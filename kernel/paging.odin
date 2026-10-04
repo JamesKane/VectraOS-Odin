@@ -14,6 +14,13 @@ Map_Flag :: enum u32 {
 
 Map_Flags :: bit_set[Map_Flag; u32] // a mapping is always readable
 
+PAGE_SIZE :: 4096
+
+// A page's bytes, through the direct map.
+page_bytes :: #force_inline proc "contextless" (pa: Paddr) -> []u8 {
+	return (cast([^]u8)phys_to_virt(pa))[:PAGE_SIZE]
+}
+
 // A page-table entry, in the architecture's format (arch_pte_*).
 Pte :: distinct u64
 

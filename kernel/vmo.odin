@@ -82,13 +82,9 @@ vmo_destroy :: proc "contextless" (v: ^Vmo) {
 // Copies kernel bytes into the VMO; the range has been checked.
 vmo_write :: proc "contextless" (v: ^Vmo, offset: u64, src: []u8) {
 	at := offset
-	s := src
-	for len(s) > 0 {
-		in_page := at & 4095
-		n := min(4096 - in_page, u64(len(s)))
-		page := cast([^]u8)phys_to_virt(v.pages[at / 4096])
-		intrinsics.mem_copy_non_overlapping(&page[in_page], raw_data(s), int(n))
-		at += n
+	for s := src; len(s) > 0; {
+		n := copy(page_bytes(v.pages[at / PAGE_SIZE])[at % PAGE_SIZE:], s)
+		at += u64(n)
 		s = s[n:]
 	}
 }

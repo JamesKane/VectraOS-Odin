@@ -126,21 +126,12 @@ foreign _ {
 	vx_symbols :: proc "c" () ---
 }
 
-@(private="file")
-read_u64_unaligned :: proc "contextless" (p: [^]u8) -> u64 {
-	v: u64
-	for i := 7; i >= 0; i -= 1 {
-		v = v << 8 | u64(p[i])
-	}
-	return v
-}
-
 // The function containing pc, or "" if there is none.
 @(private="file")
 symbol_for :: proc "contextless" (pc: u64) -> (name: string, offset: u64) {
 	p := cast([^]u8)rawptr(vx_symbols)
 	for {
-		addr := read_u64_unaligned(p)
+		addr := intrinsics.unaligned_load(cast(^u64)p)
 		if addr == max(u64) || addr > pc {
 			break
 		}

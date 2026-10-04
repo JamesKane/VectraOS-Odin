@@ -777,9 +777,8 @@ arch_devices_init :: proc "contextless" () {
 	if madt == nil {
 		return
 	}
-	length := read32(madt[4:])
-	for off := u32(44); off + 2 <= length && madt[off + 1] >= 2 && off + u32(madt[off + 1]) <= length; off += u32(madt[off + 1]) {
-		e := madt[off:]
+	for off := 44; off + 2 <= len(madt) && madt[off + 1] >= 2 && off + int(madt[off + 1]) <= len(madt); off += int(madt[off + 1]) {
+		e := madt[off:][:madt[off + 1]]
 		if e[0] == 1 && e[1] >= 12 && ioapic_count < len(ioapics) {
 			pa := Paddr(read32(e[4:]))
 			if !map_range(kernel_root, boot.hhdm + u64(pa), pa, 4096, {.Write, .Device}) {

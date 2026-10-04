@@ -716,16 +716,16 @@ sys_vmo_rw :: proc "contextless" (h: vx.Handle, op, offset: u64, buf: Uva, size:
 	if overflow || end > v.size {
 		return .Err_Range
 	}
+	// The user side is a checked range, not a kernel slice: copied as memory.
 	for done := u64(0); done < size; {
 		at := offset + done
-		in_page := at & 4095
-		n := min(4096 - in_page, size - done)
-		page := rawptr(uintptr(u64(uintptr(phys_to_virt(v.pages[at / 4096]))) + in_page))
+		page := page_bytes(v.pages[at / PAGE_SIZE])[at % PAGE_SIZE:]
+		n := min(u64(len(page)), size - done)
 		user := rawptr(uintptr(buf + Uva(done)))
 		if reading {
-			intrinsics.mem_copy(user, page, int(n))
+			intrinsics.mem_copy(user, raw_data(page), int(n))
 		} else {
-			intrinsics.mem_copy(page, user, int(n))
+			intrinsics.mem_copy(raw_data(page), user, int(n))
 		}
 		done += n
 	}
