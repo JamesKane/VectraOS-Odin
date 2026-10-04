@@ -98,7 +98,8 @@ fake_syscall :: proc "c" (nr: vx.Syscall, a0, a1, a2, a3, a4, a5: u64) -> i64 {
 }
 
 loopback :: proc "contextless" (ctx: rawptr, req: []u8, resp: []u8) -> int {
-	return p9.serve((^p9.Server)(ctx), req, resp)
+	n, res := p9.serve((^p9.Server)(ctx), req, resp)
+	return res == .Reply ? n : 0 // a loopback cannot hold a request: a deferral ends it too
 }
 
 read_file :: proc(c: ^p9.Client, root: u32, path: string, buf: []u8) -> (string, vx.Status) {

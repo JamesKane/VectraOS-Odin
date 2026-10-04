@@ -9,7 +9,7 @@
 // kill-line (^U), and a read returns at most one line, once it is ended (by
 // return) or sent (^D). ^D on an empty line makes one read return 0, the end
 // of the file. Writes go out with each newline as CR LF. A read with nothing
-// typed, or a write with no room, waits (p9.DEFER) until the driver's next
+// typed, or a write with no room, waits (p9.serve's .Defer) until the driver's next
 // interrupt makes progress.
 package driver
 

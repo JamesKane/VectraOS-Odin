@@ -191,7 +191,8 @@ ram_server :: proc(s: ^p9.Server, r: ^Ram) {
 }
 
 loopback :: proc "contextless" (ctx: rawptr, req: []u8, resp: []u8) -> int {
-	return p9.serve((^p9.Server)(ctx), req, resp)
+	n, res := p9.serve((^p9.Server)(ctx), req, resp)
+	return res == .Reply ? n : 0 // a loopback cannot hold a request: a deferral ends it too
 }
 
 @(test)
@@ -281,8 +282,8 @@ raw :: proc(h: ^Hostile, t: p9.Msg) -> vx.Status {
 	if n == 0 {
 		return .Err_Too_Small
 	}
-	reply_len := p9.serve(h.server, req[:n], h.resp[:])
-	if reply_len <= 0 {
+	reply_len, res := p9.serve(h.server, req[:n], h.resp[:])
+	if res != .Reply {
 		return .Err_Peer_Closed // the server would hang up
 	}
 	if p9.decode(h.resp[:reply_len], &h.reply) != .Ok || h.reply.tag != t.tag {
@@ -353,7 +354,8 @@ test_hostile_client :: proc(t: ^testing.T) {
 	// Messages that are not requests, or not messages at all, end the connection.
 	testing.expect(t, raw(h, {type = .Rclunk, tag = 1}) == .Err_Peer_Closed)
 	junk := [16]u8{16, 0, 0, 0, 120, 1, 0, 1, 2, 3, 0, 0, 0, 0, 0, 0}
-	testing.expect(t, p9.serve(&server, junk[:], h.resp[:]) == 0)
+	_, junk_res := p9.serve(&server, junk[:], h.resp[:])
+	testing.expect_value(t, junk_res, p9.Serve_Result.Hang_Up)
 	testing.expect(t, raw(h, {type = .Twstat, tag = 1, fid = 1, stat = junk[:4]}) == .Err_Unsupported)
 }
 
@@ -369,27 +371,30 @@ test_deferral :: proc(t: ^testing.T) {
 	req: [256]u8
 	resp: [16384]u8
 	n: int
-	serve := proc(s: ^p9.Server, req, resp: []u8, n: ^int, m: p9.Msg) -> int {
+	serve := proc(s: ^p9.Server, req, resp: []u8, n: ^int, m: p9.Msg) -> p9.Serve_Result {
 		m := m
 		n^ = p9.encode(&m, req)
-		return p9.serve(s, req[:n^], resp)
+		_, res := p9.serve(s, req[:n^], resp)
+		return res
 	}
 	m: p9.Msg
-	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Tversion, tag = p9.NOTAG, msize = 8192, version = "9P2000"}) > 0)
-	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Tattach, tag = 1, fid = 1, afid = p9.NOFID}) > 0)
-	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Twalk, tag = 1, fid = 1, newfid = 2, nwname = 1, wname = {0 = "b.txt"}}) > 0)
-	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Topen, tag = 1, fid = 2, mode = p9.ORDWR}) > 0)
+	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Tversion, tag = p9.NOTAG, msize = 8192, version = "9P2000"}) == .Reply)
+	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Tattach, tag = 1, fid = 1, afid = p9.NOFID}) == .Reply)
+	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Twalk, tag = 1, fid = 1, newfid = 2, nwname = 1, wname = {0 = "b.txt"}}) == .Reply)
+	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Topen, tag = 1, fid = 2, mode = p9.ORDWR}) == .Reply)
 	ram.not_yet = true
-	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Tread, tag = 9, fid = 2, count = 100}) == p9.DEFER)
+	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Tread, tag = 9, fid = 2, count = 100}) == .Defer)
 	held: [256]u8
 	held_len := n
 	copy(held[:], req[:n])
-	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Twrite, tag = 10, fid = 2, data = transmute([]u8)string("zz")}) == p9.DEFER)
-	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Tstat, tag = 11, fid = 2}) > 0) // everything else still completes
+	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Twrite, tag = 10, fid = 2, data = transmute([]u8)string("zz")}) == .Defer)
+	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Tstat, tag = 11, fid = 2}) == .Reply) // everything else still completes
 	ram.not_yet = false
-	n = p9.serve(&server, held[:held_len], resp[:])
-	testing.expect(t, n > 0 && p9.decode(resp[:n], &m) == .Ok && m.type == .Rread && m.tag == 9 && m.count == 5)
+	reply_len, res := p9.serve(&server, held[:held_len], resp[:])
+	testing.expect(t, res == .Reply && p9.decode(resp[:reply_len], &m) == .Ok && m.type == .Rread && m.tag == 9 && m.count == 5)
 	// An unknown fid is an error, not a wait.
-	reply_len := serve(&server, req[:], resp[:], &n, {type = .Tread, tag = 12, fid = 77, count = 1})
-	testing.expect(t, reply_len > 0 && reply_len != p9.DEFER && p9.decode(resp[:reply_len], &m) == .Ok && m.type == .Rerror)
+	unknown := p9.Msg{type = .Tread, tag = 12, fid = 77, count = 1}
+	n = p9.encode(&unknown, req[:])
+	reply_len, res = p9.serve(&server, req[:n], resp[:])
+	testing.expect(t, res == .Reply && p9.decode(resp[:reply_len], &m) == .Ok && m.type == .Rerror)
 }

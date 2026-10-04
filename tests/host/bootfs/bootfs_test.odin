@@ -47,7 +47,8 @@ fake_syscall :: proc "c" (nr: vx.Syscall, a0, a1, a2, a3, a4, a5: u64) -> i64 {
 }
 
 loopback :: proc "contextless" (ctx: rawptr, req: []u8, resp: []u8) -> int {
-	return p9.serve((^p9.Server)(ctx), req, resp)
+	n, res := p9.serve((^p9.Server)(ctx), req, resp)
+	return res == .Reply ? n : 0 // a loopback cannot hold a request: a deferral ends it too
 }
 
 // The names a directory reads as, in order, joined by spaces.

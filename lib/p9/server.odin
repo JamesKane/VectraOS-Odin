@@ -21,7 +21,7 @@ package p9
 // reply, sends what comes back, and calls hang_up when the connection goes,
 // so the file server hears every node let go. A read or write the file server
 // cannot do yet (a console with no input typed) answers Err_Should_Wait;
-// serve then returns DEFER, without a reply, and the transport holds the
+// serve then returns .Defer, without a reply, and the transport holds the
 // request and serves it again when the file server's device has done
 // something (upstream's ring transport does this). Everything else completes
 // as it arrives, so Tflush has nothing to cancel.
@@ -80,9 +80,12 @@ Server :: struct {
 	stat:       [1024]u8, // Rstat's entry
 }
 
-// serve's answer when there is no reply yet: hold the request and serve it
-// again later.
-DEFER :: -1
+// What serve made of a request.
+Serve_Result :: enum u8 {
+	Reply, // send the reply it wrote
+	Defer, // no reply yet: hold the request and serve it again later
+	Hang_Up, // the request was too broken to answer: end the connection
+}
 
 // The size of Rread's header: size, type, tag, count. Read data goes straight
 // after it in the reply buffer, where Rread carries it.
@@ -215,15 +218,15 @@ read_dir :: proc "contextless" (s: ^Server, f: ^Fid, offset: u64, out: []u8) -> 
 }
 
 // Handles one request (one whole message) and writes the reply into resp.
-// Returns the reply's length; 0 if the request was too broken to answer, in
-// which case the transport should hang up; or DEFER.
-serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> int {
+// Returns the reply's length with .Reply; otherwise the length is 0.
+@(require_results)
+serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: int, res: Serve_Result) {
 	t, r: Msg
 	if decode(req, &t) != .Ok {
-		return 0
+		return 0, .Hang_Up
 	}
 	if u8(t.type) % 2 != 0 || t.type == .Rerror {
-		return 0 // only T-messages come to a server
+		return 0, .Hang_Up // only T-messages come to a server
 	}
 	r.type = Type(u8(t.type) + 1)
 	r.tag = t.tag
@@ -354,7 +357,7 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> int {
 			}
 			// The data goes straight where Rread carries it: size, type, tag, count.
 			if len(resp) < RREAD_HDR {
-				return 0
+				return 0, .Hang_Up
 			}
 			room := s.msize - IOHDRSZ
 			if u64(len(resp) - RREAD_HDR) < u64(room) {
@@ -405,14 +408,17 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> int {
 		case .Twstat:
 			e = .Err_Unsupported // renames and chmod come with fsd
 		case:
-			return 0
+			return 0, .Hang_Up
 		}
 	}
 	if e == .Err_Should_Wait && (t.type == .Tread || t.type == .Twrite) {
-		return DEFER
+		return 0, .Defer
 	}
 	if e != .Ok {
 		r = {type = .Rerror, tag = t.tag, ename = error_text(e)}
 	}
-	return encode(&r, resp)
+	if reply_len = encode(&r, resp); reply_len == 0 {
+		return 0, .Hang_Up
+	}
+	return reply_len, .Reply
 }

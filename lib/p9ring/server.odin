@@ -13,7 +13,7 @@ import "vx:rt"
 // such as a driver's Irq, with keys from KEY_USER up, which go to its event
 // hook.
 //
-// A request the file server cannot do yet (p9.serve's DEFER) is held, and
+// A request the file server cannot do yet (p9.serve's .Defer) is held, and
 // the connection takes nothing more until it completes: it is served again
 // after every event.
 
@@ -131,16 +131,21 @@ drain :: proc "contextless" (c: ^Server_Conn) -> bool {
 			}
 			copy(c.req[:], p)
 		}
-		n := p9.serve(&c.srv, c.req[:e.len], c.resp[:])
-		c.holding = n == p9.DEFER
-		if c.holding {
+		n, res := p9.serve(&c.srv, c.req[:e.len], c.resp[:])
+		switch res {
+		case .Defer:
+			c.holding = true
 			c.held_len = e.len
 			c.held_user_data = e.user_data
 			return true
+		case .Hang_Up:
+			return false // unanswerable
+		case .Reply:
+			c.holding = false
 		}
 		arena := ring.arena(&c.ring)
-		if n <= 0 || n > len(arena) {
-			return false // unanswerable
+		if n > len(arena) {
+			return false
 		}
 		slot, ok := ring.produce_slot(&c.ring)
 		if !ok {

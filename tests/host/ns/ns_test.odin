@@ -110,7 +110,8 @@ make_server :: proc(s: ^p9.Server, t: ^[]Tnode) {
 }
 
 loopback :: proc "contextless" (ctx: rawptr, req: []u8, resp: []u8) -> int {
-	return p9.serve((^p9.Server)(ctx), req, resp)
+	n, res := p9.serve((^p9.Server)(ctx), req, resp)
+	return res == .Reply ? n : 0 // a loopback cannot hold a request: a deferral ends it too
 }
 
 // A client of s whose buffers are tbuf and rbuf.
