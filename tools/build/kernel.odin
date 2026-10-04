@@ -108,16 +108,21 @@ build_kernel :: proc(a: ^Arch, mode: Mode) -> (elf: string, ok: bool) {
 //    from run to run (`proc-.state-4433`). They are internal to their module,
 //    so they are renumbered by order of first appearance.
 scrub_ir :: proc(ir: string) -> bool {
+	epoch := os.get_env("SOURCE_DATE_EPOCH", context.temp_allocator)
+	stamp := fmt.tprintf("%s000000000", epoch == "" ? "0" : epoch)
 	files := tree_files(ir) or_return
 	for f in files {
-		if strings.has_suffix(f, ".ll") {
-			text := read_file(f) or_return
-			if renamed, changed := renumber_statics(text); changed {
-				write_file(f, renamed) or_return
-			}
+		if !strings.has_suffix(f, ".ll") {
+			continue
+		}
+		text := read_file(f) or_return
+		renamed, renumbered := renumber_statics(text)
+		stamped, restamped := scrub_timestamp(renamed, stamp)
+		if renumbered || restamped {
+			write_file(f, stamped) or_return
 		}
 	}
-	return scrub_timestamp(ir)
+	return true
 }
 
 // Renames every @"...-.name-DIGITS" global to @"...-.name-K", K counting from
@@ -166,38 +171,31 @@ renumber_statics :: proc(text: string) -> (string, bool) {
 }
 
 @(private="file")
-scrub_timestamp :: proc(ir: string) -> bool {
-	epoch := os.get_env("SOURCE_DATE_EPOCH", context.temp_allocator)
-	stamp := fmt.tprintf("%s000000000", epoch == "" ? "0" : epoch)
-	files := tree_files(ir) or_return
-	for f in files {
-		if !strings.has_suffix(f, ".ll") {
-			continue
-		}
-		text := read_file(f) or_return
-		if !strings.contains(text, `name: "ODIN_COMPILE_TIMESTAMP"`) {
-			continue
-		}
-		lines := strings.split_lines(text, context.temp_allocator)
-		vars := make([dynamic]string, context.temp_allocator) // "!203", the variables' metadata ids
-		for l in lines {
-			if strings.contains(l, `DIGlobalVariable(name: "ODIN_COMPILE_TIMESTAMP"`) {
-				append(&vars, l[:strings.index_byte(l, ' ')])
-			}
-		}
-		for &l in lines {
-			for v in vars {
-				key := fmt.tprintf("DIGlobalVariableExpression(var: %s, expr: !DIExpression(DW_OP_constu, ", v)
-				i := strings.index(l, key)
-				if i < 0 {
-					continue
-				}
-				start := i + len(key)
-				end := start + strings.index_byte(l[start:], ',')
-				l = strings.concatenate({l[:start], stamp, l[end:]}, context.temp_allocator)
-			}
-		}
-		write_file(f, strings.join(lines, "\n", context.temp_allocator)) or_return
+scrub_timestamp :: proc(text, stamp: string) -> (string, bool) {
+	if !strings.contains(text, `name: "ODIN_COMPILE_TIMESTAMP"`) {
+		return text, false
 	}
-	return true
+	lines := strings.split_lines(text, context.temp_allocator)
+	vars := make([dynamic]string, context.temp_allocator) // "!203", the variables' metadata ids
+	for l in lines {
+		if strings.contains(l, `DIGlobalVariable(name: "ODIN_COMPILE_TIMESTAMP"`) {
+			if sp := strings.index_byte(l, ' '); sp > 0 {
+				append(&vars, l[:sp])
+			}
+		}
+	}
+	for &l in lines {
+		for v in vars {
+			key := fmt.tprintf("DIGlobalVariableExpression(var: %s, expr: !DIExpression(DW_OP_constu, ", v)
+			i := strings.index(l, key)
+			if i < 0 {
+				continue
+			}
+			start := i + len(key)
+			if n := strings.index_byte(l[start:], ','); n >= 0 {
+				l = strings.concatenate({l[:start], stamp, l[start + n:]}, context.temp_allocator)
+			}
+		}
+	}
+	return strings.join(lines, "\n", context.temp_allocator), true
 }
