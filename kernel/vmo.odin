@@ -21,7 +21,7 @@ Vmo :: struct {
 
 #assert(offset_of(Vmo, obj) == 0) // objects are cast from ^Object
 
-vmo_pool := Pool{size = (size_of(Vmo) + 15) &~ 15}
+vmo_pool: Pool(Vmo)
 
 VMO_MAX_SIZE :: u64(256) << 20 // the list fits one order-7 block
 
@@ -42,7 +42,7 @@ vmo_create :: proc "contextless" (want: u64) -> (^Vmo, vx.Status) {
 	size := page_up(want)
 	count := size / 4096
 	order := page_list_order(count)
-	v := cast(^Vmo)pool_alloc(&vmo_pool)
+	v := pool_alloc(&vmo_pool)
 	if v == nil {
 		return nil, .Err_No_Memory
 	}

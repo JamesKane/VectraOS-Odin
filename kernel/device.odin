@@ -47,9 +47,9 @@ Iorange :: struct {
 
 #assert(offset_of(Iorange, obj) == 0) // objects are cast from ^Object
 
-resource_pool := Pool{size = (size_of(Resource) + 15) &~ 15}
-irq_pool := Pool{size = (size_of(Irq) + 15) &~ 15}
-iorange_pool := Pool{size = (size_of(Iorange) + 15) &~ 15}
+resource_pool: Pool(Resource)
+irq_pool: Pool(Irq)
+iorange_pool: Pool(Iorange)
 
 MAX_IRQ_LINES :: 1024
 
@@ -68,7 +68,7 @@ console_hand_off :: proc "contextless" () {
 }
 
 root_resource :: proc "contextless" () -> ^Resource {
-	r := cast(^Resource)pool_alloc(&resource_pool)
+	r := pool_alloc(&resource_pool)
 	if r == nil {
 		kpanic("no memory for the root resource")
 	}
@@ -96,7 +96,7 @@ vmo_create_physical :: proc "contextless" (pa, size: u64) -> (^Vmo, vx.Status) {
 	}
 	count := size / 4096
 	order := page_list_order(count)
-	v := cast(^Vmo)pool_alloc(&vmo_pool)
+	v := pool_alloc(&vmo_pool)
 	list := v != nil ? phys_alloc(order) : 0
 	if list == 0 {
 		if v != nil {
@@ -125,7 +125,7 @@ irq_create :: proc "contextless" (line: u32) -> (^Irq, vx.Status) {
 	if line >= MAX_IRQ_LINES {
 		return nil, .Err_Range
 	}
-	q := cast(^Irq)pool_alloc(&irq_pool)
+	q := pool_alloc(&irq_pool)
 	if q == nil {
 		return nil, .Err_No_Memory
 	}
@@ -215,7 +215,7 @@ iorange_create :: proc "contextless" (base, count: u64) -> (^Iorange, vx.Status)
 	if count == 0 || overflow || end > 0x1_0000 {
 		return nil, .Err_Range
 	}
-	r := cast(^Iorange)pool_alloc(&iorange_pool)
+	r := pool_alloc(&iorange_pool)
 	if r == nil {
 		return nil, .Err_No_Memory
 	}

@@ -150,28 +150,29 @@ object_destroy :: proc "contextless" (o: ^Object) {
 	case .Thread:
 		thread_destroy(cast(^Thread)o)
 	case .Resource:
-		pool_free(&resource_pool, o)
+		pool_free(&resource_pool, cast(^Resource)o)
 	case .Irq:
 		irq_destroy(cast(^Irq)o)
 	case .Iorange:
-		pool_free(&iorange_pool, o)
+		pool_free(&iorange_pool, cast(^Iorange)o)
 	}
 }
 
-// A pool hands out zeroed objects of one size, carved from whole pages.
-Pool :: struct {
+// A pool hands out zeroed objects of one type, carved from whole pages, each
+// rounded up to 16 bytes. The zero value is an empty pool: `x_pool: Pool(X)`.
+Pool :: struct($T: typeid) {
 	lock: Spinlock,
-	size: int, // rounded up to 16 bytes
-	free: rawptr, // free list, through each free object's first word
+	free: ^Pool_Link, // free list, through each free object's first word
 }
 
-// A pool's size is set in its declaration, as a constant expression:
-// `x_pool := Pool{size = (size_of(X) + 15) &~ 15}`. (A global initialised by
-// a procedure call would need Odin's startup code, which the kernel does not
-// run: -disable-non-constant-globals refuses one.)
+Pool_Link :: struct {
+	next: ^Pool_Link,
+}
 
 @(require_results)
-pool_alloc :: proc "contextless" (p: ^Pool) -> rawptr {
+pool_alloc :: proc "contextless" (p: ^Pool($T)) -> ^T {
+	SIZE :: (size_of(T) + 15) &~ 15
+	#assert(SIZE <= 4096) // an object fits in a page
 	spin_lock(&p.lock)
 	if p.free == nil {
 		pa := phys_alloc(0)
@@ -180,22 +181,24 @@ pool_alloc :: proc "contextless" (p: ^Pool) -> rawptr {
 			return nil
 		}
 		page := cast([^]u8)phys_to_virt(pa)
-		for off := 0; off + p.size <= 4096; off += p.size {
-			(cast(^rawptr)&page[off])^ = p.free
-			p.free = &page[off]
+		for off := 0; off + SIZE <= 4096; off += SIZE {
+			link := cast(^Pool_Link)&page[off]
+			link.next = p.free
+			p.free = link
 		}
 	}
-	o := p.free
-	p.free = (cast(^rawptr)o)^
+	link := p.free
+	p.free = link.next
 	spin_unlock(&p.lock)
-	intrinsics.mem_zero(o, p.size)
-	return o
+	intrinsics.mem_zero(link, SIZE)
+	return cast(^T)link
 }
 
-pool_free :: proc "contextless" (p: ^Pool, o: rawptr) {
+pool_free :: proc "contextless" (p: ^Pool($T), o: ^T) {
+	link := cast(^Pool_Link)o
 	spin_lock(&p.lock)
-	(cast(^rawptr)o)^ = p.free
-	p.free = o
+	link.next = p.free
+	p.free = link
 	spin_unlock(&p.lock)
 }
 

@@ -40,10 +40,8 @@ Ring_Pair :: struct {
 	slots: [2][vx.RING_SLOTS]Ring_Slot, // slots[d]: put by side d, taken by the other
 }
 
-ring_end_pool := Pool{size = (size_of(Ring_End) + 15) &~ 15}
-ring_pair_pool := Pool{size = (size_of(Ring_Pair) + 15) &~ 15}
-
-#assert(size_of(Ring_Pair) <= 4096) // a pool object fits in a page
+ring_end_pool: Pool(Ring_End)
+ring_pair_pool: Pool(Ring_Pair)
 
 // A new ring: its memory, with the header written, and its two ends.
 @(require_results)
@@ -51,7 +49,7 @@ ring_create :: proc "contextless" (p: vx.Ring_Params) -> (client, server: ^Ring_
 	h := ring.layout(p) or_return
 	v := vmo_create(h.size) or_return
 	vmo_write(v, 0, (cast([^]u8)&h)[:size_of(h)])
-	pair := cast(^Ring_Pair)pool_alloc(&ring_pair_pool)
+	pair := pool_alloc(&ring_pair_pool)
 	ends: [2]^Ring_End
 	bells: [2]^Counter
 	ok := pair != nil
@@ -59,7 +57,7 @@ ring_create :: proc "contextless" (p: vx.Ring_Params) -> (client, server: ^Ring_
 		if !ok {
 			break
 		}
-		ends[i] = cast(^Ring_End)pool_alloc(&ring_end_pool)
+		ends[i] = pool_alloc(&ring_end_pool)
 		bell, bst := counter_create(0)
 		bells[i] = bell
 		ok = ends[i] != nil && bst == .Ok

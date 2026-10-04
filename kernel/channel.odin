@@ -76,14 +76,14 @@ Channel_Pair :: struct {
 	ends: [2]^Channel, // nil once that end is destroyed
 }
 
-channel_pool := Pool{size = (size_of(Channel) + 15) &~ 15}
-channel_pair_pool := Pool{size = (size_of(Channel_Pair) + 15) &~ 15}
+channel_pool: Pool(Channel)
+channel_pair_pool: Pool(Channel_Pair)
 
 @(require_results)
 channel_create :: proc "contextless" () -> (a, b: ^Channel, st: vx.Status) {
-	pair := cast(^Channel_Pair)pool_alloc(&channel_pair_pool)
-	e0 := pair != nil ? cast(^Channel)pool_alloc(&channel_pool) : nil
-	e1 := e0 != nil ? cast(^Channel)pool_alloc(&channel_pool) : nil
+	pair := pool_alloc(&channel_pair_pool)
+	e0 := pair != nil ? pool_alloc(&channel_pool) : nil
+	e1 := e0 != nil ? pool_alloc(&channel_pool) : nil
 	if e1 == nil {
 		if e0 != nil {
 			pool_free(&channel_pool, e0)

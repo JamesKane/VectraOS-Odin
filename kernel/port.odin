@@ -42,12 +42,12 @@ Binding :: struct {
 	packet:        vx.Packet, // filled when it fires
 }
 
-port_pool := Pool{size = (size_of(Port) + 15) &~ 15}
-binding_pool := Pool{size = (size_of(Binding) + 15) &~ 15}
+port_pool: Pool(Port)
+binding_pool: Pool(Binding)
 
 @(require_results)
 port_create :: proc "contextless" () -> (^Port, vx.Status) {
-	p := cast(^Port)pool_alloc(&port_pool)
+	p := pool_alloc(&port_pool)
 	if p == nil {
 		return nil, .Err_No_Memory
 	}
@@ -155,7 +155,7 @@ port_remove_waiter :: proc "contextless" (p: ^Port, t: ^Thread) {
 // --- Bindings ---
 
 binding_new :: proc "contextless" (p: ^Port, trigger: vx.Trigger, key, threshold: u64, source: vx.Handle) -> ^Binding {
-	b := cast(^Binding)pool_alloc(&binding_pool)
+	b := pool_alloc(&binding_pool)
 	if b == nil {
 		return nil
 	}

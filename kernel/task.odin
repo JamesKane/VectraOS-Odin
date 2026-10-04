@@ -285,8 +285,8 @@ handles_put :: proc "contextless" (t: ^Task, moved: []Moved_Handle, out: []vx.Ha
 	return .Ok
 }
 
-task_pool := Pool{size = (size_of(Task) + 15) &~ 15}
-thread_pool := Pool{size = (size_of(Thread) + 15) &~ 15}
+task_pool: Pool(Task)
+thread_pool: Pool(Thread)
 
 @(private="file")
 next_task_id: u64 = 1
@@ -362,7 +362,7 @@ task_unlist :: proc "contextless" (t: ^Task) {
 
 @(require_results)
 task_create :: proc "contextless" (name: string, parent_id: u64) -> (^Task, vx.Status) {
-	t := cast(^Task)pool_alloc(&task_pool)
+	t := pool_alloc(&task_pool)
 	if t == nil {
 		return nil, .Err_No_Memory
 	}
@@ -469,7 +469,7 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 // A thread of task t that has not started (thread_start, process.odin).
 @(require_results)
 thread_create :: proc "contextless" (t: ^Task) -> (^Thread, vx.Status) {
-	th := cast(^Thread)pool_alloc(&thread_pool)
+	th := pool_alloc(&thread_pool)
 	if th == nil {
 		return nil, .Err_No_Memory
 	}

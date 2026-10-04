@@ -16,11 +16,11 @@ Counter :: struct {
 
 #assert(offset_of(Counter, obj) == 0) // objects are cast from ^Object
 
-counter_pool := Pool{size = (size_of(Counter) + 15) &~ 15}
+counter_pool: Pool(Counter)
 
 @(require_results)
 counter_create :: proc "contextless" (initial: u64) -> (^Counter, vx.Status) {
-	c := cast(^Counter)pool_alloc(&counter_pool)
+	c := pool_alloc(&counter_pool)
 	if c == nil {
 		return nil, .Err_No_Memory
 	}
