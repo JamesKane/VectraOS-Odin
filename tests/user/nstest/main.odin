@@ -14,15 +14,17 @@ import "vx:rt"
 
 checks, failures: u32
 
-check :: proc "contextless" (ok: bool, what := #caller_expression(ok), loc := #caller_location) {
+// Returns ok, so a check can guard what depends on it.
+check :: proc "contextless" (ok: bool, what := #caller_expression(ok), loc := #caller_location) -> bool {
 	checks += 1
 	if ok {
-		return
+		return true
 	}
 	failures += 1
 	rt.print("nstest: FAILED line ")
 	rt.print_u64(u64(loc.line))
 	rt.print(": ", what, "\n")
+	return false
 }
 
 // A string comparison that shows what it got when it fails.
@@ -43,6 +45,7 @@ list :: proc "contextless" (path: string) -> string {
 	if ns.open(&space, path, p9.OREAD, &f) != .Ok {
 		return "(cannot open)"
 	}
+	defer ns.close(&f)
 	length := 0
 	n: int
 	st: vx.Status
@@ -66,7 +69,6 @@ list :: proc "contextless" (path: string) -> string {
 			off += size + 2
 		}
 	}
-	ns.close(&f)
 	return st != .Ok ? "(read failed)" : string(list_out[:length])
 }
 
@@ -93,14 +95,16 @@ test_namespace :: proc "contextless" () {
 	WANT :: "# boot/svc/bootfs.ndb"
 	got: [len(WANT)]u8
 	f: ns.File
-	check(ns.open(&space, "/dev/bootfs.ndb", p9.OREAD, &f) == .Ok)
-	n, _ := ns.read(&f, got[:])
-	check(n == len(got) && string(got[:]) == WANT)
-	ns.close(&f)
-	check(ns.open(&space, "/bin/nstest", p9.OREAD, &f) == .Ok)
-	n, _ = ns.read(&f, got[:4])
-	check(n == 4 && string(got[:4]) == "\x7fELF")
-	ns.close(&f)
+	if check(ns.open(&space, "/dev/bootfs.ndb", p9.OREAD, &f) == .Ok) {
+		n, _ := ns.read(&f, got[:])
+		check(n == len(got) && string(got[:]) == WANT)
+		ns.close(&f)
+	}
+	if check(ns.open(&space, "/bin/nstest", p9.OREAD, &f) == .Ok) {
+		n, _ := ns.read(&f, got[:4])
+		check(n == 4 && string(got[:4]) == "\x7fELF")
+		ns.close(&f)
+	}
 	// bootfs is read-only.
 	check(ns.open(&space, "/boot/svc/bootfs.ndb", p9.OWRITE, &f) == .Err_Access)
 	check(ns.open(&space, "/boot/svc/bootfs.ndb", p9.Open_Mode{access = .Read, trunc = true}, &f) == .Err_Access)
