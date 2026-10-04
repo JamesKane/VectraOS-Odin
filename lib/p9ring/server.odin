@@ -3,7 +3,9 @@
 package p9ring
 
 import vx "abi:vx"
+import "vx:drbg"
 import "vx:memory"
+import "vx:ndb"
 import "vx:p9"
 import "vx:ring"
 import "vx:rt"
@@ -16,11 +18,18 @@ import "vx:rt"
 //
 // A request the file server cannot do yet (p9.serve's .Defer) is held, and
 // the connection takes nothing more until it completes: it is served again
-// after every event, and after every tick. (Holding one request per
-// connection is what a synchronous client needs; Tflush of a held request
-// comes with pipelining.)
+// after every event, after every tick, and when the file server says
+// something it did may let it go on (`again`): a request on another
+// connection, say, that queued what the held one waits for. (Holding one
+// request per connection is what a synchronous client needs; Tflush of a
+// held request comes with pipelining.)
+//
+// All the connections share one table of open files and locks (p9.Shared),
+// for the posix extension; its tokens come from the spawn message's
+// entropy= record, and without one Tshare is refused.
 
-MAX_CONNS :: 16
+MAX_CONNS :: 16 // a server's connections, unless it gives more of its own
+MAX_CONNS_LIMIT :: 256 // what a port key's slot can name
 
 KEY_USER :: u64(1) << 62 // and up: the file server's own bindings
 
@@ -72,10 +81,25 @@ Server :: struct {
 	event:        proc "contextless" (ctx: rawptr, pk: ^vx.Packet), // a packet keyed from KEY_USER up
 	// Optional: does what is due by now, and says when to be called again
 	// (vx.INFINITE: never), as a protocol's retransmission timers need.
-	tick:         proc "contextless" (ctx: rawptr) -> vx.Instant,
-	conns:        [MAX_CONNS]Server_Conn,
+	tick:          proc "contextless" (ctx: rawptr) -> vx.Instant,
+	// Optional: a message on the listen channel that is not CONNECT, with
+	// the one handle it may carry (HANDLE_NONE if none), which becomes the
+	// hook's. procfs takes registrations this way (vx:process).
+	listen_msg:    proc "contextless" (ctx: rawptr, msg: []u8, handle: vx.Handle),
+	// Set by the file server when what it just did may let a held request go
+	// on: the held requests are served again before the server sleeps.
+	again:         bool,
+	// Its connections: default_conns, unless the file server gives more of
+	// its own (procfs, which holds one per process) before serving. At most
+	// MAX_CONNS_LIMIT. serve points it at default_conns otherwise, so a Server
+	// must not move once it serves.
+	conns:         []Server_Conn,
+	default_conns: [MAX_CONNS]Server_Conn,
+	shared:        p9.Shared, // the open files and locks all its connections share (posix)
 }
 
+// A connection goes: every fid is clunked. (Upstream's M4 also unmaps the
+// ring here; that waits for vx:rt's as_unmap, with the kernel's M4 port.)
 @(private="file")
 close_conn :: proc "contextless" (c: ^Server_Conn) {
 	p9.hang_up(&c.srv)
@@ -102,10 +126,10 @@ connect :: proc "contextless" (s: ^Server, rep: ^vx.Msg_Header) -> (st: vx.Statu
 		rt.close_all(h.client, h.server, h.memory)
 	}
 	i := 0
-	for i < MAX_CONNS && s.conns[i].used {
+	for i < len(s.conns) && s.conns[i].used {
 		i += 1
 	}
-	if i == MAX_CONNS {
+	if i == len(s.conns) {
 		return .Err_No_Memory
 	}
 	c := &s.conns[i]
@@ -120,7 +144,7 @@ connect :: proc "contextless" (s: ^Server, rep: ^vx.Msg_Header) -> (st: vx.Statu
 	c.used = true
 	c.armed, c.holding = false, false
 	c.end = h.server
-	c.srv = {fs = s.fs, max_msize = rt.MSIZE, supported = s.supported}
+	c.srv = {fs = s.fs, max_msize = rt.MSIZE, supported = s.supported, shared = &s.shared}
 	return .Ok
 }
 
@@ -191,6 +215,19 @@ junk: [vx.CHANNEL_MAX_BYTES]u8
 @(private="file")
 junk_handles: [vx.CHANNEL_MAX_HANDLES]vx.Handle
 
+@(private="file")
+now :: proc "contextless" () -> i64 {
+	return i64(rt.clock_read())
+}
+
+// A message on the listen channel: CONNECT, or another the file server
+// takes, or nothing anyone wants.
+@(private="file")
+Listen_Msg :: struct #raw_union {
+	header: vx.Msg_Header,
+	bytes:  [64]u8,
+}
+
 // Serves the file system on the listen channel until the channel goes away.
 // The port is made here unless the file server made it already, to bind its
 // own sources first.
@@ -198,6 +235,18 @@ junk_handles: [vx.CHANNEL_MAX_HANDLES]vx.Handle
 serve :: proc "contextless" (s: ^Server) -> vx.Status {
 	if s.port == 0 {
 		s.port = rt.port_create() or_return
+	}
+	if s.conns == nil || len(s.conns) > MAX_CONNS_LIMIT {
+		s.conns = s.default_conns[:]
+	}
+	// Tokens for shared open files come from the entropy the spawn message
+	// gives (a manifest's `entropy`); without it, Tshare is refused.
+	s.shared.now = now
+	rec: ndb.Record
+	if rt.spawn_record("entropy", &rec) {
+		if seed, ok := ndb.get(&rec, "entropy"); ok && len(seed) >= 16 && !s.shared.random.seeded {
+			drbg.mix(&s.shared.random, transmute([]u8)seed, true)
+		}
 	}
 	for {
 		more := false // a connection still has requests: no sleeping this time round
@@ -214,16 +263,22 @@ serve :: proc "contextless" (s: ^Server) -> vx.Status {
 			}
 		}
 		for {
-			req: vx.Msg_Header
-			size, st := rt.channel_read(s.listen, memory.ptr_to_bytes(&req))
+			msg: Listen_Msg
+			handle := [1]vx.Handle{vx.HANDLE_NONE}
+			size, st := rt.channel_read(s.listen, msg.bytes[:], handle[:])
 			if st == .Err_Should_Wait {
 				break
 			}
 			if st == .Err_Peer_Closed {
 				return st
 			}
-			if st == .Ok && size.bytes == size_of(req) && req.ordinal == rt.CONNECT {
-				accept(s, &req)
+			req := &msg.header
+			if st == .Ok && size.bytes == size_of(req^) && req.ordinal == rt.CONNECT && size.handles == 0 {
+				accept(s, req)
+			} else if st == .Ok && size.bytes >= size_of(req^) && req.ordinal != rt.CONNECT && s.listen_msg != nil {
+				s.listen_msg(s.ctx, msg.bytes[:size.bytes], size.handles > 0 ? handle[0] : vx.HANDLE_NONE)
+			} else if st == .Ok && size.handles > 0 {
+				_ = rt.handle_close(handle[0])
 			}
 			// Anything else, including a message too big for us (TOO_SMALL), is dropped.
 			if st == .Err_Too_Small {
@@ -235,6 +290,10 @@ serve :: proc "contextless" (s: ^Server) -> vx.Status {
 
 		// Arm what is idle, then sleep unless something arrived meanwhile. A
 		// connection holding a request waits for an event, not its doorbell.
+		if s.again { // a held request may go on now: once more round
+			more = true
+			s.again = false
+		}
 		idle := !more
 		for &c, i in s.conns {
 			if !idle {
@@ -269,7 +328,7 @@ serve :: proc "contextless" (s: ^Server) -> vx.Status {
 					s.listen_armed = false
 					continue
 				}
-				if key.slot >= MAX_CONNS {
+				if int(key.slot) >= len(s.conns) {
 					continue
 				}
 				c := &s.conns[key.slot]

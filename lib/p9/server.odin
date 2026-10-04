@@ -8,7 +8,8 @@ package p9
 //  - the attach root: each fid remembers the root it was attached at, `..`
 //    there stays there, and `..` elsewhere goes through the file server's
 //    parent operation, so a walk can never leave the root (02 §2);
-//  - names: ".", "", and names holding '/' are refused before the file
+//  - names: ".", "", names holding '/', and names that are not UTF-8 or hold
+//    a control character (upstream ADR-0013) are refused before the file
 //    server sees them;
 //  - fids: every message's fid must exist, newfids must be free, open fids
 //    cannot walk, and only open fids read or write in their mode;
@@ -26,10 +27,16 @@ package p9
 // request and serves it again when the file server's device has done
 // something (upstream's ring transport does this). Everything else completes
 // as it arrives, so Tflush has nothing to cancel.
+//
+// With the posix extension, open files and locks are the server's, shared
+// by all its connections (Shared, below), and with xattr, Tgetattr and
+// Tsetattr (upstream docs/proto/posix.md).
 
 import "base:intrinsics"
 import "abi:vx"
+import "vx:drbg"
 import "vx:str"
+import "vx:utf"
 
 // A file server's own name for one of its files, which it chooses; the
 // framework only stores and compares them.
@@ -63,16 +70,66 @@ Fs :: struct {
 	// Or nil.
 	remove:  proc "contextless" (ctx: rawptr, node: Node) -> vx.Status,
 	// Optional: a fid let the node go; opened says whether the fid had it open.
-	clunk:   proc "contextless" (ctx: rawptr, node: Node, opened: bool),
+	clunk:    proc "contextless" (ctx: rawptr, node: Node, opened: bool),
+	// The posix and xattr extensions, each optional: a server without one
+	// refuses its message. Rgetattr needs nothing new: it is made from stat.
+	setattr:  proc "contextless" (ctx: rawptr, node: Node, a: ^Setattr) -> vx.Status,
+	rename:   proc "contextless" (ctx: rawptr, olddir: Node, oldname: string, newdir: Node, newname: string) -> vx.Status,
+	symlink:  proc "contextless" (ctx: rawptr, dir: Node, name, target: string) -> (node: Node, st: vx.Status),
+	// The target's bytes last until the next call.
+	readlink: proc "contextless" (ctx: rawptr, node: Node) -> (target: string, st: vx.Status),
 }
 
 MAX_FIDS :: 256 // per connection, for now
+
+// --- Open files and locks shared between connections (posix) ---
+//
+// An open fid on a server with the posix extension has an open file, kept
+// here: its node, mode, offset and O_APPEND, shared by every fid that joins
+// it, on any of the server's connections. Tshare gives a token for it, good
+// for `holds` joins within HOLD_TIME of the last Tshare (or of its last fid's
+// going, which a hold outlives so long): holds a client never used run out
+// then, open file or not. Locks are POSIX's: byte ranges, owned by a
+// connection and a process id, and let go when the owner lets go of any fid
+// on the file.
+
+MAX_OPEN_FILES :: 256
+MAX_LOCKS :: 256
+MAX_HOLDS :: 64
+HOLD_TIME :: i64(10_000_000_000) // ns
+
+Open_File :: struct {
+	used, append, shared: bool,
+	mode:                 Open_Mode,
+	node:                 Node,
+	offset:               u64,
+	fids, holds:          u32,
+	hold_until:           i64,
+	token:                [TOKEN_SIZE]u8,
+}
+
+Lock :: struct {
+	used:       bool,
+	type:       Lock_Type, // .Read or .Write
+	node:       Node,
+	start, end: u64, // [start, end); end max(u64): to the end of the file
+	conn:       ^Server, // the owner: a connection and a process on it
+	proc_id:    u32,
+}
+
+Shared :: struct {
+	files:  [MAX_OPEN_FILES]Open_File,
+	locks:  [MAX_LOCKS]Lock,
+	random: drbg.Drbg, // tokens; unseeded: Tshare is refused
+	now:    proc "contextless" () -> i64, // nanoseconds; nil: holds never run out
+}
 
 // What a fid refers to, on the server's side.
 Fid_Entry :: struct {
 	fid:        Fid,
 	used, open: bool,
 	mode:       Open_Mode,
+	file:       ^Open_File, // its open file in the Shared table, or nil
 	node, root: Node, // root: where it was attached; `..` stops there
 	qid:        Qid,
 	dir_offset: u64, // a directory read continues only from here
@@ -89,6 +146,7 @@ Server :: struct {
 	dialect:    Dialect,
 	extensions: Extensions, // negotiated
 	fids:       [MAX_FIDS]Fid_Entry,
+	shared:     ^Shared, // the server's open files and locks, for posix; may be nil
 	version:    [96]u8, // Rversion's string
 	stat:       [1024]u8, // Rstat's entry
 }
@@ -130,11 +188,101 @@ fid_new :: proc "contextless" (s: ^Server, fid: Fid) -> ^Fid_Entry {
 }
 
 @(private="file")
+now :: proc "contextless" (sh: ^Shared) -> i64 {
+	return sh.now != nil ? sh.now() : 0
+}
+
+@(private="file")
+file_live :: proc "contextless" (sh: ^Shared, o: ^Open_File) -> bool {
+	return o.used && (o.fids != 0 || (o.holds != 0 && (sh.now == nil || now(sh) < o.hold_until)))
+}
+
+// Lets go of the owner's locks on node in [start, end): cut, shortened or
+// split. False, with nothing changed, when a split finds no free slot.
+@(private="file")
+unlock :: proc "contextless" (sh: ^Shared, conn: ^Server, proc_id: u32, any_proc: bool, node: Node, start, end: u64) -> bool {
+	free_slots := 0
+	for &l in sh.locks {
+		free_slots += int(!l.used)
+	}
+	for &l in sh.locks {
+		if !l.used || l.node != node || l.conn != conn || (!any_proc && l.proc_id != proc_id) {
+			continue
+		}
+		if l.end <= start || l.start >= end {
+			continue
+		}
+		switch {
+		case l.start < start && l.end > end: // the middle: two pieces
+			if free_slots == 0 {
+				return false
+			}
+			for &k in sh.locks {
+				if !k.used {
+					k = l
+					k.start = end
+					free_slots -= 1
+					break
+				}
+			}
+			l.end = start
+		case l.start < start:
+			l.end = start
+		case l.end > end:
+			l.start = end
+		case:
+			l.used = false
+			free_slots += 1
+		}
+	}
+	return true
+}
+
+@(private="file")
 fid_drop :: proc "contextless" (s: ^Server, f: ^Fid_Entry) {
 	if s.fs.clunk != nil {
 		s.fs.clunk(s.fs.ctx, f.node, f.open)
 	}
+	if o := f.file; o != nil && s.shared != nil {
+		if o.fids > 0 {
+			o.fids -= 1
+		}
+		if o.fids == 0 && o.holds != 0 {
+			o.hold_until = now(s.shared) + HOLD_TIME
+		}
+		if !file_live(s.shared, o) {
+			o.used = false
+		}
+	}
+	// POSIX: any close lets go, of a fid with an open file of its own or not
+	// (a directory's; one opened when the table was full).
+	if f.open && s.shared != nil {
+		_ = unlock(s.shared, s, 0, true, f.node, 0, max(u64))
+	}
 	f^ = {}
+}
+
+// A new open file for a fid just opened: nil if there is no room.
+@(private="file")
+file_new :: proc "contextless" (sh: ^Shared, node: Node, mode: Open_Mode) -> ^Open_File {
+	for &o in sh.files {
+		if file_live(sh, &o) {
+			continue
+		}
+		m := mode
+		m.append = false
+		o = {used = true, append = mode.append, mode = m, node = node, fids = 1}
+		return &o
+	}
+	return nil
+}
+
+// The mode a file server is given, and a fid keeps: without the posix bits.
+@(private="file")
+plain_mode :: proc "contextless" (mode: Open_Mode) -> Open_Mode {
+	m := mode
+	m.append, m.join = false, false
+	return m
 }
 
 // Ends the session: every fid is clunked, and the connection must send
@@ -183,10 +331,18 @@ open_node :: proc "contextless" (s: ^Server, f: ^Fid_Entry, mode: Open_Mode) -> 
 	return .Ok
 }
 
-// A name the file server may see: not empty, not ".", no '/'.
+// A name a client may walk to, create or rename to: never empty, ".", or
+// holding a '/'; and UTF-8 with no control characters (ADR-0013), so a server
+// is safe from a client that does not use vx:ns.
 @(private="file")
 good_name :: proc "contextless" (n: string) -> bool {
-	return len(n) > 0 && n != "." && str.index_byte(n, '/') < 0
+	return len(n) > 0 && n != "." && str.index_byte(n, '/') < 0 && utf.is_name(n)
+}
+
+// A name something new may have: a good one, and not "..".
+@(private="file")
+new_name_ok :: proc "contextless" (n: string) -> bool {
+	return good_name(n) && n != ".."
 }
 
 // Walks one step from node, keeping inside root.
@@ -244,6 +400,328 @@ read_dir :: proc "contextless" (s: ^Server, f: ^Fid_Entry, offset: u64, out: []u
 	}
 	f.dir_offset = next
 	return u32(used), .Ok
+}
+
+// Writes at the offset given, or at the open file's (OFFSET_CURRENT): its end
+// if it appends, which is atomic, as the server does one request at a time.
+@(private="file", require_results)
+write :: proc "contextless" (s: ^Server, f: ^Fid_Entry, t: ^Msg) -> (count: u32, e: vx.Status) {
+	o := s.shared != nil ? f.file : nil
+	offset := t.offset
+	if offset == OFFSET_CURRENT {
+		if o == nil {
+			return 0, .Err_Invalid
+		}
+		offset = o.offset
+		if o.append {
+			st: Stat
+			s.fs.stat(s.fs.ctx, f.node, &st) or_return
+			offset = st.length
+		}
+	}
+	count = s.fs.write(s.fs.ctx, f.node, offset, t.data) or_return
+	if o != nil && t.offset == OFFSET_CURRENT {
+		o.offset = offset + u64(count)
+	}
+	return count, .Ok
+}
+
+@(private="file")
+locks_conflict :: proc "contextless" (l: ^Lock, conn: ^Server, proc_id: u32, node: Node, type: Lock_Type, start, end: u64) -> bool {
+	return l.used && l.node == node && (l.conn != conn || l.proc_id != proc_id) && l.start < end && start < l.end && (type == .Write || l.type == .Write)
+}
+
+// Tlock and Tgetlock: POSIX's byte-range locks.
+@(private="file", require_results)
+serve_lock :: proc "contextless" (s: ^Server, f: ^Fid_Entry, t: ^Msg, r: ^Msg) -> vx.Status {
+	sh := s.shared
+	if sh == nil || !f.open {
+		return .Err_Bad_State
+	}
+	start := t.start
+	end := t.length != 0 ? t.start + t.length : max(u64)
+	if t.length != 0 && end < start {
+		return .Err_Range
+	}
+	if u8(t.lock_type) > u8(Lock_Type.Unlock) {
+		return .Err_Invalid
+	}
+	if t.type == .Tgetlock {
+		r^ = {
+			type      = r.type,
+			tag       = r.tag,
+			lock_type = .Unlock,
+			start     = t.start,
+			length    = t.length,
+			proc_id   = t.proc_id,
+			client_id = t.client_id,
+		}
+		if t.lock_type == .Unlock {
+			return .Ok
+		}
+		for &l in sh.locks {
+			if !locks_conflict(&l, s, t.proc_id, f.node, t.lock_type, start, end) {
+				continue
+			}
+			r.lock_type = l.type
+			r.start = l.start
+			r.length = l.end == max(u64) ? 0 : l.end - l.start
+			r.proc_id = l.proc_id
+			r.client_id = ""
+			break
+		}
+		return .Ok
+	}
+	// A lock as the fid was opened for, as POSIX has it: reading for a read
+	// lock, writing for a write lock.
+	if (t.lock_type == .Read && f.mode.access == .Write) || (t.lock_type == .Write && !writes(f.mode)) {
+		return .Err_Access
+	}
+	r.status = .Success
+	if t.lock_type != .Unlock {
+		for &l in sh.locks {
+			if locks_conflict(&l, s, t.proc_id, f.node, t.lock_type, start, end) {
+				r.status = .Blocked // the client waits and asks again (F_SETLKW)
+				return .Ok
+			}
+		}
+	}
+	// The room it needs, found before anything changes, so an error leaves the
+	// caller's locks as they were: a slot for the new lock, and one more if it
+	// falls inside one of its own, which then splits in two.
+	free_slots := 0
+	need := t.lock_type != .Unlock ? 1 : 0
+	for &l in sh.locks {
+		free_slots += int(!l.used)
+		if l.used && l.node == f.node && l.conn == s && l.proc_id == t.proc_id && l.start < start && l.end > end {
+			need += 1
+		}
+	}
+	if free_slots < need || !unlock(sh, s, t.proc_id, false, f.node, start, end) { // its own, replaced
+		r.status = .Error
+		return .Ok
+	}
+	if t.lock_type == .Unlock {
+		return .Ok
+	}
+	for &l in sh.locks {
+		if !l.used {
+			l = {
+				used    = true,
+				type    = t.lock_type,
+				node    = f.node,
+				start   = start,
+				end     = end,
+				conn    = s,
+				proc_id = t.proc_id,
+			}
+			return .Ok
+		}
+	}
+	r.status = .Error
+	return .Ok
+}
+
+// Tjoin: a new fid, open on the open file a token names.
+@(private="file", require_results)
+serve_join :: proc "contextless" (s: ^Server, t: ^Msg, r: ^Msg) -> vx.Status {
+	sh := s.shared
+	if sh == nil {
+		return .Err_Unsupported
+	}
+	o: ^Open_File
+	for &c in sh.files {
+		if !file_live(sh, &c) || !c.shared || c.holds == 0 || (sh.now != nil && now(sh) >= c.hold_until) {
+			continue
+		}
+		diff: u8 // the whole token, every time
+		for b, k in c.token {
+			diff |= b ~ t.token[k]
+		}
+		if diff == 0 {
+			o = &c
+			break
+		}
+	}
+	if o == nil {
+		return .Err_Not_Found
+	}
+	n := fid_new(s, t.newfid)
+	if n == nil {
+		return .Err_Bad_State
+	}
+	mode := o.mode
+	mode.trunc, mode.rclose, mode.join = false, false, true
+	if e := s.fs.open(s.fs.ctx, o.node, mode); e != .Ok {
+		n^ = {}
+		return e
+	}
+	qid, e := qid_of(s, o.node)
+	if e != .Ok {
+		if s.fs.clunk != nil {
+			s.fs.clunk(s.fs.ctx, o.node, true) // the open just made, let go
+		}
+		n^ = {}
+		return e
+	}
+	o.holds -= 1
+	o.fids += 1
+	n.qid = qid
+	n.node, n.root = o.node, o.node
+	n.open = true
+	n.mode = o.mode
+	n.file = o
+	r.qid = n.qid
+	r.iounit = s.msize - IOHDRSZ
+	return .Ok
+}
+
+// Tshare, Tseek and Tdesc: an open file shared between connections.
+@(private="file", require_results)
+serve_share :: proc "contextless" (s: ^Server, f: ^Fid_Entry, t: ^Msg, r: ^Msg) -> vx.Status {
+	sh := s.shared
+	if sh == nil {
+		return .Err_Unsupported
+	}
+	o := f.file
+	if o == nil {
+		return .Err_Bad_State // not open, or a directory
+	}
+	#partial switch t.type {
+	case .Tshare:
+		if !sh.random.seeded {
+			return .Err_Unsupported // no token that cannot be guessed
+		}
+		if sh.now != nil && now(sh) >= o.hold_until {
+			o.holds = 0 // run out, unused
+		}
+		if t.holds == 0 || t.holds > MAX_HOLDS || o.holds + t.holds > MAX_HOLDS {
+			return .Err_Range
+		}
+		if !o.shared {
+			drbg.read(&sh.random, o.token[:])
+		}
+		o.shared = true
+		o.holds += t.holds
+		o.hold_until = now(sh) + HOLD_TIME
+		r.token = o.token
+		return .Ok
+	case .Tseek:
+		base: i64
+		#partial switch t.whence {
+		case .Current:
+			base = i64(o.offset)
+		case .End:
+			st: Stat
+			s.fs.stat(s.fs.ctx, o.node, &st) or_return
+			base = i64(st.length)
+		}
+		at, overflow := intrinsics.overflow_add(base, i64(t.offset))
+		if u8(t.whence) > u8(Whence.End) || overflow || at < 0 {
+			return .Err_Invalid
+		}
+		o.offset = u64(at)
+		r.offset = o.offset
+		return .Ok
+	case .Tdesc:
+		o.append = .Append in t.desc_flags
+		return .Ok
+	}
+	return .Err_Unsupported
+}
+
+// A stat's mode as POSIX has it, for Rgetattr.
+@(private="file")
+posix_mode :: proc "contextless" (mode: u32) -> u32 {
+	type := S_IFREG
+	if mode & DMDIR != 0 {
+		type = S_IFDIR
+	}
+	if mode & DMSYMLINK != 0 {
+		type = S_IFLNK
+	}
+	if mode & DMDEVICE != 0 {
+		type = S_IFCHR
+	}
+	return type | mode & 0o7777
+}
+
+// The posix and xattr extensions' messages: each only once its extension is
+// negotiated.
+@(private="file", require_results)
+serve_posix :: proc "contextless" (s: ^Server, t: ^Msg, r: ^Msg) -> vx.Status {
+	xattr := t.type == .Tgetattr || t.type == .Tsetattr
+	if (xattr ? Extension.Xattr : Extension.Posix) not_in s.extensions {
+		return .Err_Unsupported
+	}
+	if t.type == .Tjoin {
+		return serve_join(s, t, r)
+	}
+	f := fid_find(s, t.fid)
+	if f == nil {
+		return .Err_Bad_Handle
+	}
+	#partial switch t.type {
+	case .Tlock, .Tgetlock:
+		return serve_lock(s, f, t, r)
+	case .Tshare, .Tseek, .Tdesc:
+		return serve_share(s, f, t, r)
+	case .Tgetattr:
+		st: Stat
+		s.fs.stat(s.fs.ctx, f.node, &st) or_return
+		r.attr = {
+			valid        = GETATTR_BASIC,
+			qid          = st.qid,
+			mode         = posix_mode(st.mode),
+			nlink        = st.mode & DMDIR != 0 ? 2 : 1,
+			size         = st.length,
+			blksize      = 4096,
+			blocks       = (st.length + 511) / 512,
+			atime_sec    = u64(st.atime),
+			mtime_sec    = u64(st.mtime),
+			ctime_sec    = u64(st.mtime),
+			data_version = u64(st.qid.version),
+		}
+		return .Ok
+	case .Tsetattr:
+		return s.fs.setattr != nil ? s.fs.setattr(s.fs.ctx, f.node, &t.setattr) : .Err_Access
+	case .Trenameat:
+		to := fid_find(s, t.newfid)
+		if to == nil {
+			return .Err_Bad_Handle
+		}
+		if .Dir not_in f.qid.type || .Dir not_in to.qid.type || !new_name_ok(t.name) || !new_name_ok(t.name2) {
+			return .Err_Invalid
+		}
+		if s.fs.rename == nil {
+			return .Err_Access
+		}
+		return s.fs.rename(s.fs.ctx, f.node, t.name, to.node, t.name2)
+	case .Tsymlink:
+		if .Dir not_in f.qid.type || !new_name_ok(t.name) {
+			return .Err_Invalid
+		}
+		if s.fs.symlink == nil {
+			return .Err_Access
+		}
+		node := s.fs.symlink(s.fs.ctx, f.node, t.name, t.name2) or_return
+		qid, e := qid_of(s, node)
+		r.qid = qid
+		if s.fs.clunk != nil {
+			s.fs.clunk(s.fs.ctx, node, false) // no fid holds it, whether its qid came or not
+		}
+		return e
+	case .Treadlink:
+		if s.fs.readlink == nil {
+			return .Err_Invalid
+		}
+		target, e := s.fs.readlink(s.fs.ctx, f.node)
+		r.name2 = target
+		return e
+	case .Tfsync:
+		return .Ok // every server's writes are done when Rwrite is sent
+	}
+	return .Err_Unsupported // Tlink: no server has hard links
 }
 
 // Handles one request (one whole message) and writes the reply into resp.
@@ -351,7 +829,7 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 				} else if s.fs.create == nil {
 					e = .Err_Access
 				} else {
-					node, e = s.fs.create(s.fs.ctx, f.node, t.name, t.perm, t.mode)
+					node, e = s.fs.create(s.fs.ctx, f.node, t.name, t.perm, plain_mode(t.mode))
 				}
 				if e == .Ok {
 					if s.fs.clunk != nil {
@@ -367,14 +845,24 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 				if .Dir in f.qid.type && (writes(t.mode) || t.mode.trunc) {
 					e = .Err_Access // directories are only read
 				} else {
-					e = open_node(s, f, t.mode)
+					e = open_node(s, f, plain_mode(t.mode))
 				}
 			}
 			if e != .Ok {
 				break
 			}
+			if .Posix in s.extensions && s.shared != nil && .Dir not_in f.qid.type {
+				f.file = file_new(s.shared, f.node, t.mode)
+				if f.file == nil { // the server's table of open files is full: the open fails, now
+					if s.fs.clunk != nil {
+						s.fs.clunk(s.fs.ctx, f.node, true)
+					}
+					e = .Err_No_Memory
+					break
+				}
+			}
 			f.open = true
-			f.mode = t.mode
+			f.mode = plain_mode(t.mode)
 			r.qid = f.qid
 			r.iounit = s.msize - IOHDRSZ
 		case .Tread:
@@ -396,14 +884,26 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 			}
 			count := min(t.count, room)
 			out := resp[RREAD_HDR:][:count]
+			o := s.shared != nil ? f.file : nil
+			offset := t.offset
+			if offset == OFFSET_CURRENT {
+				if o == nil {
+					e = .Err_Invalid // no open file keeps an offset for it
+					break
+				}
+				offset = o.offset
+			}
 			if .Dir in f.qid.type {
-				count, e = read_dir(s, f, t.offset, out)
+				count, e = read_dir(s, f, offset, out)
 			} else {
-				count, e = s.fs.read(s.fs.ctx, f.node, t.offset, out)
+				count, e = s.fs.read(s.fs.ctx, f.node, offset, out)
 			}
 			if e == .Ok && count > u32(len(out)) {
 				e = .Err_Range // the file server claims more than it was given room for
 				break
+			}
+			if e == .Ok && o != nil && t.offset == OFFSET_CURRENT {
+				o.offset = offset + u64(count)
 			}
 			r.data = out[:count] if e == .Ok else nil
 		case .Twrite:
@@ -414,7 +914,7 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 			} else if t.count > s.msize - IOHDRSZ {
 				e = .Err_Too_Small
 			} else {
-				r.count, e = s.fs.write(s.fs.ctx, f.node, t.offset, t.data)
+				r.count, e = write(s, f, &t)
 			}
 		case .Tclunk, .Tremove:
 			if f = fid_find(s, t.fid); f == nil {
@@ -437,7 +937,9 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 				r.stat = s.stat[:n]
 			}
 		case .Twstat:
-			e = .Err_Unsupported // renames and chmod come with fsd
+			e = .Err_Unsupported // renames and chmod: Trenameat and Tsetattr
+		case .Tgetattr, .Tsetattr, .Trenameat, .Tsymlink, .Treadlink, .Tfsync, .Tlink, .Tlock, .Tgetlock, .Tshare, .Tjoin, .Tseek, .Tdesc:
+			e = serve_posix(s, &t, &r)
 		case:
 			return 0, .Hang_Up
 		}

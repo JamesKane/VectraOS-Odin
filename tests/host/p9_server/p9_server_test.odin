@@ -359,6 +359,10 @@ test_hostile_client :: proc(t: ^testing.T) {
 	testing.expect_value(t, raw(h, walk_msg(1, 3, "sub/../../b.txt")), vx.Status.Err_Invalid)
 	testing.expect_value(t, raw(h, walk_msg(1, 3, ".")), vx.Status.Err_Invalid)
 	testing.expect_value(t, raw(h, walk_msg(1, 3, "")), vx.Status.Err_Invalid)
+	// Names are UTF-8 with no control characters (ADR-0013).
+	testing.expect_value(t, raw(h, walk_msg(1, 3, "a\nb")), vx.Status.Err_Invalid)
+	testing.expect_value(t, raw(h, walk_msg(1, 3, "\xc3")), vx.Status.Err_Invalid)
+	testing.expect_value(t, raw(h, walk_msg(1, 3, "\xc0\xae")), vx.Status.Err_Invalid)
 
 	// Fids: unknown, taken, reserved, open, too many.
 	testing.expect_value(t, raw(h, walk_msg(77, 3, "a.txt")), vx.Status.Err_Bad_Handle)
@@ -375,6 +379,7 @@ test_hostile_client :: proc(t: ^testing.T) {
 	testing.expect_value(t, raw(h, {type = .Topen, tag = 1, fid = 2, mode = p9.OWRITE}), vx.Status.Err_Access) // a directory
 	testing.expect_value(t, raw(h, {type = .Tcreate, tag = 1, fid = 2, name = "..", mode = p9.OREAD}), vx.Status.Err_Invalid)
 	testing.expect_value(t, raw(h, {type = .Tcreate, tag = 1, fid = 2, name = "a/b", mode = p9.OREAD}), vx.Status.Err_Invalid)
+	testing.expect_value(t, raw(h, {type = .Tcreate, tag = 1, fid = 2, name = "tab\there", mode = p9.OREAD}), vx.Status.Err_Invalid)
 	held, made := 0, 0
 	for f in server.fids {
 		held += int(f.used)

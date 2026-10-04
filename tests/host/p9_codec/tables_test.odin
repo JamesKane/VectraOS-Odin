@@ -43,7 +43,8 @@ odin_case :: proc(s: string) -> string {
 }
 
 // The type a Msg member is on the wire: a distinct type's base (a Fid is a
-// u32), or a bit_field's backing integer (an Open_Mode is a u8).
+// u32), a bit_field's backing integer (an Open_Mode is a u8), an enum's (a
+// Lock_Type is a u8) or a bit_set's (a Getattr_Mask is a u64).
 wire_type :: proc(ti: ^runtime.Type_Info) -> typeid {
 	base := reflect.type_info_base(ti)
 	#partial switch v in base.variant {
@@ -51,6 +52,10 @@ wire_type :: proc(ti: ^runtime.Type_Info) -> typeid {
 		return base.id
 	case runtime.Type_Info_Bit_Field:
 		return v.backing_type.id
+	case runtime.Type_Info_Enum:
+		return v.base.id
+	case runtime.Type_Info_Bit_Set:
+		return v.underlying.id
 	}
 	return ti.id
 }
@@ -76,6 +81,12 @@ kind_type :: proc(k: p9.Field_Kind) -> typeid {
 		return [p9.MAXWELEM]p9.Qid
 	case .Data, .Stat:
 		return []u8
+	case .Attr:
+		return p9.Attr
+	case .Setattr:
+		return p9.Setattr
+	case .Token:
+		return [p9.TOKEN_SIZE]u8
 	}
 	return nil
 }

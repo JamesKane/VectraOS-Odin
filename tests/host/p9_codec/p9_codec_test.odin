@@ -5,6 +5,9 @@
 package p9_codec_test
 
 import vx "abi:vx"
+import "core:encoding/hex"
+import "core:strconv"
+import "core:strings"
 import "core:testing"
 import "vx:p9"
 
@@ -51,8 +54,127 @@ full_message :: proc(type: p9.Type, stat: []u8) -> p9.Msg {
 		wqid = {0 = {p9.QTDIR, 1, 2}, 1 = {p9.QTFILE, 3, 4}},
 		data = data[:],
 		stat = stat[:stat_len],
+		name2 = "target",
+		gid = 13,
+		mask = p9.GETATTR_BASIC,
+		datasync = 1,
+		attr = {
+			valid = p9.GETATTR_BASIC,
+			qid = {p9.QTFILE, 5, 55},
+			mode = p9.S_IFREG | 0o644,
+			uid = 1,
+			gid = 2,
+			nlink = 3,
+			size = 4,
+			blksize = 4096,
+			blocks = 8,
+			atime_sec = 10,
+			atime_nsec = 11,
+			mtime_sec = 12,
+			mtime_nsec = 13,
+			ctime_sec = 14,
+			ctime_nsec = 15,
+			btime_sec = 16,
+			btime_nsec = 17,
+			gen = 18,
+			data_version = 19,
+		},
+		lock_type = .Write,
+		lock_flags = {.Block},
+		start = 100,
+		length = 50,
+		proc_id = 42,
+		client_id = "c",
+		status = .Blocked,
+		holds = 2,
+		token = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+		whence = .End,
+		desc_flags = {.Append},
+		setattr = {
+			valid = {.Mode, .Size, .Mtime_Set},
+			mode = 0o600,
+			uid = 3,
+			gid = 4,
+			size = 5,
+			atime_sec = 6,
+			atime_nsec = 7,
+			mtime_sec = 8,
+			mtime_nsec = 9,
+		},
 	}
 	return m
+}
+
+// Not upstream's: every message type, full_message's way, encodes to the
+// bytes upstream's p9_encode writes for its own full_message (upstream.txt,
+// from a harness built with clang against M4's codec: the P4 cross-check).
+@(test)
+test_upstream_bytes :: proc(t: ^testing.T) {
+	UPSTREAM :: #load("upstream.txt", string)
+	buf, stat: [512]u8
+	want := UPSTREAM
+	types := 0
+	for line in strings.split_lines_iterator(&want) {
+		num, _, hex_bytes := strings.partition(line, " ")
+		ty, ok := strconv.parse_int(num, 10)
+		if !testing.expectf(t, ok, "upstream.txt: %q", line) {
+			continue
+		}
+		m := full_message(p9.Type(ty), stat[:])
+		n := p9.encode(&m, buf[:])
+		got := hex.encode(buf[:n], context.temp_allocator)
+		testing.expectf(t, string(got) == hex_bytes, "%s: %s, upstream's %s", p9.MESSAGES[ty].name, got, hex_bytes)
+		types += 1
+	}
+	testing.expect_value(t, types, 53)
+}
+
+// The fields 9P2000.L's messages add come back as they went.
+@(test)
+test_posix_fields :: proc(t: ^testing.T) {
+	buf, stat: [512]u8
+	m := full_message(.Rgetattr, stat[:])
+	d: p9.Msg
+	n := p9.encode(&m, buf[:])
+	testing.expect_value(t, n, 7 + 8 + 13 + 12 + 15 * 8) // Rgetattr's fixed size
+	testing.expect_value(t, p9.decode(buf[:n], &d), vx.Status.Ok)
+	testing.expect_value(t, d.attr.valid, p9.GETATTR_BASIC)
+	testing.expect_value(t, transmute(u64)d.attr.valid, 0x7ff)
+	testing.expect_value(t, d.attr.qid.path, 55)
+	testing.expect_value(t, d.attr.mode, p9.S_IFREG | 0o644)
+	testing.expect_value(t, d.attr.mtime_nsec, 13)
+	testing.expect_value(t, d.attr.data_version, 19)
+	m = full_message(.Tsetattr, stat[:])
+	n = p9.encode(&m, buf[:])
+	testing.expect_value(t, n, 7 + 4 + 4 + 12 + 5 * 8)
+	testing.expect_value(t, p9.decode(buf[:n], &d), vx.Status.Ok)
+	testing.expect_value(t, d.setattr.valid, m.setattr.valid)
+	testing.expect_value(t, transmute(u32)d.setattr.valid, 0x109) // MODE | SIZE | MTIME_SET
+	testing.expect_value(t, d.setattr.size, 5)
+	testing.expect_value(t, d.setattr.mode, 0o600)
+	testing.expect_value(t, d.setattr.mtime_sec, 8)
+	testing.expect_value(t, d.setattr.mtime_nsec, 9)
+	m = full_message(.Tjoin, stat[:])
+	n = p9.encode(&m, buf[:])
+	testing.expect_value(t, n, 7 + 4 + 16)
+	testing.expect_value(t, p9.decode(buf[:n], &d), vx.Status.Ok)
+	testing.expect_value(t, d.newfid, 12)
+	testing.expect_value(t, d.token[15], 16)
+	m = full_message(.Tlock, stat[:])
+	n = p9.encode(&m, buf[:])
+	testing.expect_value(t, p9.decode(buf[:n], &d), vx.Status.Ok)
+	testing.expect_value(t, d.lock_type, p9.Lock_Type.Write)
+	testing.expect_value(t, d.start, 100)
+	testing.expect_value(t, d.length, 50)
+	testing.expect_value(t, d.proc_id, 42)
+	testing.expect_value(t, len(d.client_id), 1)
+	m = full_message(.Trenameat, stat[:])
+	n = p9.encode(&m, buf[:])
+	testing.expect_value(t, p9.decode(buf[:n], &d), vx.Status.Ok)
+	testing.expect_value(t, d.fid, 11)
+	testing.expect_value(t, d.newfid, 12)
+	testing.expect_value(t, len(d.name), 7)
+	testing.expect_value(t, len(d.name2), 6)
 }
 
 @(test)
@@ -96,7 +218,7 @@ test_round_trips :: proc(t: ^testing.T) {
 		buf[0] = u8(n - 1)
 		testing.expectf(t, p9.decode(buf[:n], &d) == .Err_Invalid, "%s with a short size field decoded", name)
 	}
-	testing.expect_value(t, types, 27)
+	testing.expect_value(t, types, 53) // 9P2000's 27, 18 of 9P2000.L's, and 9Px's 8 (posix and xattr)
 	testing.expect(t, !p9.known(p9.Type(106))) // there is no Terror
 	m := p9.Msg{type = p9.Type(106)}
 	testing.expect_value(t, p9.encode(&m, buf[:]), 0)
