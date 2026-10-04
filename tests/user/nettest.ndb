@@ -1,0 +1,5 @@
+# tests/user/nettest.ndb: the network driver test's manifest (tests/qemu/net.ndb).
+# devmgr serves /srv/ether0 through the driver it starts; this connects to it.
+
+service=nettest program=/boot/bin/nettest console tasks
+connect=ether0

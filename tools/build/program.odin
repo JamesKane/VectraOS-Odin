@@ -27,6 +27,7 @@ PROGRAMS := []Program {
 	{name = "bootfs", dir = "servers/bootfs", place = .Bootfs},
 	{name = "nstest", dir = "tests/user/nstest", place = .Tests},
 	{name = "constest", dir = "tests/user/constest", place = .Tests},
+	{name = "nettest", dir = "tests/user/nettest", place = .Tests},
 	{name = "procfs", dir = "servers/procfs", place = .Bootfs},
 	{name = "devmgr", dir = "servers/devmgr", place = .Bootfs},
 	{name = "gsh", dir = "cmd/gsh", place = .Bootfs},
@@ -38,6 +39,7 @@ PROGRAMS := []Program {
 	{name = "tail", dir = "cmd/tail", place = .Bootfs},
 	{name = "drv-uart-16550", dir = "drivers/drv-uart-16550", place = .Bootfs, only = {.X86_64}},
 	{name = "drv-uart-pl011", dir = "drivers/drv-uart-pl011", place = .Bootfs, only = {.AArch64}},
+	{name = "drv-virtio-net", dir = "drivers/drv-virtio-net", place = .Bootfs},
 }
 
 program_path :: proc(a: ^Arch, mode: Mode, name: string) -> string {
