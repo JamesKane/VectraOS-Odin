@@ -21,9 +21,7 @@ check :: proc "contextless" (ok: bool, what := #caller_expression(ok), loc := #c
 		return true
 	}
 	failures += 1
-	rt.print("nstest: FAILED line ")
-	rt.print_u64(u64(loc.line))
-	rt.print(": ", what, "\n")
+	rt.print("nstest: FAILED line ", u64(loc.line), ": ", what, "\n")
 	return false
 }
 
@@ -154,10 +152,6 @@ main :: proc() -> int {
 		test_namespace()
 		test_confinement()
 	}
-	rt.print("nstest: ")
-	rt.print_u64(u64(checks))
-	rt.print(" checks, ")
-	rt.print_u64(u64(failures))
-	rt.print(" failed\n")
+	rt.print("nstest: ", u64(checks), " checks, ", u64(failures), " failed\n")
 	return failures != 0 ? 1 : 0
 }
