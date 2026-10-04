@@ -3,6 +3,7 @@ package build
 import "core:fmt"
 import "core:hash"
 import "core:os"
+import "core:slice"
 
 // The disk image: a GPT disk holding one EFI system partition, FAT32, made
 // with mtools and wrapped by this file's GPT writer. Everything on the disk
@@ -13,10 +14,56 @@ SECTOR :: 512
 ESP_BYTES :: 64 << 20
 ESP_LBA :: 2048 // 1 MiB in, as partitioning tools align it
 GPT_ENTRIES :: 128
-GPT_TABLE_BYTES :: GPT_ENTRIES * 128
 
 // C12A7328-F81F-11D2-BA4B-00A0C93EC93B, as stored on disk.
-ESP_TYPE := [16]u8{0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b}
+ESP_TYPE :: [16]u8{0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b}
+
+// The protective MBR in LBA 0 (UEFI 2.10, 5.2.3).
+Mbr :: struct #packed {
+	boot:       [446]u8,
+	partitions: [4]Mbr_Partition,
+	signature:  [2]u8,
+}
+#assert(size_of(Mbr) == SECTOR)
+
+Mbr_Partition :: struct #packed {
+	status:    u8,
+	chs_first: [3]u8,
+	type:      u8,
+	chs_last:  [3]u8,
+	first_lba: u32le,
+	sectors:   u32le,
+}
+#assert(size_of(Mbr_Partition) == 16)
+
+// The GPT header, at LBA 1 and again in the disk's last LBA (5.3.2).
+Gpt_Header :: struct #packed {
+	signature:    [8]u8,
+	revision:     u32le,
+	header_size:  u32le,
+	header_crc:   u32le, // over the header, with this field zero
+	_:            u32le,
+	my_lba:       u64le,
+	alt_lba:      u64le,
+	first_usable: u64le,
+	last_usable:  u64le,
+	disk_guid:    [16]u8,
+	entries_lba:  u64le,
+	entry_count:  u32le,
+	entry_size:   u32le,
+	entries_crc:  u32le,
+}
+#assert(size_of(Gpt_Header) == 92)
+
+Gpt_Entry :: struct #packed {
+	type_guid:  [16]u8,
+	part_guid:  [16]u8,
+	first_lba:  u64le,
+	last_lba:   u64le,
+	attributes: u64le,
+	name:       [36]u16le, // UTF-16
+}
+#assert(size_of(Gpt_Entry) == 128)
 
 image_path :: proc(a: ^Arch, mode: Mode) -> string {
 	return fmt.tprintf("%s/vectra-%s.img", out_dir(a, mode), a.name)
@@ -80,57 +127,39 @@ mtools :: proc(tool, image: string, args: ..string) -> bool {
 	return run(c[:])
 }
 
-@(private="file")
-put16 :: proc(p: []u8, v: u16) {
-	for i in 0 ..< 2 {
-		p[i] = u8(v >> (8 * uint(i)))
-	}
-}
-
-@(private="file")
-put32 :: proc(p: []u8, v: u32) {
-	for i in 0 ..< 4 {
-		p[i] = u8(v >> (8 * uint(i)))
-	}
-}
-
-@(private="file")
-put64 :: proc(p: []u8, v: u64) {
-	for i in 0 ..< 8 {
-		p[i] = u8(v >> (8 * uint(i)))
-	}
-}
-
 // A GUID derived from the image's inputs.
 @(private="file")
-derived_guid :: proc(out: []u8, seed: u64, what: string) {
+derived_guid :: proc(seed: u64, what: string) -> [16]u8 {
 	x := fnv(seed, what)
 	y := fnv(x, what)
-	put64(out, x)
-	put64(out[8:], y)
-	out[7] = out[7] & 0x0f | 0x40 // version 4 layout
-	out[8] = out[8] & 0x3f | 0x80 // RFC 4122 variant
+	g := transmute([16]u8)[2]u64le{u64le(x), u64le(y)}
+	g[7] = g[7] & 0x0f | 0x40 // version 4 layout
+	g[8] = g[8] & 0x3f | 0x80 // RFC 4122 variant
+	return g
 }
 
 @(private="file")
-gpt_header :: proc(h: []u8, my_lba, alt_lba, entries_lba, last_lba: u64, disk_guid: []u8, entries_crc: u32) {
-	copy(h, "EFI PART")
-	put32(h[8:], 0x00010000)
-	put32(h[12:], 92)
-	put64(h[24:], my_lba)
-	put64(h[32:], alt_lba)
-	put64(h[40:], 34) // first usable LBA
-	put64(h[48:], last_lba - 33) // last usable LBA
-	copy(h[56:], disk_guid)
-	put64(h[72:], entries_lba)
-	put32(h[80:], GPT_ENTRIES)
-	put32(h[84:], 128)
-	put32(h[88:], entries_crc)
-	put32(h[16:], hash.crc32(h[:92]))
+gpt_header :: proc(my_lba, alt_lba, entries_lba, last_lba: u64, disk_guid: [16]u8, entries_crc: u32) -> Gpt_Header {
+	h := Gpt_Header {
+		signature    = "EFI PART",
+		revision     = 0x00010000,
+		header_size  = size_of(Gpt_Header),
+		my_lba       = u64le(my_lba),
+		alt_lba      = u64le(alt_lba),
+		first_usable = 34,
+		last_usable  = u64le(last_lba - 33),
+		disk_guid    = disk_guid,
+		entries_lba  = u64le(entries_lba),
+		entry_count  = GPT_ENTRIES,
+		entry_size   = size_of(Gpt_Entry),
+		entries_crc  = u32le(entries_crc),
+	}
+	h.header_crc = u32le(hash.crc32(slice.bytes_from_ptr(&h, size_of(h))))
+	return h
 }
 
-// A file of size bytes, all zero and sparse where the file system allows, open for
-// writing.
+// A file of size bytes, all zero and sparse where the file system allows,
+// open for writing.
 @(private="file")
 create_sized :: proc(path: string, size: i64) -> (f: ^os.File, ok: bool) {
 	err: os.Error
@@ -164,33 +193,35 @@ write_gpt_disk :: proc(path, esp_path: string, seed: u64) -> bool {
 	total := ESP_LBA + esp_sectors + 2048
 	last := total - 1
 
-	disk_guid, part_guid: [16]u8
-	derived_guid(disk_guid[:], seed, "disk")
-	derived_guid(part_guid[:], seed, "esp")
+	disk_guid := derived_guid(seed, "disk")
 
-	entries: [GPT_TABLE_BYTES]u8
-	copy(entries[:], ESP_TYPE[:])
-	copy(entries[16:], part_guid[:])
-	put64(entries[32:], ESP_LBA)
-	put64(entries[40:], ESP_LBA + esp_sectors - 1)
-	for c, i in "EFI system partition" {
-		put16(entries[56 + 2 * i:], u16(c))
+	entries: [GPT_ENTRIES]Gpt_Entry
+	entries[0] = {
+		type_guid = ESP_TYPE,
+		part_guid = derived_guid(seed, "esp"),
+		first_lba = ESP_LBA,
+		last_lba  = u64le(ESP_LBA + esp_sectors - 1),
 	}
-	entries_crc := hash.crc32(entries[:])
+	for c, i in "EFI system partition" {
+		entries[0].name[i] = u16le(c)
+	}
+	entries_crc := hash.crc32(slice.to_bytes(entries[:]))
 
 	// A protective MBR: one partition of type 0xEE covering the disk.
-	mbr: [SECTOR]u8
-	pe := mbr[446:]
-	pe[2] = 0x02 // CHS of LBA 1
-	pe[4] = 0xee
-	pe[5], pe[6], pe[7] = 0xff, 0xff, 0xff
-	put32(pe[8:], 1)
-	put32(pe[12:], last > 0xffffffff ? 0xffffffff : u32(last))
-	mbr[510], mbr[511] = 0x55, 0xaa
-
-	primary, backup: [SECTOR]u8
-	gpt_header(primary[:], 1, last, 2, last, disk_guid[:], entries_crc)
-	gpt_header(backup[:], last, 1, last - 32, last, disk_guid[:], entries_crc)
+	mbr := Mbr {
+		partitions = {
+			0 = {
+				chs_first = {0, 0x02, 0}, // LBA 1
+				type = 0xee,
+				chs_last = {0xff, 0xff, 0xff},
+				first_lba = 1,
+				sectors = u32le(min(last, 0xffffffff)),
+			},
+		},
+		signature  = {0x55, 0xaa},
+	}
+	primary := gpt_header(1, last, 2, last, disk_guid, entries_crc)
+	backup := gpt_header(last, 1, last - 32, last, disk_guid, entries_crc)
 
 	esp, eerr := os.open(esp_path)
 	if eerr != nil {
@@ -205,9 +236,9 @@ write_gpt_disk :: proc(path, esp_path: string, seed: u64) -> bool {
 
 	disk := create_sized(path, i64(total * SECTOR)) or_return
 	defer os.close(disk)
-	write_at(disk, path, mbr[:], 0) or_return
-	write_at(disk, path, primary[:], SECTOR) or_return
-	write_at(disk, path, entries[:], 2 * SECTOR) or_return
+	write_at(disk, path, slice.bytes_from_ptr(&mbr, size_of(mbr)), 0) or_return
+	write_at(disk, path, slice.bytes_from_ptr(&primary, size_of(primary)), SECTOR) or_return
+	write_at(disk, path, slice.to_bytes(entries[:]), 2 * SECTOR) or_return
 	buf: [64 * 1024]u8
 	for off := i64(0); off < ESP_BYTES; {
 		n, err := os.read(esp, buf[:])
@@ -218,7 +249,7 @@ write_gpt_disk :: proc(path, esp_path: string, seed: u64) -> bool {
 		write_at(disk, path, buf[:n], ESP_LBA * SECTOR + off) or_return
 		off += i64(n)
 	}
-	write_at(disk, path, entries[:], i64(last - 32) * SECTOR) or_return
-	write_at(disk, path, backup[:], i64(last) * SECTOR) or_return
+	write_at(disk, path, slice.to_bytes(entries[:]), i64(last - 32) * SECTOR) or_return
+	write_at(disk, path, slice.bytes_from_ptr(&backup, size_of(backup)), i64(last) * SECTOR) or_return
 	return true
 }
