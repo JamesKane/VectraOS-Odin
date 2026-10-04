@@ -7,7 +7,7 @@ A clean-room re-implementation of [VectraOS](https://github.com/JamesKane/Vectra
 - [docs/milestones.md](docs/milestones.md): progress, phase by phase
 - [spikes/RESULTS.md](spikes/RESULTS.md): what the spikes and the phases since found about Odin
 
-Status: P1 done (M1's kernel): the kernel boots on x86_64 and aarch64 with its own page tables, guard-paged kernel stacks, SMP, timers, symbolized panics and vector state saved at every trap. P2 (M2, a shell in a namespace) is next. See [docs/milestones.md](docs/milestones.md).
+Status: P2 done (M2, a shell in a namespace): on x86_64 and aarch64 the kernel starts svcd, which starts a user-space UART console driver, bootfs, procfs and gsh; the shell runs in a namespace served over 9P rings. P3 (M3, mount the network) is next. See [docs/milestones.md](docs/milestones.md).
 
 ## Build it
 

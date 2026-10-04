@@ -45,6 +45,9 @@ _2026-10-03, macOS host (Apple M4 Max), Odin `dev-2026-09:a2fb372b7`, LLVM 22.1.
 - **No `intrinsics.syscall` on freestanding targets.** User space reaches the kernel through a six-instruction `vx_syscall` stub per architecture (`lib/rt/arch`). `_start` itself is an ordinary `proc "c"`: the kernel enters user mode exactly as a C call would.
 - **Debugging with lldb:** QEMU's `-gdb tcp::1234` plus `lldb` (`gdb-remote 1234`, `thread backtrace all`) gives a symbolized backtrace for every CPU, through the Odin kernel's DWARF and frame pointers.
 
+- **A package that another imports cannot have `main :: proc() -> int`** (Odin's rule for the main package). Programs that host tests import name the entry `vx_main` directly (`@(export, link_name="vx_main") vx_main :: proc() -> int`); the rest may call it `main`, exported under the same link name.
+- **Parallel porting worked.** Five libraries and two servers were ported by agents in their own worktrees against the frozen M2 snapshot, each checked against upstream's C compiled with clang (byte-identical 9P sessions and tar output, identical model-checker results, identical namespace results over ~475,000 lines of random operations). They found one upstream bug (a 256-byte ustar path overruns `vx_tar_entry` by one byte).
+
 ## Not yet covered
 
 - Preemption and migration in the vector-state test: they need threads (P2). (SMP entry, asynchronous interrupts and XSAVE sizing from CPUID leaf 0Dh are done in P1.)

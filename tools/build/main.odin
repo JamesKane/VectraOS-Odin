@@ -194,7 +194,7 @@ cmd_loc :: proc() -> bool {
 	}
 	FIRST_PARTY :: []string{".odin", ".S", ".ld"}
 	total := 0
-	for dir in ([]string{"kernel", "lib", "tools", "abi", "tests", "spikes"}) {
+	for dir in ([]string{"kernel", "lib", "servers", "drivers", "cmd", "tools", "abi", "tests", "spikes"}) {
 		if !os.exists(dir) {
 			continue
 		}
