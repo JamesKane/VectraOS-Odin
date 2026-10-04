@@ -26,10 +26,12 @@ Ram_Node :: struct {
 }
 
 Ram :: struct {
-	nodes:   [16]Ram_Node,
-	count:   p9.Node,
-	names:   [16][16]u8, // created nodes' names
-	not_yet: bool, // reads and writes answer Err_Should_Wait, as a console with nothing typed does
+	nodes:         [16]Ram_Node,
+	count:         p9.Node,
+	names:         [16][16]u8, // created nodes' names
+	not_yet:       bool, // reads and writes answer Err_Should_Wait, as a console with nothing typed does
+	clone_to:      p9.Node, // opening /docs/a.txt moves the fid here, as a clone file does
+	opened_clunks: [dynamic; 8]p9.Node, // the nodes clunk was told an open fid let go
 }
 
 ram_init :: proc(r: ^Ram) {
@@ -100,6 +102,24 @@ ram_open :: proc "contextless" (ctx: rawptr, node: p9.Node, mode: p9.Open_Mode) 
 		r.nodes[node].len = 0
 	}
 	return .Ok
+}
+
+ram_clone :: proc "contextless" (ctx: rawptr, node: p9.Node, mode: p9.Open_Mode) -> (opened: p9.Node, st: vx.Status) {
+	r := (^Ram)(ctx)
+	if node != 3 || r.clone_to == 0 {
+		return 0, .Err_Not_Found
+	}
+	if r.not_yet {
+		return 0, .Err_Should_Wait // a listen file before a call comes
+	}
+	return r.clone_to, .Ok
+}
+
+ram_clunk :: proc "contextless" (ctx: rawptr, node: p9.Node, opened: bool) {
+	r := (^Ram)(ctx)
+	if opened {
+		_ = append(&r.opened_clunks, node)
+	}
 }
 
 ram_read :: proc "contextless" (ctx: rawptr, node: p9.Node, offset: u64, buf: []u8) -> (count: u32, st: vx.Status) {
@@ -185,6 +205,8 @@ ram_server :: proc(s: ^p9.Server, r: ^Ram) {
 			write = ram_write,
 			create = ram_create,
 			remove = ram_remove,
+			clone = ram_clone,
+			clunk = ram_clunk,
 		},
 		max_msize = 8192,
 		supported = {.Dref, .Notify},
@@ -353,13 +375,17 @@ test_hostile_client :: proc(t: ^testing.T) {
 	testing.expect_value(t, raw(h, {type = .Topen, tag = 1, fid = 2, mode = p9.OWRITE}), vx.Status.Err_Access) // a directory
 	testing.expect_value(t, raw(h, {type = .Tcreate, tag = 1, fid = 2, name = "..", mode = p9.OREAD}), vx.Status.Err_Invalid)
 	testing.expect_value(t, raw(h, {type = .Tcreate, tag = 1, fid = 2, name = "a/b", mode = p9.OREAD}), vx.Status.Err_Invalid)
-	made := 0
+	held, made := 0, 0
+	for f in server.fids {
+		held += int(f.used)
+	}
 	for fid in p9.Fid(100) ..< 100 + p9.MAX_FIDS {
 		if raw(h, walk_msg(1, fid)) == ok {
 			made += 1
 		}
 	}
-	testing.expectf(t, made < p9.MAX_FIDS, "made %d fids of %d", made, p9.MAX_FIDS) // the table is bounded, and a full one says so
+	testing.expect(t, held > 0)
+	testing.expect_value(t, made, p9.MAX_FIDS - held) // exactly the room there was, and no more
 	testing.expect_value(t, raw(h, walk_msg(1, 999)), vx.Status.Err_No_Memory)
 
 	// Messages that are not requests, or not messages at all, end the connection.
@@ -407,6 +433,30 @@ test_deferral :: proc(t: ^testing.T) {
 	testing.expect_value(t, m.type, p9.Type.Rread)
 	testing.expect_value(t, m.tag, 9)
 	testing.expect_value(t, m.count, 5)
+
+	// An open that must wait (a listen file) is held too, and the fid is not
+	// open until it is made again and succeeds.
+	ram.clone_to = 4
+	ram.not_yet = true
+	testing.expect_value(t, serve(&server, req[:], resp[:], &n, {type = .Twalk, tag = 1, fid = 1, newfid = 3, nwname = 2, wname = {0 = "docs", 1 = "a.txt"}}), p9.Serve_Result.Reply)
+	testing.expect_value(t, serve(&server, req[:], resp[:], &n, {type = .Topen, tag = 13, fid = 3, mode = p9.OREAD}), p9.Serve_Result.Defer)
+	held_len = n
+	copy(held[:], req[:n])
+	not_open := p9.Msg{type = .Tread, tag = 14, fid = 3, count = 10} // not open: an error, not a wait
+	n = p9.encode(&not_open, req[:])
+	reply_len, res = p9.serve(&server, req[:n], resp[:])
+	testing.expect_value(t, res, p9.Serve_Result.Reply)
+	testing.expect_value(t, p9.decode(resp[:reply_len], &m), vx.Status.Ok)
+	testing.expect_value(t, m.type, p9.Type.Rerror)
+	ram.not_yet = false
+	reply_len, res = p9.serve(&server, held[:held_len], resp[:])
+	testing.expect_value(t, res, p9.Serve_Result.Reply)
+	testing.expect_value(t, p9.decode(resp[:reply_len], &m), vx.Status.Ok)
+	testing.expect_value(t, m.type, p9.Type.Ropen)
+	testing.expect_value(t, m.tag, 13)
+	testing.expect_value(t, m.qid.path, 4)
+	ram.clone_to = 0
+
 	// An unknown fid is an error, not a wait.
 	unknown := p9.Msg{type = .Tread, tag = 12, fid = 77, count = 1}
 	n = p9.encode(&unknown, req[:])
@@ -414,4 +464,39 @@ test_deferral :: proc(t: ^testing.T) {
 	testing.expect_value(t, res, p9.Serve_Result.Reply)
 	testing.expect_value(t, p9.decode(resp[:reply_len], &m), vx.Status.Ok)
 	testing.expect_value(t, m.type, p9.Type.Rerror)
+}
+
+// An open may move its fid to another node (a clone file); the fid then reads,
+// stats and clunks as that node, and clunk says which fids were open.
+@(test)
+test_open_moves :: proc(t: ^testing.T) {
+	ram: Ram
+	server: p9.Server
+	ram_init(&ram)
+	ram_server(&server, &ram)
+	tbuf, rbuf: [16384]u8
+	c := p9.Client{rpc = p9test.loopback, ctx = &server, tbuf = tbuf[:], rbuf = rbuf[:]}
+	testing.expect_value(t, p9.client_version(&c, 8192, {}), vx.Status.Ok)
+	root, e := p9.client_attach(&c, "")
+	testing.expect_value(t, e, vx.Status.Ok)
+	ram.clone_to = 4
+	f, g: p9.Fid
+	f, e = p9.client_walk(&c, root, "docs/a.txt")
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect_value(t, p9.client_open(&c, f, p9.OREAD), vx.Status.Ok)
+	buf: [16]u8
+	n: int
+	n, e = p9.client_read(&c, f, 0, buf[:])
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect_value(t, string(buf[:n]), "bravo")
+	st: p9.Stat
+	testing.expect_value(t, p9.client_stat(&c, f, &st), vx.Status.Ok)
+	testing.expect_value(t, st.qid.path, 4)
+	g, e = p9.client_walk(&c, root, "b.txt")
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect_value(t, p9.client_clunk(&c, g), vx.Status.Ok)
+	testing.expect_value(t, len(ram.opened_clunks), 0) // never opened
+	testing.expect_value(t, p9.client_clunk(&c, f), vx.Status.Ok)
+	testing.expect_value(t, len(ram.opened_clunks), 1)
+	testing.expect_value(t, ram.opened_clunks[0], 4)
 }

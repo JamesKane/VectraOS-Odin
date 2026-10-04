@@ -550,7 +550,25 @@ ERRORS := [?]Error_Text {
 	{.Err_No_Memory, "out of memory"},
 	{.Err_Unsupported, "operation not supported"},
 	{.Err_Too_Small, "message too large for msize"},
+	{.Err_Refused, "connection refused"},
+	{.Err_Timed_Out, "connection timed out"},
+	{.Err_Peer_Closed, "i/o on hungup channel"},
 	{.Err_Invalid, "bad message"},
+}
+
+// Other servers' wordings, understood but never sent: Unix's strerror(), as
+// u9fs passes it on, and u9fs's own messages (M3's interoperability test).
+@(private="file", rodata)
+ERRORS_HEARD := [?]Error_Text {
+	{.Err_Not_Found, "no such file or directory"},
+	{.Err_Not_Found, "not a directory"},
+	{.Err_Exists, "file exists"},
+	{.Err_Exists, "file or directory already exists"},
+	{.Err_Access, "read-only file system"},
+	{.Err_Access, "is a directory"},
+	{.Err_Access, "operation not permitted"},
+	{.Err_Bad_Handle, "fid unknown or out of range"},
+	{.Err_No_Memory, "no space left on device"},
 }
 
 error_text :: proc "contextless" (st: vx.Status) -> string {
@@ -562,9 +580,34 @@ error_text :: proc "contextless" (st: vx.Status) -> string {
 	return "i/o error"
 }
 
+// Whether text is want (all lower case) but for the case of ASCII letters.
+@(private="file")
+equal_nocase :: proc "contextless" (text, want: string) -> bool {
+	if len(text) != len(want) {
+		return false
+	}
+	for i in 0 ..< len(text) {
+		c := text[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// The Status an Rerror's text stands for: the whole text, in any case, as
+// this server words it or as another is known to.
 error_status :: proc "contextless" (text: string) -> vx.Status {
 	for e in ERRORS {
-		if e.text == text {
+		if equal_nocase(text, e.text) {
+			return e.status
+		}
+	}
+	for e in ERRORS_HEARD {
+		if equal_nocase(text, e.text) {
 			return e.status
 		}
 	}

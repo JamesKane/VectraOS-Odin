@@ -74,14 +74,15 @@ test_layout :: proc(t: ^testing.T) {
 
 @(test)
 test_queues :: proc(t: ^testing.T) {
-	memory, h, ok := make_ring({8, 8, 64, 32, 4096, 4096})
+	p := vx.Ring_Params{8, 8, 64, 32, 4096, 4096}
+	memory, h, ok := make_ring(p)
 	if !testing.expect(t, ok) {
 		return
 	}
 	defer free_ring(memory)
 	client, server: ring.Ring
-	testing.expect_value(t, ring.attach(&client, memory[:h.size], .Client), vx.Status.Ok)
-	testing.expect_value(t, ring.attach(&server, memory[:h.size], .Server), vx.Status.Ok)
+	testing.expect_value(t, ring.attach(&client, memory[:h.size], .Client, p), vx.Status.Ok)
+	testing.expect_value(t, ring.attach(&server, memory[:h.size], .Server, p), vx.Status.Ok)
 
 	// Three laps of the queue, filling it each time.
 	produced, consumed: u64
@@ -145,22 +146,37 @@ test_queues :: proc(t: ^testing.T) {
 
 @(test)
 test_hostile_peer :: proc(t: ^testing.T) {
-	memory, h, ok := make_ring({8, 8, 64, 32, 0, 0})
+	p := vx.Ring_Params{8, 8, 64, 32, 0, 0}
+	memory, h, ok := make_ring(p)
 	if !testing.expect(t, ok) {
 		return
 	}
 	defer free_ring(memory)
-	client, server: ring.Ring
-	testing.expect_value(t, ring.attach(&server, memory[:h.size], .Server), vx.Status.Ok)
-	testing.expect_value(t, ring.attach(&server, memory[:h.size - 1], .Server), vx.Status.Err_Invalid) // mapping too small
+	server, other: ring.Ring
+	testing.expect_value(t, ring.attach(&other, memory[:h.size - 1], .Server, p), vx.Status.Err_Invalid) // mapping too small
+	testing.expect(t, slot(&other, vx.Cqe) == nil) // a failed attach leaves nothing usable
 	header(memory).cq_offset += 64 // a rewritten header
-	testing.expect_value(t, ring.attach(&client, memory[:h.size], .Client), vx.Status.Err_Invalid)
+	testing.expect_value(t, ring.attach(&other, memory[:h.size], .Client, p), vx.Status.Err_Invalid)
 	header(memory).cq_offset -= 64
 
+	// A ring made, consistently, with bigger entries than this side's protocol
+	// has: refused, since each consume would copy an entry that size into the
+	// caller's (smaller) buffer.
+	wide, big, wok := make_ring({8, 8, 64, 256, 0, 0})
+	if !testing.expect(t, wok) {
+		return
+	}
+	defer free_ring(wide)
+	testing.expect(t, big.size <= h.size + 4096) // it may even fit the same mapping
+	testing.expect_value(t, ring.attach(&other, wide[:big.size], .Client, p), vx.Status.Err_Invalid)
+
 	// A client whose tail runs past what fits: the server marks the ring broken.
+	testing.expect_value(t, ring.attach(&server, memory[:h.size], .Server, p), vx.Status.Ok)
 	lines(memory)[.Sq_Tail].index = 9
 	got: vx.Sqe
+	testing.expect(t, server.intact)
 	testing.expect_value(t, ring.consume(&server, mem.ptr_to_bytes(&got)), vx.Status.Err_Bad_State)
+	testing.expect(t, !server.intact) // by the overrun check, not by an earlier failure
 	lines(memory)[.Sq_Tail].index = 1 // putting it back does not mend it
 	testing.expect_value(t, ring.consume(&server, mem.ptr_to_bytes(&got)), vx.Status.Err_Bad_State)
 	testing.expect(t, slot(&server, vx.Sqe) == nil)
@@ -226,15 +242,16 @@ alarm_fired :: proc "c" (sig: posix.Signal) {
 
 @(test)
 test_threads :: proc(t: ^testing.T) {
-	memory, h, ok := make_ring({64, 64, 64, 32, 0, 0})
+	p := vx.Ring_Params{64, 64, 64, 32, 0, 0}
+	memory, h, ok := make_ring(p)
 	if !testing.expect(t, ok) {
 		return
 	}
 	defer free_ring(memory)
 	s := new(Stress)
 	defer free(s)
-	testing.expect_value(t, ring.attach(&s.client, memory[:h.size], .Client), vx.Status.Ok)
-	testing.expect_value(t, ring.attach(&s.server, memory[:h.size], .Server), vx.Status.Ok)
+	testing.expect_value(t, ring.attach(&s.client, memory[:h.size], .Client, p), vx.Status.Ok)
+	testing.expect_value(t, ring.attach(&s.server, memory[:h.size], .Server, p), vx.Status.Ok)
 	posix.signal(.SIGALRM, alarm_fired)
 	posix.alarm(60)
 

@@ -21,9 +21,9 @@ import "vx:str"
 
 BLOCK :: 512
 
-// prefix (155), '/', name (100). Upstream says 255 and keeps a NUL after the
-// path in a 256-byte buffer, so a path that fills both fields writes one byte
-// past it; here the buffer holds the path alone, and such a path reads.
+// prefix (155), '/', name (100). (Upstream said 255 until M3, so a path that
+// filled both fields wrote its NUL one byte past the entry; here the buffer
+// holds the path alone, with no NUL.)
 MAX_PATH :: 256
 
 Header :: struct {
