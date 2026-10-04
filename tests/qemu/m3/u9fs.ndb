@@ -1,0 +1,33 @@
+# tests/qemu/u9fs.ndb: 9P interoperability (M3, step 5b): vx-9p's client and
+# vx-ns against u9fs, the Plan 9 project's own 9P2000 server for Unix
+# (third_party/u9fs, ADR-0006). QEMU gives each connection to 10.0.2.101!564
+# a u9fs, chrooted in a user namespace into a fresh copy of the fixtures (and
+# the etc/ its user lookups read). The shell mounts it; children dial it
+# again; a file is created, written, read back, and found on the host.
+
+scenario=u9fs timeout=40
+expect="netd: 10.0.2.15/24 from dhcp, gateway 10.0.2.2"
+prompt="vx% "
+send="mount tcp!10.0.2.101!564 /n/u9fs"
+prompt="vx% "
+send="ls /n/u9fs"
+line="etc  hello.txt"
+prompt="vx% "
+send="cat /n/u9fs/hello.txt"
+line="hello from the host"
+prompt="vx% "
+send="echo written through u9fs > /n/u9fs/out.txt"
+prompt="vx% "
+send="cat /n/u9fs/out.txt"
+line="written through u9fs"
+prompt="vx% "
+send="cat /n/u9fs/nothing"
+expect="cat: /n/u9fs/nothing: "
+prompt="vx% "
+send="echo done"
+line="done"
+host=u9fs/out.txt text="written through u9fs"
+fail="vx: panic"
+fail="FAILED"
+fail="killed"
+fail="gsh: "

@@ -1,0 +1,47 @@
+# tests/qemu/netd.ndb: netd (M3, step 3). It dials the driver, gets an
+# address from QEMU's DHCP server, and serves /net, which the shell mounts.
+# The interface's status reads as the M3 exit test expects; ping sends ICMP
+# echo requests to QEMU's gateway through /net/icmp, which needs ARP first;
+# and the conversation it made is gone once it exits. cs translates through
+# /net/cs and /net/dns: a numeric host with a service name, and localhost,
+# which QEMU's DNS proxy asks the host's resolver (systemd-resolved answers it
+# itself, as it answers names under .invalid with NXDOMAIN: no network needed).
+
+scenario=netd timeout=30
+expect="netd: serving /srv/net"
+expect="netd: 10.0.2.15/24 from dhcp, gateway 10.0.2.2"
+prompt="vx% "
+send="cat /net/ipifc/0/status"
+line="dev=ether0 addr=10.0.2.15/24 gw=10.0.2.2 dhcp lease=86400s"
+prompt="vx% "
+send="ping 10.0.2.2"
+expect="ping: 10.0.2.2: seq=1 time="
+expect="ping: 10.0.2.2: seq=3 time="
+line="ping: 3 sent, 3 received"
+prompt="vx% "
+send="ls /net/icmp"
+line="clone"
+prompt="vx% "
+send="ping 10.0.2"
+expect="ping: connect: "
+prompt="vx% "
+send="cs tcp!10.0.2.100!echo"
+line="/net/tcp/clone 10.0.2.100!7"
+prompt="vx% "
+send="cs tcp!localhost!9fs"
+line="/net/tcp/clone 127.0.0.1!564"
+prompt="vx% "
+send="cs -d LocalHost."
+line="LocalHost. ip 127.0.0.1"
+prompt="vx% "
+send="cs udp!nothing.invalid!53"
+line="cs: udp!nothing.invalid!53: no such name"
+prompt="vx% "
+send="cs tcp!10.0.2.2"
+line="cs: tcp!10.0.2.2: bad message"
+prompt="vx% "
+send="echo done"
+line="done"
+fail="vx: panic"
+fail="FAILED"
+fail="killed"
