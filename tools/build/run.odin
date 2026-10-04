@@ -1,6 +1,7 @@
 package build
 
 import "core:fmt"
+import "core:hash"
 import "core:os"
 import "core:strings"
 
@@ -130,14 +131,11 @@ dir_of :: proc(path: string) -> string {
 	return i < 0 ? "." : path[:i]
 }
 
-// FNV-1a over bytes: the cache keys and the image's derived GUIDs.
+// FNV-1a, chained from h, over a file's text or a name: the cache keys and
+// the image's derived GUIDs. Chains start from the offset basis, which is
+// also hash.fnv64a's default seed.
 FNV_OFFSET :: u64(0xcbf29ce484222325)
 
 fnv :: proc(h: u64, data: string) -> u64 {
-	h := h
-	for i in 0 ..< len(data) {
-		h ~= u64(data[i])
-		h *= 0x100000001b3
-	}
-	return h
+	return hash.fnv64a(transmute([]u8)data, h)
 }
