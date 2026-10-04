@@ -238,7 +238,7 @@ test_damaged_index :: proc(t: ^testing.T) {
 	testing.expect_value(t, debug.str(&ix, fn.name), "")
 	testing.expect_value(t, debug.file(&ix, fn.file), "")
 	_, found := debug.local_named(&ix, fn, fn.low, "a")
-	testing.expect(t, !found) // first_var + i wraps to 0 and 1, whose names are not "a" (upstream's too)
+	testing.expect(t, !found) // its variables start past the table
 	v := &ix.vars[0]
 	_, loc_ok := debug.var_location(&ix, v, 0)
 	testing.expect(t, !loc_ok)
