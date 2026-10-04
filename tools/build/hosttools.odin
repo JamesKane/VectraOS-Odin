@@ -19,6 +19,11 @@ VX9PSERVE_SRC :: "tools/vx9pserve"
 VXSTORE :: "out/host/vxstore"
 VXSTORE_SRC :: "tools/vxstore"
 
+// vxfs, from tools/vxfs: makes, fills and checks vx:fs volume images
+// (upstream's host/vxfs), for scenarios with volume= (disk.odin).
+VXFS :: "out/host/vxfs"
+VXFS_SRC :: "tools/vxfs"
+
 // third_party/u9fs (ADR-0006), built for this machine: the stock 9P2000
 // server the u9fs scenario tests against. As upstream left it, but for two
 // constants its rune.c uses and nothing defines.
@@ -68,6 +73,8 @@ Tool_State :: enum {
 vx9pserve_state: Tool_State
 @(private="file")
 vxstore_state: Tool_State
+@(private="file")
+vxfs_state: Tool_State
 @(private="file")
 u9fs_state: Tool_State
 @(private="file")
@@ -142,6 +149,25 @@ build_vxstore :: proc() -> bool {
 		run(c[:]) or_return
 	}
 	vxstore_state = .Built
+	return true
+}
+
+// Builds out/host/vxfs if it is stale, as tools/vxfs says it is built.
+build_vxfs :: proc() -> bool {
+	if vxfs_state != .Untried {
+		return vxfs_state == .Built
+	}
+	vxfs_state = .Failed
+	if !os.is_dir(VXFS_SRC) {
+		fmt.eprintfln("build: %s is missing, so %s cannot be built", VXFS_SRC, VXFS)
+		return false
+	}
+	if s := stale(VXFS, {VXFS_SRC, "lib", "abi"}, ".odin") or_return; s {
+		make_dirs("out/host") or_return
+		fmt.eprintln("  HOST  vxfs")
+		run({ODIN, "build", VXFS_SRC, "-collection:vx=lib", "-collection:abi=abi", "-vet", "-strict-style", "-warnings-as-errors", "-out:" + VXFS}) or_return
+	}
+	vxfs_state = .Built
 	return true
 }
 

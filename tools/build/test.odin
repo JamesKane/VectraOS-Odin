@@ -21,7 +21,10 @@ import "vx:ndb"
 // u9fs/ what u9fs did), must hold its text= (with or without a final newline).
 // The m5/ scenarios run with the machine's IOMMU, as upstream's runner runs
 // every scenario from M5; a scenario= record's iommu=caching puts VT-d in
-// caching mode.
+// caching mode. Its disk=MIB gives QEMU a second disk, made fresh for the run
+// (disk.odin's test_disk), on virtio-blk or, with bus=nvme, on NVMe; with
+// volume=DIR its system partition is a vx-fs volume whose home branch is
+// DIR's tree.
 
 Expect_Kind :: enum {
 	Contains, // expect=: part of a line
@@ -50,6 +53,9 @@ Scenario :: struct {
 	needs:   string, // a feature this tree's build cannot provide yet
 	iso:     bool, // boot the ISO, as a CD, with no disk
 	iommu:   Iommu_Mode,
+	disk:    i64, // disk=MIB: a second disk, made fresh for the run; 0 for none
+	nvme:    bool, // and bus=nvme: on NVMe, not virtio-blk
+	volume:  string, // and volume=DIR: its system partition a volume, home DIR
 	expects: [dynamic]Expect,
 	fails:   [dynamic]string,
 	hosts:   [dynamic]Host_Check,
@@ -98,7 +104,27 @@ load_scenario :: proc(name: string, a: ^Arch) -> (sc: Scenario, ok: bool) {
 				}
 				sc.iommu = .Caching
 			}
-			for feature in ([]string{"disk", "volume", "bus"}) {
+			if ndb.has(rec, "disk") {
+				d, dok := strconv.parse_i64_of_base(val(rec, "disk"), 10)
+				if !dok || d <= 0 || d > 4096 {
+					fmt.eprintfln("%s:%d: disk=%s is not a size in MiB, up to 4096", path, rec.line, val(rec, "disk"))
+					return sc, false
+				}
+				sc.disk = d
+			}
+			sc.volume = val(rec, "volume")
+			if ndb.has(rec, "bus") {
+				switch b := val(rec, "bus"); b {
+				case "nvme":
+					sc.nvme = true
+				case "virtio":
+				case:
+					fmt.eprintfln("%s:%d: bus=%s is neither nvme nor virtio", path, rec.line, b)
+					return sc, false
+				}
+			}
+			// What upstream's runner does that this one does not yet.
+			for feature in ([]string{"fat", "fsck", "isodisk", "installer", "blank", "media", "storetree", "rtc", "exits"}) {
 				if ndb.has(rec, feature) {
 					sc.needs = feature
 				}
@@ -136,6 +162,10 @@ load_scenario :: proc(name: string, a: ^Arch) -> (sc: Scenario, ok: bool) {
 	}
 	if sc.timeout <= 0 || len(sc.expects) == 0 {
 		fmt.eprintfln("%s: needs scenario= with a timeout, and an expect=", path)
+		return sc, false
+	}
+	if sc.volume != "" && sc.disk == 0 {
+		fmt.eprintfln("%s: volume= needs disk=", path)
 		return sc, false
 	}
 	return sc, true
@@ -203,6 +233,14 @@ run_scenario :: proc(a: ^Arch, mode: Mode, name: string) -> bool {
 		u9fs = fmt.tprintf("%s/u9fs", run_dir)
 		fresh_u9fs_root(u9fs) or_return
 	}
+	disk := ""
+	if sc.disk != 0 {
+		disk = fmt.tprintf("%s/disk.img", run_dir)
+		if !test_disk(disk, sc.disk, sc.volume) {
+			fmt.eprintfln("%s FAILED: cannot make its disk, %s", label, disk)
+			return false
+		}
+	}
 
 	log_path := fmt.tprintf("%s/test-%s.log", out_dir(a, mode), file_name)
 	log, lerr := os.create(log_path)
@@ -225,7 +263,7 @@ run_scenario :: proc(a: ^Arch, mode: Mode, name: string) -> bool {
 		return false
 	}
 	defer os.close(keys_w)
-	cmd := qemu_cmd(a, image, {test = true, share = share, u9fs = u9fs, cdrom = cdrom, iommu = sc.iommu})
+	cmd := qemu_cmd(a, image, {test = true, share = share, u9fs = u9fs, cdrom = cdrom, iommu = sc.iommu, disk = disk, nvme = sc.nvme})
 	if verbose {
 		print_cmd(cmd, "")
 	}

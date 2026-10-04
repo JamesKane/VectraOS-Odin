@@ -155,7 +155,7 @@ mtools :: proc(tool, image: string, args: ..string) -> bool {
 }
 
 // A GUID derived from the image's inputs.
-@(private="file")
+@(private)
 derived_guid :: proc(seed: u64, what: string) -> [16]u8 {
 	x := fnv(seed, what)
 	y := fnv(x, what)
@@ -165,7 +165,7 @@ derived_guid :: proc(seed: u64, what: string) -> [16]u8 {
 	return g
 }
 
-@(private="file")
+@(private)
 gpt_header :: proc(my_lba, alt_lba, entries_lba, last_lba: u64, disk_guid: [16]u8, entries_crc: u32) -> Gpt_Header {
 	h := Gpt_Header {
 		signature    = "EFI PART",

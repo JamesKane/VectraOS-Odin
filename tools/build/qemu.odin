@@ -8,6 +8,8 @@ Qemu_Opts :: struct {
 	u9fs:  string, // the root u9fs serves at 10.0.2.101!564, and its log; "" for none
 	cdrom: string, // boot this ISO as a CD, with no disk
 	iommu: Iommu_Mode,
+	disk:  string, // a second disk, on virtio-blk, or ""
+	nvme:  bool, // and on NVMe instead
 }
 
 // The machine's IOMMU (upstream's M5 steps 6c, 6d): VT-d on q35, SMMUv3 on
@@ -20,7 +22,7 @@ Iommu_Mode :: enum {
 }
 
 // QEMU's command line for booting an image. Devices arrive as the kernel
-// learns to drive them: M3 brought networking; M5 brings more disks.
+// learns to drive them: M3 brought networking; M5 a scenario's second disk.
 qemu_cmd :: proc(a: ^Arch, image: string, o: Qemu_Opts) -> []string {
 	c := make(Cmd, context.temp_allocator)
 	machine := a.machine
@@ -45,6 +47,14 @@ qemu_cmd :: proc(a: ^Arch, image: string, o: Qemu_Opts) -> []string {
 		// A test never writes the image, so several can boot one image at once.
 		append(&c, "-drive", fmt.tprintf("if=none,id=disk,format=raw,file=%s%s", image, o.test ? ",snapshot=on" : ""))
 		append(&c, "-device", fmt.tprintf("virtio-blk-pci,drive=disk,disable-legacy=on%s", platform))
+	}
+	if o.disk != "" { // after the boot disk, so devmgr finds it second: /srv/disk1
+		append(&c, "-drive", fmt.tprintf("if=none,id=disk1,format=raw,discard=unmap,file=%s", o.disk))
+		if o.nvme {
+			append(&c, "-device", "nvme,drive=disk1,serial=vxdisk1")
+		} else {
+			append(&c, "-device", fmt.tprintf("virtio-blk-pci,drive=disk1,disable-legacy=on%s", platform))
+		}
 	}
 	// QEMU's user networking: the guest is 10.0.2.15, the host 10.0.2.2.
 	// Each connection to 10.0.2.100!7 gets a `cat` on the host of its own (an
