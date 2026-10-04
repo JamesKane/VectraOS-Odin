@@ -19,6 +19,9 @@ import "vx:ndb"
 // the CD image (image --iso) instead of the disk. After a pass, each host=
 // record's file, under the run's directory (share/ is what vx9pserve served,
 // u9fs/ what u9fs did), must hold its text= (with or without a final newline).
+// The m5/ scenarios run with the machine's IOMMU, as upstream's runner runs
+// every scenario from M5; a scenario= record's iommu=caching puts VT-d in
+// caching mode.
 
 Expect_Kind :: enum {
 	Contains, // expect=: part of a line
@@ -46,6 +49,7 @@ Scenario :: struct {
 	only:    ^Arch, // arch=: run on this architecture only; nil for all
 	needs:   string, // a feature this tree's build cannot provide yet
 	iso:     bool, // boot the ISO, as a CD, with no disk
+	iommu:   Iommu_Mode,
 	expects: [dynamic]Expect,
 	fails:   [dynamic]string,
 	hosts:   [dynamic]Host_Check,
@@ -84,7 +88,17 @@ load_scenario :: proc(name: string, a: ^Arch) -> (sc: Scenario, ok: bool) {
 				sc.only = only
 			}
 			sc.iso = ndb.has(rec, "iso")
-			for feature in ([]string{"disk", "volume", "iommu", "bus"}) {
+			if strings.has_prefix(name, "m5/") {
+				sc.iommu = .On
+			}
+			if ndb.has(rec, "iommu") {
+				if m := val(rec, "iommu"); m != "caching" {
+					fmt.eprintfln("%s:%d: iommu=%s: only iommu=caching", path, rec.line, m)
+					return sc, false
+				}
+				sc.iommu = .Caching
+			}
+			for feature in ([]string{"disk", "volume", "bus"}) {
 				if ndb.has(rec, feature) {
 					sc.needs = feature
 				}
@@ -211,7 +225,7 @@ run_scenario :: proc(a: ^Arch, mode: Mode, name: string) -> bool {
 		return false
 	}
 	defer os.close(keys_w)
-	cmd := qemu_cmd(a, image, {test = true, share = share, u9fs = u9fs, cdrom = cdrom})
+	cmd := qemu_cmd(a, image, {test = true, share = share, u9fs = u9fs, cdrom = cdrom, iommu = sc.iommu})
 	if verbose {
 		print_cmd(cmd, "")
 	}

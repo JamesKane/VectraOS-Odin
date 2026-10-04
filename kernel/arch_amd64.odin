@@ -985,6 +985,9 @@ x86_trap :: proc "c" (f: ^Trap_Frame) {
 		tlb_answer(this_cpu())
 	case VECTOR_SPURIOUS:
 		return
+	case VECTOR_IOMMU:
+		vtd_fault_interrupt()
+		vx_wrmsr(X2APIC_EOI, 0)
 	case VECTOR_MSI_FIRST ..= VECTOR_MSI_LAST:
 		irq_fire(MSI_LINE_BASE + u32(f.vector))
 		vx_wrmsr(X2APIC_EOI, 0)

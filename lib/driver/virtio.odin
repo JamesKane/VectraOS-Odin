@@ -53,6 +53,9 @@ Virtio_Status_Bit :: enum u8 {
 Virtio_Status :: bit_set[Virtio_Status_Bit; u8]
 
 VIRTIO_F_VERSION_1 :: u64(1) << 32
+// The device's DMA goes through the platform's IOMMU: accepted whenever
+// offered, since the addresses a DMA domain gives are the IOMMU's.
+VIRTIO_F_ACCESS_PLATFORM :: u64(1) << 33
 VIRTIO_NO_VECTOR :: u16(0xffff)
 VIRTQ_MAX :: 256 // entries a queue may have here: each part of it fits a page
 
@@ -223,7 +226,7 @@ virtio_start :: proc "contextless" (v: ^Virtio, wanted: u64) -> (features: u64, 
 	offered := u64(intrinsics.volatile_load(&c.device_feature))
 	intrinsics.volatile_store(&c.device_feature_select, 1)
 	offered |= u64(intrinsics.volatile_load(&c.device_feature)) << 32
-	use := offered & (wanted | VIRTIO_F_VERSION_1)
+	use := offered & (wanted | VIRTIO_F_VERSION_1 | VIRTIO_F_ACCESS_PLATFORM)
 	if use & VIRTIO_F_VERSION_1 == 0 {
 		return 0, .Err_Unsupported // a legacy-only device
 	}

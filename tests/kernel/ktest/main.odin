@@ -873,6 +873,70 @@ when ODIN_ARCH == .amd64 {
 	RAM :: u64(0x4000_0000) // the start of RAM
 }
 
+// The firmware's ACPI table with this signature, from the root task's
+// "acpi" handle (left in the spawn message), into buf: its bytes, as many as
+// fit; nil if there is none.
+acpi_table :: proc "contextless" (sig: string, buf: []u8) -> []u8 {
+	acpi := vx.HANDLE_NONE
+	for name, i in rt.spawn.handle_names[:rt.spawn.handle_count] {
+		if name == "acpi" {
+			acpi = rt.spawn.handles[i]
+		}
+	}
+	rec: ndb.Record
+	if acpi == vx.HANDLE_NONE || !rt.spawn_record("acpi", &rec) {
+		return nil
+	}
+	size, _ := ndb.get_u64(&rec, "size")
+	for off := u64(0); off + 8 <= size; {
+		header: struct {
+			sig:    [4]u8,
+			length: u32le,
+		}
+		if rt.vmo_read(acpi, off, memory.ptr_to_bytes(&header)) != .Ok || header.length < 36 {
+			return nil
+		}
+		if string(header.sig[:]) == sig {
+			n := min(int(header.length), len(buf))
+			return rt.vmo_read(acpi, off, buf[:n]) == .Ok ? buf[:n] : nil
+		}
+		off += u64(header.length)
+	}
+	return nil
+}
+
+// Whether the machine has an IOMMU: a DMAR table (VT-d), or an IORT with an
+// SMMUv3 node (QEMU's virt has an IORT either way, for its ITS).
+has_iommu :: proc "contextless" () -> bool {
+	buf: [4096]u8
+	when ODIN_ARCH == .amd64 {
+		return acpi_table("DMAR", buf[:]) != nil
+	} else {
+		iort := acpi_table("IORT", buf[:])
+		if len(iort) < 48 {
+			return false
+		}
+		u32_at :: proc "contextless" (b: []u8) -> u32 {
+			return u32(b[0]) | u32(b[1]) << 8 | u32(b[2]) << 16 | u32(b[3]) << 24
+		}
+		nodes, at := u32_at(iort[36:]), int(u32_at(iort[40:]))
+		for _ in 0 ..< nodes {
+			if at + 4 > len(iort) {
+				break
+			}
+			length := int(iort[at + 1]) | int(iort[at + 2]) << 8
+			if iort[at] == 4 {
+				return true // an SMMUv3
+			}
+			if length < 16 {
+				break
+			}
+			at += length
+		}
+		return false
+	}
+}
+
 test_devices :: proc "contextless" () {
 	res := rt.spawn_take("resource")
 	check(res != vx.HANDLE_NONE)
@@ -989,6 +1053,12 @@ test_devices :: proc "contextless" () {
 	map1, st = rt.dma_map(dom, mem, 0, 16 * 1024, {.Read, .Write}, addrs[:])
 	check(st == .Ok)
 	check(addrs[0] != 0 && addrs[3] != 0 && addrs[0] & 4095 == 0 && addrs[0] != addrs[1])
+	// Through the IOMMU (QEMU's intel-iommu or SMMUv3, which the m5/
+	// scenarios have): the domain's own addresses, contiguous, from 4 GiB.
+	// Without one (M4's scenarios), the pages' physical addresses.
+	if has_iommu() {
+		check(addrs[1] == addrs[0] + 4096 && addrs[3] == addrs[0] + 3 * 4096 && addrs[0] >= 1 << 32)
+	}
 	h, st = rt.vmo_create_physical(res, DEVICE, 4096)
 	check(st == .Ok)
 	_, st = rt.dma_map(dom, h, 0, 4096, {.Read}, addrs[:])
