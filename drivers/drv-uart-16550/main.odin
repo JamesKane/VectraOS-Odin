@@ -77,9 +77,22 @@ service :: proc "contextless" () {
 		driver.cons_input(&cons, rt.inb(base + RBR))
 	}
 	driver.cons_pump(&cons)
+	// Still pending after the rounds above: the edge-triggered line stays up,
+	// so no new edge will come. Come back to it after the other work queued.
+	if rt.inb(base + IIR) & IIR_NONE == 0 {
+		again := vx.Packet{key = KEY_AGAIN}
+		_ = rt.port_post(server.port, &again)
+	}
 }
 
+// The packet service posts itself when it left something pending.
+KEY_AGAIN :: p9ring.KEY_USER + 1
+
 event :: proc "contextless" (ctx: rawptr, pk: ^vx.Packet) {
+	if pk.key == KEY_AGAIN {
+		service()
+		return
+	}
 	if pk.trigger != .Irq {
 		return
 	}

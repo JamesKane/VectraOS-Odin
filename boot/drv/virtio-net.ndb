@@ -1,0 +1,4 @@
+# boot/drv/virtio-net.ndb: the virtio network card (modern, 1af4:1041), whose
+# driver serves /srv/ether0 (docs/01 §7.2, 04 §5 M3).
+
+match=pci vendor=0x1af4 device=0x1041 program=/boot/bin/drv-virtio-net post=ether0 msi=2

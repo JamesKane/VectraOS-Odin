@@ -28,6 +28,7 @@ PROGRAMS := []Program {
 	{name = "nstest", dir = "tests/user/nstest", place = .Tests},
 	{name = "constest", dir = "tests/user/constest", place = .Tests},
 	{name = "procfs", dir = "servers/procfs", place = .Bootfs},
+	{name = "devmgr", dir = "servers/devmgr", place = .Bootfs},
 	{name = "gsh", dir = "cmd/gsh", place = .Bootfs},
 	{name = "ls", dir = "cmd/ls", place = .Bootfs},
 	{name = "cat", dir = "cmd/cat", place = .Bootfs},

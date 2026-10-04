@@ -83,6 +83,7 @@ elf_load :: proc "contextless" (task: vx.Handle, image: []u8) -> (entry: u64, st
 	   eh.machine != ELF_MACHINE || eh.phentsize != size_of(Elf_Phdr) || o1 || o2 || table_end > u64(len(image)) || eh.entry >= USER_TOP {
 		return 0, .Err_Invalid
 	}
+	entry_found := false // the entry point must be in an executable segment
 	for i in 0 ..< u64(eh.phnum) {
 		ph := intrinsics.unaligned_load((^Elf_Phdr)(&image[eh.phoff + i * size_of(Elf_Phdr)]))
 		if ph.type != PT_LOAD || ph.memsz == 0 {
@@ -90,7 +91,8 @@ elf_load :: proc "contextless" (task: vx.Handle, image: []u8) -> (entry: u64, st
 		}
 		file_end, o3 := intrinsics.overflow_add(ph.offset, ph.filesz)
 		mem_end, o4 := intrinsics.overflow_add(ph.vaddr, ph.memsz)
-		if ph.filesz > ph.memsz || o3 || file_end > u64(len(image)) || o4 || mem_end > STACK_TOP - STACK_SIZE - memory.PAGE_SIZE ||
+		// Not in the first page either: there, an address of 0 asks as_map to pick one.
+		if ph.vaddr < memory.PAGE_SIZE || ph.filesz > ph.memsz || o3 || file_end > u64(len(image)) || o4 || mem_end > STACK_TOP - STACK_SIZE - memory.PAGE_SIZE ||
 		   ph.flags >= {.W, .X} {
 			return 0, .Err_Invalid
 		}
@@ -109,7 +111,16 @@ elf_load :: proc "contextless" (task: vx.Handle, image: []u8) -> (entry: u64, st
 		if .X in ph.flags {
 			flags += {.Exec}
 		}
-		_ = as_map(task, vmo, 0, map_size, flags, base) or_return
+		va := as_map(task, vmo, 0, map_size, flags, base) or_return
+		if va != base {
+			return 0, .Err_Invalid // mapped, but not where the program was linked to run
+		}
+		if .X in ph.flags && eh.entry >= ph.vaddr && eh.entry < mem_end {
+			entry_found = true
+		}
+	}
+	if !entry_found {
+		return 0, .Err_Invalid
 	}
 	return eh.entry, .Ok
 }

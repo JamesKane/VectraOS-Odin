@@ -6,12 +6,13 @@ import "core:strings"
 import "vx:tar"
 
 // The boot image, bootfs.tar, a Limine module: the namespace's mount
-// points, boot/bin with each program that lives in bootfs, and boot/svc with
-// the service manifests from boot/svc/*.ndb. The archive is deterministic:
+// points, boot/bin with each program that lives in bootfs, boot/svc with the
+// service manifests from boot/svc/*.ndb, and boot/drv with the driver
+// manifests from boot/drv/*.ndb. The archive is deterministic:
 // fixed order, no times or owners (lib/tar's writer).
 
 @(private="file")
-BOOTFS_DIRS := []string{"bin", "boot", "boot/bin", "boot/svc", "dev", "proc", "srv", "tmp"}
+BOOTFS_DIRS := []string{"bin", "boot", "boot/bin", "boot/drv", "boot/svc", "dev", "n", "net", "proc", "srv", "tmp"}
 
 // Whether `name` is in the comma-separated list `with`.
 listed :: proc(with, name: string) -> bool {
@@ -42,8 +43,11 @@ make_bootfs :: proc(a: ^Arch, mode: Mode, out: string, with := "") -> bool {
 			append(&entries, Bootfs_Entry{fmt.tprintf("boot/bin/%s", p.name), data, 0o755})
 		}
 	}
-	if os.is_dir("boot/svc") {
-		manifests := tree_files("boot/svc") or_return
+	for dir in ([]string{"boot/svc", "boot/drv"}) {
+		if !os.is_dir(dir) {
+			continue
+		}
+		manifests := tree_files(dir) or_return
 		for m in manifests {
 			if strings.has_suffix(m, ".ndb") {
 				append(&entries, Bootfs_Entry{m, read_file(m) or_return, 0o644})

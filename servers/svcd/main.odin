@@ -9,13 +9,16 @@
 // A manifest is ndb records: a service= record, then the records that belong
 // to it, up to the next service=.
 //
-//   service=NAME program=/boot/bin/PROG [post=SRV] [bootimage] [console] [tasks] [restart] [arch=A]
+//   service=NAME program=/boot/bin/PROG [post=SRV] [bootimage] [console] [tasks]
+//           [resource] [acpi] [restart] [arch=A]
 //   arg=VALUE                                  an argument, in order
 //   mount=OLD srv=SRV [aname=A] [flags=abc]    a mount in its namespace
 //   bind=OLD new=NEW [flags=abc]               a bind in its namespace
 //   ioport=BASE count=N                        a driver's I/O ports (x86_64)
 //   mmio=ADDRESS size=N                        a driver's registers
 //   irq=LINE                                   a driver's interrupt
+//   claim=SRV                                  the post's server end, as "claim:SRV"
+//   connect=SRV                                a connector to the post, as "srv:SRV"
 //
 // post=SRV: svcd makes a listen channel, gives the service its server end
 // ("listen") and keeps the client end as /srv/SRV, for mounts. It keeps a
@@ -25,12 +28,18 @@
 // it gets svcd's own task, and through it every task (procfs). arch: it runs
 // only on that architecture. vx.skip=NAME,... on the kernel command line
 // leaves services out. A service gets nothing that is not named here: no
-// ambient authority.
+// ambient authority. resource and acpi: the root Resource and the ACPI
+// tables, which only devmgr needs.
 //
 // Drivers, the services with ioport, mmio or irq records, start first. svcd
 // mints their device objects from the root Resource once, keeps them, and
 // gives each instance its own handles to them, so a restarted driver gets
 // the same device. Once a service has posted /srv/cons, svcd writes there too.
+//
+// A post is a rendezvous: whichever manifest names it first makes it, and
+// connections wait for a server. claim= is how devmgr gets the server end of
+// a post such as /srv/ether0, to give the driver it starts; connect= gives a
+// service a connector to one, such as netd's to /srv/ether0.
 package svcd
 
 import vx "abi:vx"
@@ -84,7 +93,8 @@ Post :: struct {
 services: [dynamic; MAX_SERVICES]Service // a service's index is its .Exit key
 posts: [dynamic; MAX_SERVICES]Post
 image: []u8
-image_vmo, port, resource: vx.Handle
+image_vmo, port, resource, acpi_vmo: vx.Handle
+acpi_size: u64
 console_attached: bool
 
 name_of :: proc "contextless" (s: ^Service) -> string {
@@ -111,6 +121,26 @@ find_post :: proc "contextless" (name: string) -> ^Post {
 		}
 	}
 	return nil
+}
+
+// The post of that name, made if it is not there yet: whichever manifest
+// names it first (post=, claim=, connect=) makes the rendezvous. nil if there
+// is no room, or the name is too long.
+ensure_post :: proc "contextless" (name: string) -> ^Post {
+	if p := find_post(name); p != nil || name == "" {
+		return p
+	}
+	if len(posts) == MAX_SERVICES || len(name) > MAX_NAME {
+		return nil
+	}
+	a, b, st := rt.channel_create()
+	if st != .Ok {
+		return nil
+	}
+	p := Post{client = a, server = b}
+	_ = append(&p.name, name) // it fits: checked above
+	_ = append(&posts, p) // and so does it
+	return &posts[len(posts) - 1]
 }
 
 // A reader over one manifest, from `at`; values decode into its own scratch.
@@ -155,17 +185,34 @@ is_device_record :: proc "contextless" (rec: ^ndb.Record) -> bool {
 }
 
 // Reads one manifest's service= records, and mints its drivers' devices. A
-// malformed manifest is reported and skipped.
+// malformed manifest is reported and skipped whole.
 read_manifest :: proc "contextless" (path, text: string) {
+	// Through it once for errors first: a manifest is used whole or not at all,
+	// never a service with its records cut off at a typo.
 	r := manifest_reader(text, 0)
-	before := r.pos
-	current: ^Service // the service the records belong to; none for one svcd skipped
-	res: ndb.Result
 	for {
 		rec: ndb.Record
-		res = ndb.next(&r, &rec)
-		if res != .Record {
+		if res := ndb.next(&r, &rec); res == .Error {
+			say(path, ": ", r.error, ", so none of it is used\n")
+			return
+		} else if res != .Record {
 			break
+		}
+	}
+	r = manifest_reader(text, 0)
+	before := r.pos
+	current: ^Service // the service the records belong to; none for one svcd skipped
+	for {
+		rec: ndb.Record
+		if ndb.next(&r, &rec) != .Record { // none fails: it was all read above
+			break
+		}
+		if current != nil && (ndb.has(&rec, "claim") || ndb.has(&rec, "connect")) {
+			name, _ := ndb.get(&rec, ndb.has(&rec, "claim") ? "claim" : "connect")
+			if ensure_post(name) == nil {
+				say(name_of(current), ": cannot make its post (too many, or a long name)\n")
+				current.broken = true
+			}
 		}
 		if current != nil && is_device_record(&rec) && !current.broken {
 			if st := mint(current, &rec); st != .Ok {
@@ -188,26 +235,15 @@ read_manifest :: proc "contextless" (path, text: string) {
 				_, restart := ndb.get(&rec, "restart")
 				s := Service{manifest = text, at = before, restart = restart}
 				_ = append(&s.name, name)
-				_ = append(&services, s)
-				current = &services[len(services) - 1]
-				if srv != "" && find_post(srv) == nil {
-					if len(posts) == MAX_SERVICES || len(srv) > MAX_NAME {
-						fail("too many posts, or a long name")
-					}
-					a, b, st := rt.channel_create()
-					if st != .Ok {
-						fail("channel_create")
-					}
-					p := Post{client = a, server = b}
-					_ = append(&p.name, srv)
-					_ = append(&posts, p)
+				if srv != "" && ensure_post(srv) == nil {
+					say("skipping ", name, ": cannot post it (too many, or a long name)\n")
+				} else {
+					_ = append(&services, s)
+					current = &services[len(services) - 1]
 				}
 			}
 		}
 		before = r.pos
-	}
-	if res == .Error {
-		say(path, ": ", r.error, "\n")
 	}
 }
 
@@ -236,13 +272,13 @@ grant :: proc "contextless" (g: ^Grants, name: string, h: vx.Handle, st: vx.Stat
 @(private="file")
 records_buf: [16 * 1024]u8
 @(private="file")
-ns_name_buf: [vx.CHANNEL_MAX_HANDLES][8]u8
+handle_name_buf: [vx.CHANNEL_MAX_HANDLES][len("claim:") + MAX_NAME]u8 // "ns.NN", "claim:NAME", "srv:NAME"
 
 // "ns." and a mount's handle index in two digits, as upstream names them:
 // ns.03.
 @(private="file")
 ns_name :: proc "contextless" (index: int) -> string {
-	b := str.Buf{buf = ns_name_buf[index][:]}
+	b := str.Buf{buf = handle_name_buf[index][:]}
 	str.write_string(&b, index < 10 ? "ns.0" : "ns.")
 	str.write_u64(&b, u64(index))
 	return str.to_string(&b)
@@ -289,6 +325,15 @@ start :: proc "contextless" (index: int) -> vx.Status {
 	if ndb.has(&rec, "console") && cons != nil {
 		grant(&g, "console", rt.handle_dup(cons.client, CONNECTOR_RIGHTS)) or_return
 	}
+	if ndb.has(&rec, "resource") && resource != vx.HANDLE_NONE { // root authority over devices: devmgr
+		grant(&g, "resource", rt.handle_dup(resource, vx.RIGHTS_SAME)) or_return
+	}
+	if ndb.has(&rec, "acpi") && acpi_vmo != vx.HANDLE_NONE {
+		grant(&g, "acpi", rt.handle_dup(acpi_vmo, vx.RIGHTS_SAME)) or_return
+		ndb.flag(&w, "acpi")
+		ndb.put_u64(&w, "size", acpi_size)
+		_ = ndb.end(&w)
+	}
 	if ndb.has(&rec, "tasks") { // svcd's own task: the whole tree, for procfs
 		grant(&g, "tasks", rt.handle_dup(rt.self, {.Inspect, .Manage, .Transfer})) or_return
 	}
@@ -322,6 +367,19 @@ start :: proc "contextless" (index: int) -> vx.Status {
 				ndb.put(&w, "flags", f)
 			}
 			ndb.put(&w, "src", src)
+		case ndb.has(&rec, "claim") || ndb.has(&rec, "connect"):
+			// claim=NAME: the post's server end, to hand on (devmgr gives it to
+			// a driver); connect=NAME: a connector to it. As handles
+			// "claim:NAME" and "srv:NAME".
+			claim := ndb.has(&rec, "claim")
+			name, _ := ndb.get(&rec, claim ? "claim" : "connect")
+			p := find_post(name)
+			if p == nil || len(g.handles) == cap(g.handles) {
+				return .Err_Not_Found
+			}
+			handle, _ := str.join(handle_name_buf[len(g.handles)][:], claim ? "claim:" : "srv:", string(p.name[:]))
+			grant(&g, handle, rt.handle_dup(claim ? p.server : p.client, CONNECTOR_RIGHTS)) or_return
+			continue
 		case is_device_record(&rec): // passed on as they are, for the driver to read
 			for t in rec.tuples {
 				if t.flag {
@@ -425,6 +483,17 @@ vx_main :: proc() -> int {
 	}
 
 	resource = rt.spawn_take("resource")
+	acpi_vmo = rt.spawn_take("acpi")
+	if acpi_vmo != vx.HANDLE_NONE {
+		rec: ndb.Record
+		size_ok := false
+		if rt.spawn_record("acpi", &rec) {
+			acpi_size, size_ok = ndb.get_u64(&rec, "size")
+		}
+		if !size_ok {
+			acpi_vmo = vx.HANDLE_NONE
+		}
+	}
 	image_vmo = rt.spawn_take("bootimage")
 	size, ok := rt.boot_image_size()
 	if image_vmo == vx.HANDLE_NONE || !ok {

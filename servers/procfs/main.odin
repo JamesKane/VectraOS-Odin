@@ -139,7 +139,7 @@ fs_open :: proc "contextless" (ctx: rawptr, node: p9.Node, mode: p9.Open_Mode) -
 	if kind_of(node) == .Ctl && mode.access != .Write {
 		return .Err_Access
 	}
-	return mode.trunc || mode.rclose ? .Err_Access : .Ok
+	return mode.rclose ? .Err_Access : .Ok // trunc means nothing to a file made as it is read
 }
 
 // A task's status record, as it is now; empty if the task has gone or the

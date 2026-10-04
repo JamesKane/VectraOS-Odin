@@ -19,6 +19,7 @@ import "vx:rt"
 // Registers, as u32 indices.
 DR :: 0x00 / 4
 FR :: 0x18 / 4
+LCR_H :: 0x2c / 4
 IMSC :: 0x38 / 4
 MIS :: 0x40 / 4
 ICR :: 0x44 / 4
@@ -26,6 +27,7 @@ ICR :: 0x44 / 4
 FR_RXFE :: u32(1) << 4 // receive FIFO empty
 FR_TXFF :: u32(1) << 5 // transmit FIFO full
 FR_TXFE :: u32(1) << 7 // transmit FIFO empty
+LCR_H_FEN :: u32(1) << 4 // the FIFOs, which tx_room counts on (16 bytes when empty)
 INT_RX :: u32(1) << 4
 INT_TX :: u32(1) << 5
 INT_RT :: u32(1) << 6 // receive timeout: bytes waiting below the FIFO level
@@ -101,6 +103,7 @@ vx_main :: proc() -> int {
 	_ = rt.handle_close(mmio) // the mapping keeps it
 	regs = cast([^]u32)uintptr(at)
 
+	set(LCR_H, reg(LCR_H) | LCR_H_FEN)
 	set(ICR, INT_ALL)
 	set(IMSC, imsc)
 	cons = {tx_room = tx_room, tx_byte = tx_byte, tx_wanted = tx_wanted}

@@ -19,7 +19,7 @@ foreign _ {
 	vx_main :: proc "odin" () -> int ---
 }
 
-SPAWN_MAX_ARGS :: 32
+SPAWN_MAX_ARGS :: 64 // gsh's longest command line has fewer
 
 // What the spawn message said: the program's name, its arguments, the
 // kernel command line (the root task's), and its handles by name. handles

@@ -17,6 +17,7 @@ stdio: struct {
 	msg:                 [size_of(vx.Msg_Header) + 4096]u8, // stdin's current message,
 	msg_len, msg_pos:    u32, // and how much of it has been read
 	in_ended:            bool,
+	closed_bound:        bool, // .Peer_Closed on stdin is bound once; it fires once
 	len:                 int,
 	line:                struct {
 		header: vx.Msg_Header,
@@ -73,7 +74,9 @@ read :: proc "contextless" (buf: []u8) -> (int, vx.Status) {
 				stdio.port = port
 			}
 			_ = port_bind(stdio.port, stdio.input, .Readable, 0)
-			_ = port_bind(stdio.port, stdio.input, .Peer_Closed, 1)
+			if !stdio.closed_bound { // once: binding it each time would leave one per read behind
+				stdio.closed_bound = port_bind(stdio.port, stdio.input, .Peer_Closed, 1) == .Ok
+			}
 			pk: [1]vx.Packet
 			_, _ = port_wait(stdio.port, vx.INFINITE, 0, pk[:])
 		case st != .Ok:

@@ -19,15 +19,30 @@ console: struct {
 	open:      bool,
 	len:       int,
 	line:      [512]u8,
+	retry_at:  vx.Instant, // no reconnecting before this, after a failure
 }
 
+// How long a failed connection is left before the next try.
+@(private="file")
+RETRY_AFTER :: vx.Instant(1_000_000_000)
+
+// Connects (again). After a failure it does not try for a second, so a
+// console that is gone for good costs each line nothing, not a connect's wait.
 @(private="file")
 console_open :: proc "contextless" () -> (st: vx.Status) {
 	if console.conn.end != 0 {
 		p9_disconnect(&console.conn)
 	}
 	console.open = false
-	defer console.open = st == .Ok
+	if clock_read() < console.retry_at {
+		return .Err_Peer_Closed
+	}
+	defer {
+		console.open = st == .Ok
+		if !console.open {
+			console.retry_at = clock_read() + RETRY_AFTER
+		}
+	}
 	c := &console.conn.c
 	p9_connect(console.connector, &console.conn) or_return
 	root := p9.client_attach(c, "") or_return
@@ -101,14 +116,23 @@ console_read :: proc "contextless" (buf: []u8) -> (int, vx.Status) {
 	if console.len > 0 {
 		console_flush() // a prompt goes out before the wait
 	}
-	if !console.open {
+	if console.connector == vx.HANDLE_NONE {
 		return 0, .Err_Bad_State
 	}
-	n, st := p9.client_read(&console.conn.c, console.fid, 0, buf)
-	if st != .Ok && console_open() == .Ok {
-		n, st = p9.client_read(&console.conn.c, console.fid, 0, buf)
+	// Until the console is back (the driver restarting), wait for it rather
+	// than fail: a reader takes an error for the end of its input.
+	for {
+		if console.open {
+			if n, st := p9.client_read(&console.conn.c, console.fid, 0, buf); st == .Ok {
+				return n, .Ok
+			}
+		}
+		if console_open() == .Ok {
+			continue
+		}
+		@(static) never: u32
+		_ = futex_wait(&never, 0, console.retry_at) // a second, then try again
 	}
-	return n, st
 }
 
 // The console's connector, which a shell hands its commands a duplicate of;
