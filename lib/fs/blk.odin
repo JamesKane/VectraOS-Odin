@@ -113,7 +113,8 @@ Dead :: struct {
 	death: Gen,
 }
 
-// The library's state over a device. Its zero value is closed.
+// The library's state over a device. Its zero value is closed. Not to be
+// copied once open: its cache and arenas point at each other.
 Fs :: struct {
 	dev:         Dev,
 	mem:         Mem,
