@@ -1,0 +1,15 @@
+// Handle rights (docs/01-kernel-ipc.md §3). The order gives the bit number.
+// Draft until ADR-0004 freezes vx-abi v0.
+
+VX_RIGHT(READ)
+VX_RIGHT(WRITE)
+VX_RIGHT(EXEC)
+VX_RIGHT(MAP)
+VX_RIGHT(DUPLICATE)
+VX_RIGHT(TRANSFER)
+VX_RIGHT(SIGNAL)
+VX_RIGHT(WAIT)
+VX_RIGHT(MANAGE)
+VX_RIGHT(INSPECT)
+VX_RIGHT(DEBUG)
+VX_RIGHT(PAGER) // a Resource handle with it (and not MANAGE) makes pagers and nothing else

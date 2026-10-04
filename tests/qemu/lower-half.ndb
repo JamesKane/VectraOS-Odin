@@ -1,0 +1,6 @@
+# tests/qemu/lower-half.ndb: the kernel runs on its own page tables, whose lower
+# half is empty, so a load from near address 0 faults (M1).
+
+scenario=lower-half timeout=10 cmdline=vx.selftest=lower-half
+expect="vx: kernel 0.1.0 $arch, "
+expect="vx: panic: page fault at 0x8 (read, not present, kernel)"

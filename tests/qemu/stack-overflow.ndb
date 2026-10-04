@@ -1,0 +1,10 @@
+# tests/qemu/stack-overflow.ndb: a kernel stack that overflows runs into its
+# guard page and the kernel says so (M4, step 1a), rather than writing over
+# what lies below it. On x86_64 the page fault cannot push its frame and
+# becomes a double fault, on its own stack; on aarch64 the exception vector
+# notices the stack pointer has left the stack before pushing anything.
+
+scenario=stack-overflow timeout=10 cmdline=vx.selftest=stack-overflow
+expect="vx: kernel 0.1.0 $arch, "
+expect="vx: panic: kernel stack overflow"
+fail="selftest"

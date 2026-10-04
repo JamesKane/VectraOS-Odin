@@ -1,0 +1,25 @@
+// Status codes. OK is zero and is the only success; every error is negative,
+// including NIL, so a nil object never reports success (docs/04 §1.1).
+// Draft until ADR-0004 freezes vx-abi v0.
+
+VX_STATUS(OK,              0)
+VX_STATUS(ERR_NIL,        -1)   // a call on a nil object
+VX_STATUS(ERR_BAD_HANDLE, -2)   // closed, never valid, or a stale generation
+VX_STATUS(ERR_ACCESS,     -3)   // the handle lacks a right the call needs
+VX_STATUS(ERR_INVALID,    -4)   // an argument is malformed
+VX_STATUS(ERR_RANGE,      -5)   // a size, offset or count is out of range or overflows
+VX_STATUS(ERR_NO_MEMORY,  -6)   // the budget or the pool is exhausted
+VX_STATUS(ERR_SHOULD_WAIT,-7)   // nothing to read yet, or the poster's quota is used up
+VX_STATUS(ERR_TIMED_OUT,  -8)   // the deadline passed
+VX_STATUS(ERR_PEER_CLOSED,-9)   // the other end of a channel or ring is gone
+VX_STATUS(ERR_REFUSED,   -10)   // admission or reservation refused; never degraded
+VX_STATUS(ERR_UNSUPPORTED,-11)
+VX_STATUS(ERR_BAD_STATE, -12)   // not in the state the call needs: a futex word that changed, a task already started
+VX_STATUS(ERR_TOO_SMALL, -13)   // a buffer too small for what is waiting; the sizes needed are reported
+VX_STATUS(ERR_KILLED,    -14)   // the calling task is being killed
+VX_STATUS(ERR_NOT_FOUND, -15)   // no such name: a walk, a module, a service
+VX_STATUS(ERR_EXISTS,    -16)   // the name is taken
+VX_STATUS(ERR_INTERRUPTED,-17)  // thread_interrupt woke the call; the interrupt is delivered on the way out
+VX_STATUS(ERR_NO_CHILD,  -18)   // a wait with no child to wait for: Plan 9's "no living children"
+VX_STATUS(ERR_IO,        -19)   // the device reported an error: a sector that cannot be read, a failed write
+VX_STATUS(ERR_NO_SPACE,  -20)   // the volume is full: nothing was changed

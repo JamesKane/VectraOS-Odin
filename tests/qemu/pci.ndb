@@ -1,0 +1,12 @@
+# tests/qemu/pci.ndb: devmgr finds the PCI functions (M3, step 1): through the
+# ACPI tables the kernel passes on, the MCFG's ECAM region, and physical VMOs
+# over configuration space. QEMU's virtio network card and disk are there,
+# with their MSI-X capability and memory BARs sized.
+
+scenario=pci timeout=15 cmdline=vx.skip=gsh
+expect="svcd: started devmgr (task "
+expect=" 1af4:1041 net msi-x"
+expect=" PCI functions"
+fail="vx: panic"
+fail="FAILED"
+fail=") killed: "
