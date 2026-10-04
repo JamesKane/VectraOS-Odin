@@ -1,6 +1,6 @@
 # ADR-0011: Monocypher 4.0.3, vendored unchanged, behind a thin Odin layer
 
-Status: proposed, import review pending, 2026-10-04 (`third_party/VENDOR.ndb`, `reviewed.by=pending`).
+Status: accepted, 2026-10-04. The import is byte-identical to the one James Kane reviewed for upstream VectraOS, 2026-10-04 (upstream `third_party/VENDOR.ndb`); accepted here on that review, at his instruction.
 
 ## Context
 

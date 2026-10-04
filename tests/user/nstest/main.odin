@@ -86,7 +86,7 @@ test_namespace :: proc "contextless" () {
 	copy(programs[:], boot_bin) // list's buffer is reused
 	progs := string(programs[:len(boot_bin)])
 	check_str(list("/bin"), progs) // the empty /bin, then /boot/bin
-	check(len(progs) > 20 && progs[:20] == "posix bootfs nstest ") // sbase's directory first
+	check(len(progs) > 29 && progs[:29] == "posix bootfs bus-acpi nstest ") // sbase's directory first
 	svc := list("/boot/svc")
 	copy(manifests[:], svc) // list's buffer is reused
 	svcs := string(manifests[:len(svc)])

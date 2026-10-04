@@ -2,7 +2,7 @@
 // checksum (written again here, so the stack's own is checked against an
 // independent one), frame builders for a scripted peer, and the digest of
 // every frame a stack sends. Imported relatively; it has no tests of its
-// own, so ./build check runs it as an empty package.
+// own, so ./build check runs it only through the suites that import it.
 //
 // The digest is FNV-1a over each frame's length (eight little-endian bytes)
 // and then its bytes. The expected digests in the suites came from

@@ -34,6 +34,7 @@ PROGRAMS := []Program {
 	{name = "svcd", dir = "servers/svcd", place = .Module},
 	{name = "ktest", dir = "tests/kernel/ktest", place = .Module},
 	{name = "bootfs", dir = "servers/bootfs", place = .Bootfs},
+	{name = "bus-acpi", dir = "servers/bus-acpi", place = .Bootfs, cports = {"acpica"}},
 	{name = "nstest", dir = "tests/user/nstest", place = .Tests},
 	{name = "constest", dir = "tests/user/constest", place = .Tests},
 	{name = "nettest", dir = "tests/user/nettest", place = .Tests},
@@ -48,6 +49,7 @@ PROGRAMS := []Program {
 	{name = "devmgr", dir = "servers/devmgr", place = .Bootfs},
 	{name = "netd", dir = "servers/netd", place = .Bootfs},
 	{name = "gsh", dir = "cmd/gsh", place = .Bootfs},
+	{name = "poweroff", dir = "cmd/poweroff", place = .Bootfs},
 	{name = "install", dir = "cmd/install", place = .Bootfs, cports = {"monocypher"}},
 	{name = "ls", dir = "cmd/ls", place = .Bootfs},
 	{name = "cat", dir = "cmd/cat", place = .Bootfs},
@@ -59,8 +61,11 @@ PROGRAMS := []Program {
 	{name = "cs", dir = "cmd/cs", place = .Bootfs},
 	{name = "dbg", dir = "cmd/dbg", place = .Bootfs},
 	{name = "drv-uart-16550", dir = "drivers/drv-uart-16550", place = .Bootfs, only = {.X86_64}},
+	{name = "drv-rtc-cmos", dir = "drivers/drv-rtc-cmos", place = .Bootfs, only = {.X86_64}},
 	{name = "drv-uart-pl011", dir = "drivers/drv-uart-pl011", place = .Bootfs, only = {.AArch64}},
 	{name = "drv-virtio-net", dir = "drivers/drv-virtio-net", place = .Bootfs},
+	{name = "dosfs", dir = "servers/dosfs", place = .Bootfs},
+	{name = "isofs", dir = "servers/isofs", place = .Bootfs},
 	{name = "distd", dir = "servers/distd", place = .Bootfs, cports = {"monocypher"}},
 	{name = "ctest", source = "tests/posix/ctest.c", place = .Tests, kind = .C},
 	{name = "sbasetest", source = "tests/posix/sbasetest.c", place = .Tests, kind = .C},
@@ -80,6 +85,8 @@ build_program :: proc(a: ^Arch, mode: Mode, p: Program) -> (elf: string, ok: boo
 	fmt.eprintfln("  PROG  %s %s", p.name, a.name)
 	out := fmt.tprintf("%s/prog/%s", out_dir(a, mode), p.name)
 	objs := compile_ir(a, mode, p.dir, fmt.tprintf("lib/rt/arch/%s", a.name), out, nil, nil) or_return
+	extra := program_asm(a, p, out) or_return
+	append(&objs, ..extra[:])
 
 	ld := cmd_make(LLD, "-nostdlib", "-static", "-z", "max-page-size=0x1000", "--build-id", "-T", fmt.tprintf("lib/rt/linker/%s.ld", a.name), "-o", elf)
 	append(&ld, ..objs[:])

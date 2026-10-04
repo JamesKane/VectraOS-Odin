@@ -1,7 +1,7 @@
 // What the host tests that drive a p9.Fs through lib/p9's server framework
 // and client share: a loopback transport and client-side helpers for
-// listing and stating. Imported relatively; it has no tests of
-// its own, so ./build check runs it as an empty package.
+// listing and stating. Imported relatively; it has no tests of its own,
+// so ./build check runs it only through the suites that import it.
 package p9test
 
 import vx "abi:vx"

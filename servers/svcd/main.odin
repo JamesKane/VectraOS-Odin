@@ -10,7 +10,8 @@
 // to it, up to the next service=.
 //
 //   service=NAME program=/boot/bin/PROG [post=SRV] [bootimage] [console] [tasks]
-//           [resource] [pager] [acpi] [restart] [arch=A] [when=WORD] [storeimage]
+//           [resource] [pager] [acpi] [cmdline] [restart] [arch=A] [when=WORD]
+//           [storeimage]
 //   arg=VALUE                                  an argument, in order
 //   env=NAME=VALUE                             an environment variable
 //   mount=OLD srv=SRV [aname=A] [flags=abc]    a mount in its namespace
@@ -44,7 +45,8 @@
 // .Transfer, .Inspect), "pager", which makes pagers and nothing else (fsd:
 // upstream's docs/11 §8). entropy: a seed of its own for a random
 // generator, from svcd's, which the kernel seeded from the bootloader's
-// entropy (vx:drbg).
+// entropy (vx:drbg). cmdline: the kernel command line, as svcd's own spawn
+// message has it (devmgr, which gives it to bus-acpi for its options).
 //
 // Drivers, the services with ioport, mmio or irq records, start first. svcd
 // mints their device objects from the root Resource once, keeps them, and
@@ -450,6 +452,10 @@ start :: proc "contextless" (index: int) -> vx.Status {
 		grant(&g, "acpi", rt.handle_dup(acpi_vmo, vx.RIGHTS_SAME)) or_return
 		ndb.flag(&w, "acpi")
 		ndb.put_u64(&w, "size", acpi_size)
+		_ = ndb.end(&w)
+	}
+	if ndb.has(&rec, "cmdline") && rt.spawn.cmdline != "" { // the kernel's, for devmgr
+		ndb.put(&w, "cmdline", rt.spawn.cmdline)
 		_ = ndb.end(&w)
 	}
 	if ndb.has(&rec, "tasks") { // svcd's own task: the whole tree, for procfs
