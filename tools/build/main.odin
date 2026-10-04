@@ -116,11 +116,19 @@ cmd_test :: proc(arches: []^Arch, mode: Mode, names: []string) -> bool {
 	if len(names) == 0 {
 		all := make([dynamic]string, context.temp_allocator)
 		// The top level only: tests/qemu/m2 and the like are run by name.
-		files, _ := os.read_directory_by_path("tests/qemu", -1, context.temp_allocator)
+		files, err := os.read_directory_by_path("tests/qemu", -1, context.temp_allocator)
+		if err != nil {
+			fmt.eprintfln("build: cannot read tests/qemu: %v", err)
+			return false
+		}
 		for f in files {
 			if f.type == .Regular && strings.has_suffix(f.name, ".ndb") {
 				append(&all, strings.clone(filepath.stem(f.name), context.temp_allocator))
 			}
+		}
+		if len(all) == 0 {
+			fmt.eprintln("build: no scenarios in tests/qemu")
+			return false
 		}
 		slice.sort(all[:])
 		names = all[:]
@@ -139,18 +147,24 @@ cmd_check :: proc() -> bool {
 	ok := true
 	dirs, err := os.read_directory_by_path("tests/host", -1, context.temp_allocator)
 	if err != nil {
-		fmt.eprintln("build: cannot read tests/host")
+		fmt.eprintfln("build: cannot read tests/host: %v", err)
 		return false
 	}
 	slice.sort_by(dirs, proc(a, b: os.File_Info) -> bool {return a.name < b.name})
+	ran := 0
 	for d in dirs {
 		if d.type != .Directory {
 			continue
 		}
+		ran += 1
 		fmt.eprintfln("  HOST  %s", d.name)
 		c := cmd_make(ODIN, "test", fmt.tprintf("tests/host/%s", d.name), "-collection:vx=lib", "-collection:abi=abi", "-vet", "-strict-style", "-warnings-as-errors", "-sanitize:address", fmt.tprintf("-out:out/host/%s", d.name))
 		make_dirs("out/host") or_return
 		ok = run(c[:]) && ok
+	}
+	if ran == 0 {
+		fmt.eprintln("build: no packages in tests/host")
+		ok = false
 	}
 	ok = cmd_vendor_check() && ok
 	return ok
