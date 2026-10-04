@@ -34,6 +34,7 @@
 package svcd
 
 import vx "abi:vx"
+import "vx:memory"
 import "vx:ndb"
 import "vx:p9"
 import "vx:rt"
@@ -443,16 +444,16 @@ main :: proc() -> int {
 
 	resource = rt.spawn_take("resource")
 	image_vmo = rt.spawn_take("bootimage")
-	rec: ndb.Record
-	size: u64
-	ok := image_vmo != 0 && rt.spawn_record("bootimage", &rec)
-	if ok {
-		size, ok = ndb.get_u64(&rec, "size")
-	}
-	if !ok {
+	size, ok := rt.boot_image_size()
+	if image_vmo == vx.HANDLE_NONE || !ok {
 		fail("no boot image")
 	}
-	base, mst := rt.as_map(rt.self, image_vmo, 0, (size + 4095) &~ 4095, {})
+	// The size is the kernel's, but round it up to pages without wrapping all the same.
+	padded, pok := memory.page_round(size)
+	if !pok {
+		fail("cannot map the boot image")
+	}
+	base, mst := rt.as_map(rt.self, image_vmo, 0, padded, {})
 	if mst != .Ok {
 		fail("cannot map the boot image")
 	}

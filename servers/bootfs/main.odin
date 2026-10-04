@@ -10,9 +10,8 @@
 // An aname attaches below the root: "boot/bin" serves only that directory.
 package bootfs
 
-import "base:intrinsics"
 import vx "abi:vx"
-import "vx:ndb"
+import "vx:memory"
 import "vx:p9"
 import "vx:p9ring"
 import "vx:rt"
@@ -205,21 +204,16 @@ server := p9ring.Server {
 vx_main :: proc() -> int {
 	image := rt.spawn_take("bootimage")
 	server.listen = rt.spawn_take("listen")
-	rec: ndb.Record
-	size: u64
-	ok := image != vx.HANDLE_NONE && server.listen != vx.HANDLE_NONE && rt.spawn_record("bootimage", &rec)
-	if ok {
-		size, ok = ndb.get_u64(&rec, "size")
-	}
-	if !ok {
+	size, ok := rt.boot_image_size()
+	if image == vx.HANDLE_NONE || server.listen == vx.HANDLE_NONE || !ok {
 		fail("no boot image or listen channel in the spawn message")
 	}
 	// The size comes from svcd; round it up to pages without wrapping.
-	padded, overflow := intrinsics.overflow_add(size, 4095)
-	if overflow {
+	padded, pok := memory.page_round(size)
+	if !pok {
 		fail("cannot map the boot image")
 	}
-	base, st := rt.as_map(rt.self, image, 0, padded &~ 4095, {})
+	base, st := rt.as_map(rt.self, image, 0, padded, {})
 	if st != .Ok {
 		fail("cannot map the boot image")
 	}
