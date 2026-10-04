@@ -10,7 +10,7 @@ name=limine
     license="BSD-2-Clause; bundled parts as listed in 3RDPARTY.md"
     adr=docs/adr/0005-limine.md
     port=ports/limine/port.ndb
-    reviewed.by=pending
+    reviewed.by="James Kane" reviewed.date=2026-10-04
 
 name=u9fs
     version="plan9 ed1a9c2"
@@ -19,4 +19,4 @@ name=u9fs
     tree.sha256=426ecd594603676850f7311b964b232c66151714cb6acad1761f06a817515a52
     license="Lucent Technologies' permissive notice (LICENSE); Plan 9 is MIT since 2021"
     adr=docs/adr/0006-u9fs.md
-    reviewed.by=pending
+    reviewed.by="James Kane" reviewed.date=2026-10-04
