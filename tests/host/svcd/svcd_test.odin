@@ -8,8 +8,10 @@
 package svcd_test
 
 import vx "abi:vx"
+import "core:strings"
 import "core:testing"
 import "vx:ndb"
+import "vx:rt"
 import "vx:tar"
 import svcd "../../../servers/svcd"
 
@@ -111,4 +113,47 @@ test_templates :: proc(t: ^testing.T) {
 		testing.expectf(t, svcd.put_template(&s, &g, &rw, c.name) == c.st, "template %q", c.name)
 		testing.expect_value(t, string(kernel_log[:kernel_log_len]), c.said)
 	}
+}
+
+// when=WORD (upstream's M5 step 9c): a service starts only when the kernel
+// command line has WORD, alone: at its start or after a space, and at its
+// end or before one, as upstream's cmdline_has reads it.
+@(test)
+test_when :: proc(t: ^testing.T) {
+	Case :: struct {
+		cmdline, word: string,
+		has:           bool,
+	}
+	for c in ([]Case {
+			{"vx.live", "vx.live", true},
+			{"vx.skip=gsh vx.live", "vx.live", true},
+			{"vx.live vx.skip=gsh", "vx.live", true},
+			{"vx.skip=gsh  vx.system vx.slot=a", "vx.system", true},
+			{"vx.lively", "vx.live", false},
+			{"xvx.live", "vx.live", false},
+			{"vx.skip=vx.live", "vx.live", false},
+			{"", "vx.live", false},
+			{"vx.live", "", false}, // no empty word in it
+			{"", "", true}, // an empty line has one
+			{"a  b", "", true}, // and so does a doubled space
+			{"a ", "", true}, // or a trailing one
+		}) {
+		rt.spawn.cmdline = c.cmdline
+		testing.expectf(t, svcd.cmdline_has(c.word) == c.has, "%q in %q", c.word, c.cmdline)
+	}
+
+	// A manifest's service= record with when=, or without.
+	MANIFEST :: "service=a program=/boot/bin/a when=vx.system\nservice=b program=/boot/bin/b\nservice=c program=/boot/bin/c when=vx.live\n"
+	sa := svcd.Service{manifest = MANIFEST}
+	sb := svcd.Service{manifest = MANIFEST, at = strings.index(MANIFEST, "service=b")}
+	sc := svcd.Service{manifest = MANIFEST, at = strings.index(MANIFEST, "service=c")}
+	rt.spawn.cmdline = "vx.system vx.slot=a"
+	testing.expect(t, svcd.wanted(&sa))
+	testing.expect(t, svcd.wanted(&sb))
+	testing.expect(t, !svcd.wanted(&sc))
+	rt.spawn.cmdline = "vx.live"
+	testing.expect(t, !svcd.wanted(&sa))
+	testing.expect(t, svcd.wanted(&sb))
+	testing.expect(t, svcd.wanted(&sc))
+	rt.spawn.cmdline = ""
 }
