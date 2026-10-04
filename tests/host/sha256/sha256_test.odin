@@ -6,6 +6,7 @@ package sha256_test
 import "core:crypto/sha2"
 import "core:encoding/hex"
 import "core:math/rand"
+import "core:slice"
 import "core:testing"
 import "vx:sha256"
 
@@ -15,26 +16,24 @@ digest :: proc(data: []u8) -> [sha256.DIGEST_SIZE]u8 {
 	return sha256.end(&h)
 }
 
-digest_is :: proc(data: []u8, want_hex: string) -> bool {
+expect_digest :: proc(t: ^testing.T, data: []u8, want_hex: string, loc := #caller_location) {
 	d := digest(data)
 	got := hex.encode(d[:])
 	defer delete(got)
-	return string(got) == want_hex
+	testing.expect_value(t, string(got), want_hex, loc)
 }
 
 @(test)
 test_vectors :: proc(t: ^testing.T) {
-	testing.expect(t, digest_is(nil, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"))
-	testing.expect(t, digest_is(transmute([]u8)string("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"))
+	expect_digest(t, nil, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+	expect_digest(t, transmute([]u8)string("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
 	two_blocks := "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
-	testing.expect(t, digest_is(transmute([]u8)two_blocks, "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"))
+	expect_digest(t, transmute([]u8)two_blocks, "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1")
 
 	million := make([]u8, 1000000)
 	defer delete(million)
-	for &c in million {
-		c = 'a'
-	}
-	testing.expect(t, digest_is(million, "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"))
+	slice.fill(million, 'a')
+	expect_digest(t, million, "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0")
 
 	// Split at every point around the block boundaries: the digest must not change.
 	whole := digest(million[:200])

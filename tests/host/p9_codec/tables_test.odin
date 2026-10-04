@@ -82,7 +82,6 @@ kind_type :: proc(k: p9.Field_Kind) -> typeid {
 
 @(test)
 test_fields_def :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
 	rows := def_rows(FIELDS_DEF, "P9_FIELD(")
 	testing.expect_value(t, len(rows), len(p9.Field))
 	for row, i in rows {
@@ -101,7 +100,6 @@ test_fields_def :: proc(t: ^testing.T) {
 
 @(test)
 test_messages_def :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
 	rows := def_rows(MESSAGES_DEF, "P9_MSG(")
 	listed: [256]bool
 	for row in rows {
