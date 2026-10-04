@@ -76,32 +76,49 @@ check_pins :: proc() -> bool {
 	return ok
 }
 
-Arch :: struct {
-	name:         string, // as VectraOS names it: x86_64, aarch64
-	odin_target:  string,
-	odin_flags:   []string,
-	llc_flags:    []string,
-	clang_target: string,
-	limine:       string, // the target= in ports/limine/port.ndb
-	loader:       string, // the loader's name on the ESP
+Arch_Kind :: enum {
+	X86_64,
+	AArch64,
 }
 
-ARCHES := [?]Arch {
-	{
+Arch :: struct {
+	kind:              Arch_Kind,
+	name:              string, // as VectraOS names it: x86_64, aarch64
+	odin_target:       string,
+	kernel_odin_flags: []string, // the kernel's only, beyond IR_ODIN_FLAGS
+	kernel_llc_flags:  []string,
+	clang_target:      string,
+	limine:            string, // the target= in ports/limine/port.ndb
+	loader:            string, // the loader's name on the ESP
+	qemu:              string,
+	machine:           string, // QEMU's -machine
+	firmware:          string, // the UEFI firmware QEMU boots, as pflash
+}
+
+ARCHES := [Arch_Kind]Arch {
+	.X86_64 = {
+		kind = .X86_64,
 		name = "x86_64",
 		odin_target = "freestanding_amd64_sysv",
-		odin_flags = {"-disable-red-zone"},
-		llc_flags = {"-code-model=kernel"},
+		kernel_odin_flags = {"-disable-red-zone"},
+		kernel_llc_flags = {"-code-model=kernel"},
 		clang_target = "x86_64-unknown-none-elf",
 		limine = "uefi-x86_64",
 		loader = "BOOTX64.EFI",
+		qemu = QEMU_X86_64,
+		machine = "q35",
+		firmware = FIRMWARE_X86_64,
 	},
-	{
+	.AArch64 = {
+		kind = .AArch64,
 		name = "aarch64",
 		odin_target = "freestanding_arm64",
 		clang_target = "aarch64-unknown-none-elf",
 		limine = "uefi-aarch64",
 		loader = "BOOTAA64.EFI",
+		qemu = QEMU_AARCH64,
+		machine = "virt,gic-version=3",
+		firmware = FIRMWARE_AARCH64,
 	},
 }
 
@@ -119,6 +136,15 @@ Mode :: enum {
 	Release,
 }
 
+MODES := [Mode]struct {
+	name:     string,
+	odin_opt: string,
+	llc_opt:  string,
+} {
+	.Debug = {"debug", "-o:minimal", "-O1"},
+	.Release = {"release", "-o:speed", "-O2"},
+}
+
 out_dir :: proc(a: ^Arch, mode: Mode) -> string {
-	return fmt.tprintf("out/%s/%s", a.name, mode == .Release ? "release" : "debug")
+	return fmt.tprintf("out/%s/%s", a.name, MODES[mode].name)
 }

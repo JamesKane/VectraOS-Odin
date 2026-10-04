@@ -1,5 +1,6 @@
 package build
 
+import "base:runtime"
 import "core:fmt"
 import "core:os"
 import "core:path/filepath"
@@ -26,7 +27,7 @@ main :: proc() {
 		os.exit(2)
 	}
 	command := os.args[1]
-	arches := make([dynamic]^Arch, context.temp_allocator)
+	chosen: bit_set[Arch_Kind] // by --arch; none means all
 	names := make([dynamic]string, context.temp_allocator)
 	mode := Mode.Debug
 	for i := 2; i < len(os.args); i += 1 {
@@ -42,7 +43,7 @@ main :: proc() {
 				fmt.eprintln("build: --arch takes x86_64 or aarch64")
 				os.exit(2)
 			}
-			append(&arches, a)
+			chosen += {a.kind}
 		case "--release":
 			mode = .Release
 		case "-v":
@@ -55,8 +56,9 @@ main :: proc() {
 			append(&names, arg)
 		}
 	}
-	if len(arches) == 0 {
-		for &a in ARCHES {
+	arches := make([dynamic]^Arch, context.temp_allocator)
+	for &a in ARCHES {
+		if chosen == {} || a.kind in chosen {
 			append(&arches, &a)
 		}
 	}
@@ -76,15 +78,21 @@ main :: proc() {
 		ok = true
 		switch command {
 		case "all":
-			limine := port_load("limine") or_else Port{}
+			// A port that does not load has said why; the kernels still build.
+			limine, loaded := port_load("limine")
 			for a in arches {
-				_, lok := build_port_target(&limine, a.limine)
+				runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+				lok := loaded
+				if loaded {
+					_, lok = build_port_target(&limine, a.limine)
+				}
 				_, kok := build_kernel(a, mode)
 				pok := kok && build_programs(a, mode)
 				ok = ok && lok && kok && pok
 			}
 		case "image":
 			for a in arches {
+				runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 				ok = build_image(a, mode, image_path(a, mode)) && ok
 			}
 		case "qemu":
@@ -116,11 +124,19 @@ cmd_test :: proc(arches: []^Arch, mode: Mode, names: []string) -> bool {
 	if len(names) == 0 {
 		all := make([dynamic]string, context.temp_allocator)
 		// The top level only: tests/qemu/m2 and the like are run by name.
-		files, _ := os.read_directory_by_path("tests/qemu", -1, context.temp_allocator)
+		files, err := os.read_directory_by_path("tests/qemu", -1, context.temp_allocator)
+		if err != nil {
+			fmt.eprintfln("build: cannot read tests/qemu: %v", err)
+			return false
+		}
 		for f in files {
 			if f.type == .Regular && strings.has_suffix(f.name, ".ndb") {
-				append(&all, strings.clone(filepath.stem(f.name), context.temp_allocator))
+				append(&all, filepath.stem(f.name))
 			}
+		}
+		if len(all) == 0 {
+			fmt.eprintln("build: no scenarios in tests/qemu")
+			return false
 		}
 		slice.sort(all[:])
 		names = all[:]
@@ -128,6 +144,9 @@ cmd_test :: proc(arches: []^Arch, mode: Mode, names: []string) -> bool {
 	ok := true
 	for a in arches {
 		for name in names {
+			// An image's build reads and writes hundreds of megabytes, all
+			// temporary: let each scenario's go before the next.
+			runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 			ok = run_scenario(a, mode, name) && ok
 		}
 	}
@@ -139,18 +158,24 @@ cmd_check :: proc() -> bool {
 	ok := true
 	dirs, err := os.read_directory_by_path("tests/host", -1, context.temp_allocator)
 	if err != nil {
-		fmt.eprintln("build: cannot read tests/host")
+		fmt.eprintfln("build: cannot read tests/host: %v", err)
 		return false
 	}
 	slice.sort_by(dirs, proc(a, b: os.File_Info) -> bool {return a.name < b.name})
+	ran := 0
 	for d in dirs {
 		if d.type != .Directory {
 			continue
 		}
+		ran += 1
 		fmt.eprintfln("  HOST  %s", d.name)
 		c := cmd_make(ODIN, "test", fmt.tprintf("tests/host/%s", d.name), "-collection:vx=lib", "-collection:abi=abi", "-vet", "-strict-style", "-warnings-as-errors", "-sanitize:address", fmt.tprintf("-out:out/host/%s", d.name))
 		make_dirs("out/host") or_return
 		ok = run(c[:]) && ok
+	}
+	if ran == 0 {
+		fmt.eprintln("build: no packages in tests/host")
+		ok = false
 	}
 	ok = cmd_vendor_check() && ok
 	return ok
@@ -192,6 +217,7 @@ cmd_loc :: proc() -> bool {
 		}
 		return
 	}
+	// The counts are printed as strings: Odin's %7d pads with zeros, not spaces.
 	FIRST_PARTY :: []string{".odin", ".S", ".ld"}
 	total := 0
 	for dir in ([]string{"kernel", "lib", "servers", "drivers", "cmd", "tools", "abi", "tests", "spikes"}) {

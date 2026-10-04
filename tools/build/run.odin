@@ -1,7 +1,9 @@
 package build
 
 import "core:fmt"
+import "core:hash"
 import "core:os"
+import "core:slice"
 import "core:strings"
 
 verbose: bool
@@ -100,6 +102,11 @@ cmd_make :: proc(args: ..string) -> Cmd {
 	return c
 }
 
+// A command line wholly known up front, from its parts in order.
+concat :: proc(parts: ..[]string) -> []string {
+	return slice.concatenate(parts, context.temp_allocator)
+}
+
 read_file :: proc(path: string) -> (string, bool) {
 	data, err := os.read_entire_file(path, context.temp_allocator)
 	if err != nil {
@@ -125,19 +132,11 @@ make_dirs :: proc(path: string) -> bool {
 	return true
 }
 
-dir_of :: proc(path: string) -> string {
-	i := strings.last_index_byte(path, '/')
-	return i < 0 ? "." : path[:i]
-}
-
-// FNV-1a over bytes: the cache keys and the image's derived GUIDs.
+// FNV-1a, chained from h, over a file's text or a name: the cache keys and
+// the image's derived GUIDs. Chains start from the offset basis, which is
+// also hash.fnv64a's default seed.
 FNV_OFFSET :: u64(0xcbf29ce484222325)
 
 fnv :: proc(h: u64, data: string) -> u64 {
-	h := h
-	for i in 0 ..< len(data) {
-		h ~= u64(data[i])
-		h *= 0x100000001b3
-	}
-	return h
+	return hash.fnv64a(transmute([]u8)data, h)
 }

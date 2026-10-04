@@ -131,6 +131,7 @@ port_target :: proc(p: ^Port, name: string) -> (^ndb.Record, bool) {
 			return t, true
 		}
 	}
+	fmt.eprintfln("%s/port.ndb: no target=%s", p.dir, name)
 	return nil, false
 }
 
@@ -144,8 +145,7 @@ file_cflags :: proc(p: ^Port, rel: string) -> string {
 }
 
 object_for :: proc(objdir, rel: string) -> string {
-	dot := strings.last_index_byte(rel, '.')
-	return fmt.tprintf("%s/%s.o", objdir, rel[:dot])
+	return fmt.tprintf("%s/%s.o", objdir, strings.trim_suffix(rel, filepath.ext(rel)))
 }
 
 // The loader for one target, built if the cache does not hold it already.
@@ -183,35 +183,22 @@ build_port_target :: proc(p: ^Port, target: string) -> (result: string, ok: bool
 	for list in ([][dynamic]string{c_files, s_files}) {
 		for rel in list {
 			o := object_for(objdir, rel)
-			c := cmd_make(CLANG)
-			append(&c, ..cflags)
-			append(&c, ..cppflags)
-			append(&c, config_inc)
-			append(&c, ..words(file_cflags(p, rel)))
-			append(&c, prefix_map, "-c", rel, "-o", o)
-			append(&cmds, c[:])
+			append(&cmds, concat({CLANG}, cflags, cppflags, {config_inc}, words(file_cflags(p, rel)), {prefix_map, "-c", rel, "-o", o}))
 			append(&objs, o)
 		}
 	}
 	for rel in nasm_files {
 		o := object_for(objdir, rel)
-		c := cmd_make(NASM, rel)
-		append(&c, ..words(val(t, "nasmflags")))
-		append(&c, "-o", o)
-		append(&cmds, c[:])
+		append(&cmds, concat({NASM, rel}, words(val(t, "nasmflags")), {"-o", o}))
 		append(&objs, o)
 	}
 	for rel in cpp_files {
 		o := object_for(objdir, rel)
-		c := cmd_make(CLANG)
-		append(&c, ..cflags)
-		append(&c, ..cppflags)
-		append(&c, config_inc, prefix_map, "-x", "assembler-with-cpp", "-c", rel, "-o", o)
-		append(&cmds, c[:])
+		append(&cmds, concat({CLANG}, cflags, cppflags, {config_inc, prefix_map, "-x", "assembler-with-cpp", "-c", rel, "-o", o}))
 		append(&objs, o)
 	}
 	for o in objs {
-		make_dirs(dir_of(o)) or_return
+		make_dirs(filepath.dir(o)) or_return
 	}
 	fmt.eprintfln("  PORT  %s  %s (%d files)", p.name, target, len(cmds))
 	run_parallel(cmds[:], src) or_return
@@ -232,11 +219,7 @@ build_port_target :: proc(p: ^Port, target: string) -> (result: string, ok: bool
 
 		if pass == 1 {
 			write_symbol_map(fmt.tprintf("%s/limine_nomap.elf", outdir), map_s, ".section .full_map", "full_map") or_return
-			cc := cmd_make(CLANG)
-			append(&cc, ..cflags)
-			append(&cc, ..cppflags)
-			append(&cc, config_inc, "-c", map_s, "-o", map_o)
-			run(cc[:], src) or_return
+			run(concat({CLANG}, cflags, cppflags, {config_inc, "-c", map_s, "-o", map_o}), src) or_return
 		}
 
 		ld := cmd_make(LLD, fmt.tprintf("-T%s", script))
