@@ -465,6 +465,8 @@ aarch64_irq :: proc "contextless" () {
 		timer_interrupt()
 	} else if intid == INTID_RESCHED {
 		this_cpu().resched = true
+	} else if intid >= 32 && intid == smmu0.event_intid {
+		smmu_event_interrupt() // the IOMMU's own line: its faults
 	} else if intid >= LPI_BASE && intid < LPI_BASE + LPI_COUNT {
 		irq_fire(MSI_LINE_BASE + intid - LPI_BASE) // an MSI: edge-triggered, never masked
 	} else if intid >= 32 && intid < 1020 {
@@ -898,6 +900,21 @@ arch_irq_route :: proc "contextless" (line: u32) -> (level: bool, st: vx.Status)
 	return true, .Ok
 }
 
+// The kernel's own SPI (the SMMU's event queue): routed to the boot CPU,
+// edge-triggered as the SMMU raises it, and never a device's.
+arch_kernel_spi :: proc "contextless" (line: u32, edge: bool) {
+	d := gicd()
+	bit := u32(1) << (line % 32)
+	g := &d.igroupr[line / 32] // group 1
+	intrinsics.volatile_store(g, intrinsics.volatile_load(g) | bit)
+	intrinsics.volatile_store(&d.ipriorityr[line], 0x80)
+	c := &d.icfgr[line / 16]
+	cfg := intrinsics.volatile_load(c)
+	intrinsics.volatile_store(c, edge ? cfg | 2 << (line % 16 * 2) : cfg &~ (2 << (line % 16 * 2)))
+	intrinsics.volatile_store(&d.irouter[line], cpus[0].arch_id & 0xff_00ff_ffff)
+	intrinsics.volatile_store(&d.isenabler[line / 32], bit)
+}
+
 arch_irq_mask :: proc "contextless" (line: u32, masked: bool) {
 	// An MSI is edge-triggered; arch_msi_destroy turns it off.
 	if line < 32 || line >= gic_lines {
@@ -1036,6 +1053,26 @@ its_table :: proc "contextless" (order: uint) -> Paddr {
 	return pa
 }
 
+// The ITS, as the MADT says (QEMU virt's if it says nothing).
+@(private="file")
+its_phys :: proc "contextless" () -> Paddr {
+	pa := ITS_PHYS_DEFAULT
+	if madt := acpi_table("APIC"); madt != nil {
+		for off := 44; off + 2 <= len(madt) && madt[off + 1] >= 2; off += int(madt[off + 1]) {
+			if madt[off] == 0xf && madt[off + 1] >= 20 && off + 16 <= len(madt) { // a GIC ITS structure
+				pa = Paddr(read64(madt[off + 8:]))
+			}
+		}
+	}
+	return pa
+}
+
+// The page a device's MSI writes go to: the ITS's translation register's
+// (GITS_TRANSLATER, in its second 64 KiB frame), which every IOMMU domain maps.
+arch_msi_doorbell :: proc "contextless" () -> Paddr {
+	return its_phys() + 0x1_0000
+}
+
 @(private="file", require_results)
 its_init :: proc "contextless" () -> vx.Status {
 	if its.regs != nil {
@@ -1048,14 +1085,7 @@ its_init :: proc "contextless" () -> vx.Status {
 	if boot_rd == nil || intrinsics.volatile_load(&gicd().typer) & (1 << 17) == 0 { // GICD_TYPER.LPIS
 		return .Err_Unsupported
 	}
-	pa := ITS_PHYS_DEFAULT
-	if madt := acpi_table("APIC"); madt != nil {
-		for off := 44; off + 2 <= len(madt) && madt[off + 1] >= 2; off += int(madt[off + 1]) {
-			if madt[off] == 0xf && madt[off + 1] >= 20 && off + 16 <= len(madt) { // a GIC ITS structure
-				pa = Paddr(read64(madt[off + 8:]))
-			}
-		}
-	}
+	pa := its_phys()
 	if !map_range(kernel_root, boot.hhdm + u64(pa), pa, ITS_SIZE, {.Write, .Device}) {
 		return .Err_No_Memory
 	}

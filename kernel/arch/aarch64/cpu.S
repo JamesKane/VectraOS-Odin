@@ -368,3 +368,27 @@ vx_watch_slot:
     msr dbgwcr15_el1, x2
     isb
     ret
+
+// (p: rawptr): the cache line holding p cleaned to the point of coherency,
+// for a device that reads memory without snooping (the SMMU's tables).
+    .globl vx_dc_cvac
+    .type vx_dc_cvac, %function
+vx_dc_cvac:
+    dc cvac, x0
+    ret
+
+// (p: rawptr): the cache line holding p invalidated, so a device's write to
+// it is read from memory (the SMMU's event queue).
+    .globl vx_dc_ivac
+    .type vx_dc_ivac, %function
+vx_dc_ivac:
+    dc ivac, x0
+    ret
+
+// Every earlier memory access complete, as a device sees it, before what
+// follows.
+    .globl vx_dsb_sy
+    .type vx_dsb_sy, %function
+vx_dsb_sy:
+    dsb sy
+    ret
