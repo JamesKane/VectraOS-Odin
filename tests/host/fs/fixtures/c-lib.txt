@@ -1,0 +1,413 @@
+2 time 0
+3 format 0
+4 users 0
+5 symlink 0
+6 create 0
+7 time 0
+8 commit 3 0
+9 create 0
+10 write 0
+11 write 0
+12 write 0
+13 create 0
+14 rename 0
+15 reapall 0 0
+16 symlink 0
+17 write 0
+18 time 0
+19 reapall 0 0
+20 symlink 0
+21 reapall 0 0
+22 write 0
+23 symlink 0
+24 create 0
+25 truncate 0
+26 snap 0
+27 commit 4 0
+28 write 0
+29 mkdir 0
+30 create 0
+31 time 0
+32 remove 0
+33 write 0
+34 write 0
+35 write -15
+36 truncate 0
+37 mkdir 0
+38 time 0
+39 write 0
+40 rename 0
+41 commit 5 0
+42 compress 0
+43 time 0
+44 write 0
+45 mkdir 0
+46 create 0
+47 mkdir 0
+48 time 0
+49 snap 0
+50 write 0
+51 chmod 0
+52 commit 6 0
+53 write 0
+54 time 0
+55 chmod 0
+56 chmod 0
+57 time 0
+58 write 0
+59 commit 7 0
+60 orphan 0
+61 mkdir 0
+62 time 0
+63 remove 0
+64 snap 0
+65 time 0
+66 write 0
+67 truncate 0
+68 chmod 0
+69 rename 0
+70 write 0
+71 write 0
+72 create 0
+73 orphan 0
+74 commit 8 0
+75 remove 0
+76 remove 0
+77 remove 0
+78 write 0
+79 time 0
+80 commit 9 0
+81 write 0
+82 write 0
+83 time 0
+84 time 0
+85 truncate 0
+86 fork 0
+87 commit 10 0
+88 write 0
+89 commit 11 0
+90 mkdir 0
+91 write 0
+92 commit 12 0
+93 write 0
+94 time 0
+95 create 0
+96 symlink -16
+97 commit 13 0
+98 truncate 0
+99 create 0
+100 write 0
+101 orphan 0
+102 mkdir -16
+103 write 0
+104 mkdir -16
+105 write 0
+106 commit 14 0
+107 compress 0
+108 symlink 0
+109 create 0
+110 commit 15 0
+111 rollback 0
+112 snap 0
+113 del 0
+114 mkdir 0
+115 time 0
+116 remove 0
+117 commit 16 0
+118 commit 17 0
+119 commit 18 0
+120 compress 0
+121 create 0
+122 time 0
+123 create 0
+124 time 0
+125 commit 19 0
+126 compress 0
+127 create 0
+128 commit 20 0
+129 remove 0
+130 write 0
+131 commit 21 0
+132 write 0
+133 write -15
+134 commit 22 0
+135 commit 23 0
+136 compress 0
+137 symlink 0
+138 time 0
+139 fork 0
+140 write 0
+141 commit 24 0
+142 rollback 0
+143 mkdir 0
+144 remove 0
+145 create 0
+146 snap 0
+147 truncate 0
+148 commit 25 0
+149 truncate 0
+150 create 0
+151 write 0
+152 orphan 0
+153 create 0
+154 mkdir 0
+155 mkdir 0
+156 commit 26 0
+157 write 0
+158 write 0
+159 reapall 0 0
+160 commit 27 0
+161 truncate 0
+162 truncate 0
+163 rename 0
+164 time 0
+165 reapall 0 0
+166 remove -16
+167 commit 28 0
+168 compress 0
+169 commit 29 0
+170 rollback 0
+171 time 0
+172 chmod 0
+173 write 0
+174 del 0
+175 time 0
+176 chmod 0
+177 commit 30 0
+178 rollback 0
+179 chmod 0
+180 chmod 0
+181 write 0
+182 time 0
+183 snap 0
+184 write 0
+185 create 0
+186 commit 31 0
+187 create 0
+188 del 0
+189 rename 0
+190 time 0
+191 commit 32 0
+192 create 0
+193 commit 33 0
+194 snap 0
+195 del 0
+196 create 0
+197 time 0
+198 mkdir 0
+199 write 0
+200 symlink 0
+201 write 0
+202 truncate 0
+203 write 0
+204 time 0
+205 truncate 0
+206 create 0
+207 time 0
+208 chmod 0
+209 time 0
+210 create -16
+211 time 0
+212 create 0
+213 rename 0
+214 write 0
+215 commit 34 0
+216 compress 0
+217 commit 35 0
+218 remove 0
+219 mkdir 0
+220 time 0
+221 write 0
+222 truncate 0
+223 time 0
+224 create 0
+225 time 0
+226 symlink 0
+227 time 0
+228 mkdir 0
+229 create 0
+230 time 0
+231 del 0
+232 write -15
+233 create 0
+234 write 0
+235 rename 0
+236 mkdir 0
+237 symlink 0
+238 commit 36 0
+239 close 0
+240 del 0
+241 create 0
+242 rename 0
+243 commit 37 0
+244 close 0
+245 del 0
+246 write 0
+247 commit 38 0
+248 time 0
+249 commit 39 0
+250 write 0
+251 orphan 0
+252 write 0
+253 write 0
+254 time 0
+255 create 0
+256 write 0
+257 commit 40 0
+258 rollback 0
+259 symlink 0
+260 commit 41 0
+261 rename 0
+262 write 0
+263 write 0
+264 write 0
+265 time 0
+266 create 0
+267 remove -16
+268 commit 42 0
+269 write 0
+270 write 0
+271 mkdir 0
+272 create 0
+273 write 0
+274 create 0
+275 time 0
+276 remove 0
+277 write 0
+278 symlink 0
+279 time 0
+280 truncate 0
+281 truncate 0
+282 write 0
+283 time 0
+284 truncate 0
+285 time 0
+286 write 0
+287 time 0
+288 create 0
+289 write 0
+290 time 0
+291 write 0
+292 mkdir 0
+293 remove 0
+294 mkdir 0
+295 rename 0
+296 write 0
+297 reapall 0 0
+298 rename 0
+299 time 0
+300 commit 43 0
+301 time 0
+302 write 0
+303 commit 44 0
+304 time 0
+305 create 0
+306 remove -16
+307 mkdir 0
+308 snap 0
+309 time 0
+310 rename 0
+311 create 0
+312 write 0
+313 mkdir -16
+314 time 0
+315 remove 0
+316 create 0
+317 create 0
+318 write 0
+319 write 0
+320 create 0
+321 write 0
+322 chmod 0
+323 time 0
+324 write 0
+325 time 0
+326 write 0
+327 rename 0
+328 create 0
+329 write 0
+330 write 0
+331 commit 45 0
+332 commit 46 0
+333 time 0
+334 del 0
+335 remove 0
+336 mkdir 0
+337 time 0
+338 write 0
+339 rename 0
+340 write 0
+341 commit 47 0
+342 time 0
+343 time 0
+344 mkdir 0
+345 remove -16
+346 commit 48 0
+347 compress 0
+348 commit 49 0
+349 truncate 0
+350 create 0
+351 write 0
+352 write 0
+353 write 0
+354 write -15
+355 chmod 0
+356 time 0
+357 write 0
+358 time 0
+359 reapall 0 0
+360 rename 0
+361 mkdir 0
+362 time 0
+363 commit 50 0
+364 remove 0
+365 commit 51 0
+366 compress 0
+367 create 0
+368 truncate 0
+369 mkdir 0
+370 chmod 0
+371 write 0
+372 commit 52 0
+373 remove 0
+374 truncate 0
+375 commit 53 0
+376 reapall 0 0
+377 write 0
+378 chmod 0
+379 mkdir 0
+380 time 0
+381 fork 0
+382 commit 54 0
+383 snap 0
+384 write 0
+385 rename 0
+386 commit 55 0
+387 create 0
+388 remove 0
+389 write 0
+390 mkdir 0
+391 truncate 0
+392 fork 0
+393 rename 0
+394 chmod 0
+395 write 0
+396 create 0
+397 rename 0
+398 time 0
+399 commit 56 0
+400 compress 0
+401 write 0
+402 remove -16
+403 time 0
+404 write 0
+405 mkdir 0
+406 snap 0
+407 mkdir 0
+408 write -15
+409 create 0
+410 chmod 0
+411 commit 57 0
+412 compress 0
+413 commit 58 0
+check 0: 10 snapshots, 10 labels, 7 deadlists; 57 used, 45 in trees, 12 else
