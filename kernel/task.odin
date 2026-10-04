@@ -67,6 +67,7 @@ Task :: struct {
 	state:           vx.Task_State, // .Exited once torn down
 	ending:          bool, // its last thread has exited, or it was killed: torn down soon
 	killed:          bool,
+	execing:         bool, // in, or the scratch of, a task_exec: no thread starts until the address spaces have changed places
 	exit:            [dynamic; vx.ERRMAX]u8, // its exit string (ADR-0010): empty while it runs, and for success
 	obs:             Observers, // EXIT bindings
 	// The root task's debug capability, until there is a debug-log object; a
@@ -259,6 +260,28 @@ handle_close :: proc "contextless" (t: ^Task, h: vx.Handle) -> vx.Status {
 	}
 	object_release(obj)
 	return .Ok
+}
+
+// Closes every handle t holds (task_exec): the new program starts with only
+// what its spawn message names.
+handles_close_all :: proc "contextless" (t: ^Task) {
+	for i in 1 ..< HANDLE_SLOTS {
+		obj: ^Object
+		{
+			spin_guard(&t.lock)
+			if t.handles == nil {
+				return
+			}
+			e := &t.handles[i]
+			obj = e.obj
+			if obj != nil {
+				free_slot(e)
+			}
+		}
+		if obj != nil {
+			object_release(obj)
+		}
+	}
 }
 
 // A handle in flight: the reference the sender's handle held, and its rights.

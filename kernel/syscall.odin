@@ -817,6 +817,106 @@ sys_task_kill :: proc "contextless" (h: vx.Handle, msg_ptr: Uva, length, id: u64
 	return .Ok
 }
 
+// Takes two tasks' locks in a fixed order, and gives them back.
+@(private="file")
+lock_pair :: proc "contextless" (a, b: ^Task) {
+	first, second := uintptr(a) < uintptr(b) ? a : b, uintptr(a) < uintptr(b) ? b : a
+	spin_lock(&first.lock)
+	spin_lock(&second.lock)
+}
+
+@(private="file")
+unlock_pair :: proc "contextless" (a, b: ^Task) {
+	spin_unlock(&a.lock)
+	spin_unlock(&b.lock)
+}
+
+// task_exec(scratch, bootstrap, entry, sp) (ADR-0012): the caller takes the
+// address space of scratch, a task it built and never started, and goes on as
+// the program in it, keeping its id, parent and EXIT bindings. Its handles
+// are all closed but bootstrap, which a new thread gets as its first argument
+// at entry, on sp; the calling thread ends. scratch, left with the old
+// address space, ends with it. Only a task with one live thread may call it.
+@(private="file", require_results)
+sys_task_exec :: proc "contextless" (sh, bootstrap: vx.Handle, entry, sp: Uva) -> vx.Status {
+	if entry >= USER_TOP || sp > USER_TOP {
+		return .Err_Invalid
+	}
+	t := current_task()
+	s := handle_get_as(t, sh, Task, {.Manage}) or_return
+	th: ^Thread
+	st := vx.Status.Err_Invalid
+	if s != t {
+		th, st = thread_create(t) // made first: a failure changes nothing
+	}
+	if st == .Ok {
+		// Both are held so until the swap: a thread started meanwhile, in
+		// either, would run on tables about to change hands, and then be freed.
+		lock_pair(t, s)
+		alone := t.live_threads == 1 && !t.ending && !t.killed && !t.execing
+		fresh := s.state == .New && s.live_threads == 0 && !s.ending && !s.killed && s.root != 0 && !s.execing
+		if alone && fresh {
+			t.execing, s.execing = true, true
+		} else {
+			st = .Err_Bad_State
+		}
+		unlock_pair(t, s)
+	}
+	moved: [1]Moved_Handle
+	if st == .Ok {
+		values := [1]vx.Handle{bootstrap}
+		st = handles_take(t, values[:], &t.obj, &s.obj, moved[:])
+		if st != .Ok {
+			lock_pair(t, s)
+			t.execing, s.execing = false, false
+			unlock_pair(t, s)
+		}
+	}
+	if st != .Ok {
+		if th != nil {
+			object_release(&th.obj)
+		}
+		object_release(&s.obj)
+		return st
+	}
+
+	// The address spaces change places, and the caller takes the new
+	// program's name. Both locks: nothing else maps into either meanwhile.
+	lock_pair(t, s)
+	t.root, s.root = s.root, t.root
+	t.map_next, s.map_next = s.map_next, t.map_next
+	t.mapped, s.mapped = s.mapped, t.mapped
+	t.maps, s.maps = s.maps, t.maps
+	t.name = s.name
+	t.exc_handler = 0 // the old program's in-task handler is not in the new one
+	unlock_pair(t, s)
+	// This CPU leaves the old tables now, before they go with s. No other
+	// CPU has them loaded: the caller has no other thread, and without
+	// ASIDs, loading tables drops every cached translation (ADR-0012).
+	load_user_root(this_cpu(), t.root)
+
+	// Every handle the old program held is closed: the new one starts with
+	// only what its spawn message names.
+	handles_close_all(t)
+	value: [1]vx.Handle
+	st = handles_put(t, moved[:], value[:])
+	object_release(moved[0].obj)
+	{
+		spin_guard(&t.lock)
+		t.execing = false // the new program's first thread may start now
+	}
+	task_kill(s, "") // never started: torn down at once, with the old address space
+	object_release(&s.obj)
+	if st == .Ok {
+		st = thread_start(th, entry, sp, u64(value[0]), 0)
+	}
+	object_release(&th.obj) // a started thread holds its own reference
+	if st != .Ok {
+		task_exit_with("exec failed")
+	}
+	thread_exit_current() // the new program goes on in the new thread
+}
+
 // --- Memory and handles ---
 
 // vmo_rw(vmo, op, offset, buffer, size): copies between a VMO and the
@@ -887,6 +987,8 @@ syscall_dispatch :: proc "contextless" (nr: u64, a: [6]u64) -> i64 {
 		return i64(sys_task_create(Uva(a[0]), a[1], Uva(a[2]), a[3]))
 	case .Task_Kill:
 		return i64(sys_task_kill(vx.Handle(a[0]), Uva(a[1]), a[2], a[3]))
+	case .Task_Exec:
+		return i64(sys_task_exec(vx.Handle(a[0]), vx.Handle(a[1]), Uva(a[2]), Uva(a[3])))
 	case .Task_Info:
 		return i64(sys_task_info(vx.Handle(a[0]), Uva(a[1]), a[2], a[3]))
 	case .Thread_Create:

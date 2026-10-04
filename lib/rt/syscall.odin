@@ -39,6 +39,14 @@ task_create :: proc "contextless" (name: string) -> (vx.Handle, vx.Status) {
 	return h, st
 }
 
+// The caller takes scratch's address space and goes on as the program in
+// it (ADR-0012), with bootstrap as its only handle. Returns only on a
+// failure.
+@(require_results)
+task_exec :: proc "contextless" (scratch, bootstrap: vx.Handle, entry, sp: u64) -> vx.Status {
+	return status(vx_syscall(.Task_Exec, u64(scratch), u64(bootstrap), entry, sp))
+}
+
 // A copy of the caller, with no threads yet (task_create's .Fork).
 @(require_results)
 task_fork :: proc "contextless" (name: string) -> (vx.Handle, vx.Status) {

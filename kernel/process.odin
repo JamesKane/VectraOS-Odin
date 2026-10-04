@@ -88,7 +88,7 @@ thread_start :: proc "contextless" (th: ^Thread, entry, sp: Uva, arg, arg2: u64)
 	t := th.task
 	{
 		spin_guard(&t.lock)
-		if th.state != .New || th.started || t.ending || t.killed {
+		if th.state != .New || th.started || t.ending || t.killed || t.execing {
 			return .Err_Bad_State
 		}
 		th.started = true // under the task's lock: one start, even with entry 0

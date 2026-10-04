@@ -1548,6 +1548,126 @@ test_fork :: proc "contextless" () {
 	_ = rt.handle_close(port)
 }
 
+// --- task_exec (ADR-0012) ---
+
+// The program a forked child execs: it closes `probe`, a handle the child
+// held before the exec, and exits if that fails as a closed handle does, or
+// traps if the handle was still there.
+write_exec_probe :: proc "contextless" (probe: vx.Handle) -> (code: Child_Image) {
+	when ODIN_ARCH == .amd64 {
+		emit :: proc "contextless" (code: ^Child_Image, bytes: ..u8) {
+			_ = append(code, ..bytes)
+		}
+		emit32 :: proc "contextless" (code: ^Child_Image, v: u32) {
+			emit(code, u8(v), u8(v >> 8), u8(v >> 16), u8(v >> 24))
+		}
+		emit(&code, 0xbf); emit32(&code, u32(probe)) // mov $probe, %edi
+		emit(&code, 0xb8); emit32(&code, u32(vx.Syscall.Handle_Close)) // mov $handle_close, %eax
+		emit(&code, 0x0f, 0x05) // syscall
+		emit(&code, 0x48, 0x3d); emit32(&code, transmute(u32)i32(vx.Status.Err_Bad_Handle)) // cmp $BAD_HANDLE, %rax
+		emit(&code, 0x75, 0x07) // jne 1f
+		emit(&code, 0xb8); emit32(&code, u32(vx.Syscall.Thread_Exit)) // mov $thread_exit, %eax
+		emit(&code, 0x0f, 0x05) // syscall
+		emit(&code, 0x0f, 0x0b) // 1: ud2
+	} else {
+		emit :: proc "contextless" (code: ^Child_Image, words: ..u32) {
+			for w in words {
+				_ = append(code, u8(w), u8(w >> 8), u8(w >> 16), u8(w >> 24))
+			}
+		}
+		emit(&code, 0x52800000 | (u32(probe) & 0xffff) << 5) // movz w0, #probe & 0xffff
+		emit(&code, 0x72a00000 | (u32(probe) >> 16) << 5) // movk w0, #probe >> 16, lsl #16
+		emit(&code, 0xd2800008 | u32(vx.Syscall.Handle_Close) << 5) // movz x8, #handle_close
+		emit(&code, 0xd4000001) // svc #0
+		emit(&code, 0xb100001f | u32(-i32(vx.Status.Err_Bad_Handle)) << 10) // cmn x0, #-BAD_HANDLE
+		emit(&code, 0x54000061) // b.ne 1f
+		emit(&code, 0xd2800008 | u32(vx.Syscall.Thread_Exit) << 5) // movz x8, #thread_exit
+		emit(&code, 0xd4000001) // svc #0
+		emit(&code, 0x00000000) // 1: udf #0
+	}
+	return
+}
+
+// A forked child's first thread: it builds the probe in a scratch task and
+// execs it. Its exit string is the probe's, or why the exec failed.
+exec_child :: proc "c" (unused: vx.Handle, arg2: u64) -> ! {
+	scratch, text, stack: vx.Handle
+	a, b, st := rt.channel_create()
+	ok := st == .Ok
+	code := write_exec_probe(a) // still held at the exec: it must be closed by it
+	if ok {
+		scratch, st = rt.task_create("execd")
+		ok = st == .Ok
+	}
+	if ok {
+		text, st = rt.vmo_create(4096)
+		ok = st == .Ok && rt.vmo_write(text, 0, code[:]) == .Ok
+	}
+	if ok {
+		_, st = rt.as_map(scratch, text, 0, 4096, {.Exec}, CHILD_CODE)
+		ok = st == .Ok
+	}
+	if ok {
+		stack, st = rt.vmo_create(4096)
+		ok = st == .Ok
+	}
+	if ok {
+		_, st = rt.as_map(scratch, stack, 0, 4096, {.Write}, CHILD_STACK_TOP - 4096)
+		ok = st == .Ok
+	}
+	rt.close_all(text, stack)
+	if ok {
+		_ = rt.task_exec(scratch, b, CHILD_CODE, CHILD_STACK_TOP) // returns only on a failure
+	}
+	_ = rt.task_kill(rt.self, "exec failed")
+	rt.thread_exit()
+}
+
+test_exec :: proc "contextless" () {
+	port, _ := rt.port_create()
+	sp := new_stack()
+	// A forked child execs: its task, so its id and its EXIT binding, carry
+	// on, under the new program's name, with none of its old handles.
+	child, st := rt.task_fork("forked")
+	check(st == .Ok)
+	before, bst := rt.task_info(child)
+	check(bst == .Ok)
+	check(rt.port_bind(port, child, .Exit, 99) == .Ok) // bound before the exec
+	th: vx.Handle
+	th, st = rt.thread_create(child)
+	check(st == .Ok && rt.thread_start(th, u64(uintptr(rawptr(exec_child))), sp, 0, 0) == .Ok)
+	_ = rt.handle_close(th)
+	pk: [1]vx.Packet
+	n, _ := rt.port_wait(port, after_ms(2000), 0, pk[:])
+	check(n == 1 && pk[0].key == 99 && pk[0].value == 0) // once, at the end
+	after, ast := rt.task_info(child)
+	check(ast == .Ok && after.id == before.id && after.exit_len == 0)
+	check(str.from_nul_padded(after.name[:]) == "execd")
+	_ = rt.handle_close(child)
+
+	// Refused: a task of its own, and a caller with another thread (ktest
+	// has one waiting now), before anything changes.
+	scratch, sst := rt.task_create("scratch")
+	a, b, cst := rt.channel_create()
+	check(sst == .Ok && cst == .Ok)
+	check(rt.task_exec(rt.self, b, CHILD_CODE, CHILD_STACK_TOP) == .Err_Invalid)
+	@(static) w: Waiter
+	id: u32
+	th, id, st = rt.thread_create_id(rt.self)
+	check(st == .Ok && rt.thread_start(th, u64(uintptr(rawptr(interrupted_waiter))), new_stack(), 0, u64(uintptr(&w))) == .Ok)
+	_ = rt.futex_wait(&never, 0, after_ms(20)) // it is waiting
+	check(rt.task_exec(scratch, b, CHILD_CODE, CHILD_STACK_TOP) == .Err_Bad_State)
+	check(rt.task_exec(scratch, b, 0x0000_8000_0000_0000, CHILD_STACK_TOP) == .Err_Invalid)
+	_ = rt.exception_bind(rt.self, vx.HANDLE_NONE, u64(uintptr(rawptr(handler))), {.In_Task})
+	_ = rt.thread_interrupt(rt.self, id, "done") // the waiter's wait ends, and it exits
+	for i := 0; i < 1000 && !intrinsics.atomic_load(&w.done); i += 1 {
+		_ = rt.futex_wait(&never, 0, after_ms(1))
+	}
+	_ = rt.exception_bind(rt.self, vx.HANDLE_NONE, 0, {.In_Task})
+	_ = rt.task_kill(scratch, "")
+	rt.close_all(th, scratch, a, b, port)
+}
+
 // --- The thread pointer (a C library's TLS) ---
 
 tls_shared: Shared
@@ -1698,6 +1818,7 @@ vx_main :: proc() -> int {
 	test_debugger()
 	test_tls()
 	test_fork()
+	test_exec()
 	test_fp()
 	test_nested_channels()
 	test_rings()

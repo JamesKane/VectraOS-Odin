@@ -294,6 +294,13 @@ exit_string :: proc "contextless" (s: ^Task_Summary) -> string {
 // its descendants. With .Next, task_info finds the one with the next id
 // after `id` instead, so a holder of a task handle can list its tree
 // (procfs). There is no other way to reach a task: no global lookup.
+// task_exec(scratch, bootstrap, entry, sp) (ADR-0012): the caller takes the
+// address space of scratch, a task it made and filled and never started, and
+// goes on as the program in it: its handles are all closed but bootstrap,
+// which a new thread gets as its first argument at entry, on sp; the calling
+// thread ends. The task keeps its id, its parent and its EXIT bindings, and
+// takes scratch's name. Only a task with one live thread may call it.
+//
 // task_create(name, len, &task, options): a new task, with nothing in it.
 // With .Fork, it has a copy of the caller's memory, made now, and of its
 // handle table: the same values and rights, a handle to the caller becoming
