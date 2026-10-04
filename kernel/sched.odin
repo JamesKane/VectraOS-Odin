@@ -1,5 +1,6 @@
 package kernel
 
+import "base:intrinsics"
 import vx "abi:vx"
 
 // The v1 scheduler. Every CPU serves one shared ready queue round robin; each
@@ -30,6 +31,20 @@ Cpu :: struct {
 	resched:    bool, // call schedule before returning to user mode
 	reap:       ^Thread, // a thread that died here, for whoever runs next to free
 	idle_stack: u64, // the idle stack's lowest byte
+	// Which task tables this CPU has loaded (0: none), and how many times it
+	// has loaded tables: a shootdown waits only for CPUs that may cache the
+	// pages. Atomic: other CPUs read them.
+	user_root:  Paddr,
+	root_loads: u64,
+	tlb_asked:  u64, // x86_64's shootdowns (arch_amd64.odin)
+	tlb_done:   u64,
+}
+
+// Loads a task's tables on this CPU (0: none), counted for shootdowns.
+load_user_root :: proc "contextless" (c: ^Cpu, root: Paddr) {
+	intrinsics.atomic_store_explicit(&c.user_root, root, .Relaxed)
+	arch_switch_user_root(root)
+	intrinsics.atomic_add_explicit(&c.root_loads, 1, .Release)
 }
 
 @(private="file")
@@ -122,7 +137,7 @@ schedule_locked :: proc "contextless" () {
 		// Leave a task's address space even for the idle thread, so a dead
 		// task's tables are on no CPU by the time its last thread is reaped.
 		if prev.task != next.task {
-			arch_switch_user_root(next.task != nil ? next.task.root : 0)
+			load_user_root(c, next.task != nil ? next.task.root : 0)
 			arch_io_switch(next.task)
 		}
 	} else {

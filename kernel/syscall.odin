@@ -22,10 +22,41 @@ options_of :: proc "contextless" ($T: typeid, a: u64) -> (T, bool) where intrins
 	return transmute(T)u32(a), a &~ u64(transmute(u32)~T{}) == 0
 }
 
+// User memory is touched only through these, assembly in each architecture's
+// entry.S: a fault inside one resumes at its fault label (uaccess_fixup, from
+// the trap handler), which reports the failure. So a range another thread
+// unmaps between the check and the copy fails the copy, not the kernel.
+foreign _ {
+	vx_user_copy :: proc "c" (dst, src: rawptr, n: u64) -> u64 --- // the bytes not copied
+	vx_user_copy_fault :: proc "c" () --- // an address only
+	vx_user_load32 :: proc "c" (src: rawptr, dst: ^u32) -> bool ---
+	vx_user_load32_fault :: proc "c" () --- // an address only
+}
+
+// Where a kernel fault on a user address at pc resumes, if pc is inside one
+// of the user-access routines; 0 if it is not.
+uaccess_fixup :: proc "contextless" (pc: u64) -> u64 {
+	copy_at, copy_fault := u64(uintptr(rawptr(vx_user_copy))), u64(uintptr(rawptr(vx_user_copy_fault)))
+	load_at, load_fault := u64(uintptr(rawptr(vx_user_load32))), u64(uintptr(rawptr(vx_user_load32_fault)))
+	switch {
+	case pc >= copy_at && pc < copy_fault:
+		return copy_fault
+	case pc >= load_at && pc < load_fault:
+		return load_fault
+	}
+	return 0
+}
+
+// One aligned 32-bit word of user memory (a futex's), read whole through the
+// task's own mapping; false if nothing maps it now.
+@(require_results)
+user_load32 :: proc "contextless" (src: Uva) -> (v: u32, ok: bool) {
+	ok = vx_user_load32(rawptr(uintptr(src)), &v)
+	return
+}
+
 // User pointers are checked against the current task's page tables before
-// the kernel touches them. Mappings are only ever removed when a task ends,
-// so nothing can unmap a range between the check and the copy; with as_unmap
-// these become copies that recover from a fault.
+// the kernel touches them, and then touched only through vx_user_copy.
 user_range_ok :: proc "contextless" (addr: Uva, length: u64, write: bool) -> bool {
 	if length == 0 {
 		return true
@@ -44,19 +75,17 @@ user_range_ok :: proc "contextless" (addr: Uva, length: u64, write: bool) -> boo
 
 @(require_results)
 copy_from_user :: proc "contextless" (dst: rawptr, src: Uva, length: u64) -> vx.Status {
-	if !user_range_ok(src, length, false) {
+	if !user_range_ok(src, length, false) || vx_user_copy(dst, rawptr(uintptr(src)), length) != 0 {
 		return .Err_Invalid
 	}
-	intrinsics.mem_copy(dst, rawptr(uintptr(src)), int(length))
 	return .Ok
 }
 
 @(require_results)
 copy_to_user :: proc "contextless" (dst: Uva, src: rawptr, length: u64) -> vx.Status {
-	if !user_range_ok(dst, length, true) {
+	if !user_range_ok(dst, length, true) || vx_user_copy(rawptr(uintptr(dst)), src, length) != 0 {
 		return .Err_Invalid
 	}
-	intrinsics.mem_copy(rawptr(uintptr(dst)), src, int(length))
 	return .Ok
 }
 
@@ -378,6 +407,14 @@ sys_as_map :: proc "contextless" (th, vh: vx.Handle, offset, size, flags: u64, a
 		return st
 	}
 	return copy_out(addr_ptr, &at)
+}
+
+// as_unmap(task, address, size): the pages of a range, mapped or not.
+@(private="file", require_results)
+sys_as_unmap :: proc "contextless" (th: vx.Handle, va: Uva, size: u64) -> vx.Status {
+	t := handle_get_as(current_task(), th, Task, {.Manage}) or_return
+	defer object_release(&t.obj)
+	return task_unmap(t, va, size)
 }
 
 // --- Channels ---
@@ -778,16 +815,16 @@ sys_vmo_rw :: proc "contextless" (h: vx.Handle, op, offset: u64, buf: Uva, size:
 	if overflow || end > v.size {
 		return .Err_Range
 	}
-	// The user side is a checked range, not a kernel slice: copied as memory.
+	// Through the fault-safe copies: another thread may unmap the buffer meanwhile.
 	for done := u64(0); done < size; {
 		at := offset + done
 		page := page_bytes(v.pages[at / PAGE_SIZE])[at % PAGE_SIZE:]
 		n := min(u64(len(page)), size - done)
-		user := rawptr(uintptr(buf + Uva(done)))
+		user := buf + Uva(done)
 		if reading {
-			intrinsics.mem_copy(user, raw_data(page), int(n))
+			copy_to_user(user, raw_data(page), n) or_return
 		} else {
-			intrinsics.mem_copy(raw_data(page), user, int(n))
+			copy_from_user(raw_data(page), user, n) or_return
 		}
 		done += n
 	}
@@ -884,6 +921,8 @@ syscall_dispatch :: proc "contextless" (nr: u64, a: [6]u64) -> i64 {
 		return i64(sys_vmo_rw(vx.Handle(a[0]), a[1], a[2], Uva(a[3]), a[4]))
 	case .As_Map:
 		return i64(sys_as_map(vx.Handle(a[0]), vx.Handle(a[1]), a[2], a[3], a[4], Uva(a[5])))
+	case .As_Unmap:
+		return i64(sys_as_unmap(vx.Handle(a[0]), Uva(a[1]), a[2]))
 	case .Handle_Dup:
 		return i64(sys_handle_dup(vx.Handle(a[0]), a[1], Uva(a[2])))
 	case .Handle_Close:

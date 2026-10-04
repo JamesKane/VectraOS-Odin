@@ -110,7 +110,7 @@ futex_bucket :: proc "contextless" (key: Paddr) -> u32 {
 // until futex_wake or the deadline. .Err_Bad_State if the word already differs.
 @(require_results)
 futex_wait :: proc "contextless" (word: Uva, expected: u32, deadline: Instant) -> vx.Status {
-	if word & 3 != 0 {
+	if word & 3 != 0 || word >= USER_TOP {
 		return .Err_Invalid
 	}
 	t := this_cpu().current
@@ -121,7 +121,14 @@ futex_wait :: proc "contextless" (word: Uva, expected: u32, deadline: Instant) -
 	b := &futex_buckets[futex_bucket(key)]
 	w := Futex_Waiter{thread = t, key = key}
 	spin_lock(&b.lock)
-	if intrinsics.atomic_load_explicit(cast(^u32)phys_to_virt(key), .Acquire) != expected {
+	// Read through the task's own mapping, not the page: if another thread has
+	// unmapped the word since, the load fails rather than read a freed page.
+	now, mapped := user_load32(word)
+	if !mapped {
+		spin_unlock(&b.lock)
+		return .Err_Invalid
+	}
+	if now != expected {
 		spin_unlock(&b.lock)
 		return .Err_Bad_State
 	}

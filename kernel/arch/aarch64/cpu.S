@@ -228,3 +228,26 @@ vx_pan_off:
     msr pan, #0
     isb
     ret
+
+// (va, len: u64): every CPU drops its translations for [va, va + len) in
+// whatever address space. The Inner Shareable invalidations reach every CPU,
+// and the DSB after them waits until all have done them: no interrupts
+// needed. Without ASIDs yet, by address for any ASID; past 64 pages, all.
+    .globl vx_tlb_shootdown
+    .type vx_tlb_shootdown, %function
+vx_tlb_shootdown:
+    dsb ishst
+    lsr x2, x1, #12
+    cmp x2, #64
+    b.hi 2f
+    add x1, x0, x1
+1:  cmp x0, x1
+    b.hs 3f
+    lsr x3, x0, #12
+    tlbi vaale1is, x3
+    add x0, x0, #4096
+    b 1b
+2:  tlbi vmalle1is
+3:  dsb ish
+    isb
+    ret

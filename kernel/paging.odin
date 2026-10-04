@@ -199,9 +199,9 @@ user_page_ok :: proc "contextless" (root: Paddr, va: Uva, write: bool) -> bool {
 	return e != nil && arch_pte_user_ok(e^, write)
 }
 
-// Clears a 4 KiB page's entry. Its translation may still be cached on a CPU
-// that has the tables loaded; nothing unmaps a page another thread may still
-// use until as_unmap brings shootdowns.
+// Clears a 4 KiB page's entry. Its translation may still be cached on any
+// CPU that has the tables loaded: the caller shoots it down
+// (arch_tlb_shootdown), with no lock held, before the page can be freed.
 unmap_page :: proc "contextless" (root: Paddr, va: u64) {
 	e, level := leaf_entry(root, va)
 	if e != nil && level == 3 {

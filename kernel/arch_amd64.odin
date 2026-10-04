@@ -29,6 +29,8 @@ foreign _ {
 	vx_run_on_stack :: proc "c" (top: u64, fn: proc "c" () -> !) -> ! ---
 	vx_read_xcr0 :: proc "c" () -> u64 ---
 	vx_write_cr3 :: proc "c" (root: u64) ---
+	vx_read_cr3 :: proc "c" () -> u64 ---
+	vx_invlpg :: proc "c" (va: u64) ---
 	vx_context_switch :: proc "c" (save_sp: ^u64, load_sp: u64) ---
 	vx_enter_user :: proc "c" (entry, sp, arg, arg2, kstack_top: u64) -> ! ---
 	syscall_entry :: proc "c" () --- // entry.S: an address only
@@ -449,6 +451,67 @@ arch_switch_tables :: proc "contextless" (root: Paddr) {
 	vx_switch_tables(u64(root))
 }
 
+// Drops this CPU's user translations (loading CR3 again keeps only global,
+// kernel, entries) if a shootdown has asked it to since it last did.
+@(private="file")
+tlb_answer :: proc "contextless" (c: ^Cpu) {
+	asked := intrinsics.atomic_load_explicit(&c.tlb_asked, .Acquire)
+	if intrinsics.atomic_load_explicit(&c.tlb_done, .Relaxed) >= asked {
+		return
+	}
+	vx_write_cr3(vx_read_cr3())
+	intrinsics.atomic_store_explicit(&c.tlb_done, asked, .Release)
+}
+
+@(private="file")
+shootdown_gen: u64
+
+// Every CPU drops its translations for [va, va + length) in the address
+// space with this root; once it returns, the pages may be freed. x86 has no
+// broadcast invalidation: every other CPU with the tables loaded gets an
+// interrupt, and this one waits until each has flushed, or loaded other
+// tables since (a load flushes too). While waiting it answers any shootdown
+// asked of it, so two at once cannot wait for each other. The caller holds
+// no lock that a CPU it waits for might be spinning on.
+arch_tlb_shootdown :: proc "contextless" (root: Paddr, va: Uva, length: u64) {
+	me := this_cpu()
+	if intrinsics.atomic_load_explicit(&me.user_root, .Relaxed) == root {
+		if length / PAGE_SIZE > 32 {
+			vx_write_cr3(vx_read_cr3())
+		} else {
+			for p := u64(va); p < u64(va) + length; p += PAGE_SIZE {
+				vx_invlpg(p)
+			}
+		}
+	}
+	gen := intrinsics.atomic_add_explicit(&shootdown_gen, 1, .Relaxed) + 1
+	loads: [MAX_CPUS]u64
+	waiting: bit_set[0 ..< MAX_CPUS; u64]
+	for &c, i in cpus[:min(cpu_total, MAX_CPUS)] {
+		if &c == me || intrinsics.atomic_load_explicit(&c.user_root, .Acquire) != root {
+			continue
+		}
+		loads[i] = intrinsics.atomic_load_explicit(&c.root_loads, .Acquire)
+		old := intrinsics.atomic_load_explicit(&c.tlb_asked, .Relaxed)
+		for old < gen {
+			_, swapped := intrinsics.atomic_compare_exchange_weak_explicit(&c.tlb_asked, old, gen, .Release, .Relaxed)
+			if swapped {
+				break
+			}
+			old = intrinsics.atomic_load_explicit(&c.tlb_asked, .Relaxed)
+		}
+		waiting += {i}
+		vx_wrmsr(X2APIC_ICR, c.arch_id << 32 | VECTOR_SHOOTDOWN)
+	}
+	for i in waiting {
+		c := &cpus[i]
+		for intrinsics.atomic_load_explicit(&c.tlb_done, .Acquire) < gen && intrinsics.atomic_load_explicit(&c.root_loads, .Acquire) == loads[i] {
+			tlb_answer(me)
+			vx_pause()
+		}
+	}
+}
+
 // --- The clock and the timer ---
 //
 // The timer uses TSC-deadline mode where the CPU has it. Otherwise (QEMU
@@ -627,6 +690,8 @@ kput_exception :: proc "contextless" (f: ^Trap_Frame) {
 @(private="file")
 VECTOR_RESCHED :: 0x21 // another CPU made a thread ready
 @(private="file")
+VECTOR_SHOOTDOWN :: 0x22 // another CPU unmapped user pages: flush (arch_tlb_shootdown)
+@(private="file")
 VECTOR_SYSCALL :: 0x100 // entry.S
 @(private="file")
 X2APIC_ICR :: 0x830
@@ -690,6 +755,9 @@ x86_trap :: proc "c" (f: ^Trap_Frame) {
 	case VECTOR_RESCHED:
 		vx_wrmsr(X2APIC_EOI, 0)
 		this_cpu().resched = true
+	case VECTOR_SHOOTDOWN:
+		vx_wrmsr(X2APIC_EOI, 0)
+		tlb_answer(this_cpu())
 	case VECTOR_SPURIOUS:
 		return
 	case VECTOR_MSI_FIRST ..= VECTOR_MSI_LAST:
@@ -699,6 +767,10 @@ x86_trap :: proc "c" (f: ^Trap_Frame) {
 		irq_fire(u32(f.vector - VECTOR_IRQ_BASE)) // a level line is masked before the EOI
 		vx_wrmsr(X2APIC_EOI, 0)
 	case:
+		if f.vector == 14 && !from_user && vx_read_cr2() < u64(USER_TOP) && uaccess_fixup(f.rip) != 0 {
+			f.rip = uaccess_fixup(f.rip) // a user page gone under a copy: it reports the failure
+			return
+		}
 		if from_user {
 			task_fault_start()
 			kput_exception(f)

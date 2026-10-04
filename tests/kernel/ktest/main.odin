@@ -281,6 +281,7 @@ Child_Code :: enum {
 	Block,
 	Port_Block,
 	Use_Simd,
+	Read_Loop,
 }
 
 Child_Image :: [dynamic; 64]u8 // more than any of them needs
@@ -306,6 +307,9 @@ write_child :: proc "contextless" (what: Child_Code) -> (code: Child_Image) {
 			emit(&code, 0x0f, 0x05) // syscall
 		case .Spin:
 			emit(&code, 0xeb, 0xfe) // jmp .
+		case .Read_Loop:
+			emit(&code, 0x48, 0x8b, 0x44, 0x24, 0xf8) // 1: mov -8(%rsp), %rax: a load from its stack
+			emit(&code, 0xeb, 0xf9) // jmp 1b, with no system call
 		case .Port_Block:
 			emit(&code, 0x48, 0x8d, 0x74, 0x24, 0xf0) // lea -16(%rsp), %rsi: the handle's place
 			emit(&code, 0x31, 0xff) // xor %edi, %edi: no options
@@ -345,6 +349,9 @@ write_child :: proc "contextless" (what: Child_Code) -> (code: Child_Image) {
 			emit(&code, 0xd4000001) // svc #0
 		case .Spin:
 			emit(&code, 0x14000000) // b .
+		case .Read_Loop:
+			emit(&code, 0xf85f83e0) // 1: ldur x0, [sp, #-8]: a load from its stack
+			emit(&code, 0x17ffffff) // b 1b, with no system call
 		case .Port_Block:
 			emit(&code, 0xd10043e1) // sub x1, sp, #16: the handle's place
 			emit(&code, 0xd2800000) // movz x0, #0: no options
@@ -951,6 +958,120 @@ test_port_waiters :: proc "contextless" () {
 	rt.close_all(child, port)
 }
 
+// --- as_unmap ---
+
+PAGE :: u64(4096)
+
+// A user address as a slice the kernel copies through.
+bytes_at :: proc "contextless" (at: u64, n: int) -> []u8 {
+	return (cast([^]u8)uintptr(at))[:n]
+}
+
+// as_unmap: whole mappings and parts of them, the hole mapped again, and the
+// pages gone for the kernel's copies too.
+test_unmap :: proc "contextless" () {
+	v, st := rt.vmo_create(4 * PAGE)
+	at: u64
+	if st == .Ok {
+		at, st = rt.as_map(rt.self, v, 0, 4 * PAGE, {.Write})
+	}
+	check(st == .Ok)
+	if st != .Ok || at == 0 {
+		return
+	}
+	for p in u64(0) ..< 4 {
+		intrinsics.volatile_store(cast(^u8)uintptr(at + p * PAGE), u8(p + 1))
+	}
+	check(rt.as_unmap(rt.self, at + PAGE, PAGE + 1) == .Err_Range) // pages only
+	check(rt.as_unmap(rt.self, at + PAGE, 2 * PAGE) == .Ok) // the middle: two mappings now
+	check(rt.vmo_read(v, 0, bytes_at(at + PAGE, 1)) == .Err_Invalid) // gone for the kernel too
+	check(rt.vmo_read(v, 0, bytes_at(at + 2 * PAGE + 100, 1)) == .Err_Invalid)
+	check(intrinsics.volatile_load(cast(^u8)uintptr(at)) == 1) // the ends stay
+	check(intrinsics.volatile_load(cast(^u8)uintptr(at + 3 * PAGE)) == 4)
+	check(rt.as_unmap(rt.self, at + PAGE, 2 * PAGE) == .Ok) // nothing there: fine
+	hole, hst := rt.as_map(rt.self, v, PAGE, 2 * PAGE, {.Write}, at + PAGE)
+	check(hst == .Ok && hole == at + PAGE)
+	check(intrinsics.volatile_load(cast(^u8)uintptr(hole)) == 2) // the VMO kept them
+	check(intrinsics.volatile_load(cast(^u8)uintptr(hole + PAGE)) == 3)
+	byte: [1]u8
+	check(rt.vmo_read(v, 0, byte[:]) == .Ok && byte[0] == 1)
+	check(rt.as_unmap(rt.self, at, 4 * PAGE) == .Ok) // all three mappings at once
+	check(rt.vmo_read(v, 0, bytes_at(at, 1)) == .Err_Invalid)
+	_ = rt.handle_close(v)
+
+	// Every CPU loses the translations: a child spinning on loads from its
+	// stack page, with no system call to switch its tables, faults once the
+	// page is unmapped. Without the shootdown it would read on, from a cached
+	// entry; that shows under TCG (and so always on aarch64), as KVM flushes a
+	// guest's TLB on its own often enough to hide it.
+	port, _ := rt.port_create()
+	child, ok := start_child(.Read_Loop)
+	check(ok)
+	_ = rt.futex_wait(&never, 0, after_ms(50)) // it is spinning, on another CPU
+	check(rt.as_unmap(child, CHILD_STACK_TOP - 4096, 4096) == .Ok)
+	check(wait_exit(port, child) == -1) // killed by the fault
+	rt.close_all(child, port)
+}
+
+// Kernel copies that lose their page part-way fail, and the kernel goes on:
+// one thread unmaps and maps a page again and again while another copies
+// into it.
+Copy_Race :: struct {
+	stop:                bool,
+	vmo:                 vx.Handle,
+	page:                u64,
+	ok, invalid, other: u32,
+}
+
+copy_racer :: proc "c" (unused: vx.Handle, arg: u64) -> ! {
+	r := cast(^Copy_Race)uintptr(arg)
+	for !intrinsics.atomic_load(&r.stop) {
+		#partial switch rt.vmo_read(r.vmo, 0, bytes_at(r.page, 4096)) {
+		case .Ok:
+			intrinsics.atomic_add(&r.ok, 1)
+		case .Err_Invalid:
+			intrinsics.atomic_add(&r.invalid, 1)
+		case:
+			intrinsics.atomic_add(&r.other, 1)
+		}
+	}
+	rt.thread_exit(0)
+}
+
+test_copy_race :: proc "contextless" () {
+	@(static) r: Copy_Race
+	target: vx.Handle
+	st: vx.Status
+	r.vmo, st = rt.vmo_create(4096)
+	check(st == .Ok)
+	target, st = rt.vmo_create(4096)
+	check(st == .Ok)
+	r.page, st = rt.as_map(rt.self, target, 0, 4096, {.Write})
+	check(st == .Ok)
+	th, tst := rt.thread_create(rt.self)
+	check(tst == .Ok)
+	check(rt.thread_start(th, u64(uintptr(rawptr(copy_racer))), new_stack(), 0, u64(uintptr(&r))) == .Ok)
+	mapped, all := true, true
+	for _ in 0 ..< 20000 {
+		if mapped {
+			all = all && rt.as_unmap(rt.self, r.page, 4096) == .Ok
+		} else {
+			at, mst := rt.as_map(rt.self, target, 0, 4096, {.Write}, r.page)
+			all = all && mst == .Ok && at == r.page
+		}
+		mapped = !mapped
+	}
+	check(all)
+	intrinsics.atomic_store(&r.stop, true)
+	_ = rt.futex_wait(&never, 0, after_ms(20))
+	check(intrinsics.atomic_load(&r.other) == 0)
+	check(intrinsics.atomic_load(&r.ok) + intrinsics.atomic_load(&r.invalid) > 0)
+	if !mapped {
+		_, _ = rt.as_map(rt.self, target, 0, 4096, {.Write}, r.page)
+	}
+	rt.close_all(th, target)
+}
+
 @(export, link_name="vx_main")
 vx_main :: proc() -> int {
 	test_spawn_message()
@@ -962,6 +1083,8 @@ vx_main :: proc() -> int {
 	test_tasks()
 	test_torn_down()
 	test_port_waiters()
+	test_unmap()
+	test_copy_race()
 	test_nested_channels()
 	test_rings()
 	test_vmo_rw()

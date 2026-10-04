@@ -309,6 +309,36 @@ trap_restore:
     add sp, sp, #FRAME_SIZE
     eret
 
+// vx_user_copy(dst, src, n) -> u64: copies to or from user memory, and
+// returns the bytes not copied: 0 means it all was. A fault inside resumes at
+// vx_user_copy_fault (uaccess_fixup, aarch64_trap), which returns what is left.
+    .globl vx_user_copy, vx_user_copy_fault
+    .type vx_user_copy, %function
+vx_user_copy:
+    cbz x2, 2f
+1:  ldrb w3, [x1], #1
+    strb w3, [x0], #1
+    subs x2, x2, #1
+    b.ne 1b
+2:  mov x0, #0
+    ret
+vx_user_copy_fault:
+    mov x0, x2              // counts down as it goes: what is left
+    ret
+
+// vx_user_load32(src, dst) -> bool: one aligned 32-bit load from user memory
+// (a futex word), whole. A fault returns false.
+    .globl vx_user_load32, vx_user_load32_fault
+    .type vx_user_load32, %function
+vx_user_load32:
+    ldar w2, [x0]
+    str w2, [x1]
+    mov x0, #1
+    ret
+vx_user_load32_fault:
+    mov x0, #0
+    ret
+
     .bss
     .p2align 4
 overflow_stack:

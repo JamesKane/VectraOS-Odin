@@ -115,6 +115,13 @@ as_map :: proc "contextless" (task, vmo: vx.Handle, offset, size: u64, flags: vx
 	return va, st
 }
 
+// Unmaps the pages of [at, at + size), whole mappings or parts of them; pages
+// nothing maps are left alone. Once it returns, no CPU reaches them there.
+@(require_results)
+as_unmap :: proc "contextless" (task: vx.Handle, at, size: u64) -> vx.Status {
+	return status(vx_syscall(.As_Unmap, u64(task), at, size))
+}
+
 @(require_results)
 vmo_read :: proc "contextless" (vmo: vx.Handle, offset: u64, buf: []u8) -> vx.Status {
 	return status(vx_syscall(.Vmo_Rw, u64(vmo), u64(vx.Vmo_Op.Read), offset, addr(raw_data(buf)), u64(len(buf))))

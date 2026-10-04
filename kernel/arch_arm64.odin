@@ -41,6 +41,7 @@ foreign _ {
 	vx_run_on_stack :: proc "c" (top: u64, fn: proc "c" () -> !) -> ! ---
 	vx_vreg_irq_test :: proc "c" (input, output: ^[512]u8, fired: ^u64, target: u64) ---
 	vx_switch_user_root :: proc "c" (root: u64) ---
+	vx_tlb_shootdown :: proc "c" (va, length: u64) ---
 	vx_write_icc_sgi1r :: proc "c" (v: u64) ---
 	vx_pan_off :: proc "c" () ---
 	vx_context_switch :: proc "c" (save_sp: ^u64, load_sp: u64) ---
@@ -265,6 +266,13 @@ arch_switch_user_root :: proc "contextless" (root: Paddr) {
 
 arch_user_top_slots :: proc "contextless" () -> int {
 	return 512
+}
+
+// Every CPU drops its translations for [va, va + length): broadcast
+// invalidations, which need no interrupts (cpu.S). Without ASIDs yet, the
+// root does not narrow them.
+arch_tlb_shootdown :: proc "contextless" (root: Paddr, va: Uva, length: u64) {
+	vx_tlb_shootdown(u64(va), length)
 }
 
 arch_pte_user_ok :: proc "contextless" (e: Pte, write: bool) -> bool {
@@ -583,6 +591,8 @@ aarch64_trap :: proc "c" (f: ^Trap_Frame, index: u64) {
 		aarch64_irq()
 	case from_user && index & 3 == 0 && esr.ec == .Svc64:
 		f.x[0] = u64(syscall_dispatch(f.x[8], {f.x[0], f.x[1], f.x[2], f.x[3], f.x[4], f.x[5]}))
+	case !from_user && index & 3 == 0 && esr.ec == .Dabt_Same && f.far < u64(USER_TOP) && uaccess_fixup(f.elr) != 0:
+		f.elr = uaccess_fixup(f.elr) // a user page gone under a copy: it reports the failure
 	case from_user:
 		task_fault_start()
 		kput_exception(f, index)

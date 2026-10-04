@@ -44,6 +44,7 @@ Mapping :: struct {
 	va:           Uva,
 	size, offset: u64,
 	vmo:          ^Vmo,
+	flags:        vx.Map_Options,
 }
 
 TASK_MAX_MAPPINGS :: PAGE_SIZE / size_of(Mapping)
@@ -407,6 +408,22 @@ task_name :: proc "contextless" (t: ^Task) -> string {
 	return string(t.name[:n])
 }
 
+// The page-table flags for a user mapping of v.
+@(private="file")
+user_map_flags :: proc "contextless" (flags: vx.Map_Options, device: bool) -> Map_Flags {
+	mf := Map_Flags{.User}
+	if .Write in flags {
+		mf += {.Write}
+	}
+	if .Exec in flags {
+		mf += {.Exec}
+	}
+	if device {
+		mf += {.Device}
+	}
+	return mf
+}
+
 // Maps [offset, offset + size) of a VMO into a task's address space. With
 // va == 0 the kernel picks the address; otherwise va is used and must be
 // page-aligned and free. The mapping holds a reference on the VMO. W^X:
@@ -420,18 +437,8 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 	if size == 0 || (offset | size) & (PAGE_SIZE - 1) != 0 || overflow || vmo_end > v.size {
 		return 0, .Err_Range
 	}
-	mf := Map_Flags{.User}
-	if .Write in flags {
-		mf += {.Write}
-	}
-	if .Exec in flags {
-		mf += {.Exec}
-	}
-	if v.physical {
-		mf += {.Device}
-	}
+	mf := user_map_flags(flags, v.physical)
 	spin_lock(&t.lock)
-	defer spin_unlock(&t.lock)
 	at := want_va != 0 ? want_va : t.map_next
 	end, end_overflow := intrinsics.overflow_add(at, Uva(size))
 	slot: ^Mapping
@@ -466,15 +473,95 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 		for off := u64(0); off < done; off += PAGE_SIZE {
 			unmap_page(t.root, u64(at) + off)
 		}
+		root := t.root
+		spin_unlock(&t.lock)
+		if done != 0 {
+			arch_tlb_shootdown(root, at, done) // another thread may have touched them
+		}
 		return 0, st
 	}
 	object_ref(&v.obj)
-	slot^ = {va = at, size = size, offset = offset, vmo = v}
+	slot^ = {va = at, size = size, offset = offset, vmo = v, flags = flags}
 	t.mapped += size
 	if want_va == 0 {
 		t.map_next = end + PAGE_SIZE // leave a guard page between placed mappings
 	}
+	spin_unlock(&t.lock)
 	return at, .Ok
+}
+
+// Unmaps [va, va + size): whole mappings, or the parts of them in the range;
+// a mapping cut in the middle becomes two, so that needs a free slot. The
+// page entries are cleared under the lock, the translations shot down after
+// it (another CPU spinning on it could not answer), and only then are the
+// VMOs let go, which may free their pages.
+@(require_results)
+task_unmap :: proc "contextless" (t: ^Task, va: Uva, size: u64) -> vx.Status {
+	end, overflow := intrinsics.overflow_add(va, Uva(size))
+	if size == 0 || (u64(va) | size) & (PAGE_SIZE - 1) != 0 || overflow || end > USER_TOP {
+		return .Err_Range
+	}
+	drop: [dynamic; TASK_MAX_MAPPINGS]^Vmo
+	root: Paddr
+	{
+		spin_guard(&t.lock)
+		if t.root == 0 || t.maps == nil || t.ending {
+			return .Err_Bad_State
+		}
+		splits, free_slots := 0, 0
+		for m in t.maps {
+			if m.size == 0 {
+				free_slots += 1
+			} else if m.va < va && m.va + Uva(m.size) > end {
+				splits += 1
+			}
+		}
+		if splits > free_slots {
+			return .Err_No_Memory
+		}
+		for &m in t.maps {
+			m_end := m.va + Uva(m.size)
+			if m.size == 0 || m_end <= va || m.va >= end {
+				continue
+			}
+			lo, hi := max(m.va, va), min(m_end, end)
+			for p := lo; p < hi; p += PAGE_SIZE {
+				unmap_page(t.root, u64(p))
+			}
+			t.mapped -= u64(hi - lo)
+			switch {
+			case lo == m.va && hi == m_end: // all of it
+				_ = append(&drop, m.vmo)
+				m = {}
+			case lo == m.va: // its start
+				m.offset += u64(hi - m.va)
+				m.size = u64(m_end - hi)
+				m.va = hi
+			case hi == m_end: // its end
+				m.size = u64(lo - m.va)
+			case: // its middle: the end becomes a mapping of its own
+				rest: ^Mapping
+				for &r in t.maps {
+					if r.size == 0 {
+						rest = &r
+						break
+					}
+				}
+				object_ref(&m.vmo.obj)
+				rest^ = m
+				rest.va = hi
+				rest.size = u64(m_end - hi)
+				rest.offset = m.offset + u64(hi - m.va)
+				m.size = u64(lo - m.va)
+			}
+		}
+		root = t.root
+	}
+	arch_tlb_shootdown(root, va, size)
+	for v in drop {
+		object_release(&v.obj)
+	}
+	return .Ok
 }
 
 // A thread of task t that has not started (thread_start, process.odin).
