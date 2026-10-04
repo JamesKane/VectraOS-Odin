@@ -42,3 +42,18 @@ Not yet: M1's user-space half (now in P2); ACPI, the IOMMU and device objects (P
 | `d087b34` | bootfs and procfs; m2/boot, m2/ns and m2/shell pass |
 
 Not yet: the top-level (current-upstream) `boot`, `shell`, `ktest`, `cons`, `ns` and `proc` scenarios, which also expect M3 and M4 work (`/net`, exit strings, notes, namespace groups).
+
+## Idiom clean-up after P2 — 2026-10-03
+
+A four-part review of P0–P2 for idiomatic Odin (kernel, libraries, user programs, build tool and host tests) found the same C habits everywhere: one `u64` for every kind of address, `[^]T` with a separate length, integer flag words, status ladders, untyped pools, array-plus-count pairs and helpers copied per package. Applied area by area, behaviour unchanged (P1+P2 gate, host tests and image reproducibility after each merge); the rules it settled on are in docs/CODING.md.
+
+Bugs fixed along the way: `./build test` could pass having run nothing; port-target and port-load failures were silent; ~64 MiB image buffers were never freed (peak 591 → 129 MB); unchecked ELF symbol-table reads in the build tool; `iorange_create` stored a 65,536-port range as a count of 0 (upstream has the same bug); `p9.serve`'s −1/0 length sentinels; misaligned typed stores into byte buffers in `rt`; `read_spawn` trapping on a short message; file leaks in `gsh` pipelines and `nstest`; svcd's unchecked boot-image rounding.
+
+| Commit | Step |
+|---|---|
+| `9338e12` | Typed ABI sets: `vx.Rights`, `Map_Options`, `Vmo_Options`, `Task_Info_Options` |
+| `e7a2ec6` | Build tool (output byte-identical to before) |
+| merge of `c1dc6ad` | Libraries; new `vx:str` and `vx:memory` |
+| merge of `4c220e0` | Kernel: `Paddr`/`Uva`/`Pte`, `Pool($T)`, `handle_get_as`, statuses inside, slices over multi-pointers |
+| merge of `12e215a` | Host tests: `expect_value`, tables, shared `p9test` |
+| merge of `ff01ffd` | User programs |

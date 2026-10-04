@@ -11,7 +11,7 @@ import "vx:ndb"
 // whose return value ends the thread. A program defines it, Odin's way:
 //
 //	@(export, link_name = "vx_main")
-//	main :: proc() -> int { ... }
+//	vx_main :: proc() -> int { ... }
 //
 // It runs with a default context; its allocator is nil until user space has
 // arenas.
