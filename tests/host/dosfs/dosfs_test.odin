@@ -27,7 +27,7 @@ import dosfs "../../../servers/dosfs"
 import "../blkfake"
 import "../p9test"
 
-DIR :: "out/host/dosfs"
+DIR :: "out/host/dosfs-disks" // not out/host/dosfs: ./build check's test binary
 
 when ODIN_OS == .Darwin {
 	MFORMAT :: "/opt/homebrew/bin/mformat"
