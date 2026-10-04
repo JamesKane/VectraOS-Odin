@@ -6,6 +6,7 @@ import "vx:ns"
 import "vx:p9"
 import "vx:procns"
 import "vx:rt"
+import "vx:str"
 
 text: [64 * 1024]u8 // the end of the input, as a ring
 total: u64
@@ -21,22 +22,22 @@ take :: proc "contextless" (p: []u8) {
 
 @(export, link_name="vx_main")
 main :: proc() -> int {
+	args := rt.args()
 	lines := u64(10)
-	arg := 0
-	if len(rt.args()) > 0 && len(rt.spawn.args[0]) > 1 && rt.spawn.args[0][0] == '-' {
-		lines = 0
-		for c in transmute([]u8)rt.spawn.args[0][1:] {
-			if c < '0' || c > '9' || lines > 100000 {
-				rt.print("usage: tail [-N] [file]\n")
-				return 1
-			}
-			lines = lines * 10 + u64(c - '0')
+	if len(args) > 0 && len(args[0]) > 1 && args[0][0] == '-' {
+		n, ok := str.parse_u64(args[0][1:])
+		// The digits stop being taken once they make more than 100000, so
+		// the largest count is 1000009.
+		if !ok || n / 10 > 100_000 {
+			rt.print("usage: tail [-N] [file]\n")
+			return 1
 		}
-		arg = 1
+		lines = n
+		args = args[1:]
 	}
-	if arg < len(rt.args()) {
+	if len(args) > 0 {
 		f: ns.File
-		if procns.from_spawn(&space) != .Ok || ns.open(&space, rt.spawn.args[arg], p9.OREAD, &f) != .Ok {
+		if procns.from_spawn(&space) != .Ok || ns.open(&space, args[0], p9.OREAD, &f) != .Ok {
 			rt.print("tail: cannot open it\n")
 			return 1
 		}
@@ -70,8 +71,11 @@ main :: proc() -> int {
 		}
 		start -= 1
 	}
-	for i in start ..< total {
-		rt.print(string(text[i % len(text):][:1]))
-	}
+	// What is left of the ring from start is at most two runs: to the end of
+	// the buffer, then from its beginning.
+	from := int(start % len(text))
+	count := int(total - start)
+	first := min(count, len(text) - from)
+	rt.print(string(text[from:][:first]), string(text[:count - first]))
 	return 0
 }

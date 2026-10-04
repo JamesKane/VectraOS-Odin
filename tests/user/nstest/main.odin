@@ -36,7 +36,7 @@ check_str :: proc "contextless" (got, want: string, what := #caller_expression(g
 }
 
 space: ns.Namespace
-list_out: [512]u8
+list_out: [dynamic; 512]u8
 list_buf: [4096]u8
 
 // The names in a directory, space-separated.
@@ -46,7 +46,7 @@ list :: proc "contextless" (path: string) -> string {
 		return "(cannot open)"
 	}
 	defer ns.close(&f)
-	length := 0
+	clear(&list_out)
 	n: int
 	st: vx.Status
 	for {
@@ -54,27 +54,27 @@ list :: proc "contextless" (path: string) -> string {
 		if n <= 0 {
 			break
 		}
-		for off := 0; off + 2 <= n; {
-			size := int(list_buf[off]) | int(list_buf[off + 1]) << 8
-			s: p9.Stat
-			if off + size + 2 > n || p9.stat_decode(list_buf[off:off + size + 2], &s) != .Ok || length + len(s.name) + 1 > len(list_out) {
+		it := p9.Dir_Entries{buf = list_buf[:n]}
+		for s in p9.next_entry(&it) {
+			if len(list_out) + len(s.name) + 1 > cap(list_out) {
 				return "(bad entry)"
 			}
-			if length > 0 {
-				list_out[length] = ' '
-				length += 1
+			if len(list_out) > 0 {
+				_ = append(&list_out, ' ')
 			}
-			copy(list_out[length:], s.name)
-			length += len(s.name)
-			off += size + 2
+			_ = append(&list_out, s.name)
+		}
+		if it.off != n {
+			return "(bad entry)"
 		}
 	}
-	return st != .Ok ? "(read failed)" : string(list_out[:length])
+	return st != .Ok ? "(read failed)" : string(list_out[:])
 }
 
 test_spawn :: proc "contextless" () {
 	check(rt.spawn.name == "nstest")
-	check(len(rt.args()) == 2 && rt.spawn.args[0] == "first" && rt.spawn.args[1] == "second arg")
+	args := rt.args()
+	check(len(args) == 2 && args[0] == "first" && args[1] == "second arg")
 	check(rt.spawn_take("bootimage") == vx.HANDLE_NONE) // not granted
 	check(rt.spawn_take("listen") == vx.HANDLE_NONE)
 }

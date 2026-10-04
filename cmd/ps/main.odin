@@ -25,13 +25,8 @@ main :: proc() -> int {
 		if n <= 0 {
 			break
 		}
-		for off := 0; off + 2 <= n; {
-			size := int(buf[off]) | int(buf[off + 1]) << 8
-			entry: p9.Stat
-			if off + size + 2 > n || p9.stat_decode(buf[off:off + size + 2], &entry) != .Ok {
-				break
-			}
-			off += size + 2
+		it := p9.Dir_Entries{buf = buf[:n]}
+		for entry in p9.next_entry(&it) {
 			path_buf: [64]u8
 			path, fits := str.join(path_buf[:], "/proc/", entry.name, "/status")
 			if !fits {

@@ -5,11 +5,11 @@ import "vx:rt"
 
 @(export, link_name="vx_main")
 main :: proc() -> int {
-	for i in 0 ..< len(rt.args()) {
+	for a, i in rt.args() {
 		if i > 0 {
 			rt.print(" ")
 		}
-		rt.print(rt.spawn.args[i])
+		rt.print(a)
 	}
 	rt.print("\n")
 	return 0
