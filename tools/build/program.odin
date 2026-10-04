@@ -61,6 +61,7 @@ PROGRAMS := []Program {
 	{name = "drv-uart-pl011", dir = "drivers/drv-uart-pl011", place = .Bootfs, only = {.AArch64}},
 	{name = "drv-virtio-net", dir = "drivers/drv-virtio-net", place = .Bootfs},
 	{name = "dosfs", dir = "servers/dosfs", place = .Bootfs},
+	{name = "isofs", dir = "servers/isofs", place = .Bootfs},
 	{name = "ctest", source = "tests/posix/ctest.c", place = .Tests, kind = .C},
 	{name = "sbasetest", source = "tests/posix/sbasetest.c", place = .Tests, kind = .C},
 	// dbg's fixture, as upstream builds it but against musl: its own
