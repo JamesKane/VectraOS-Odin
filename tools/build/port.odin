@@ -131,6 +131,7 @@ port_target :: proc(p: ^Port, name: string) -> (^ndb.Record, bool) {
 			return t, true
 		}
 	}
+	fmt.eprintfln("%s/port.ndb: no target=%s", p.dir, name)
 	return nil, false
 }
 

@@ -76,9 +76,13 @@ main :: proc() {
 		ok = true
 		switch command {
 		case "all":
-			limine := port_load("limine") or_else Port{}
+			// A port that does not load has said why; the kernels still build.
+			limine, loaded := port_load("limine")
 			for a in arches {
-				_, lok := build_port_target(&limine, a.limine)
+				lok := loaded
+				if loaded {
+					_, lok = build_port_target(&limine, a.limine)
+				}
 				_, kok := build_kernel(a, mode)
 				pok := kok && build_programs(a, mode)
 				ok = ok && lok && kok && pok
