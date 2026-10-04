@@ -28,6 +28,7 @@ Scenario :: struct {
 	name:    string,
 	timeout: f64,
 	cmdline: string,
+	with:    string, // test programs for bootfs, comma-separated (tests/user/)
 	only:    string, // arch=: run on this architecture only
 	needs:   string, // a feature this tree's build cannot provide yet
 	expects: [dynamic]Expect,
@@ -56,8 +57,9 @@ load_scenario :: proc(name: string, a: ^Arch) -> (sc: Scenario, ok: bool) {
 			}
 			sc.timeout = t
 			sc.cmdline = val(rec, "cmdline")
+			sc.with = val(rec, "with")
 			sc.only = val(rec, "arch")
-			for feature in ([]string{"with", "iso", "disk", "volume", "iommu", "bus"}) {
+			for feature in ([]string{"iso", "disk", "volume", "iommu", "bus"}) {
 				if ndb.has(rec, feature) {
 					sc.needs = feature
 				}
@@ -109,10 +111,10 @@ run_scenario :: proc(a: ^Arch, mode: Mode, name: string) -> bool {
 
 	file_name, _ := strings.replace_all(name, "/", "-", context.temp_allocator) // m2/shell -> m2-shell
 	image := image_path(a, mode)
-	if sc.cmdline != "" {
+	if sc.cmdline != "" || sc.with != "" {
 		image = fmt.tprintf("%s/test-%s.img", out_dir(a, mode), file_name)
 	}
-	build_image(a, mode, image, sc.cmdline) or_return
+	build_image(a, mode, image, sc.cmdline, sc.with) or_return
 
 	log_path := fmt.tprintf("%s/test-%s.log", out_dir(a, mode), file_name)
 	log, lerr := os.create(log_path)

@@ -24,7 +24,7 @@ image_path :: proc(a: ^Arch, mode: Mode) -> string {
 
 // Builds the kernel and the loader, then the image. cmdline, if set, is
 // added to limine.conf.
-build_image :: proc(a: ^Arch, mode: Mode, image: string, cmdline := "") -> bool {
+build_image :: proc(a: ^Arch, mode: Mode, image: string, cmdline := "", with := "") -> bool {
 	limine := port_load("limine") or_return
 	loader := build_port_target(&limine, a.limine) or_return
 	kernel := build_kernel(a, mode) or_return
@@ -38,7 +38,7 @@ build_image :: proc(a: ^Arch, mode: Mode, image: string, cmdline := "") -> bool 
 	}
 
 	bootfs := fmt.tprintf("%s.bootfs.tar", image)
-	make_bootfs(a, mode, bootfs) or_return
+	make_bootfs(a, mode, bootfs, with) or_return
 
 	seed := FNV_OFFSET
 	seed = fnv(seed, read_file(bootfs) or_return)

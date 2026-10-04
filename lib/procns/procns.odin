@@ -156,3 +156,9 @@ spawn_records :: proc "contextless" (space: ^ns.Namespace, w: ^ndb.Writer, handl
 	}
 	return w.failed ? .Err_Range : .Ok
 }
+
+// The connection the spawn message's i-th mount record made, for a program
+// that speaks to its server directly (nstest's hostile client).
+conn :: proc "contextless" (i: int) -> ^rt.Conn {
+	return &conns[i]
+}

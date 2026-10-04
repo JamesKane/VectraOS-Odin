@@ -12,6 +12,7 @@ import "core:strings"
 Program_Place :: enum {
 	Module, // on the ESP, a Limine module: the root task's candidates
 	Bootfs, // in bootfs.tar
+	Tests, // in bootfs.tar for a scenario that names it (with=), with tests/user/NAME.ndb
 }
 
 Program :: struct {
@@ -26,6 +27,8 @@ PROGRAMS := []Program {
 	{name = "ktest", dir = "tests/kernel/ktest", place = .Module},
 	{name = "drv-uart-16550", dir = "drivers/drv-uart-16550", place = .Bootfs, arch = "x86_64"},
 	{name = "drv-uart-pl011", dir = "drivers/drv-uart-pl011", place = .Bootfs, arch = "aarch64"},
+	{name = "nstest", dir = "tests/user/nstest", place = .Tests},
+	{name = "constest", dir = "tests/user/constest", place = .Tests},
 	{name = "gsh", dir = "cmd/gsh", place = .Bootfs},
 	{name = "ls", dir = "cmd/ls", place = .Bootfs},
 	{name = "cat", dir = "cmd/cat", place = .Bootfs},

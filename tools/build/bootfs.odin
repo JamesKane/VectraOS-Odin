@@ -14,12 +14,28 @@ import "vx:tar"
 @(private="file")
 BOOTFS_DIRS := []string{"bin", "boot", "boot/bin", "boot/svc", "dev", "proc", "srv", "tmp"}
 
-make_bootfs :: proc(a: ^Arch, mode: Mode, out: string) -> bool {
+// Whether `name` is in the comma-separated list `with`.
+listed :: proc(with, name: string) -> bool {
+	rest := with
+	for len(rest) > 0 {
+		i := strings.index_byte(rest, ',')
+		item := i < 0 ? rest : rest[:i]
+		if item == name {
+			return true
+		}
+		rest = i < 0 ? "" : rest[i + 1:]
+	}
+	return false
+}
+
+// Test programs named in `with` join the image, with their manifests from
+// tests/user/NAME.ndb, after the system's: svcd starts a test after what it tests.
+make_bootfs :: proc(a: ^Arch, mode: Mode, out: string, with := "") -> bool {
 	paths := make([dynamic]string, context.temp_allocator)
 	files := make([dynamic]string, context.temp_allocator)
 	// Programs, then the system's manifests: svcd starts services in this order.
 	for p in PROGRAMS {
-		if p.place == .Bootfs && program_for(p, a) {
+		if (p.place == .Bootfs || (p.place == .Tests && listed(with, p.name))) && program_for(p, a) {
 			append(&paths, fmt.tprintf("boot/bin/%s", p.name))
 			append(&files, read_file(program_path(a, mode, p.name)) or_return)
 		}
@@ -32,6 +48,12 @@ make_bootfs :: proc(a: ^Arch, mode: Mode, out: string) -> bool {
 				append(&paths, m)
 				append(&files, read_file(m) or_return)
 			}
+		}
+	}
+	for p in PROGRAMS {
+		if p.place == .Tests && listed(with, p.name) {
+			append(&paths, fmt.tprintf("boot/svc/%s.ndb", p.name))
+			append(&files, read_file(fmt.tprintf("tests/user/%s.ndb", p.name)) or_return)
 		}
 	}
 	total := (len(BOOTFS_DIRS) + 2) * 512

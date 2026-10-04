@@ -1,0 +1,12 @@
+# tests/user/nstest.ndb: the namespace test's manifest (tests/qemu/m2/ns.ndb).
+# svcd evaluates it and gives nstest only these connections. `restart` makes
+# svcd run it again each time it exits, until its restart limit: six runs of
+# two connections each, more than bootfs has room for at once, so bootfs must
+# free and reuse them.
+
+service=nstest program=/boot/bin/nstest console restart
+arg=first
+arg="second arg"
+mount=/ srv=bootfs
+bind=/bin new=/boot/bin flags=a
+mount=/dev srv=bootfs aname=boot/svc flags=a
