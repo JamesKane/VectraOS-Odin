@@ -96,9 +96,22 @@ Held :: struct {
 	pc:        u64,
 }
 
+// A fault the debugger has seen and passed on, on one thread: if the program's
+// handler declines it and runs the instruction again (the musl back end's
+// fatal path does), the same fault comes back, and goes on without a second
+// stop. Upstream never meets this: the programs it debugs have no handler.
+@(private)
+Passed :: struct {
+	tid:     u32,
+	kind:    vx.Exception_Kind,
+	pc:      u64,
+	address: u64,
+}
+
 @(private)
 Debugger :: struct {
 	bound:    bool, // procfs's port takes the task's exceptions first
+	passed:   [DBG_THREADS]Passed,
 	bp:       [DBG_BREAKS]Breakpoint,
 	watches:  vx.Watches, // the task's watchpoints, as procfs set them
 	threads:  [DBG_THREADS]Held,
@@ -418,9 +431,44 @@ release :: proc "contextless" (p: ^Proc, h: ^Held) -> vx.Status {
 	case .Over, .Wover:
 		return .Ok // on its way already
 	}
+	if h.why == .Fault {
+		remember_pass(p, h)
+	}
 	st := rt.exception_resume(p.task, h.tid, h.why == .Fault || h.why == .Trap ? .Pass : .Continue)
 	h^ = {}
 	return st
+}
+
+// Notes the fault a held thread is let go past, for dbg_exception.
+@(private="file")
+remember_pass :: proc "contextless" (p: ^Proc, h: ^Held) {
+	d := dbg_of(p)
+	e: vx.Exception
+	if rt.thread_state(p.task, h.tid, .Get_Exception, &e) != .Ok {
+		return
+	}
+	slot := &d.passed[0]
+	for &q in d.passed {
+		if q.tid == h.tid || q.tid == 0 {
+			slot = &q
+			break
+		}
+	}
+	slot^ = {tid = h.tid, kind = e.kind, pc = reg_pc(&e.regs)^, address = e.address}
+}
+
+// Whether this fault is the one the thread was just let go past, come back
+// because the program's handler declined it; forgets it either way.
+@(private="file")
+passed_again :: proc "contextless" (d: ^Debugger, tid: u32, e: ^vx.Exception) -> bool {
+	for &q in d.passed {
+		if q.tid == tid {
+			again := q.kind == e.kind && q.pc == reg_pc(&e.regs)^ && q.address == e.address
+			q = {}
+			return again
+		}
+	}
+	return false
 }
 
 @(private="file", require_results)
@@ -547,6 +595,11 @@ dbg_exception :: proc "contextless" (p: ^Proc, tid: u32) {
 		h^ = {}
 		_ = rt.exception_resume(p.task, tid, .Pass)
 	case:
+		if passed_again(d, tid, &e) { // seen, passed on, and declined: on, to the task's own port
+			h^ = {}
+			_ = rt.exception_resume(p.task, tid, .Pass)
+			return
+		}
 		h^ = {tid = tid, why = .Fault, pc = pc}
 		dbg_event(p, "fault", tid, pc, addr_extra(e.address, fault_access(&e), &extra))
 	}
