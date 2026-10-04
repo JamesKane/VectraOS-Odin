@@ -1,5 +1,11 @@
 # third_party/VENDOR.ndb: every vendored tree, checked by ./build vendor-check
 # (ADR-0001, and upstream's ADR-0003 rules: pinned, reviewed source only).
+# sha256= is the release tarball; an import from a source tree with no release
+# has git.tree= instead, the directory's git tree id at the commit upstream=
+# pins. tree.sha256= is the unpacked tree, as this prints inside it:
+#   find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum
+# subset= lists the parts of a larger release that were kept, paths as in the
+# release; tree.sha256= is then over just those.
 
 name=limine
     version=12.9.1
@@ -19,4 +25,47 @@ name=u9fs
     tree.sha256=426ecd594603676850f7311b964b232c66151714cb6acad1761f06a817515a52
     license="Lucent Technologies' permissive notice (LICENSE); Plan 9 is MIT since 2021"
     adr=docs/adr/0006-u9fs.md
+    reviewed.by=pending
+
+name=musl
+    version=1.2.6
+    upstream=https://musl.libc.org/releases/musl-1.2.6.tar.gz
+    sha256=d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a
+    tree.sha256=4ff880d885a84930d4c30f494af299a3d0abb18e8c11f5c5c451d3e786d35c74
+    signed.by=836489290BB6B70F99FFDA0556BCDB593020450F
+    license=MIT
+    adr=docs/adr/0007-musl-odin-backend.md
+    port=ports/musl/port.ndb
+    reviewed.by=pending
+
+name=compiler-rt
+    version=22.1.8
+    upstream=https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/llvm-project-22.1.8.src.tar.xz
+    sha256=922f1817a0df7b1489272d18134ee0087a8b068828f87ac63b9861b1a9965888
+    subset="compiler-rt/LICENSE.TXT compiler-rt/lib/builtins"
+    tree.sha256=b1951f11a77bc0edb2af0298b52b2fc696154092b9ec229ff58406312dc417ce
+    signed.by=FFB3368980F3E6BB5737145A316C56D064CACBA5
+    license="Apache-2.0 WITH LLVM-exception"
+    adr=docs/adr/0008-compiler-rt.md
+    port=ports/compiler-rt/port.ndb
+    reviewed.by=pending
+
+name=lua
+    version=5.5.1
+    upstream=https://www.lua.org/ftp/lua-5.5.1.tar.gz
+    sha256=1c4b4068d67061f2a2231ad2b5422e77acea1487ea9890f6320af614f4373dce
+    tree.sha256=eb6d632ef7f91b95390ed3b45d290e4befa5b7d700096b35465c14e8d77957b0
+    license=MIT
+    adr=docs/adr/0009-lua.md
+    port=ports/lua/port.ndb
+    reviewed.by=pending
+
+name=sbase
+    version="git c546c3a"
+    upstream=https://git.suckless.org/sbase/commit/?id=c546c3a5724c81cee9a11d816a38ccdf17472129
+    git.tree=a58d176568a1b33d435a7628740b68289ea5c07a
+    tree.sha256=ceb8836feaf735e1bccece63f8edec0e86f5088aa7c0eaae73a5035aeabffecb
+    license="MIT (LICENSE); libutf and some files under their own permissive notices, as LICENSE lists"
+    adr=docs/adr/0010-sbase.md
+    port=ports/sbase/port.ndb
     reviewed.by=pending

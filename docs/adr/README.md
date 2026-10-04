@@ -9,3 +9,6 @@
 | [0005](0005-limine.md) | Limine | proposed |
 | [0006](0006-u9fs.md) | u9fs, vendored as a host test tool | proposed (import review pending) |
 | [0007](0007-musl-odin-backend.md) | musl, vendored unchanged, with a back end in Odin | proposed (import review pending) |
+| [0008](0008-compiler-rt.md) | compiler-rt's builtins, vendored from LLVM 22.1.8 | proposed (import review pending) |
+| [0009](0009-lua.md) | Lua 5.5.1, vendored unchanged, as `/bin/lua` | proposed (import review pending) |
+| [0010](0010-sbase.md) | sbase, vendored unchanged, as the POSIX userland's commands | proposed (import review pending) |

@@ -1,0 +1,26 @@
+# ports/compiler-rt/port.ndb: how tools/build builds compiler-rt's builtins into
+# libclang_rt.builtins.a (ADR-0008).
+#
+# The sources are upstream's own lists: build reads each set(NAME ...) named
+# in cmake.lists= from the vendored CMakeLists.txt, so a new release's files
+# come with it. extra= are the files CMakeLists.txt adds under conditions that
+# hold for a hosted ELF target that is neither Apple nor Fuchsia, minus those
+# ADR-0008 leaves out. An architecture's file replaces the generic one of the
+# same name (CMake's filter_builtin_sources).
+#
+# The flags are BUILTIN_CFLAGS and BUILTIN_DEFS for such a target, with the
+# C standard CMake sets (C11), at -O2. One deviation, as for musl: frame
+# pointers are kept (-fno-omit-frame-pointer for -fomit-frame-pointer). build
+# adds the target and musl's headers.
+
+port=compiler-rt src=third_party/compiler-rt/lib/builtins
+    cflags="-std=c11 -O2 -fno-builtin -fvisibility=hidden -DVISIBILITY_HIDDEN -DCOMPILER_RT_HAS_FLOAT16 -fno-omit-frame-pointer -w"
+    cmake.lists="GENERIC_SOURCES GENERIC_TF_SOURCES"
+    extra="atomic.c clear_cache.c"
+
+target=x86_64 arch=x86_64
+    cmake.lists=x86_80_BIT_SOURCES
+    extra="cpu_model/x86.c i386/fp_mode.c x86_64/floatdidf.c x86_64/floatdisf.c x86_64/floatundidf.S x86_64/floatundisf.S x86_64/floatdixf.c x86_64/floatundixf.S"
+
+target=aarch64 arch=aarch64
+    extra="cpu_model/aarch64.c aarch64/fp_mode.c"

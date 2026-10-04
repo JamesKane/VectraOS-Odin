@@ -1,0 +1,41 @@
+# ports/musl/port.ndb: how tools/build builds musl into the vectra-musl
+# sysroot's libc.a (ADR-0007).
+#
+# The flags are the ones musl 1.2.6's configure chose for the pinned clang
+# (ADR-0001), as upstream VectraOS captured them when it vendored musl: run
+# configure --target=ARCH --disable-shared --prefix=/ with
+# CC="clang --target=ARCH-unknown-linux-musl", and take config.mak's
+# CFLAGS_C99FSE and CFLAGS_AUTO and the Makefile's -D_XOPEN_SOURCE=700. One
+# deviation: frame pointers are kept (-fno-omit-frame-pointer, not
+# -fomit-frame-pointer), so a debugger unwinds through libc. Capture them
+# again whenever musl or the toolchain changes, and compare.
+#
+# The include path is the Makefile's CFLAGS_ALL with ports/musl/vx/arch/generic
+# first, whose syscall_arch.h sends every system call to the back end; build
+# adds it, and the target, itself.
+#
+# The source set is the Makefile's: every .c directly in each directory under
+# src/, and in src/malloc/mallocng, each directory's ARCH/*.c, *.s and *.S
+# replacing the generic file of the same name. Not crt/crt1.c (the back end
+# has its own crt1; crti and crtn are built from crt/ARCH) and not ldso/
+# (static only). exclude= lists the architecture files that make system calls
+# in assembly themselves, so that the generic C file of the same name is built
+# instead and its system calls reach the back end: clone, syscall_cp (the back
+# end supplies __syscall_cp_asm), __unmapself, x86_64's __set_thread_area,
+# vfork, and the signal restorers. Every path listed must be in the set.
+# nossp= are the files the Makefile builds with -fno-stack-protector
+# (NOSSP_OBJS), by name.
+#
+# backend.exports= are the only global symbols the back end's object may
+# define (ADR-0007); build makes every other one local.
+
+port=musl src=third_party/musl
+    cflags="-std=c99 -nostdinc -ffreestanding -fexcess-precision=standard -frounding-math -fno-strict-aliasing -Wa,--noexecstack -D_XOPEN_SOURCE=700 -O2 -fno-align-functions -pipe -fno-omit-frame-pointer -fno-unwind-tables -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections -w -Wno-pointer-to-int-cast -Werror=implicit-function-declaration -Werror=implicit-int -Werror=pointer-sign -Werror=pointer-arith -Werror=int-conversion -Werror=incompatible-pointer-types -Qunused-arguments -Waddress -Warray-bounds -Wchar-subscripts -Wduplicate-decl-specifier -Winit-self -Wreturn-type -Wsequence-point -Wstrict-aliasing -Wunused-function -Wunused-label -Wunused-variable"
+    nossp="__libc_start_main __init_tls __stack_chk_fail __set_thread_area memset memcpy"
+    backend.exports="__vx_syscall __vx_start __syscall_cp_asm __cp_begin __cp_end"
+
+target=x86_64 arch=x86_64
+    exclude="src/thread/x86_64/clone.s src/thread/x86_64/syscall_cp.s src/thread/x86_64/__unmapself.s src/thread/x86_64/__set_thread_area.s src/process/x86_64/vfork.s src/signal/x86_64/restore.s"
+
+target=aarch64 arch=aarch64
+    exclude="src/thread/aarch64/clone.s src/thread/aarch64/syscall_cp.s src/thread/aarch64/__unmapself.s src/process/aarch64/vfork.s src/signal/aarch64/restore.s"
