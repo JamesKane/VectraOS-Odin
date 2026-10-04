@@ -12,3 +12,4 @@
 | [0008](0008-compiler-rt.md) | compiler-rt's builtins, vendored from LLVM 22.1.8 | accepted |
 | [0009](0009-lua.md) | Lua 5.5.1, vendored unchanged, as `/bin/lua` | accepted |
 | [0010](0010-sbase.md) | sbase, vendored unchanged, as the POSIX userland's commands | accepted |
+| [0012](0012-acpica.md) | ACPICA 20260930, its core vendored unchanged, with an OS layer in Odin, for `bus-acpi` | proposed |
