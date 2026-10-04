@@ -80,3 +80,14 @@ name=monocypher
     adr=docs/adr/0011-monocypher.md
     port=ports/monocypher/port.ndb
     reviewed.by=pending
+
+name=acpica
+    version=20260930
+    upstream=https://github.com/open-acpica/acpica/releases/download/20260930/acpica-unix-20260930.tar.gz
+    sha256=aa18901b92e30749be0edc3081c8d550c61fce4fa37546fc6a65d367a4ae71a5
+    subset="LICENSE.BSD-3-Clause LICENSE.GPL-2.0-only source/include source/components/dispatcher source/components/events source/components/executer source/components/hardware source/components/namespace source/components/parser source/components/resources source/components/tables source/components/utilities"
+    tree.sha256=a100b5615a1a5d0721f36f027c18af752d5f634268f1ba17d742bb0d892d63f3
+    license="BSD-3-Clause or GPL-2.0-only (taken as BSD-3-Clause)"
+    adr=docs/adr/0012-acpica.md
+    port=ports/acpica/port.ndb
+    reviewed.by=pending
