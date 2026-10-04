@@ -665,6 +665,10 @@ box_main :: proc(p: ^Port, box: string) -> string {
 C_PROGRAMS := []Program {
 	{name = "ctest", source = "tests/posix/ctest.c", place = .Tests, kind = .C},
 	{name = "sbasetest", source = "tests/posix/sbasetest.c", place = .Tests, kind = .C},
+	// dbg's fixture, as upstream builds it but against musl: its own
+	// functions are optnone, and the house flags give -g and frame pointers.
+	// Its lib/vx-rt/rt.c is this tree's stand-in for upstream's runtime.
+	{name = "dbgdemo", source = "tests/user/dbgdemo.c", place = .Tests, kind = .C},
 }
 
 // Everything POSIX for one architecture and mode: the sysroot, the C test
