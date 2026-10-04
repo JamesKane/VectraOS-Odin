@@ -43,18 +43,13 @@ end :: proc "contextless" (h: ^Hasher) -> (digest: [DIGEST_SIZE]u8) {
 	for h.used != 56 {
 		add(h, pad[:])
 	}
-	length: [8]u8
-	for i in 0 ..< 8 {
-		length[i] = u8(bits >> (56 - 8 * uint(i)))
-	}
+	length := transmute([8]u8)u64be(bits)
 	add(h, length[:])
+	words: [8]u32be
 	for s, i in h.state {
-		digest[4 * i] = u8(s >> 24)
-		digest[4 * i + 1] = u8(s >> 16)
-		digest[4 * i + 2] = u8(s >> 8)
-		digest[4 * i + 3] = u8(s)
+		words[i] = u32be(s)
 	}
-	return
+	return transmute([DIGEST_SIZE]u8)words
 }
 
 @(private="file", rodata)
@@ -77,8 +72,8 @@ ror :: #force_inline proc "contextless" (x: u32, n: uint) -> u32 {
 @(private="file")
 compress :: proc "contextless" (h: ^Hasher, p: ^[64]u8) {
 	w: [64]u32
-	for i in 0 ..< 16 {
-		w[i] = u32(p[4 * i]) << 24 | u32(p[4 * i + 1]) << 16 | u32(p[4 * i + 2]) << 8 | u32(p[4 * i + 3])
+	for word, i in transmute([16]u32be)p^ {
+		w[i] = u32(word)
 	}
 	for i in 16 ..< 64 {
 		s0 := ror(w[i - 15], 7) ~ ror(w[i - 15], 18) ~ (w[i - 15] >> 3)
@@ -99,12 +94,5 @@ compress :: proc "contextless" (h: ^Hasher, p: ^[64]u8) {
 		b = a
 		a = t1 + t2
 	}
-	h.state[0] += a
-	h.state[1] += b
-	h.state[2] += c
-	h.state[3] += d
-	h.state[4] += e
-	h.state[5] += f
-	h.state[6] += g
-	h.state[7] += k
+	h.state += {a, b, c, d, e, f, g, k}
 }
