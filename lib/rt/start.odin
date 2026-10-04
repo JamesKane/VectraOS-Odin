@@ -39,6 +39,7 @@ Spawn :: struct {
 	args:         [dynamic; SPAWN_MAX_ARGS]string, // in order
 	argv0:        string, // argv0=, the POSIX argv[0] (has_argv0), rather than spawn=
 	has_argv0:    bool,
+	user:         string, // user=: who the program runs as, which its attaches name (upstream's docs/11 §9)
 	envs:         [dynamic; SPAWN_MAX_ARGS]string, // env=, each NAME=VALUE, in order
 	text:       string, // the records, for what the runtime does not read itself (mount=, bind=)
 	handles:      [vx.CHANNEL_MAX_HANDLES]vx.Handle,
@@ -154,6 +155,8 @@ read_spawn :: proc "contextless" (bootstrap: vx.Handle) {
 		case ndb.has(&rec, "argv0"):
 			spawn.argv0, _ = ndb.get(&rec, "argv0")
 			spawn.has_argv0 = true
+		case ndb.has(&rec, "user"):
+			spawn.user, _ = ndb.get(&rec, "user")
 		case ndb.has(&rec, "env"):
 			env, _ := ndb.get(&rec, "env")
 			ok = append(&spawn.envs, env) == 1

@@ -39,6 +39,16 @@ Type :: enum u8 {
 	Rseek     = 155,
 	Tdesc     = 156,
 	Rdesc     = 157,
+	// 9Px's map extension: a file's range as a VMO, which comes back in one
+	// of the transport's handle slots.
+	Tmap      = 158,
+	Rmap      = 159,
+	// 9Px's dref extension: a read or write whose data is in a VMO of the
+	// client's, which comes in one of the transport's handle slots.
+	Treadref  = 160,
+	Rreadref  = 161,
+	Twriteref = 162,
+	Rwriteref = 163,
 	Tversion = 100,
 	Rversion = 101,
 	Tauth    = 102,
@@ -109,6 +119,10 @@ Field :: enum u8 {
 	Token, // 16 bytes
 	Whence, // Tseek's: set 0, current 1, end 2
 	Descflags, // Tdesc's: append 1
+	// 9Px's map extension.
+	Prot, // Tmap's: read 1, write 2, exec 4
+	// 9Px's dref extension.
+	Roffset, // where in the request's VMO the data is, or goes
 }
 
 // How a field is laid out on the wire.
@@ -172,6 +186,8 @@ FIELDS := [Field]Field_Info {
 	.Token     = {.Token, "token"},
 	.Whence    = {.U8, "whence"},
 	.Descflags = {.U32, "desc_flags"},
+	.Prot      = {.U32, "prot"},
+	.Roffset   = {.U64, "roffset"},
 }
 
 // A message type's name and its fields in wire order. An entry with no name
@@ -237,6 +253,12 @@ MESSAGES := [256]Message {
 	155 = {"Rseek", {.Offset}},
 	156 = {"Tdesc", {.Fid, .Descflags}},
 	157 = {"Rdesc", {}},
+	158 = {"Tmap", {.Fid, .Offset, .Length, .Prot}},
+	159 = {"Rmap", {.Offset, .Length}}, // where in the VMO the range starts, and how much is there
+	160 = {"Treadref", {.Fid, .Offset, .Count, .Roffset}},
+	161 = {"Rreadref", {.Count}},
+	162 = {"Twriteref", {.Fid, .Offset, .Count, .Roffset}},
+	163 = {"Rwriteref", {.Count}},
 }
 
 // Whether t is a message 9P2000, or 9P2000.L's or 9Px's extensions, have.

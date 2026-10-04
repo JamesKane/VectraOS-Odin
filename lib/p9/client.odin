@@ -11,6 +11,10 @@ import "abi:vx"
 // if the connection is gone.
 Rpc :: proc "contextless" (ctx: rawptr, req: []u8, resp: []u8) -> int
 
+// Who a client attaches as when it names no one: the program's user (its
+// spawn message's user=, which vx:ns sets here), or "none".
+client_user: string
+
 Client :: struct {
 	rpc:        Rpc,
 	ctx:        rawptr,
@@ -20,8 +24,14 @@ Client :: struct {
 	extensions: Extensions, // negotiated
 	next_tag:   u16,
 	next_fid:   Fid,
-	uname:      string, // who attaches; empty: "none"
+	uname:      string, // who attaches; empty: client_user, or "none"
 	reply:      Msg, // the last reply; its strings and data point into rbuf
+	// The handle the last reply carried (Rmap's VMO), set by the transport;
+	// the call that wants it takes it, and the transport closes one not taken.
+	handle:      vx.Handle,
+	// A handle for the next request to carry (dref's VMO), which the
+	// transport moves to the server, or closes if it cannot.
+	send_handle: vx.Handle,
 }
 
 @(private="file", require_results)
@@ -74,7 +84,11 @@ client_version :: proc "contextless" (c: ^Client, msize: u32, extensions: Extens
 
 @(require_results)
 client_attach :: proc "contextless" (c: ^Client, aname: string) -> (fid: Fid, e: vx.Status) {
-	t := Msg{type = .Tattach, fid = c.next_fid, afid = NOFID, uname = c.uname if len(c.uname) > 0 else "none", aname = aname}
+	uname := len(client_user) > 0 ? client_user : "none"
+	if len(c.uname) > 0 {
+		uname = c.uname
+	}
+	t := Msg{type = .Tattach, fid = c.next_fid, afid = NOFID, uname = uname, aname = aname}
 	c.next_fid += 1
 	e = call(c, &t)
 	return t.fid, e
@@ -343,4 +357,45 @@ client_getlock :: proc "contextless" (c: ^Client, fid: Fid, type: Lock_Type, sta
 	t := Msg{type = .Tgetlock, fid = fid, lock_type = type, start = start, length = length, proc_id = proc_id, client_id = ""}
 	call(c, &t) or_return
 	return {type = c.reply.lock_type, start = c.reply.start, length = c.reply.length, proc_id = c.reply.proc_id}, .Ok
+}
+
+// What Tmap answers: a VMO for the range, where in it the range starts, and
+// how many bytes it has from there (less than asked for past the file's end).
+Mapped :: struct {
+	vmo:        vx.Handle,
+	vmo_offset: u64,
+	avail:      u64,
+}
+
+// Tmap (upstream's docs/proto/map.md): a VMO for the file's [offset, offset
+// + length), the fid open as the mapping needs. The VMO is the caller's.
+@(require_results)
+client_map :: proc "contextless" (c: ^Client, fid: Fid, offset, length: u64, prot: Prot) -> (m: Mapped, e: vx.Status) {
+	if .Map not_in c.extensions {
+		return {}, .Err_Unsupported
+	}
+	t := Msg{type = .Tmap, fid = fid, offset = offset, length = length, prot = prot}
+	call(c, &t) or_return
+	if c.handle == vx.HANDLE_NONE {
+		return {}, .Err_Invalid // an Rmap without its VMO
+	}
+	m = {vmo = c.handle, vmo_offset = c.reply.offset, avail = c.reply.length}
+	c.handle = vx.HANDLE_NONE
+	return m, .Ok
+}
+
+// Treadref and Twriteref (upstream's docs/proto/dref.md): count bytes of the
+// file at offset copied into, or from, a VMO at roffset by the server, in one
+// message whatever the msize. The request carries send_handle, which the
+// caller sets to a duplicate of its VMO (lib/rt's p9_readref does), and which
+// the transport moves; one left over was never sent, and is the caller's to
+// close. Returns how many bytes moved.
+@(require_results)
+client_ref :: proc "contextless" (c: ^Client, type: Type, fid: Fid, offset, roffset: u64, count: u32) -> (done: u32, e: vx.Status) {
+	if .Dref not_in c.extensions || (type != .Treadref && type != .Twriteref) {
+		return 0, .Err_Unsupported
+	}
+	t := Msg{type = type, fid = fid, offset = offset, count = count, roffset = roffset}
+	call(c, &t) or_return
+	return c.reply.count, .Ok
 }
