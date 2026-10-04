@@ -13,7 +13,23 @@ import "vx:tar"
 // fixed order, no times or owners (lib/tar's writer).
 
 @(private="file")
-BOOTFS_DIRS := []string{"bin", "boot", "boot/bin", "boot/drv", "boot/svc", "dev", "lib", "lib/ns", "n", "net", "proc", "srv", "sys", "tmp"}
+BOOTFS_DIRS := []string{"bin", "boot", "boot/bin", "boot/bin/posix", "boot/share", "boot/share/misc", "boot/drv", "boot/svc", "boot/tests", "dev", "lib", "lib/ns", "n", "net", "proc", "srv", "sys", "tmp"}
+
+// Whether any program, of any kind, is called `name`.
+@(private="file")
+is_program :: proc(name: string) -> bool {
+	for p in PROGRAMS {
+		if p.name == name {
+			return true
+		}
+	}
+	for p in C_PROGRAMS {
+		if p.name == name {
+			return true
+		}
+	}
+	return false
+}
 
 // Whether `name` is in the comma-separated list `with`.
 listed :: proc(with, name: string) -> bool {
@@ -68,6 +84,25 @@ make_bootfs :: proc(a: ^Arch, mode: Mode, out: string, with := "") -> bool {
 		if p.place == .Tests && listed(with, p.name) {
 			data := read_file(fmt.tprintf("tests/user/%s.ndb", p.name)) or_return
 			append(&entries, Bootfs_Entry{fmt.tprintf("boot/svc/%s.ndb", p.name), data, 0o644})
+			if cmds := fmt.tprintf("tests/user/%s.cmds", p.name); os.exists(cmds) { // a dbg script
+				append(&entries, Bootfs_Entry{fmt.tprintf("boot/tests/%s.cmds", p.name), read_file(cmds) or_return, 0o644})
+			}
+		}
+	}
+	// A `with` name that is no program is a script test: its manifest runs a
+	// program the image has (lua, gsh) on tests/user/NAME.lua or NAME.rc, at
+	// /boot/tests.
+	rest := with
+	for name in strings.split_iterator(&rest, ",") {
+		if is_program(name) {
+			continue
+		}
+		manifest := read_file(fmt.tprintf("tests/user/%s.ndb", name)) or_return
+		append(&entries, Bootfs_Entry{fmt.tprintf("boot/svc/%s.ndb", name), manifest, 0o644})
+		for ext in ([]string{"lua", "rc"}) {
+			if script := fmt.tprintf("tests/user/%s.%s", name, ext); os.exists(script) {
+				append(&entries, Bootfs_Entry{fmt.tprintf("boot/tests/%s.%s", name, ext), read_file(script) or_return, 0o644})
+			}
 		}
 	}
 	total := (len(BOOTFS_DIRS) + 2) * 512
