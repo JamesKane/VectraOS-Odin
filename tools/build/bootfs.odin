@@ -19,7 +19,7 @@ make_bootfs :: proc(a: ^Arch, mode: Mode, out: string) -> bool {
 	files := make([dynamic]string, context.temp_allocator)
 	// Programs, then the system's manifests: svcd starts services in this order.
 	for p in PROGRAMS {
-		if p.place == .Bootfs {
+		if p.place == .Bootfs && program_for(p, a) {
 			append(&paths, fmt.tprintf("boot/bin/%s", p.name))
 			append(&files, read_file(program_path(a, mode, p.name)) or_return)
 		}

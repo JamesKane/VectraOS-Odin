@@ -108,3 +108,9 @@ console_read :: proc "contextless" (buf: []u8) -> (int, vx.Status) {
 	}
 	return n, st
 }
+
+// The console's connector, which a shell hands its commands a duplicate of;
+// HANDLE_NONE without a console.
+console_connector :: proc "contextless" () -> vx.Handle {
+	return console.connector
+}

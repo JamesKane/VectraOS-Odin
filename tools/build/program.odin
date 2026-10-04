@@ -18,11 +18,21 @@ Program :: struct {
 	name:  string,
 	dir:   string,
 	place: Program_Place,
+	arch:  string, // built for this architecture only; "" for both
 }
 
 PROGRAMS := []Program {
 	{name = "svcd", dir = "servers/svcd", place = .Module},
 	{name = "ktest", dir = "tests/kernel/ktest", place = .Module},
+	{name = "drv-uart-16550", dir = "drivers/drv-uart-16550", place = .Bootfs, arch = "x86_64"},
+	{name = "drv-uart-pl011", dir = "drivers/drv-uart-pl011", place = .Bootfs, arch = "aarch64"},
+	{name = "gsh", dir = "cmd/gsh", place = .Bootfs},
+	{name = "ls", dir = "cmd/ls", place = .Bootfs},
+	{name = "cat", dir = "cmd/cat", place = .Bootfs},
+	{name = "echo", dir = "cmd/echo", place = .Bootfs},
+	{name = "ps", dir = "cmd/ps", place = .Bootfs},
+	{name = "ns", dir = "cmd/ns", place = .Bootfs},
+	{name = "tail", dir = "cmd/tail", place = .Bootfs},
 }
 
 USER_ODIN_FLAGS := []string {
@@ -95,8 +105,15 @@ build_program :: proc(a: ^Arch, mode: Mode, p: Program) -> (elf: string, ok: boo
 	return elf, true
 }
 
+program_for :: proc(p: Program, a: ^Arch) -> bool {
+	return p.arch == "" || p.arch == a.name
+}
+
 build_programs :: proc(a: ^Arch, mode: Mode) -> bool {
 	for p in PROGRAMS {
+		if !program_for(p, a) {
+			continue
+		}
 		build_program(a, mode, p) or_return
 	}
 	return true

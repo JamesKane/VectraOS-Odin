@@ -1,0 +1,12 @@
+# boot/svc/cons.ndb: the console, a user-space UART driver that posts
+# /srv/cons (docs/01 §7, 04 §5 M2). One service for each architecture; svcd
+# starts the one for its own. Its device objects are minted from the root
+# Resource: the port's I/O range or the UART's registers, and its IRQ.
+
+service=uart program=/boot/bin/drv-uart-16550 arch=x86_64 post=cons restart
+ioport=0x3f8 count=8
+irq=4
+
+service=uart program=/boot/bin/drv-uart-pl011 arch=aarch64 post=cons restart
+mmio=0x9000000 size=4096
+irq=33
