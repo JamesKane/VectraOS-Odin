@@ -135,6 +135,7 @@ vx_main :: proc() -> int {
 	cons = {tx_room = tx_room, tx_byte = tx_byte, tx_wanted = tx_wanted}
 	driver.cons_print_here(&cons)
 	server.fs = driver.cons_fs(&cons)
+	driver.cons_conns_for(&server) // a connection for every program with console output
 	server.event = event
 	pst: vx.Status
 	server.port, pst = rt.port_create()
