@@ -1,0 +1,5 @@
+# boot/svc/bootfs.ndb: the boot image as a read-only file tree (docs/04 §5,
+# M2), posted as /srv/bootfs. svcd's manifest format is described in
+# servers/svcd/svcd.c.
+
+service=bootfs program=/boot/bin/bootfs post=bootfs bootimage console restart

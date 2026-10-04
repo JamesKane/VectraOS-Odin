@@ -23,12 +23,13 @@ Program :: struct {
 }
 
 PROGRAMS := []Program {
+	// In upstream's order, which bootfs.tar keeps: ls /boot/bin shows it.
 	{name = "svcd", dir = "servers/svcd", place = .Module},
 	{name = "ktest", dir = "tests/kernel/ktest", place = .Module},
-	{name = "drv-uart-16550", dir = "drivers/drv-uart-16550", place = .Bootfs, arch = "x86_64"},
-	{name = "drv-uart-pl011", dir = "drivers/drv-uart-pl011", place = .Bootfs, arch = "aarch64"},
+	{name = "bootfs", dir = "servers/bootfs", place = .Bootfs},
 	{name = "nstest", dir = "tests/user/nstest", place = .Tests},
 	{name = "constest", dir = "tests/user/constest", place = .Tests},
+	{name = "procfs", dir = "servers/procfs", place = .Bootfs},
 	{name = "gsh", dir = "cmd/gsh", place = .Bootfs},
 	{name = "ls", dir = "cmd/ls", place = .Bootfs},
 	{name = "cat", dir = "cmd/cat", place = .Bootfs},
@@ -36,6 +37,8 @@ PROGRAMS := []Program {
 	{name = "ps", dir = "cmd/ps", place = .Bootfs},
 	{name = "ns", dir = "cmd/ns", place = .Bootfs},
 	{name = "tail", dir = "cmd/tail", place = .Bootfs},
+	{name = "drv-uart-16550", dir = "drivers/drv-uart-16550", place = .Bootfs, arch = "x86_64"},
+	{name = "drv-uart-pl011", dir = "drivers/drv-uart-pl011", place = .Bootfs, arch = "aarch64"},
 }
 
 USER_ODIN_FLAGS := []string {
