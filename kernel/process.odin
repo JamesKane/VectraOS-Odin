@@ -19,6 +19,7 @@ import vx "abi:vx"
 // one exits the next time it heads back to user mode (user_return).
 
 EXIT_FAULT :: i64(-1) // the status of a task killed by a fault
+EXIT_NO_MEMORY :: i64(-2) // a fork the kernel could not finish
 
 @(require_results)
 task_bind :: proc "contextless" (t: ^Task, b: ^Binding) -> vx.Status {

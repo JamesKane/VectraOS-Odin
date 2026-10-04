@@ -39,6 +39,14 @@ task_create :: proc "contextless" (name: string) -> (vx.Handle, vx.Status) {
 	return h, st
 }
 
+// A copy of the caller, with no threads yet (task_create's .Fork).
+@(require_results)
+task_fork :: proc "contextless" (name: string) -> (vx.Handle, vx.Status) {
+	h: vx.Handle
+	st := status(vx_syscall(.Task_Create, addr(raw_data(name)), u64(len(name)), addr(&h), u64(transmute(u32)vx.Task_Options{.Fork})))
+	return h, st
+}
+
 @(require_results)
 task_kill :: proc "contextless" (task: vx.Handle, exit_status: i64, id: u64 = 0) -> vx.Status {
 	return status(vx_syscall(.Task_Kill, u64(task), u64(exit_status), id))

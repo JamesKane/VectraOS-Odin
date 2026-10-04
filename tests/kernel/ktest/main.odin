@@ -1413,6 +1413,84 @@ test_debugger :: proc "contextless" () {
 	rt.close_all(child, port)
 }
 
+// --- fork ---
+
+fork_page: [512]u64
+fork_ring: u64 // where a ring's memory is mapped, in the parent
+
+FORK_OK :: 100 // fork_child's exit status when all is well; more says what was not
+
+// The forked child's first thread. Its exit status says what it found:
+// FORK_OK if all is well, more by the bits of what was not.
+fork_child :: proc "c" (unused: vx.Handle, my_id: u64) -> ! {
+	wrong: i64
+	if intrinsics.volatile_load(&fork_page[7]) != 0x1234 {
+		wrong |= 1 // memory as it was at the fork
+	}
+	intrinsics.volatile_store(&fork_page[7], 0x9999) // and its own: the parent never sees this
+	me, st := rt.task_info(rt.self)
+	if st != .Ok || me.id != my_id {
+		wrong |= 2 // "self" is itself
+	}
+	if fork_ring != 0 {
+		_ = intrinsics.volatile_load(cast(^u64)uintptr(fork_ring)) // not there: a fault ends it
+	}
+	_ = rt.task_kill(rt.self, FORK_OK + wrong)
+	rt.thread_exit(0)
+}
+
+run_fork :: proc "contextless" (sp: u64, port: vx.Handle) -> i64 {
+	child, st := rt.task_fork("forked")
+	if st != .Ok {
+		return min(i64)
+	}
+	defer rt.close_all(child)
+	intrinsics.volatile_store(&fork_page[7], 0x5555) // after the fork: not the child's
+	info, ist := rt.task_info(child)
+	th, tst := rt.thread_create(child)
+	if ist != .Ok || tst != .Ok {
+		return min(i64)
+	}
+	defer rt.close_all(th)
+	if rt.thread_start(th, u64(uintptr(rawptr(fork_child))), sp, 0, info.id) != .Ok {
+		return min(i64)
+	}
+	return wait_exit(port, child)
+}
+
+test_fork :: proc "contextless" () {
+	port, _ := rt.port_create()
+	sp := new_stack() // mapped before the fork, so the child has it too
+	check(sp != 0)
+	intrinsics.volatile_store(&fork_page[7], 0x1234)
+	check(run_fork(sp, port) == FORK_OK)
+	check(intrinsics.volatile_load(&fork_page[7]) == 0x5555) // the child's write stayed in the child
+
+	// A ring's memory is not copied: the child faults where the parent has it.
+	params := vx.Ring_Params {
+		sq_entries   = 16,
+		cq_entries   = 16,
+		sqe_size     = 64,
+		cqe_size     = 32,
+		client_arena = 4096,
+		server_arena = 4096,
+	}
+	layout, _ := ring.layout(params)
+	h, st := rt.ring_create(&params)
+	check(st == .Ok)
+	fork_ring, st = rt.as_map(rt.self, h.memory, 0, layout.size, {.Write})
+	check(st == .Ok)
+	intrinsics.volatile_store(&fork_page[7], 0x1234)
+	check(intrinsics.volatile_load(cast(^u64)uintptr(fork_ring)) != 0x5a5a) // the parent reads it
+	check(run_fork(sp, port) == EXIT_FAULT) // the child is killed by the fault
+	check(rt.as_unmap(rt.self, fork_ring, layout.size) == .Ok)
+	fork_ring = 0
+	rt.close_all(h.memory, h.client, h.server)
+	none := vx.HANDLE_NONE
+	check(rt.vx_syscall(.Task_Create, u64(uintptr(raw_data(string("x")))), 1, u64(uintptr(&none)), 2) == i64(vx.Status.Err_Invalid))
+	_ = rt.handle_close(port)
+}
+
 // --- The thread pointer (a C library's TLS) ---
 
 tls_shared: Shared
@@ -1562,6 +1640,7 @@ vx_main :: proc() -> int {
 	test_vmo_clone()
 	test_debugger()
 	test_tls()
+	test_fork()
 	test_fp()
 	test_nested_channels()
 	test_rings()

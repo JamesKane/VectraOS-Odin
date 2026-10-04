@@ -17,6 +17,7 @@ Vmo :: struct {
 	pages:      []Paddr, // each page, in a block of its own through the direct map
 	list_order: uint, // the page list's allocation order
 	physical:   bool, // device memory: its pages are not RAM, and are never freed
+	ring:       bool, // a ring's memory (ring.odin), never copied into a forked task
 }
 
 #assert(offset_of(Vmo, obj) == 0) // objects are cast from ^Object

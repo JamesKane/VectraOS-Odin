@@ -534,6 +534,53 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 	return at, .Ok
 }
 
+// task_create's .Fork: the new task gets a copy of the parent's memory and
+// its handle table, and nothing else; the caller starts a thread in it.
+//   - Each mapping is a copy, made now, of what the parent sees there, at
+//     the same address with the same permissions. A ring's memory is not
+//     copied (a copied ring is broken, a shared one would have two
+//     producers), nor is device memory: the child finds those addresses
+//     unmapped, and its library connects again.
+//   - Each handle keeps its value and rights, so what the parent's memory
+//     says about its handles (its file descriptors) holds in the child. A
+//     handle to the parent itself becomes one to the child.
+//   - The in-task fault handler is the parent's (signal handlers are
+//     inherited); exception ports, a debugger and I/O ports are not.
+@(require_results)
+task_fork_copy :: proc "contextless" (parent, child: ^Task) -> vx.Status {
+	spin_guard(&parent.lock)
+	if parent.root == 0 || parent.ending {
+		return .Err_Bad_State
+	}
+	for m in parent.maps {
+		if m.size == 0 || m.vmo.physical || m.vmo.ring {
+			continue
+		}
+		dup := vmo_create(m.size) or_return
+		for &pa, i in dup.pages {
+			copy(page_bytes(pa), page_bytes(m.vmo.pages[m.offset / PAGE_SIZE + u64(i)]))
+		}
+		_, st := task_map(child, dup, 0, m.size, m.flags, m.va)
+		object_release(&dup.obj) // the child's mapping holds it, if it was made
+		if st != .Ok {
+			return st
+		}
+	}
+	for e, i in parent.handles {
+		e := e
+		if e.obj == &parent.obj {
+			e.obj = &child.obj
+		}
+		if e.obj != nil {
+			object_ref(e.obj)
+		}
+		child.handles[i] = e // free slots too: their generations go on from the parent's
+	}
+	child.map_next = parent.map_next
+	child.exc_handler = parent.exc_handler
+	return .Ok
+}
+
 // Unmaps [va, va + size): whole mappings, or the parts of them in the range;
 // a mapping cut in the middle becomes two, so that needs a free slot. The
 // page entries are cleared under the lock, the translations shot down after

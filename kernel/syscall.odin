@@ -729,14 +729,25 @@ sys_ring_xfer :: proc "contextless" (h: vx.Handle, op: u64, handles: Uva, count,
 // --- Tasks and threads ---
 
 @(private="file", require_results)
-sys_task_create :: proc "contextless" (name_ptr: Uva, name_len: u64, out: Uva) -> vx.Status {
+sys_task_create :: proc "contextless" (name_ptr: Uva, name_len: u64, out: Uva, options: u64) -> vx.Status {
 	name: [24]u8
 	if name_len >= len(name) {
 		return .Err_Range
 	}
+	opts, valid := options_of(vx.Task_Options, options)
+	if !valid {
+		return .Err_Invalid
+	}
 	copy_in_slice(name[:name_len], name_ptr) or_return
 	t := task_create(string(name[:name_len]), current_task().id) or_return
 	t.may_debug_write = current_task().may_debug_write
+	if .Fork in opts {
+		if st := task_fork_copy(current_task(), t); st != .Ok {
+			task_kill(t, EXIT_NO_MEMORY) // never started: torn down with its last reference
+			object_release(&t.obj)
+			return st
+		}
+	}
 	return return_handle(&t.obj, vx.ALL_RIGHTS, out)
 }
 
@@ -867,7 +878,7 @@ syscall_dispatch :: proc "contextless" (nr: u64, a: [6]u64) -> i64 {
 	case .Clock_Read:
 		return i64(clock_now())
 	case .Task_Create:
-		return i64(sys_task_create(Uva(a[0]), a[1], Uva(a[2])))
+		return i64(sys_task_create(Uva(a[0]), a[1], Uva(a[2]), a[3]))
 	case .Task_Kill:
 		return i64(sys_task_kill(vx.Handle(a[0]), a[1], a[2]))
 	case .Task_Info:

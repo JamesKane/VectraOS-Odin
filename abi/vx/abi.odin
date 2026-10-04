@@ -277,6 +277,16 @@ Task_Summary :: struct { // what task_info returns
 // its descendants. With .Next, task_info finds the one with the next id
 // after `id` instead, so a holder of a task handle can list its tree
 // (procfs). There is no other way to reach a task: no global lookup.
+// task_create(name, len, &task, options): a new task, with nothing in it.
+// With .Fork, it has a copy of the caller's memory, made now, and of its
+// handle table: the same values and rights, a handle to the caller becoming
+// one to the new task. Rings' memory and device memory are not copied, and
+// the copy has no threads: the caller starts one.
+Task_Option :: enum u32 {
+	Fork,
+}
+Task_Options :: bit_set[Task_Option; u32]
+
 Task_Info_Option :: enum u32 {
 	Next,
 }
