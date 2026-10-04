@@ -26,6 +26,7 @@
 // console. tests/host/dbg drives `session` against a recorded procfs.
 package dbg
 
+import "base:intrinsics"
 import vx "abi:vx"
 import "vx:debug"
 import "vx:memory"
@@ -481,8 +482,9 @@ MAX_TASK_NAME :: len(vx.Task_Summary{}.name) - 1
 @(private="file")
 records: [8 * 1024]u8
 
+// The run command: the program launched, and its first event.
 @(private="file")
-run :: proc() {
+start_program :: proc() {
 	if state.live {
 		rt.print("dbg: already running\n")
 		return
@@ -523,7 +525,7 @@ run :: proc() {
 // stops at them from its first instruction.
 @(private="file")
 launch :: proc(base: string, handles: []vx.Handle, names: []string, recs: string) -> bool {
-	when #defined(rt.proc_register) {
+	when intrinsics.type_has_field(rt.Spawn_Args, "registered") {
 		a := rt.Spawn_Args {
 			name         = base[:utf.cut(base, MAX_TASK_NAME)],
 			image        = image[:image_size],
@@ -687,7 +689,7 @@ command :: proc(line_in: string) -> bool {
 		if len(state.crash_dir) > 0 || state.pid != 0 {
 			rt.print("dbg: not a program to launch\n")
 		} else {
-			run()
+			start_program()
 		}
 	case "cont", "continue":
 		if !state.live {
@@ -880,16 +882,19 @@ session :: proc(argv: []string) -> string {
 	return ""
 }
 
+// The program ends with run's exit string, as upstream's programs return
+// theirs: empty for success (ADR-0010).
 @(export, link_name="vx_main")
 vx_main :: proc() -> int {
+	rt.exits(run())
+}
+
+run :: proc() -> string {
 	if procns.from_spawn(&space) != .Ok {
-		rt.exits("no namespace")
+		return "no namespace"
 	}
 	if info, st := rt.task_info(rt.self); st == .Ok {
 		me = info.id
 	}
-	if exit := session(rt.args()); exit != "" {
-		rt.exits(exit)
-	}
-	return 0
+	return session(rt.args())
 }
