@@ -1,0 +1,443 @@
+op 1 -> 0
+mount /srv/bootfs /
+exists 1100111010000000001000001
+list / [bin boot dev readme]
+list /bin []
+list /dev []
+fids 1 members 1
+op 2 -> 0
+mount /srv/bootfs /
+bind /bin /bin
+bind -a /boot/bin /bin
+exists 1110111010000000001000001
+list / [bin boot dev readme]
+list /bin [ls cat]
+list /dev []
+fids 3 members 3
+op 3 -> 0
+mount /srv/bootfs /
+bind /bin /bin
+bind -a /boot/bin /bin
+bind /dev /dev
+mount -a /srv/cons /dev
+exists 1110111011000000001000001
+list / [bin boot dev readme]
+list /bin [ls cat]
+list /dev [cons null]
+fids 5 members 5
+op 4 -> 0
+mount /srv/bootfs /
+bind /bin /bin
+bind -a /boot/bin /bin
+bind /dev /dev
+mount -a /srv/cons /dev
+bind -b /boot /dev
+exists 1110111011110000001000001
+list / [bin boot dev readme]
+list /bin [ls cat]
+list /dev [bin cons null]
+fids 6 members 6
+op 5 -> -15
+mount /srv/bootfs /
+bind /bin /bin
+bind -a /boot/bin /bin
+bind /dev /dev
+mount -a /srv/cons /dev
+bind -b /boot /dev
+exists 1110111011110000001000001
+list / [bin boot dev readme]
+list /bin [ls cat]
+list /dev [bin cons null]
+fids 6 members 6
+op 6 -> -15
+mount /srv/bootfs /
+bind /bin /bin
+bind -a /boot/bin /bin
+bind /dev /dev
+mount -a /srv/cons /dev
+bind -b /boot /dev
+exists 1110111011110000001000001
+list / [bin boot dev readme]
+list /bin [ls cat]
+list /dev [bin cons null]
+fids 6 members 6
+op 7 -> 0
+mount /srv/bootfs /
+bind /bin /bin
+bind -a /boot/bin /bin
+bind /dev /dev
+mount -a /srv/cons /dev
+bind -b /boot /dev
+bind -ac /readme /bin
+exists 1110111011110000001000001
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev [bin cons null]
+fids 7 members 7
+op 8 -> 0
+mount /srv/bootfs /
+bind /bin /bin
+bind /dev /dev
+mount -a /srv/cons /dev
+bind -b /boot /dev
+bind -ac /readme /bin
+exists 1100111011110000001000001
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev [bin cons null]
+fids 6 members 6
+op 9 -> 0
+mount /srv/bootfs /
+bind /bin /bin
+bind -ac /readme /bin
+exists 1100111010000000001000001
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev []
+fids 3 members 3
+op 10 -> 0
+mount /srv/bootfs /
+bind /bin /bin
+bind -ac /readme /bin
+bind /boot /boot/bin/cat
+exists 1100111010000000001000001
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev []
+fids 4 members 4
+op 11 -> 0
+mount /srv/bootfs /
+bind /bin /bin
+bind -ac /readme /bin
+bind /boot /boot/bin/cat
+bind /boot/bin /boot/bin
+mount -b /srv/cons /boot/bin
+exists 1100111110000000001000001
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev []
+fids 6 members 6
+op 12 -> 0
+mount /srv/bootfs /
+bind /bin /bin
+bind -ac /readme /bin
+bind /boot /boot/bin/cat
+bind /boot/bin /boot/bin
+mount -b /srv/cons /boot/bin
+bind /bin /boot
+bind -ac /readme /boot
+exists 1100100010000000001000000
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev []
+fids 8 members 8
+op 13 -> -15
+mount /srv/bootfs /
+bind /bin /bin
+bind -ac /readme /bin
+bind /boot /boot/bin/cat
+bind /boot/bin /boot/bin
+mount -b /srv/cons /boot/bin
+bind /bin /boot
+bind -ac /readme /boot
+exists 1100100010000000001000000
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev []
+fids 8 members 8
+op 14 -> 0
+mount /srv/bootfs /
+bind /bin /bin
+bind -ac /readme /bin
+bind /boot /boot/bin/cat
+bind /boot/bin /boot/bin
+mount -b /srv/cons /boot/bin
+bind /bin /boot
+bind -ac /readme /boot
+mount /srv/cons /new
+exists 1100100010000000111000000
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev []
+fids 9 members 9
+op 15 -> -15
+mount /srv/bootfs /
+bind /bin /bin
+bind -ac /readme /bin
+bind /boot /boot/bin/cat
+bind /boot/bin /boot/bin
+mount -b /srv/cons /boot/bin
+bind /bin /boot
+bind -ac /readme /boot
+mount /srv/cons /new
+exists 1100100010000000111000000
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev []
+fids 9 members 9
+op 16 -> 0
+mount /srv/bootfs /
+bind /bin /bin
+bind -ac /readme /bin
+bind /boot /boot/bin/cat
+bind /boot/bin /boot/bin
+mount -b /srv/cons /boot/bin
+bind /bin /boot
+bind -ac /readme /boot
+exists 1100100010000000001000000
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev []
+fids 8 members 8
+op 17 -> 0
+mount /srv/bootfs /
+bind /bin /bin
+bind -ac /readme /bin
+bind /boot /boot/bin/cat
+bind /boot/bin /boot/bin
+mount -b /srv/cons /boot/bin
+bind /bin /boot
+bind -ac /readme /boot
+bind / /n
+exists 1100100010001000001011000
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev []
+fids 9 members 9
+op 18 -> -4
+mount /srv/bootfs /
+bind /bin /bin
+bind -ac /readme /bin
+bind /boot /boot/bin/cat
+bind /boot/bin /boot/bin
+mount -b /srv/cons /boot/bin
+bind /bin /boot
+bind -ac /readme /boot
+bind / /n
+exists 1100100010001000001011000
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev []
+fids 9 members 9
+op 19 -> -4
+mount /srv/bootfs /
+bind /bin /bin
+bind -ac /readme /bin
+bind /boot /boot/bin/cat
+bind /boot/bin /boot/bin
+mount -b /srv/cons /boot/bin
+bind /bin /boot
+bind -ac /readme /boot
+bind / /n
+exists 1100100010001000001011000
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev []
+fids 9 members 9
+op 20 -> 0
+mount /srv/bootfs /
+bind /bin /bin
+bind -ac /readme /bin
+bind /boot /boot/bin/cat
+bind /boot/bin /boot/bin
+mount -b /srv/cons /boot/bin
+bind /bin /boot
+bind -ac /readme /boot
+exists 1100100010000000001000000
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev []
+fids 8 members 8
+op 21 -> 0
+mount /srv/bootfs /
+bind /bin /bin
+bind -ac /readme /bin
+bind /boot /boot/bin/cat
+bind /boot/bin /boot/bin
+mount -b /srv/cons /boot/bin
+bind /bin /boot
+bind -ac /readme /boot
+mount /srv/bootfs /n
+exists 1100100010001000001011000
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev []
+fids 9 members 9
+op 22 -> -15
+mount /srv/bootfs /
+bind /bin /bin
+bind -ac /readme /bin
+bind /boot /boot/bin/cat
+bind /boot/bin /boot/bin
+mount -b /srv/cons /boot/bin
+bind /bin /boot
+bind -ac /readme /boot
+mount /srv/bootfs /n
+exists 1100100010001000001011000
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev []
+fids 9 members 9
+op 23 -> 0
+mount /srv/bootfs /
+bind /bin /bin
+bind -ac /readme /bin
+bind /boot /boot/bin/cat
+bind /boot/bin /boot/bin
+mount -b /srv/cons /boot/bin
+bind /bin /boot
+bind -ac /readme /boot
+exists 1100100010000000001000000
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev []
+fids 8 members 8
+op 24 -> 0
+mount /srv/bootfs /
+bind /bin /bin
+bind -ac /readme /bin
+bind /boot /boot/bin/cat
+bind /boot/bin /boot/bin
+mount -b /srv/cons /boot/bin
+bind /bin /boot
+bind -ac /readme /boot
+bind /dev /readme
+exists 1100100010000000001000000
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev []
+fids 9 members 9
+op 25 -> 0
+mount /srv/bootfs /
+bind /bin /bin
+bind -ac /readme /bin
+bind /boot /boot/bin/cat
+bind /boot/bin /boot/bin
+mount -b /srv/cons /boot/bin
+bind /bin /boot
+bind -ac /readme /boot
+bind /dev /readme
+mount /srv/cons /readme/cons
+exists 1100100011000000001100000
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev []
+fids 10 members 10
+op 26 -> 0
+mount /srv/bootfs /
+bind /bin /bin
+bind -ac /readme /bin
+bind /boot /boot/bin/cat
+bind /boot/bin /boot/bin
+mount -b /srv/cons /boot/bin
+bind /bin /boot
+bind -ac /readme /boot
+mount /srv/cons /readme/cons
+exists 1100100011000000001000000
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev []
+fids 9 members 9
+op 27 -> -15
+mount /srv/bootfs /
+bind /bin /bin
+bind -ac /readme /bin
+bind /boot /boot/bin/cat
+bind /boot/bin /boot/bin
+mount -b /srv/cons /boot/bin
+bind /bin /boot
+bind -ac /readme /boot
+mount /srv/cons /readme/cons
+exists 1100100011000000001000000
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev []
+fids 9 members 9
+op 28 -> -15
+mount /srv/bootfs /
+bind /bin /bin
+bind -ac /readme /bin
+bind /boot /boot/bin/cat
+bind /boot/bin /boot/bin
+mount -b /srv/cons /boot/bin
+bind /bin /boot
+bind -ac /readme /boot
+mount /srv/cons /readme/cons
+exists 1100100011000000001000000
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev []
+fids 9 members 9
+op 29 -> -15
+mount /srv/bootfs /
+bind /bin /bin
+bind -ac /readme /bin
+bind /boot /boot/bin/cat
+bind /boot/bin /boot/bin
+mount -b /srv/cons /boot/bin
+bind /bin /boot
+bind -ac /readme /boot
+mount /srv/cons /readme/cons
+exists 1100100011000000001000000
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev []
+fids 9 members 9
+op 30 -> 0
+mount /srv/bootfs /
+bind /bin /bin
+bind -ac /readme /bin
+bind /boot /boot/bin/cat
+bind /bin /boot
+bind -ac /readme /boot
+mount /srv/cons /readme/cons
+exists 1100100011000000001000000
+list / [bin boot dev readme]
+list /bin [(bad stat)]
+list /dev []
+fids 7 members 7
+op 31 -> 0
+mount /srv/bootfs /
+bind /boot /boot/bin/cat
+bind /bin /boot
+bind -ac /readme /boot
+mount /srv/cons /readme/cons
+exists 1100100011000000001000000
+list / [bin boot dev readme]
+list /bin []
+list /dev []
+fids 5 members 5
+op 32 -> 0
+bind /boot /boot/bin/cat
+bind /bin /boot
+bind -ac /readme /boot
+mount /srv/cons /readme/cons
+exists 0000000000000000000000000
+list / [(cannot open)]
+list /bin [(cannot open)]
+list /dev [(cannot open)]
+fids 4 members 4
+op 33 -> 0
+bind /boot /boot/bin/cat
+bind /bin /boot
+bind -ac /readme /boot
+mount /srv/cons /readme/cons
+mount /srv/cons /
+exists 1000000000000000000000110
+list / [cons null]
+list /bin [(cannot open)]
+list /dev [(cannot open)]
+fids 5 members 5
+op 34 -> 0
+bind /boot /boot/bin/cat
+bind /bin /boot
+bind -ac /readme /boot
+mount /srv/cons /readme/cons
+mount /srv/cons /
+bind /null /null
+bind -a /cons /null
+exists 1000000000000000000000110
+list / [cons null]
+list /bin [(cannot open)]
+list /dev [(cannot open)]
+fids 7 members 7

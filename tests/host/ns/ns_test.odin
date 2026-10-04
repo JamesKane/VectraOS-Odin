@@ -1,9 +1,10 @@
 // lib/ns against two in-memory 9P servers: lexical path cleaning, mount and
-// bind with each flag, union directories (walks and reads), longest-prefix
-// matching at component boundaries, unmount, ns output that replays in the
-// order members were made, connections let go, and creates. Ported from
-// upstream's tests/host/ns_test.c; dial_test.odin adds dialing, which
-// upstream does not host-test.
+// bind with each flag, union directories (walks, reads, creates), mount
+// points found by identity, unmount, ns output that replays in the order
+// members were made, connections let go, and namespace(6) files as newns
+// reads them. Ported from upstream's tests/host/ns_test.c; dial_test.odin
+// adds dialing, and group_test.odin namespace groups, which upstream does
+// not host-test.
 //
 //   boot server:  /bin/  /boot/bin/ls  /boot/bin/cat  /dev/  /readme
 //   dev server:   /cons  /null
@@ -203,6 +204,10 @@ test_clean :: proc(t: ^testing.T) {
 		{"relative", "", 8},
 		{"", "", 8},
 		{"/abcdefghij", "", 8}, // does not fit
+		{"/a\nb", "", 64}, // a control character (ADR-0013)
+		{"/\xc3/x", "", 64}, // not UTF-8
+		{"/caf\xc3\xa9/../x", "/x", 64},
+		{"/caf\xc3\xa9", "/caf\xc3\xa9", 64},
 	}
 	for c in cases {
 		out: [64]u8
