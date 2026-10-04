@@ -132,6 +132,9 @@ Spawn_Args :: struct {
 	handles:      []vx.Handle, // given to the child: they leave the caller, whatever happens
 	handle_names: []string, // at most CHANNEL_MAX_HANDLES - 1; "self" is added
 	records:      string, // more ndb records for the spawn message: arg=, mount=, bind=
+	// Who the child runs as (user=): this, or else the caller's own.
+	// Advisory until keyd (upstream's M10): a program can say it is anyone.
+	user:         string,
 	// If set, called once the task exists and its image is loaded, before
 	// its message is written or its thread started: it may give the child
 	// one more handle, named (a handle left HANDLE_NONE gives none).
@@ -252,6 +255,10 @@ spawn_elf :: proc "contextless" (a: ^Spawn_Args) -> (task: vx.Handle, st: vx.Sta
 	w := ndb.Writer{buf = spawn_out.records[:]}
 	ndb.put(&w, "spawn", a.name)
 	_ = ndb.end(&w)
+	if user := len(a.user) > 0 ? a.user : spawn.user; len(user) > 0 {
+		ndb.put(&w, "user", user)
+		_ = ndb.end(&w)
+	}
 	for name, i in names[:count] {
 		ndb.put(&w, "handle", name)
 		ndb.put_u64(&w, "index", u64(i))
