@@ -41,6 +41,8 @@
 // walks rc.vars/rc.next_var.
 package rc
 
+import "vx:str"
+
 FDS :: 10 // descriptors 0 to 9, as rc's >[n]
 
 // A word, and a list of them, as the machine keeps them: in the heap, its
@@ -363,10 +365,5 @@ next_var :: proc "contextless" (it: ^Var_Iterator) -> (name: string, val: ^Word,
 // A name as upstream's C API reads it: up to its first NUL.
 @(private)
 c_name :: proc "contextless" (s: string) -> string {
-	for i in 0 ..< len(s) {
-		if s[i] == 0 {
-			return s[:i]
-		}
-	}
-	return s
+	return str.from_nul_padded(transmute([]u8)s)
 }
