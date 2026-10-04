@@ -1,7 +1,9 @@
 // lib/ns against two in-memory 9P servers: lexical path cleaning, mount and
 // bind with each flag, union directories (walks and reads), longest-prefix
-// matching at component boundaries, unmount, and ns output that replays.
-// Ported from upstream's tests/host/ns_test.c.
+// matching at component boundaries, unmount, ns output that replays in the
+// order members were made, connections let go, and creates. Ported from
+// upstream's tests/host/ns_test.c; dial_test.odin adds dialing, which
+// upstream does not host-test.
 //
 //   boot server:  /bin/  /boot/bin/ls  /boot/bin/cat  /dev/  /readme
 //   dev server:   /cons  /null
@@ -9,6 +11,7 @@ package ns_test
 
 import "abi:vx"
 import "core:strings"
+import "core:sync"
 import "core:testing"
 import "vx:ns"
 import "vx:p9"
@@ -95,7 +98,7 @@ t_readdir :: proc "contextless" (ctx: rawptr, dir: p9.Node, index: u32) -> (chil
 	return 0, .Err_Not_Found
 }
 
-make_server :: proc(s: ^p9.Server, t: ^[]Tnode) {
+make_server :: proc "contextless" (s: ^p9.Server, t: ^[]Tnode) {
 	s^ = {
 		fs = {
 			ctx = t,
@@ -120,6 +123,25 @@ connect :: proc(t: ^testing.T, c: ^p9.Client, s: ^p9.Server, tbuf, rbuf: []u8, l
 		rbuf = rbuf,
 	}
 	testing.expect_value(t, p9.client_version(c, 8192, {}), vx.Status.Ok, loc)
+}
+
+// The two servers and a client of each, as every test here uses them.
+Fixture :: struct {
+	boot_nodes, dev_nodes: []Tnode,
+	boot_srv, dev_srv:     p9.Server,
+	bufs:                  [4][8192]u8,
+	boot_c, dev_c:         p9.Client,
+}
+
+// A new fixture, from the heap: it is too big for a test's stack.
+fixture :: proc(t: ^testing.T, loc := #caller_location) -> ^Fixture {
+	f := new(Fixture)
+	f.boot_nodes, f.dev_nodes = BOOT[:], DEV[:]
+	make_server(&f.boot_srv, &f.boot_nodes)
+	make_server(&f.dev_srv, &f.dev_nodes)
+	connect(t, &f.boot_c, &f.boot_srv, f.bufs[0][:], f.bufs[1][:], loc)
+	connect(t, &f.dev_c, &f.dev_srv, f.bufs[2][:], f.bufs[3][:], loc)
+	return f
 }
 
 exists :: proc(space: ^ns.Namespace, path: string) -> bool {
@@ -193,21 +215,14 @@ test_clean :: proc(t: ^testing.T) {
 test_namespace :: proc(t: ^testing.T) {
 	space := new(ns.Namespace)
 	defer free(space)
-	boot_nodes, dev_nodes := BOOT[:], DEV[:]
-	boot_srv, dev_srv := new(p9.Server), new(p9.Server)
-	defer free(boot_srv)
-	defer free(dev_srv)
-	make_server(boot_srv, &boot_nodes)
-	make_server(dev_srv, &dev_nodes)
-	bufs := new([4][8192]u8)
-	defer free(bufs)
-	boot_c, dev_c: p9.Client
-	connect(t, &boot_c, boot_srv, bufs[0][:], bufs[1][:])
-	connect(t, &dev_c, dev_srv, bufs[2][:], bufs[3][:])
+	fx := fixture(t)
+	defer free(fx)
+	boot_c, dev_c := &fx.boot_c, &fx.dev_c
+	boot_srv, dev_srv := &fx.boot_srv, &fx.dev_srv
 
 	expect_exists(t, space, "/", false) // empty
-	testing.expect_value(t, ns.mount(space, &boot_c, vx.HANDLE_NONE, "/srv/bootfs", "", "/bin", {}), vx.Status.Err_Not_Found) // nothing at /bin to mount on yet
-	testing.expect_value(t, ns.mount(space, &boot_c, vx.HANDLE_NONE, "/srv/bootfs", "", "/", {}), vx.Status.Ok)
+	testing.expect_value(t, ns.mount(space, boot_c, vx.HANDLE_NONE, "/srv/bootfs", "", "/bin", {}), vx.Status.Err_Not_Found) // nothing at /bin to mount on yet
+	testing.expect_value(t, ns.mount(space, boot_c, vx.HANDLE_NONE, "/srv/bootfs", "", "/", {}), vx.Status.Ok)
 	testing.expect_value(t, list(space, "/"), "bin boot dev readme")
 	expect_exists(t, space, "/boot/bin/ls")
 	expect_exists(t, space, "/bin/ls", false)
@@ -240,7 +255,7 @@ test_namespace :: proc(t: ^testing.T) {
 	testing.expect_value(t, ns.open(space, "/bin/cat", p9.OWRITE, &f), vx.Status.Err_Access)
 
 	// A second server, after what is at /dev; then one before it.
-	testing.expect_value(t, ns.mount(space, &dev_c, vx.HANDLE_NONE, "/srv/cons", "", "/dev", {.After}), vx.Status.Ok)
+	testing.expect_value(t, ns.mount(space, dev_c, vx.HANDLE_NONE, "/srv/cons", "", "/dev", {.After}), vx.Status.Ok)
 	expect_exists(t, space, "/dev/cons")
 	testing.expect_value(t, list(space, "/dev"), "cons null")
 	testing.expect_value(t, ns.bind(space, "/boot", "/dev", {.Before}), vx.Status.Ok)
@@ -253,9 +268,9 @@ test_namespace :: proc(t: ^testing.T) {
 		"mount /srv/bootfs /\n" +
 		"bind /bin /bin\n" +
 		"bind -a /boot/bin /bin\n" +
-		"bind /boot /dev\n" +
-		"bind -a /dev /dev\n" +
-		"mount -a /srv/cons /dev\n"
+		"bind /dev /dev\n" +
+		"mount -a /srv/cons /dev\n" +
+		"bind -b /boot /dev\n" // in the order they were made
 	testing.expect_value(t, string(out[:n]), want)
 	testing.expect_value(t, ns.print(space, out[:10]), 0)
 
@@ -282,4 +297,89 @@ test_namespace :: proc(t: ^testing.T) {
 		members += len(e.members)
 	}
 	testing.expect_value(t, live, members)
+}
+
+// Replays ns output into a fresh namespace, as a child replays its spawn
+// records: mount SRC OLD [ANAME] and bind [-abc] NEW OLD lines, the sources
+// being /srv/bootfs and /srv/cons here.
+replay :: proc(space: ^ns.Namespace, fx: ^Fixture, script: string) -> vx.Status {
+	lines := script
+	for line in strings.split_lines_iterator(&lines) {
+		w := strings.fields(line, context.temp_allocator)
+		if len(w) < 3 {
+			return .Err_Invalid
+		}
+		i := 1
+		flags: ns.Flags
+		if w[1][0] == '-' {
+			if strings.contains_rune(w[1], 'a') {
+				flags = {.After}
+			} else if strings.contains_rune(w[1], 'b') {
+				flags = {.Before}
+			}
+			i = 2
+		}
+		st: vx.Status
+		if w[0] == "mount" {
+			c := w[i] == "/srv/bootfs" ? &fx.boot_c : &fx.dev_c
+			aname := len(w) > i + 2 ? w[i + 2] : ""
+			st = ns.mount(space, c, vx.HANDLE_NONE, w[i], aname, w[i + 1], flags)
+		} else {
+			st = ns.bind(space, w[i], w[i + 1], flags)
+		}
+		if st != .Ok {
+			return st
+		}
+	}
+	return .Ok
+}
+
+released: int // how many times count_release ran: test_replay_and_release's alone
+
+count_release :: proc "contextless" (c: ^p9.Client, connector: vx.Handle) {
+	sync.atomic_add(&released, 1)
+}
+
+used_fids :: proc(s: ^p9.Server) -> (n: int) {
+	for f in s.fids {
+		n += int(f.used)
+	}
+	return
+}
+
+// Review fixes (M3): ns output, and so a child's namespace, replays members in
+// the order they were made, even after a replace or an unmount reused a slot;
+// and an unmount that leaves a connection unused lets it go.
+@(test)
+test_replay_and_release :: proc(t: ^testing.T) {
+	parent, child := new(ns.Namespace), new(ns.Namespace)
+	defer free(parent)
+	defer free(child)
+	fx := fixture(t)
+	defer free(fx)
+	parent.release = count_release
+	testing.expect_value(t, ns.mount(parent, &fx.boot_c, vx.HANDLE_NONE, "/srv/bootfs", "", "/", {}), vx.Status.Ok)
+	testing.expect_value(t, ns.bind(parent, "/boot", "/bin", {}), vx.Status.Ok) // /bin's entry, made first
+	testing.expect_value(t, ns.mount(parent, &fx.dev_c, vx.HANDLE_NONE, "/srv/cons", "", "/dev", {}), vx.Status.Ok)
+	testing.expect_value(t, ns.bind(parent, "/dev", "/bin", {}), vx.Status.Ok) // replaced: now needs /dev's mount
+	testing.expect_value(t, list(parent, "/bin"), "cons null")
+	script: [512]u8
+	n := ns.print(parent, script[:])
+	testing.expect(t, n > 0)
+	testing.expect_value(t, replay(child, fx, string(script[:n])), vx.Status.Ok)
+	testing.expect_value(t, list(child, "/bin"), "cons null") // the same, not bootfs's empty /dev
+
+	testing.expect_value(t, ns.unmount(parent, "", "/bin"), vx.Status.Ok)
+	testing.expect_value(t, sync.atomic_load(&released), 0) // /dev still uses the cons connection
+	testing.expect_value(t, ns.unmount(parent, "", "/dev"), vx.Status.Ok)
+	testing.expect_value(t, sync.atomic_load(&released), 1) // its last member is gone
+	testing.expect_value(t, ns.mount(parent, &fx.dev_c, vx.HANDLE_NONE, "/srv/cons", "", "/dev", {}), vx.Status.Ok)
+
+	// Creating: in the directory the path names, which these servers refuse.
+	before := used_fids(&fx.dev_srv)
+	f: ns.File
+	testing.expect_value(t, ns.create(parent, "/dev/new", 0o644, p9.OWRITE, &f), vx.Status.Err_Access)
+	testing.expect_value(t, ns.create(parent, "/nowhere/new", 0o644, p9.OWRITE, &f), vx.Status.Err_Not_Found)
+	testing.expect_value(t, ns.create(parent, "/", 0o644, p9.OWRITE, &f), vx.Status.Err_Invalid)
+	testing.expect_value(t, used_fids(&fx.dev_srv), before) // the failed creates clunked what they walked to
 }

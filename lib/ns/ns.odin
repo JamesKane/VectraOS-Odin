@@ -13,13 +13,16 @@
 // and walks the rest from each member in order until one has it. Confinement
 // is not this table's job: it is the connections' (02 §2).
 //
-// ns output (print) replays: one mount or bind line per member, the first of
-// each union without -a, the rest with it.
+// ns output (print) replays: one mount or bind line per member, in the order
+// the members were added, since each may resolve paths that earlier ones
+// made; each union's first member to be replayed without a flag, the rest
+// with -b or -a for where they go among those replayed before them.
 //
 // Building a namespace from a spawn message's mount= and bind= records sits
-// on top of this package: each mount record gets a connection of its own to
+// on top of this package (lib/procns): each mount record gets a connection to
 // the server behind its connector, and is handed to mount with that
-// connector, so a child can be given its own connection later.
+// connector, so a child can be given its own connection later. dial.odin
+// adds 9P servers over TCP, reached through the namespace's own /net.
 package ns
 
 import "abi:vx"
@@ -55,6 +58,7 @@ Member :: struct {
 	mounted: bool, // a mount (src and aname) rather than a bind (the path it came from)
 	fid:     p9.Fid,
 	from:    [dynamic; MAX_PATH]u8, // bind: the path; mount: the aname
+	seq:     u32, // when it was added: ns output and children replay members in this order
 }
 
 Entry :: struct {
@@ -64,8 +68,12 @@ Entry :: struct {
 
 // All zeroes is an empty namespace.
 Namespace :: struct {
-	conns:   [MAX_CONNS]Conn,
-	entries: [MAX_ENTRIES]Entry,
+	conns:    [MAX_CONNS]Conn,
+	entries:  [MAX_ENTRIES]Entry,
+	next_seq: u32,
+	// Called when unmount leaves a connection with no members, after its fids
+	// are clunked; the connection's slot is free once it returns. May be nil.
+	release:  proc "contextless" (c: ^p9.Client, connector: vx.Handle),
 }
 
 // Cleans an absolute path lexically into out: no empty, "." or ".."
@@ -191,13 +199,25 @@ walk :: proc "contextless" (ns: ^Namespace, path: string) -> (c: ^p9.Client, fid
 	return nil, 0, e
 }
 
+// The directory a cleaned path other than "/" is in.
+@(private="file")
+parent_of :: proc "contextless" (path: string) -> string {
+	up := len(path)
+	for up > 1 && path[up - 1] != '/' {
+		up -= 1
+	}
+	return path[:max(up - 1, 1)]
+}
+
 @(private="file")
 drop_member :: proc "contextless" (ns: ^Namespace, m: ^Member) {
 	_ = p9.client_clunk(ns.conns[m.conn].client, m.fid)
 }
 
-// Adds m at the cleaned path old, which must name something already (but "/"
-// may be mounted on in an empty namespace).
+// Adds m at the cleaned path old, which must name something already, or (to
+// replace, not to join a union) be a new name in a directory that exists:
+// /n/host for a mount needs only /n, as Plan 9's mntgen gives it. "/" may be
+// mounted on in an empty namespace.
 @(private="file", require_results)
 add :: proc "contextless" (ns: ^Namespace, old: string, m: Member, flags: Flags) -> vx.Status {
 	m := m
@@ -206,7 +226,14 @@ add :: proc "contextless" (ns: ^Namespace, old: string, m: Member, flags: Flags)
 		base: Member
 		union_with_old := flags & {.After, .Before} != {}
 		bc, fid, st := walk(ns, old)
-		if st != .Ok && !(len(old) == 1 && !union_with_old) {
+		if st == .Err_Not_Found && !union_with_old && len(old) > 1 {
+			// A new name: its directory must exist.
+			pc, pfid, ps := walk(ns, parent_of(old))
+			if ps != .Ok {
+				return st
+			}
+			_ = p9.client_clunk(pc, pfid)
+		} else if st != .Ok && !(len(old) == 1 && !union_with_old) {
 			return st
 		}
 		base.fid = fid
@@ -231,6 +258,8 @@ add :: proc "contextless" (ns: ^Namespace, old: string, m: Member, flags: Flags)
 			// The union starts with what was there: a bind of the path onto itself.
 			base.conn = conn_index(ns, bc)
 			_ = append(&base.from, old)
+			base.seq = ns.next_seq
+			ns.next_seq += 1
 			_ = append(&e.members, base)
 		}
 	}
@@ -241,6 +270,8 @@ add :: proc "contextless" (ns: ^Namespace, old: string, m: Member, flags: Flags)
 		clear(&e.members)
 	}
 	m.flags = flags & {.Create}
+	m.seq = ns.next_seq
+	ns.next_seq += 1
 	if append(&e.members, m) != 1 {
 		return .Err_No_Memory
 	}
@@ -360,40 +391,140 @@ unmount :: proc "contextless" (ns: ^Namespace, new, old: string) -> vx.Status {
 	if kept == 0 {
 		clear(&e.path)
 	}
+	for &c, slot in ns.conns { // a connection no member uses any more is let go
+		if c.client == nil || conn_mounted(ns, u8(slot)) {
+			continue
+		}
+		if ns.release != nil {
+			ns.release(c.client, c.connector)
+		}
+		c = {}
+	}
 	return removed ? .Ok : .Err_Not_Found
 }
 
-// --- ns output ---
-
-// Writes the namespace as a script of mount and bind lines, entries in the
-// order they were made. Returns its length, or 0 if it does not fit.
-print :: proc "contextless" (ns: ^Namespace, buf: []u8) -> int {
-	t := str.Buf{buf = buf}
+// Whether any member is a mount of the connection in slot. (A bind into it
+// does not keep it: upstream lets it go all the same.)
+@(private="file")
+conn_mounted :: proc "contextless" (ns: ^Namespace, slot: u8) -> bool {
 	for &e in ns.entries {
 		if len(e.path) == 0 {
 			continue
 		}
-		for &m, k in e.members {
-			str.write_string(&t, m.mounted ? "mount " : "bind ")
-			if k > 0 || .Create in m.flags {
-				str.write_byte(&t, '-')
-				if k > 0 {
-					str.write_byte(&t, 'a')
-				}
-				if .Create in m.flags {
-					str.write_byte(&t, 'c')
-				}
-				str.write_byte(&t, ' ')
+		for &m in e.members {
+			if m.mounted && m.conn == slot {
+				return true
 			}
-			str.write_string(&t, member_source(ns, &m))
-			str.write_byte(&t, ' ')
-			str.write_string(&t, entry_path(&e))
-			if m.mounted && len(m.from) > 0 {
-				str.write_byte(&t, ' ')
-				str.write_bytes(&t, m.from[:])
-			}
-			str.write_byte(&t, '\n')
 		}
+	}
+	return false
+}
+
+// --- Replay order ---
+
+// Every member, in the order they were added: the order a script or a child
+// must replay them in, since each may resolve paths that earlier ones made.
+//
+//	r := ns.replay_order(space)
+//	for step in ns.next_step(&r) { ... }
+Replay :: struct {
+	ns:    ^Namespace,
+	steps: [dynamic; MAX_ENTRIES * MAX_MEMBERS]Step_Index,
+	next:  int,
+}
+
+Step_Index :: struct {
+	entry, member: u8,
+}
+
+// One member to replay, with the flags that put it back where it was among
+// the members of its entry replayed before it: none for the first; "b" if it
+// comes before every one of them, else "a"; and "c" if it takes creates.
+Step :: struct {
+	entry:  ^Entry,
+	member: ^Member,
+	flags:  string,
+}
+
+replay_order :: proc "contextless" (ns: ^Namespace) -> (r: Replay) {
+	r.ns = ns
+	for &e, i in ns.entries {
+		if len(e.path) == 0 {
+			continue
+		}
+		for &m, k in e.members {
+			// Insertion sort: a few hundred members at most.
+			_ = append(&r.steps, Step_Index{})
+			at := len(r.steps) - 1
+			for at > 0 && step_member(&r, at - 1).seq > m.seq {
+				r.steps[at] = r.steps[at - 1]
+				at -= 1
+			}
+			r.steps[at] = {u8(i), u8(k)}
+		}
+	}
+	return
+}
+
+@(private="file")
+step_member :: proc "contextless" (r: ^Replay, s: int) -> ^Member {
+	return &r.ns.entries[r.steps[s].entry].members[r.steps[s].member]
+}
+
+next_step :: proc "contextless" (r: ^Replay) -> (step: Step, ok: bool) {
+	if r.next >= len(r.steps) {
+		return {}, false
+	}
+	s := r.next
+	r.next += 1
+	me := r.steps[s]
+	earlier, before_all := false, true
+	for i in 0 ..< s {
+		if r.steps[i].entry != me.entry {
+			continue
+		}
+		earlier = true
+		if r.steps[i].member < me.member {
+			before_all = false
+		}
+	}
+	step.entry = &r.ns.entries[me.entry]
+	step.member = &step.entry.members[me.member]
+	create := .Create in step.member.flags
+	switch {
+	case !earlier:
+		step.flags = create ? "c" : ""
+	case before_all:
+		step.flags = create ? "bc" : "b"
+	case:
+		step.flags = create ? "ac" : "a"
+	}
+	return step, true
+}
+
+// --- ns output ---
+
+// Writes the namespace as a script of mount and bind lines, in the order they
+// would rebuild it. Returns its length, or 0 if it does not fit.
+print :: proc "contextless" (ns: ^Namespace, buf: []u8) -> int {
+	t := str.Buf{buf = buf}
+	r := replay_order(ns)
+	for step in next_step(&r) {
+		m := step.member
+		str.write_string(&t, m.mounted ? "mount " : "bind ")
+		if len(step.flags) > 0 {
+			str.write_byte(&t, '-')
+			str.write_string(&t, step.flags)
+			str.write_byte(&t, ' ')
+		}
+		str.write_string(&t, member_source(ns, m))
+		str.write_byte(&t, ' ')
+		str.write_string(&t, entry_path(step.entry))
+		if m.mounted && len(m.from) > 0 {
+			str.write_byte(&t, ' ')
+			str.write_bytes(&t, m.from[:])
+		}
+		str.write_byte(&t, '\n')
 	}
 	return t.failed ? 0 : t.len
 }
@@ -441,6 +572,34 @@ open :: proc "contextless" (ns: ^Namespace, path: string, mode: p9.Open_Mode, f:
 	st = p9.client_open(f.c, f.fid, mode)
 	if st != .Ok {
 		_ = p9.client_clunk(f.c, f.fid)
+		f^ = {}
+	}
+	return st
+}
+
+// Creates the file at path (in the directory its last '/' names), open in
+// mode, with permissions perm.
+@(require_results)
+create :: proc "contextless" (ns: ^Namespace, path: string, perm: u32, mode: p9.Open_Mode, f: ^File) -> vx.Status {
+	f^ = {
+		ns = ns,
+	}
+	buf: [MAX_PATH]u8
+	cleaned := clean(path, buf[:])
+	slash := len(cleaned)
+	for slash > 0 && cleaned[slash - 1] != '/' {
+		slash -= 1
+	}
+	if len(cleaned) == 0 || slash == len(cleaned) {
+		return .Err_Invalid // "/" itself
+	}
+	c, fid, st := walk(ns, cleaned[:max(slash - 1, 1)])
+	if st != .Ok {
+		return st
+	}
+	f.c, f.fid = c, fid
+	if st = p9.client_create(c, fid, cleaned[slash:], perm, mode); st != .Ok {
+		_ = p9.client_clunk(c, fid)
 		f^ = {}
 	}
 	return st
