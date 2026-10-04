@@ -33,7 +33,8 @@ Port :: struct {
 
 Binding :: struct {
 	next:          ^Binding, // on its source's list, then on its port's ready list
-	port:          ^Port, // holds a reference
+	port:          ^Port, // holds a reference until it fires; then the port holds it
+	fired:         bool,
 	key:           u64,
 	threshold:     u64, // .Counter_Ge
 	trigger:       vx.Trigger,
@@ -55,8 +56,11 @@ port_create :: proc "contextless" () -> (^Port, vx.Status) {
 }
 
 // The last reference is gone: no waiter can be left (each held a reference
-// through its handle_get), and fired bindings each hold one too.
+// through its handle_get), and the packets fired into the port go with it.
 port_destroy :: proc "contextless" (p: ^Port) {
+	for b := fifo_pop(&p.ready); b != nil; b = fifo_pop(&p.ready) {
+		pool_free(&binding_pool, b)
+	}
 	pool_free(&port_pool, p)
 }
 
@@ -65,7 +69,7 @@ port_destroy :: proc "contextless" (p: ^Port) {
 port_wake_one :: proc "contextless" (p: ^Port) {
 	for p.waiters != nil {
 		t := p.waiters
-		p.waiters = t.next
+		p.waiters = t.wait_next
 		if thread_wake_token(t, p, .Ok) {
 			break
 		}
@@ -87,7 +91,9 @@ port_post :: proc "contextless" (p: ^Port, packet: vx.Packet) -> vx.Status {
 }
 
 binding_free :: proc "contextless" (b: ^Binding) {
-	object_drop(&b.port.obj)
+	if !b.fired { // a fired one gave its reference up
+		object_drop(&b.port.obj)
+	}
 	pool_free(&binding_pool, b)
 }
 
@@ -110,7 +116,7 @@ port_take :: proc "contextless" (p: ^Port, out: []vx.Packet) -> int {
 		p.count -= 1
 	}
 	spin_unlock(&p.lock)
-	for done != nil { // outside the lock: freeing drops a reference on this port
+	for done != nil {
 		next := done.next
 		binding_free(done)
 		done = next
@@ -127,10 +133,10 @@ port_join_waiters :: proc "contextless" (p: ^Port, t: ^Thread) -> bool {
 		return false
 	}
 	t.wait_token = p // set before t is on the list; wakers only find it there, under this lock
-	t.next = nil
+	t.wait_next = nil
 	link := &p.waiters
 	for link^ != nil {
-		link = &link^.next
+		link = &link^.wait_next
 	}
 	link^ = t
 	return true
@@ -139,7 +145,7 @@ port_join_waiters :: proc "contextless" (p: ^Port, t: ^Thread) -> bool {
 port_remove_waiter :: proc "contextless" (p: ^Port, t: ^Thread) {
 	spin_lock(&p.lock)
 	defer spin_unlock(&p.lock)
-	unlink(&p.waiters, t, "next")
+	unlink(&p.waiters, t, "wait_next")
 }
 
 // --- Bindings ---
@@ -164,10 +170,16 @@ binding_fire :: proc "contextless" (b: ^Binding, value: u64) {
 		source    = b.source_handle,
 		trigger   = b.trigger,
 	}
+	b.fired = true
 	spin_lock(&p.lock)
 	fifo_push(&p.ready, b)
 	port_wake_one(p)
 	spin_unlock(&p.lock)
+	// The port owns the fired binding now, so the binding no longer keeps the
+	// port alive: a port with packets no one takes is still freed
+	// (port_destroy). Only a drop: this runs under the source's lock, or in an
+	// interrupt.
+	object_drop(&p.obj)
 }
 
 observers_add :: proc "contextless" (o: ^Observers, b: ^Binding) {

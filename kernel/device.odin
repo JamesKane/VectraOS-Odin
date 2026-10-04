@@ -51,10 +51,13 @@ resource_pool: Pool(Resource)
 irq_pool: Pool(Irq)
 iorange_pool: Pool(Iorange)
 
-MAX_IRQ_LINES :: 1024
+MAX_IRQ_LINES :: 2048
+MSI_LINE_BASE :: 1024 // lines from here are MSIs (arch_msi_create)
 
-@(private="file")
-irq_lines: [MAX_IRQ_LINES]^Irq // under irq_lines_lock; at most one Irq per line
+// Under irq_lines_lock; at most one Irq per line. The architecture reads it
+// to find a free MSI line.
+@(private)
+irq_lines: [MAX_IRQ_LINES]^Irq
 @(private="file")
 irq_lines_lock: Spinlock
 
@@ -134,6 +137,28 @@ irq_create :: proc "contextless" (line: u32) -> (^Irq, vx.Status) {
 	return q, .Ok
 }
 
+// An MSI for the PCI function `source`: the architecture picks a free line
+// (it reads irq_lines, under irq_lines_lock) and says what to write where.
+@(require_results)
+irq_create_msi :: proc "contextless" (source: u32) -> (q: ^Irq, msi: vx.Msi, st: vx.Status) {
+	irq := pool_alloc(&irq_pool)
+	if irq == nil {
+		return nil, {}, .Err_No_Memory
+	}
+	object_init(&irq.obj, .Irq)
+	spin_lock(&irq_lines_lock)
+	irq.line, msi, st = arch_msi_create(source)
+	if st == .Ok {
+		irq_lines[irq.line] = irq
+	}
+	spin_unlock(&irq_lines_lock)
+	if st != .Ok {
+		pool_free(&irq_pool, irq)
+		return nil, {}, st
+	}
+	return irq, msi, .Ok // edge-triggered: never masked
+}
+
 // The line fired: called by the architecture's interrupt handler.
 irq_fire :: proc "contextless" (line: u32) {
 	spin_lock(&irq_lines_lock)
@@ -185,6 +210,9 @@ irq_ack :: proc "contextless" (q: ^Irq) {
 irq_destroy :: proc "contextless" (q: ^Irq) {
 	spin_lock(&irq_lines_lock)
 	arch_irq_mask(q.line, true)
+	if q.line >= MSI_LINE_BASE {
+		arch_msi_destroy(q.line)
+	}
 	irq_lines[q.line] = nil
 	spin_unlock(&irq_lines_lock)
 	observers_free(q.obs.head)
@@ -228,4 +256,102 @@ task_enable_io :: proc "contextless" (t: ^Task, r: ^Iorange) -> vx.Status {
 		arch_io_switch(t)
 	}
 	return .Ok
+}
+
+// --- DmaDomain ---
+//
+// What a device may reach by DMA. There is no IOMMU behind it yet: a
+// pass-through domain gives devices physical addresses, so it is only safe
+// with devices QEMU emulates (M3). It holds each VMO it maps, so the pages
+// stay where the device was told they are.
+
+DMA_MAPPINGS :: 128
+
+Dma_Domain :: struct {
+	using obj: Object,
+	lock:      Spinlock,
+	mapped:    [DMA_MAPPINGS]^Vmo, // a reference for each dma_map
+}
+
+#assert(offset_of(Dma_Domain, obj) == 0) // objects are cast from ^Object
+
+dma_pool: Pool(Dma_Domain)
+
+@(require_results)
+dma_domain_create :: proc "contextless" () -> (^Dma_Domain, vx.Status) {
+	d := pool_alloc(&dma_pool)
+	if d == nil {
+		return nil, .Err_No_Memory
+	}
+	object_init(&d.obj, .Dma_Domain)
+	return d, .Ok
+}
+
+// Holds the VMO for the device and gives the address of each page of the
+// range into `addresses`; `slot` says which mapping it is, to undo just this one.
+@(require_results)
+dma_map :: proc "contextless" (d: ^Dma_Domain, v: ^Vmo, offset, size: u64, addresses: []Paddr) -> (slot: int, st: vx.Status) {
+	end, overflow := intrinsics.overflow_add(offset, size)
+	if size == 0 || (offset | size) & (PAGE_SIZE - 1) != 0 || overflow || end > v.size {
+		return 0, .Err_Range
+	}
+	if v.physical {
+		return 0, .Err_Unsupported // device memory: peer-to-peer comes later
+	}
+	slot = -1
+	{
+		spin_guard(&d.lock)
+		for m, i in d.mapped {
+			if m == nil {
+				object_ref(&v.obj)
+				d.mapped[i] = v
+				slot = i
+				break
+			}
+		}
+	}
+	if slot < 0 {
+		return 0, .Err_No_Memory
+	}
+	first := offset / PAGE_SIZE
+	copy(addresses, v.pages[first:][:size / PAGE_SIZE])
+	return slot, .Ok
+}
+
+// Undoes one dma_map, by the slot it gave.
+dma_unmap_slot :: proc "contextless" (d: ^Dma_Domain, slot: int) {
+	spin_lock(&d.lock)
+	v := d.mapped[slot]
+	d.mapped[slot] = nil
+	spin_unlock(&d.lock)
+	if v != nil {
+		object_release(&v.obj)
+	}
+}
+
+// Lets go of every mapping of the VMO.
+@(require_results)
+dma_unmap :: proc "contextless" (d: ^Dma_Domain, v: ^Vmo) -> vx.Status {
+	drop: [dynamic; DMA_MAPPINGS]^Vmo
+	spin_lock(&d.lock)
+	for &m in d.mapped {
+		if m == v {
+			_ = append(&drop, m) // room for every slot
+			m = nil
+		}
+	}
+	spin_unlock(&d.lock)
+	for m in drop {
+		object_release(&m.obj)
+	}
+	return len(drop) > 0 ? .Ok : .Err_Not_Found
+}
+
+dma_domain_destroy :: proc "contextless" (d: ^Dma_Domain) {
+	for m in d.mapped {
+		if m != nil {
+			object_drop(&m.obj)
+		}
+	}
+	pool_free(&dma_pool, d)
 }

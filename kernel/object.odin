@@ -21,6 +21,7 @@ Obj_Type :: enum u8 {
 	Resource,
 	Irq,
 	Iorange,
+	Dma_Domain,
 }
 
 Object :: struct {
@@ -51,6 +52,8 @@ obj_type_of :: #force_inline proc "contextless" ($T: typeid) -> Obj_Type {
 		return .Irq
 	} else when T == Iorange {
 		return .Iorange
+	} else when T == Dma_Domain {
+		return .Dma_Domain
 	} else {
 		#panic("not a kernel object")
 	}
@@ -155,6 +158,8 @@ object_destroy :: proc "contextless" (o: ^Object) {
 		irq_destroy(cast(^Irq)o)
 	case .Iorange:
 		pool_free(&iorange_pool, cast(^Iorange)o)
+	case .Dma_Domain:
+		dma_domain_destroy(cast(^Dma_Domain)o)
 	}
 }
 

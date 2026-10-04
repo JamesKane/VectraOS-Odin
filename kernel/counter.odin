@@ -115,7 +115,7 @@ futex_wait :: proc "contextless" (word: Uva, expected: u32, deadline: Instant) -
 	}
 	t := this_cpu().current
 	key := user_page_pa(t.task.root, word)
-	if key == 0 {
+	if key == 0 || !in_direct_map(key, 4) { // device memory has no direct mapping
 		return .Err_Invalid
 	}
 	b := &futex_buckets[futex_bucket(key)]

@@ -212,6 +212,20 @@ Cqe :: struct #align (32) { // the generic completion entry, 32 bytes
 //       level-triggered line is masked when it fires until irq_ack; an
 //       edge-triggered one is never masked, and a binding made after it
 //       fired fires at once.
+//   irq_create(resource, source, {.Msi}, &out, &msi)
+//       an MSI or MSI-X interrupt for the PCI function whose requester ID
+//       (bus << 8 | device << 3 | function) is `source`: the kernel picks
+//       it, and Msi says what the device must write, and where. Always
+//       edge-triggered. (x86_64: an APIC vector; aarch64: an LPI, through the
+//       GIC's ITS, which knows the device by its requester ID.)
+//   dma_domain_create(resource, 0, &out)
+//       a DmaDomain: what a device may reach by DMA. In pass-through mode,
+//       the only one so far (QEMU; the IOMMU comes with M5), a device
+//       address is the physical address.
+//   dma_map(domain, vmo, offset, size, addresses)
+//       the device address of each page of [offset, offset + size), into
+//       addresses[size / 4096]; the domain holds the VMO until dma_unmap
+//   dma_unmap(domain, vmo)
 //   iorange_create(resource, base, count, &out)
 //       x86_64 only: I/O ports, which a task may use once as_map has been
 //       called with the IoRange in place of a VMO (offset, size and flags 0)
@@ -219,6 +233,19 @@ Vmo_Option :: enum u32 { // vmo_create
 	Physical,
 }
 Vmo_Options :: bit_set[Vmo_Option; u32]
+
+Irq_Option :: enum u32 { // irq_create
+	Msi,
+}
+Irq_Options :: bit_set[Irq_Option; u32]
+
+Msi :: struct { // what a device writes to raise an MSI
+	address:  u64,
+	data:     u32,
+	reserved: u32,
+}
+
+#assert(size_of(Msi) == 16)
 
 Vmo_Op :: enum u32 { // vmo_rw
 	Read  = 0,

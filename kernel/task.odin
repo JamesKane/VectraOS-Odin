@@ -96,11 +96,13 @@ Thread :: struct {
 	user_sp:      Uva,
 	user_arg:     u64,
 	user_arg2:    u64,
+	started:      bool, // thread_start has taken it (under its task's lock)
 	intent:       vx.Intent,
 	last_of_task: bool, // its exit ended its task (reaped in sched.odin)
 	console_line: User_Line, // debug_write output not yet ended, which goes out whole at its newline
 	state:        Thread_State,
-	next:         ^Thread, // in the ready queue, or in a list of waiters (under that list's lock)
+	next:         ^Thread, // in the ready queue (under the scheduler's lock)
+	wait_next:    ^Thread, // in a port's waiters (under the port's lock); never the same link as next
 	sleep_next:   ^Thread, // in its CPU's sleep queue, ordered by wake_at
 	sleep_cpu:    ^Cpu, // the CPU whose sleep queue holds it
 	cpu:          ^Cpu, // the CPU it runs or last ran on
@@ -240,7 +242,7 @@ Moved_Handle :: struct {
 // TRANSFER, appear once, and not be `forbidden` (a channel end cannot travel
 // through itself). Their references move into out.
 @(require_results)
-handles_take :: proc "contextless" (t: ^Task, values: []vx.Handle, forbidden: ^Object, out: []Moved_Handle) -> vx.Status {
+handles_take :: proc "contextless" (t: ^Task, values: []vx.Handle, forbidden, forbidden2: ^Object, out: []Moved_Handle) -> vx.Status {
 	spin_lock(&t.lock)
 	defer spin_unlock(&t.lock)
 	for v, i in values {
@@ -250,7 +252,7 @@ handles_take :: proc "contextless" (t: ^Task, values: []vx.Handle, forbidden: ^O
 			return .Err_Bad_Handle
 		case .Transfer not_in e.rights:
 			return .Err_Access
-		case e.obj == forbidden:
+		case e.obj == forbidden || (forbidden2 != nil && e.obj == forbidden2):
 			return .Err_Invalid
 		}
 		for k in 0 ..< i {
@@ -443,21 +445,25 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 	}
 	st := vx.Status.Ok
 	switch {
-	case t.root == 0 || t.ending:
+	case t.root == 0 || t.maps == nil || t.ending:
 		st = .Err_Bad_State
 	case at & (PAGE_SIZE - 1) != 0 || end_overflow || end > USER_TOP:
 		st = .Err_Range
 	case slot == nil:
 		st = .Err_No_Memory
 	}
+	// Page by page; a page that is already mapped (by another mapping) fails
+	// it, and only the pages this call mapped are taken back out.
 	done: u64
-	for ; st == .Ok && done < size; done += PAGE_SIZE {
+	for st == .Ok && done < size {
 		if !map_range(t.root, u64(at) + done, v.pages[(offset + done) / PAGE_SIZE], PAGE_SIZE, mf) {
 			st = .Err_No_Memory
+		} else {
+			done += PAGE_SIZE
 		}
 	}
 	if st != .Ok {
-		for off := u64(0); off + PAGE_SIZE <= done; off += PAGE_SIZE {
+		for off := u64(0); off < done; off += PAGE_SIZE {
 			unmap_page(t.root, u64(at) + off)
 		}
 		return 0, st

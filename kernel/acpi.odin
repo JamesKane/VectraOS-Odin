@@ -1,6 +1,7 @@
 package kernel
 
 import "base:intrinsics"
+import vx "abi:vx"
 
 // ACPI tables, by signature, through the RSDT or XSDT. Each is checked to
 // lie inside memory the direct map covers before it is read.
@@ -59,4 +60,69 @@ acpi_table :: proc "contextless" (sig: string) -> []u8 {
 		}
 	}
 	return nil
+}
+
+// A table at a physical address, if it is whole and in the direct map.
+@(private="file")
+acpi_at :: proc "contextless" (pa: Paddr) -> []u8 {
+	HEADER :: 36
+	if pa == 0 || !in_direct_map(pa, HEADER) {
+		return nil
+	}
+	length := read32(phys_bytes(pa, HEADER)[4:])
+	if length < HEADER || !in_direct_map(pa, u64(length)) {
+		return nil
+	}
+	return phys_bytes(pa, length)
+}
+
+// Every table the RSDT or XSDT lists, and the DSDT the FADT points to, end
+// to end in one VMO for the root task, so that devmgr can read the rest (the
+// MCFG for PCI, and the AML later) in user space. Each starts with its own
+// header, whose length says where the next begins.
+@(require_results)
+acpi_export :: proc "contextless" () -> (v: ^Vmo, size: u64, ok: bool) {
+	if boot.rsdp == 0 || !in_direct_map(boot.rsdp, 36) {
+		return
+	}
+	rsdp := phys_bytes(boot.rsdp, 36)
+	xsdt := rsdp[15] >= 2
+	sdt := acpi_at(Paddr(xsdt ? read64(rsdp[24:]) : u64(read32(rsdp[16:]))))
+	if sdt == nil {
+		return
+	}
+	tables: [dynamic; 64][]u8
+	entry := xsdt ? 8 : 4
+	for off := 36; off + entry <= len(sdt) && len(tables) < 63; off += entry {
+		if t := acpi_at(Paddr(xsdt ? read64(sdt[off:]) : u64(read32(sdt[off:])))); t != nil {
+			_ = append(&tables, t) // below 63, so room
+		}
+	}
+	if fadt := acpi_table("FACP"); fadt != nil {
+		// The DSDT: X_DSDT where the FADT is long enough to have it, else DSDT.
+		pa := len(fadt) >= 44 ? Paddr(read32(fadt[40:])) : 0
+		if len(fadt) >= 148 && read64(fadt[140:]) != 0 {
+			pa = Paddr(read64(fadt[140:]))
+		}
+		if dsdt := acpi_at(pa); dsdt != nil {
+			_ = append(&tables, dsdt) // the 64th at most
+		}
+	}
+	for t in tables {
+		size += u64(len(t))
+	}
+	if size == 0 {
+		return
+	}
+	st: vx.Status
+	v, st = vmo_create(size)
+	if st != .Ok {
+		return nil, 0, false
+	}
+	at: u64
+	for t in tables {
+		vmo_write(v, at, t)
+		at += u64(len(t))
+	}
+	return v, size, true
 }

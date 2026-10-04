@@ -692,6 +692,9 @@ x86_trap :: proc "c" (f: ^Trap_Frame) {
 		this_cpu().resched = true
 	case VECTOR_SPURIOUS:
 		return
+	case VECTOR_MSI_FIRST ..= VECTOR_MSI_LAST:
+		irq_fire(MSI_LINE_BASE + u32(f.vector))
+		vx_wrmsr(X2APIC_EOI, 0)
 	case VECTOR_IRQ_BASE ..< VECTOR_IRQ_BASE + MAX_GSI:
 		irq_fire(u32(f.vector - VECTOR_IRQ_BASE)) // a level line is masked before the EOI
 		vx_wrmsr(X2APIC_EOI, 0)
@@ -819,6 +822,11 @@ ioapic_lock: Spinlock
 VECTOR_IRQ_BASE :: 0x30 // device interrupts: VECTOR_IRQ_BASE + GSI
 @(private="file")
 MAX_GSI :: 0x50 // up to vector 0x7f
+// MSIs: line MSI_LINE_BASE + vector.
+@(private="file")
+VECTOR_MSI_FIRST :: 0x80
+@(private="file")
+VECTOR_MSI_LAST :: 0xef
 
 @(private="file")
 ioapic_read :: proc "contextless" (a: ^Ioapic, reg: u32) -> u32 {
@@ -921,7 +929,28 @@ arch_irq_route :: proc "contextless" (line: u32) -> (level: bool, st: vx.Status)
 	return level, .Ok
 }
 
+// An MSI is a write to the boot CPU's local APIC (x2APIC IDs above 255 need
+// interrupt remapping, which comes with the IOMMU) with a free vector. The
+// PCI function does not matter: any vector can come from any device.
+arch_msi_create :: proc "contextless" (source: u32) -> (line: u32, msi: vx.Msi, st: vx.Status) {
+	for v in u32(VECTOR_MSI_FIRST) ..= VECTOR_MSI_LAST {
+		if irq_lines[MSI_LINE_BASE + v] != nil {
+			continue
+		}
+		if cpus[0].arch_id > 0xff {
+			return 0, {}, .Err_Unsupported
+		}
+		return MSI_LINE_BASE + v, {address = 0xfee0_0000 | cpus[0].arch_id << 12, data = v}, .Ok // fixed, edge
+	}
+	return 0, {}, .Err_No_Memory
+}
+
+arch_msi_destroy :: proc "contextless" (line: u32) {} // nothing routes it but the device
+
 arch_irq_mask :: proc "contextless" (line: u32, masked: bool) {
+	if line >= MSI_LINE_BASE {
+		return // an MSI: edge-triggered, and the device masks it if anything does
+	}
 	a := ioapic_for(line)
 	if a == nil {
 		return

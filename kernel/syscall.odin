@@ -192,7 +192,7 @@ port_wait_on :: proc "contextless" (p: ^Port, deadline, leeway: Instant, out: Uv
 			continue // a packet arrived meanwhile
 		}
 		woke := thread_block(deadline, leeway)
-		if woke == .Err_Timed_Out || woke == .Err_Killed {
+		if woke != .Ok { // its deadline, or a kill: still on the list, so off it
 			port_remove_waiter(p, t)
 			return 0, woke
 		}
@@ -254,16 +254,73 @@ sys_vmo_create :: proc "contextless" (size, options: u64, out: Uva, rh: vx.Handl
 
 // --- Devices (device.odin) ---
 
+// irq_create(resource, line, options, &out, &msi): a line, or with {.Msi}
+// an MSI for the PCI function `line` names, with what to program into it.
 @(private="file", require_results)
-sys_irq_create :: proc "contextless" (rh: vx.Handle, line, options: u64, out: Uva) -> vx.Status {
-	if options != 0 || line > u64(max(u32)) {
+sys_irq_create :: proc "contextless" (rh: vx.Handle, line, options: u64, out, msi_out: Uva) -> vx.Status {
+	opts, valid := options_of(vx.Irq_Options, options)
+	if !valid || line > u64(max(u32)) {
 		return .Err_Invalid
 	}
 	r := handle_get_as(current_task(), rh, Resource, {.Manage}) or_return
 	defer object_release(&r.obj)
-	canonical := arch_irq_canonical(u32(line)) or_return
-	q := irq_create(canonical) or_return
+	q: ^Irq
+	if .Msi in opts {
+		msi: vx.Msi
+		q, msi = irq_create_msi(u32(line)) or_return
+		if st := copy_out(msi_out, &msi); st != .Ok {
+			object_release(&q.obj)
+			return st
+		}
+	} else {
+		canonical := arch_irq_canonical(u32(line)) or_return
+		q = irq_create(canonical) or_return
+	}
 	return return_handle(&q.obj, vx.Rights{.Wait, .Write} + DEVICE_RIGHTS, out)
+}
+
+@(private="file", require_results)
+sys_dma_domain_create :: proc "contextless" (rh: vx.Handle, options: u64, out: Uva) -> vx.Status {
+	if options != 0 {
+		return .Err_Invalid // pass-through: the only kind so far
+	}
+	r := handle_get_as(current_task(), rh, Resource, {.Manage}) or_return
+	d, st := dma_domain_create()
+	object_release(&r.obj)
+	if st != .Ok {
+		return st
+	}
+	return return_handle(&d.obj, vx.Rights{.Map} + DEVICE_RIGHTS, out)
+}
+
+// dma_map(domain, vmo, offset, size, addresses): batched, a page at a time.
+@(private="file", require_results)
+sys_dma_map :: proc "contextless" (dh, vh: vx.Handle, offset, size: u64, out: Uva) -> vx.Status {
+	MAX_PAGES :: 512
+	pages := size / PAGE_SIZE
+	if pages > MAX_PAGES || !user_range_ok(out, pages * size_of(Paddr), true) {
+		return .Err_Invalid
+	}
+	d := handle_get_as(current_task(), dh, Dma_Domain, {.Map}) or_return
+	defer object_release(&d.obj)
+	v := handle_get_as(current_task(), vh, Vmo, {.Read, .Write}) or_return
+	defer object_release(&v.obj)
+	addresses: [MAX_PAGES]Paddr
+	slot := dma_map(d, v, offset, size, addresses[:pages]) or_return
+	st := copy_out_slice(out, addresses[:pages])
+	if st != .Ok {
+		dma_unmap_slot(d, slot) // only this one: earlier mappings of the VMO may be in use
+	}
+	return st
+}
+
+@(private="file", require_results)
+sys_dma_unmap :: proc "contextless" (dh, vh: vx.Handle) -> vx.Status {
+	d := handle_get_as(current_task(), dh, Dma_Domain, {.Map}) or_return
+	defer object_release(&d.obj)
+	v := handle_get_as(current_task(), vh, Vmo, {}) or_return
+	defer object_release(&v.obj)
+	return dma_unmap(d, v)
 }
 
 @(private="file", require_results)
@@ -353,8 +410,10 @@ sys_channel_create :: proc "contextless" (options: u64, out: Uva) -> vx.Status {
 
 // Builds a message from user memory: the body copied in, the handles moved
 // out of the caller's table (gone whatever happens next, as with every write).
+// `through` is the channel end written to: neither it nor its peer may travel
+// in the message.
 @(private="file", require_results)
-msg_from_user :: proc "contextless" (bytes: Uva, body_len: u32, handles: Uva, count: u32, forbidden: ^Object) -> (m: ^Channel_Msg, st: vx.Status) {
+msg_from_user :: proc "contextless" (bytes: Uva, body_len: u32, handles: Uva, count: u32, through: ^Channel) -> (m: ^Channel_Msg, st: vx.Status) {
 	if body_len < size_of(vx.Msg_Header) || body_len > vx.CHANNEL_MAX_BYTES || count > vx.CHANNEL_MAX_HANDLES {
 		return nil, .Err_Invalid
 	}
@@ -366,7 +425,9 @@ msg_from_user :: proc "contextless" (bytes: Uva, body_len: u32, handles: Uva, co
 	}
 	st = copy_in_slice(msg_body(msg), bytes)
 	if st == .Ok {
-		st = handles_take(current_task(), values[:count], forbidden, msg_handles(msg))
+		// The peer's address is only compared, never followed: no lock is needed for that.
+		peer := through.pair.ends[peer_side(through.side)]
+		st = handles_take(current_task(), values[:count], &through.obj, cast(^Object)peer, msg_handles(msg))
 	}
 	if st != .Ok {
 		msg.count = 0 // nothing was moved
@@ -396,7 +457,7 @@ msg_to_user :: proc "contextless" (m: ^Channel_Msg, bytes, handles: Uva) -> vx.S
 sys_channel_write :: proc "contextless" (h: vx.Handle, bytes: Uva, length: u64, handles: Uva, count: u64) -> vx.Status {
 	c := handle_get_as(current_task(), h, Channel, {.Write}) or_return
 	defer object_release(&c.obj)
-	m := msg_from_user(bytes, u32(min(length, u64(max(u32)))), handles, u32(min(count, u64(max(u32)))), &c.obj) or_return
+	m := msg_from_user(bytes, u32(min(length, u64(max(u32)))), handles, u32(min(count, u64(max(u32)))), c) or_return
 	st := channel_write(c, m)
 	if st != .Ok {
 		msg_free(m)
@@ -436,7 +497,7 @@ sys_channel_call :: proc "contextless" (h: vx.Handle, args_ptr: Uva, deadline: i
 		return .Err_Invalid
 	}
 	c := handle_get_as(current_task(), h, Channel, {.Read, .Write}) or_return
-	request, st := msg_from_user(Uva(uintptr(args.wr_bytes)), args.wr_len, Uva(uintptr(args.wr_handles)), args.wr_count, &c.obj)
+	request, st := msg_from_user(Uva(uintptr(args.wr_bytes)), args.wr_len, Uva(uintptr(args.wr_handles)), args.wr_count, c)
 	reply: ^Channel_Msg
 	if st == .Ok {
 		sent: bool
@@ -601,7 +662,8 @@ sys_ring_xfer :: proc "contextless" (h: vx.Handle, op: u64, handles: Uva, count,
 	defer object_release(&e.obj)
 	moved: [vx.RING_SLOT_HANDLES]Moved_Handle
 	if put {
-		handles_take(current_task(), values[:count], &e.obj, moved[:count]) or_return
+		peer := e.pair.ends[peer_side(e.side)] // compared only
+		handles_take(current_task(), values[:count], &e.obj, cast(^Object)peer, moved[:count]) or_return
 		put_slot, pst := ring_put(e, moved[:count])
 		if pst != .Ok {
 			for m in moved[:count] {
@@ -670,7 +732,7 @@ sys_thread_start :: proc "contextless" (h: vx.Handle, entry, sp: Uva, arg: vx.Ha
 	if arg != 0 {
 		m: [1]Moved_Handle
 		args := [1]vx.Handle{arg}
-		handles_take(current_task(), args[:], nil, m[:]) or_return
+		handles_take(current_task(), args[:], nil, nil, m[:]) or_return
 		out: [1]vx.Handle
 		st := handles_put(th.task, m[:], out[:])
 		object_release(m[0].obj)
@@ -807,9 +869,15 @@ syscall_dispatch :: proc "contextless" (nr: u64, a: [6]u64) -> i64 {
 	case .Vmo_Create:
 		return i64(sys_vmo_create(a[0], a[1], Uva(a[2]), vx.Handle(a[3]), Paddr(a[4])))
 	case .Irq_Create:
-		return i64(sys_irq_create(vx.Handle(a[0]), a[1], a[2], Uva(a[3])))
+		return i64(sys_irq_create(vx.Handle(a[0]), a[1], a[2], Uva(a[3]), Uva(a[4])))
 	case .Irq_Ack:
 		return i64(sys_irq_ack(vx.Handle(a[0])))
+	case .Dma_Domain_Create:
+		return i64(sys_dma_domain_create(vx.Handle(a[0]), a[1], Uva(a[2])))
+	case .Dma_Map:
+		return i64(sys_dma_map(vx.Handle(a[0]), vx.Handle(a[1]), a[2], a[3], Uva(a[4])))
+	case .Dma_Unmap:
+		return i64(sys_dma_unmap(vx.Handle(a[0]), vx.Handle(a[1])))
 	case .Iorange_Create:
 		return i64(sys_iorange_create(vx.Handle(a[0]), a[1], a[2], Uva(a[3])))
 	case .Vmo_Rw:

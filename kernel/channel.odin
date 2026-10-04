@@ -75,6 +75,11 @@ Channel_Pair :: struct {
 	ends: [Side]^Channel, // nil once that end is destroyed
 }
 
+// Kernel-picked txids have the top bit set; bit 30 says which end's call it
+// is, so a call in each direction at once is never taken for the other's reply.
+CALL_TXID :: u32(0x8000_0000)
+SIDE_TXID :: u32(0x4000_0000)
+
 channel_pool: Pool(Channel)
 channel_pair_pool: Pool(Channel_Pair)
 
@@ -106,7 +111,7 @@ channel_create :: proc "contextless" () -> (a, b: ^Channel, st: vx.Status) {
 		object_init(&e.obj, .Channel)
 		e.pair = pair
 		e.side = side
-		e.next_txid = 0x8000_0000 // kernel-picked txids have the top bit set
+		e.next_txid = CALL_TXID | u32(side) << 30 // each end's calls in a half of their own
 		pair.ends[side] = e
 	}
 	return e0, e1, .Ok
@@ -220,10 +225,7 @@ channel_call :: proc "contextless" (c: ^Channel, request: ^Channel_Msg, deadline
 		return nil, false, .Err_Peer_Closed
 	}
 	w.txid = c.next_txid
-	c.next_txid += 1
-	if c.next_txid & 0x8000_0000 == 0 {
-		c.next_txid = 0x8000_0000
-	}
+	c.next_txid = CALL_TXID | c.next_txid & SIDE_TXID | (c.next_txid + 1) &~ (CALL_TXID | SIDE_TXID)
 	h := msg_header(request)
 	h.txid = w.txid
 	h.sender_intent = .Interactive

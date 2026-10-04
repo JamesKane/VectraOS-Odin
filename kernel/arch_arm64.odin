@@ -194,7 +194,10 @@ Gicr :: struct {
 	typer:      u64,
 	statusr:    u32,
 	waker:      u32,
-	_:          [(0x1_0000 - 0x18) / 4]u32,
+	_:          [(0x70 - 0x18) / 4]u32,
+	propbaser:  u64, // LPIs: the configuration table
+	pendbaser:  u64, // and the pending table
+	_:          [(0x1_0000 - 0x80) / 4]u32,
 	_:          [32]u32,
 	igroupr0:   u32,
 	_:          [31]u32,
@@ -205,6 +208,8 @@ Gicr :: struct {
 
 #assert(offset_of(Gicr, typer) == 0x08)
 #assert(offset_of(Gicr, waker) == 0x14)
+#assert(offset_of(Gicr, propbaser) == 0x70)
+#assert(offset_of(Gicr, pendbaser) == 0x78)
 #assert(offset_of(Gicr, igroupr0) == 0x1_0080)
 #assert(offset_of(Gicr, isenabler0) == 0x1_0100)
 #assert(offset_of(Gicr, ipriorityr) == 0x1_0400)
@@ -392,6 +397,9 @@ arch_timer_init :: proc "contextless" () {
 	if rd == nil {
 		kpanic("no GIC redistributor for this CPU")
 	}
+	if arch_cpu_index() == 0 {
+		boot_rd = rd // LPIs (MSIs) go to the boot CPU
+	}
 
 	intrinsics.volatile_store(&rd.waker, intrinsics.volatile_load(&rd.waker) &~ (1 << 1)) // clear ProcessorSleep
 	for intrinsics.volatile_load(&rd.waker) & (1 << 2) != 0 {} // wait for ChildrenAsleep to clear
@@ -418,14 +426,16 @@ aarch64_irq :: proc "contextless" () {
 	iar := vx_read_icc_iar1()
 	intid := u32(iar) & 0xffffff
 	if intid >= 1020 && intid <= 1023 {
-		return // spurious
+		return // spurious; LPIs (MSIs) are 8192 and up
 	}
 	if intid == INTID_VIRTUAL_TIMER || intid == INTID_EL2_VIRTUAL_TIMER {
 		vx_timer_disarm() // disarm before the EOI: the line is level-triggered
 		timer_interrupt()
 	} else if intid == INTID_RESCHED {
 		this_cpu().resched = true
-	} else if intid >= 32 {
+	} else if intid >= LPI_BASE && intid < LPI_BASE + LPI_COUNT {
+		irq_fire(MSI_LINE_BASE + intid - LPI_BASE) // an MSI: edge-triggered, never masked
+	} else if intid >= 32 && intid < 1020 {
 		irq_fire(intid) // a device's SPI: masked before the EOI, as it is level-triggered
 	}
 	vx_write_icc_eoir1(iar)
@@ -519,11 +529,12 @@ aarch64_kernel_stack_fault :: proc "c" (sp: u64) -> ! {
 }
 
 // SGI 0 to one CPU, through ICC_SGI1R_EL1: its affinity levels 3 to 1, and
-// level 0 as a bit in the target list.
+// level 0 as a bit in a 16-wide target list, with RS choosing which 16.
 arch_send_resched :: proc "contextless" (c: ^Cpu) {
 	m := c.arch_id
-	aff3, aff2, aff1, aff0 := (m >> 32) & 0xff, (m >> 16) & 0xff, (m >> 8) & 0xff, m & 0xf
-	vx_write_icc_sgi1r(aff3 << 48 | aff2 << 32 | aff1 << 16 | u64(INTID_RESCHED) << 24 | 1 << aff0)
+	aff3, aff2, aff1, aff0 := (m >> 32) & 0xff, (m >> 16) & 0xff, (m >> 8) & 0xff, m & 0xff
+	rs := aff0 >> 4 // which 16 of Aff0
+	vx_write_icc_sgi1r(aff3 << 48 | aff2 << 32 | aff1 << 16 | u64(INTID_RESCHED) << 24 | rs << 44 | 1 << (aff0 & 0xf))
 }
 
 // Exceptions from EL0 land on SP_EL1, which is the top of the current
@@ -651,10 +662,280 @@ arch_irq_route :: proc "contextless" (line: u32) -> (level: bool, st: vx.Status)
 }
 
 arch_irq_mask :: proc "contextless" (line: u32, masked: bool) {
+	// An MSI is edge-triggered; arch_msi_destroy turns it off.
 	if line < 32 || line >= gic_lines {
 		return
 	}
 	d := gicd()
 	reg := masked ? &d.icenabler[line / 32] : &d.isenabler[line / 32]
 	intrinsics.volatile_store(reg, u32(1) << (line % 32))
+}
+
+// --- MSIs: LPIs through the ITS ---
+//
+// A PCI function's MSI write goes to the ITS's translation register, with the
+// function's requester ID as its DeviceID and the data as an EventID. The ITS
+// maps the pair to an LPI, through tables in memory it is given, and sends
+// the LPI to a redistributor: here always the boot CPU's, through collection
+// 0. The kernel sets it all up the first time an MSI is created. LPIs are
+// edge-triggered and have no active state; one is turned off by clearing its
+// enable bit in the configuration table.
+
+@(private="file")
+ITS_PHYS_DEFAULT :: Paddr(0x0808_0000) // QEMU virt's, if the MADT has none
+@(private="file")
+ITS_SIZE :: u64(128 * 1024)
+@(private="file")
+ITS_TRANSLATER :: 0x1_0040 // GITS_TRANSLATER, in the ITS's second frame
+LPI_BASE :: 8192
+LPI_COUNT :: 1024
+@(private="file")
+LPI_ID_BITS :: 14 // INTIDs up to 2^14: LPIs 8192..16383
+@(private="file")
+ITS_EVENTS :: 32 // per device
+@(private="file")
+ITS_QUEUE_BYTES :: 64 * 1024
+
+// The ITS's control registers that the kernel uses.
+@(private="file")
+Its :: struct {
+	ctlr:    u32,
+	iidr:    u32,
+	typer:   u64,
+	_:       [(0x80 - 0x10) / 8]u64,
+	cbaser:  u64, // the command queue
+	cwriter: u64,
+	creadr:  u64,
+	_:       [(0x100 - 0x98) / 8]u64,
+	baser:   [8]u64, // the tables it asks for
+}
+
+#assert(offset_of(Its, typer) == 0x08)
+#assert(offset_of(Its, cbaser) == 0x80)
+#assert(offset_of(Its, cwriter) == 0x88)
+#assert(offset_of(Its, creadr) == 0x90)
+#assert(offset_of(Its, baser) == 0x100)
+
+// The LPI configuration byte: a priority, bit 1 (RES1, group 1), and bit 0, enable.
+@(private="file")
+LPI_OFF :: 0xa2
+@(private="file")
+LPI_ON :: 0xa3
+
+// ITS commands, by their opcodes.
+@(private="file")
+Its_Command :: enum u64 {
+	Sync    = 0x05,
+	Mapd    = 0x08,
+	Mapc    = 0x09,
+	Mapti   = 0x0a,
+	Inv     = 0x0c,
+	Discard = 0x0f,
+}
+
+@(private="file")
+Its_Device :: struct {
+	id:     u32, // the DeviceID: a requester ID
+	events: bit_set[0 ..< ITS_EVENTS; u32], // the EventIDs in use
+	used:   bool,
+}
+
+@(private="file")
+Lpi_Event :: struct { // what an LPI in use was mapped from
+	device: u8, // in its.devices
+	event:  u8,
+	used:   bool,
+}
+
+@(private="file")
+boot_rd: ^Gicr // the boot CPU's redistributor
+
+@(private="file")
+its: struct {
+	regs:       ^Its,
+	pa:         Paddr,
+	lpi_config: []u8, // a byte for each LPI: priority, and bit 0 enables it
+	queue:      []u64, // the command queue
+	queue_at:   u64, // bytes written
+	target:     u64, // the redistributor, as MAPC and SYNC name it
+	device_ids: u64, // DeviceIDs below this fit the ITS and its device table
+	unusable:   bool, // its setup failed: no MSIs (and no second try)
+	devices:    [64]Its_Device,
+	lpis:       [LPI_COUNT]Lpi_Event,
+}
+
+@(private="file")
+its_command :: proc "contextless" (op: Its_Command, d0_high: u64, d1, d2, d3: u64) {
+	at := its.queue_at / 8
+	its.queue[at] = u64(op) | d0_high << 32
+	its.queue[at + 1] = d1
+	its.queue[at + 2] = d2
+	its.queue[at + 3] = d3
+	its.queue_at = (its.queue_at + 32) % ITS_QUEUE_BYTES
+	vx_pte_publish() // the command reaches memory before the ITS is told
+	intrinsics.volatile_store(&its.regs.cwriter, its.queue_at)
+	for { // until it has run them
+		read := intrinsics.volatile_load(&its.regs.creadr)
+		if read & 1 != 0 {
+			kpanic("the GIC's ITS stalled on a command") // Stalled: a command it refused
+		}
+		if read == its.queue_at {
+			break
+		}
+	}
+}
+
+@(private="file")
+its_sync :: proc "contextless" () {
+	its_command(.Sync, 0, 0, its.target << 16, 0)
+}
+
+@(private="file")
+its_table :: proc "contextless" (order: uint) -> Paddr {
+	pa := phys_alloc_zeroed(order)
+	if pa == 0 {
+		kpanic("no memory for the ITS's tables")
+	}
+	return pa
+}
+
+@(private="file", require_results)
+its_init :: proc "contextless" () -> vx.Status {
+	if its.regs != nil {
+		return .Ok
+	}
+	if its.unusable {
+		return .Err_Unsupported
+	}
+	its.unusable = true // until it has all worked
+	if boot_rd == nil || intrinsics.volatile_load(&gicd().typer) & (1 << 17) == 0 { // GICD_TYPER.LPIS
+		return .Err_Unsupported
+	}
+	pa := ITS_PHYS_DEFAULT
+	if madt := acpi_table("APIC"); madt != nil {
+		for off := 44; off + 2 <= len(madt) && madt[off + 1] >= 2; off += int(madt[off + 1]) {
+			if madt[off] == 0xf && madt[off + 1] >= 20 && off + 16 <= len(madt) { // a GIC ITS structure
+				pa = Paddr(read64(madt[off + 8:]))
+			}
+		}
+	}
+	if !map_range(kernel_root, boot.hhdm + u64(pa), pa, ITS_SIZE, {.Write, .Device}) {
+		return .Err_No_Memory
+	}
+	regs := cast(^Its)uintptr(boot.hhdm + u64(pa))
+	typer := intrinsics.volatile_load(&regs.typer)
+
+	// The redistributor: its LPI configuration and pending tables, then LPIs on.
+	config := its_table(1) // 8 KiB: a byte for each of 8192 LPIs
+	its.lpi_config = (cast([^]u8)phys_to_virt(config))[:2 * PAGE_SIZE]
+	for &c in its.lpi_config[:LPI_COUNT] {
+		c = LPI_OFF
+	}
+	pending := its_table(4) // 64 KiB-aligned, as the GIC requires
+	intrinsics.volatile_store(&boot_rd.propbaser, u64(config) | 1 << 10 | 7 << 7 | (LPI_ID_BITS - 1))
+	intrinsics.volatile_store(&boot_rd.pendbaser, u64(pending) | 1 << 10 | 7 << 7)
+	intrinsics.volatile_store(&boot_rd.ctlr, intrinsics.volatile_load(&boot_rd.ctlr) | 1) // EnableLPIs
+
+	// The ITS: the tables it asks for (devices and collections), then the command queue.
+	for &baser in regs.baser {
+		b := intrinsics.volatile_load(&baser)
+		type, entry := b >> 56 & 7, (b >> 48 & 0x1f) + 1
+		if type != 1 && type != 4 {
+			continue // devices, collections
+		}
+		bits := type == 1 ? (typer >> 13 & 0x1f) + 1 : 16
+		pages := min(((entry << bits) + PAGE_SIZE - 1) / PAGE_SIZE, 256) // 1 MiB of entries is room for every device QEMU has
+		if type == 1 {
+			its.device_ids = min(pages * PAGE_SIZE / entry, 1 << bits)
+		}
+		order: uint
+		for (u64(1) << order) < pages {
+			order += 1
+		}
+		want := 1 << 63 | 7 << 59 | (entry - 1) << 48 | u64(its_table(order)) | 1 << 10 | (pages - 1)
+		intrinsics.volatile_store(&baser, want)
+		// The ITS may not take 4 KiB pages or inner-shareable, cached tables;
+		// then these tables are the wrong size or need cache maintenance: no MSIs.
+		ATTRS :: u64(3 << 8 | 3 << 10)
+		if intrinsics.volatile_load(&baser) & ATTRS != want & ATTRS {
+			return .Err_Unsupported
+		}
+	}
+	queue := its_table(4)
+	its.queue = (cast([^]u64)phys_to_virt(queue))[:ITS_QUEUE_BYTES / 8]
+	intrinsics.volatile_store(&regs.cbaser, 1 << 63 | 7 << 59 | u64(queue) | 1 << 10 | 15)
+	intrinsics.volatile_store(&regs.cwriter, 0)
+	intrinsics.volatile_store(&regs.ctlr, intrinsics.volatile_load(&regs.ctlr) | 1) // Enabled
+	its.regs = regs
+	its.pa = pa
+
+	// Collection 0 is the boot CPU's redistributor, by address or by number as GITS_TYPER.PTA says.
+	rd_pa := u64(virt_to_phys(boot_rd))
+	its.target = typer & (1 << 19) != 0 ? rd_pa >> 16 : intrinsics.volatile_load(&boot_rd.typer) >> 8 & 0xffff
+	its_command(.Mapc, 0, 0, 1 << 63 | its.target << 16 | 0, 0) // valid, target, ICID 0
+	its_sync()
+	its.unusable = false
+	return .Ok
+}
+
+// Called with irq_lines_lock held.
+arch_msi_create :: proc "contextless" (source: u32) -> (line: u32, msi: vx.Msi, st: vx.Status) {
+	its_init() or_return
+	lpi := u32(0)
+	for lpi < LPI_COUNT && irq_lines[MSI_LINE_BASE + lpi] != nil {
+		lpi += 1
+	}
+	if u64(source) >= its.device_ids {
+		return 0, {}, .Err_Range // a DeviceID the ITS has no room for would stall it
+	}
+	dev, free_dev := -1, -1
+	for d, i in its.devices {
+		if d.used && d.id == source {
+			dev = i
+		}
+		if !d.used && free_dev < 0 {
+			free_dev = i
+		}
+	}
+	if lpi == LPI_COUNT || (dev < 0 && free_dev < 0) {
+		return 0, {}, .Err_No_Memory
+	}
+	if dev < 0 { // a new device: its interrupt translation table, then MAPD
+		dev = free_dev
+		its.devices[dev] = {id = source, used = true}
+		itt := its_table(0)
+		its_command(.Mapd, u64(source), 4 /* 5 EventID bits */, 1 << 63 | u64(itt), 0)
+	}
+	d := &its.devices[dev]
+	event := 0
+	for event < ITS_EVENTS && (event in d.events) {
+		event += 1
+	}
+	if event == ITS_EVENTS {
+		return 0, {}, .Err_No_Memory
+	}
+	d.events += {event}
+	its.lpis[lpi] = {device = u8(dev), event = u8(event), used = true}
+	its.lpi_config[lpi] = LPI_ON
+	vx_pte_publish()
+	its_command(.Mapti, u64(source), u64(event) | u64(LPI_BASE + lpi) << 32, 0, 0) // to ICID 0
+	its_command(.Inv, u64(source), u64(event), 0, 0)
+	its_sync()
+	return MSI_LINE_BASE + lpi, {address = u64(its.pa) + ITS_TRANSLATER, data = u32(event)}, .Ok
+}
+
+// Turns the LPI off and forgets its event. (The ITS keeps the device's
+// table: devices come back, as restarted drivers do.)
+arch_msi_destroy :: proc "contextless" (line: u32) {
+	lpi := line - MSI_LINE_BASE
+	if lpi >= LPI_COUNT || !its.lpis[lpi].used {
+		return
+	}
+	its.lpi_config[lpi] = LPI_OFF
+	e := its.lpis[lpi]
+	d := &its.devices[e.device]
+	its_command(.Discard, u64(d.id), u64(e.event), 0, 0)
+	its_sync()
+	d.events -= {int(e.event)}
+	its.lpis[lpi].used = false
 }

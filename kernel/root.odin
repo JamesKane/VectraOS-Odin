@@ -86,60 +86,60 @@ CHANNEL_END_RIGHTS :: vx.Rights{.Read, .Write, .Wait, .Signal, .Duplicate, .Tran
 @(private="file")
 ROOT_RESOURCE_RIGHTS :: vx.Rights{.Manage, .Duplicate, .Transfer, .Inspect}
 @(private="file")
-BOOT_IMAGE_RIGHTS :: vx.Rights{.Read, .Map, .Duplicate, .Transfer, .Inspect}
+READ_ONLY_RIGHTS :: vx.Rights{.Read, .Map, .Duplicate, .Transfer, .Inspect} // the boot image and the ACPI tables
 
 @(private="file")
 spawn_text: [1024]u8
 
 // Writes the root task's spawn message into a new channel and returns the
-// end it reads from. The message holds references to t and to the boot image.
+// end it reads from: a handle to itself, the boot image, the ACPI tables, the
+// root Resource, and the command line. The message holds the references.
 @(private="file")
 root_spawn_message :: proc "contextless" (t: ^Task) -> ^Channel {
 	w := ndb.Writer{buf = spawn_text[:]}
+	given: [dynamic; 4]Moved_Handle
+	give :: proc "contextless" (w: ^ndb.Writer, given: ^[dynamic; 4]Moved_Handle, name: string, h: Moved_Handle) {
+		ndb.put(w, "handle", name)
+		ndb.put_u64(w, "index", u64(len(given)))
+		_ = ndb.end(w)
+		_ = append(given, h) // four at most, and there are four
+	}
 	ndb.put(&w, "spawn", root_module.name)
 	_ = ndb.end(&w)
-	ndb.put(&w, "handle", "self")
-	ndb.put_u64(&w, "index", 0)
-	_ = ndb.end(&w)
-	image: ^Vmo
+	object_ref(&t.obj)
+	give(&w, &given, "self", {&t.obj, vx.ALL_RIGHTS})
 	if len(root_module.bootfs) > 0 {
-		st: vx.Status
-		image, st = vmo_create(u64(len(root_module.bootfs)))
+		image, st := vmo_create(u64(len(root_module.bootfs)))
 		if st != .Ok {
 			kpanic("no memory for the boot image")
 		}
 		vmo_write(image, 0, root_module.bootfs)
-		ndb.put(&w, "handle", "bootimage")
-		ndb.put_u64(&w, "index", 1)
-		_ = ndb.end(&w)
+		give(&w, &given, "bootimage", {&image.obj, READ_ONLY_RIGHTS})
 		ndb.flag(&w, "bootimage")
 		ndb.put_u64(&w, "size", u64(len(root_module.bootfs)))
 		_ = ndb.end(&w)
 	}
-	ndb.put(&w, "handle", "resource")
-	ndb.put_u64(&w, "index", image != nil ? 2 : 1)
-	_ = ndb.end(&w)
+	if acpi, acpi_size, ok := acpi_export(); ok {
+		give(&w, &given, "acpi", {&acpi.obj, READ_ONLY_RIGHTS})
+		ndb.flag(&w, "acpi")
+		ndb.put_u64(&w, "size", acpi_size)
+		_ = ndb.end(&w)
+	}
+	give(&w, &given, "resource", {&root_resource().obj, ROOT_RESOURCE_RIGHTS})
 	ndb.put(&w, "cmdline", boot.cmdline)
 	if !ndb.end(&w) {
 		kpanic("the root task's spawn message does not fit")
 	}
 
-	count := u32(image != nil ? 3 : 2)
 	text := ndb.written(&w)
-	m := msg_alloc(u32(size_of(vx.Msg_Header) + len(text)), count)
+	m := msg_alloc(u32(size_of(vx.Msg_Header) + len(text)), u32(len(given)))
 	ours, theirs, st := channel_create()
 	if m == nil || st != .Ok {
 		kpanic("cannot make the root task's channel")
 	}
 	msg_header(m)^ = {ordinal = vx.SPAWN}
 	copy(msg_body(m)[size_of(vx.Msg_Header):], text)
-	handles := msg_handles(m)
-	object_ref(&t.obj)
-	handles[0] = {&t.obj, vx.ALL_RIGHTS}
-	if image != nil {
-		handles[1] = {&image.obj, BOOT_IMAGE_RIGHTS} // the message takes our reference
-	}
-	handles[count - 1] = {&root_resource().obj, ROOT_RESOURCE_RIGHTS}
+	copy(msg_handles(m), given[:]) // the message takes our references
 	if channel_write(ours, m) != .Ok {
 		kpanic("cannot send the root task's spawn message")
 	}

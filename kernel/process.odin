@@ -40,26 +40,29 @@ task_bind :: proc "contextless" (t: ^Task, b: ^Binding) -> vx.Status {
 // address space.
 @(private="file")
 task_teardown :: proc "contextless" (t: ^Task) {
-	for &e in t.handles { // no one adds to an ending task's table
-		obj := e.obj
-		e.obj = nil
-		if obj != nil {
-			object_drop(obj)
+	// The tables leave the task under its lock, so a handle_add or task_map on
+	// another CPU (through a handle to this task) sees them gone, never freed.
+	spin_lock(&t.lock)
+	handles, maps, root := t.handles, t.maps, t.root
+	t.handles = nil
+	t.maps = nil
+	t.root = 0
+	t.mapped = 0
+	spin_unlock(&t.lock)
+	for e in handles[1:] {
+		if e.obj != nil {
+			object_drop(e.obj)
 		}
 	}
-	for m in t.maps {
+	for m in maps {
 		if m.size != 0 {
 			object_drop(&m.vmo.obj)
 		}
 	}
-	free_user_tables(t.root)
-	phys_free(virt_to_phys(t.maps), 0)
-	phys_free(virt_to_phys(t.handles), 0)
+	free_user_tables(root)
+	phys_free(virt_to_phys(maps), 0)
+	phys_free(virt_to_phys(handles), 0)
 	spin_lock(&t.lock)
-	t.root = 0
-	t.maps = nil
-	t.handles = nil
-	t.mapped = 0
 	t.state = .Exited // only now: an EXIT binding sees the task fully gone
 	observers_fire(&t.obs, .Exit, u64(t.exit_status))
 	spin_unlock(&t.lock)
@@ -69,12 +72,18 @@ task_teardown :: proc "contextless" (t: ^Task) {
 // arguments. The thread holds a reference to itself until it is reaped.
 @(require_results)
 thread_start :: proc "contextless" (th: ^Thread, entry, sp: Uva, arg, arg2: u64) -> vx.Status {
+	// Both in the lower half: a non-canonical address would fault on the way
+	// to user mode, in the kernel (x86_64's iretq), not in the task.
+	if entry >= USER_TOP || sp > USER_TOP {
+		return .Err_Invalid
+	}
 	t := th.task
 	{
 		spin_guard(&t.lock)
-		if th.state != .New || th.user_entry != 0 || t.ending || t.killed {
+		if th.state != .New || th.started || t.ending || t.killed {
 			return .Err_Bad_State
 		}
+		th.started = true // under the task's lock: one start, even with entry 0
 		th.user_entry = entry
 		th.user_sp = sp
 		th.user_arg = arg
