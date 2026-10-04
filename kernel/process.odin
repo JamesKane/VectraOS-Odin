@@ -48,7 +48,16 @@ task_teardown :: proc "contextless" (t: ^Task) {
 	t.maps = nil
 	t.root = 0
 	t.mapped = 0
+	exc_port, dbg_port := t.exc_port, t.dbg_port
+	t.exc_port, t.dbg_port = nil, nil
+	t.exc_handler = 0
 	spin_unlock(&t.lock)
+	if exc_port != nil {
+		object_drop(&exc_port.obj)
+	}
+	if dbg_port != nil {
+		object_drop(&dbg_port.obj)
+	}
 	for e in handles[1:] {
 		if e.obj != nil {
 			object_drop(e.obj)
@@ -107,6 +116,7 @@ thread_exit_current :: proc "contextless" (status: i64) -> ! {
 	if !t.killed && t.live_threads == 1 {
 		t.exit_status = status
 	}
+	th.exited = true
 	t.live_threads -= 1
 	th.last_of_task = t.live_threads == 0
 	if th.last_of_task {
@@ -118,12 +128,12 @@ thread_exit_current :: proc "contextless" (status: i64) -> ! {
 
 // A dead thread's last rites, run by the next thread on its CPU (sched.odin).
 thread_reap :: proc "contextless" (th: ^Thread) {
-	kstack_free(th.kstack)
-	th.kstack = 0
 	t := th.task
-	spin_lock(&t.lock)
+	spin_lock(&t.lock) // off the task's list first: nothing that walks it finds a freed stack
 	unlink(&t.threads, th, "task_next")
 	spin_unlock(&t.lock)
+	kstack_free(th.kstack)
+	th.kstack = 0
 	if th.last_of_task {
 		task_teardown(t)
 	}
@@ -145,7 +155,7 @@ task_kill :: proc "contextless" (t: ^Task, status: i64) {
 		t.ending = true
 	}
 	for th := t.threads; th != nil; th = th.task_next {
-		sched_kick_for_kill(th)
+		sched_kick(th, .Err_Killed)
 	}
 	spin_unlock(&t.lock)
 	if idle {
@@ -154,7 +164,8 @@ task_kill :: proc "contextless" (t: ^Task, status: i64) {
 }
 
 // Every trap from user mode ends here before returning to it: a killed
-// task's thread exits, and a pending reschedule happens.
+// task's thread exits, a suspended one parks, a pending reschedule happens,
+// and a note goes to the task's handler.
 user_return :: proc "contextless" () {
 	object_drain() // what this trap dropped
 	for {
@@ -163,18 +174,26 @@ user_return :: proc "contextless" () {
 		if t.killed {
 			thread_exit_current(t.exit_status)
 		}
+		if exception_check_suspend() {
+			continue // parked until resumed: look at the kill again
+		}
 		if !c.resched {
-			return
+			break
 		}
 		schedule() // and look again: a kill may have come meanwhile
 	}
+	exception_check_interrupt() // a thread_interrupt, to its handler
 }
 
-// A fault in user mode kills the whole task (until exception ports, no one
-// else could handle it).
-task_fault_exit :: proc "contextless" () -> ! {
-	task_kill(this_cpu().current.task, EXIT_FAULT)
-	thread_exit_current(EXIT_FAULT)
+// Ends the current thread's task with this exit status.
+task_exit_with :: proc "contextless" (status: i64) -> ! {
+	task_kill(this_cpu().current.task, status)
+	thread_exit_current(status)
+}
+
+// A fault in user mode that no one handled kills the whole task.
+task_fault_exit :: proc "contextless" (kind: vx.Exception_Kind, code: u32, address, pc: u64) -> ! {
+	task_exit_with(EXIT_FAULT)
 }
 
 // The last reference is gone. Threads hold references to their task, so it

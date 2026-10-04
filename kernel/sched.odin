@@ -172,10 +172,11 @@ thread_wake_token :: proc "contextless" (t: ^Thread, token: rawptr, result: vx.S
 		return false
 	}
 	t.wait_token = nil
-	t.wait_result = result
 	if t.state == .Blocked {
+		t.wait_result = result
 		make_ready(t)
 	} else {
+		t.pending_result = result // for its block, which returns at once
 		t.wake_pending = true
 	}
 	return true
@@ -191,6 +192,11 @@ thread_block :: proc "contextless" (deadline: Instant, leeway: Instant) -> vx.St
 	spin_lock(&sched.lock)
 	if t.wake_pending { // woken before it got here
 		t.wake_pending = false
+		t.wait_result = t.pending_result
+		// This wait is over: a waker that comes later (a channel reply before
+		// the caller has left the list) must not end the next one, which may
+		// use the same token, a record at the same place on this stack.
+		t.wait_token = nil
 		spin_unlock(&sched.lock)
 		return t.wait_result
 	}
@@ -283,9 +289,15 @@ sched_start_thread :: proc "contextless" (t: ^Thread) {
 // The first time a thread runs, the context switch returns into the
 // architecture's trampoline, which calls this with the lock still held from
 // the switch. It never returns: it enters user mode.
+// One suspended before it ever ran parks on its first way back to the
+// kernel, its user registers in place (thread_suspend pokes it until it
+// does); one whose task was killed meanwhile ends here.
 @(export, link_name="thread_entry")
 thread_entry :: proc "c" (t: ^Thread) -> ! {
 	reap_after_switch()
+	if t.task.killed {
+		thread_exit_current(t.task.exit_status)
+	}
 	arch_enter_user(t.user_entry, t.user_sp, t.user_arg, t.user_arg2, thread_kstack_top(t))
 }
 
@@ -312,24 +324,54 @@ sched_exit_current :: proc "contextless" () -> ! {
 	kpanic("a dead thread was scheduled")
 }
 
-// Gets a thread of a task being killed to notice (process.odin): a blocked
-// thread wakes with ERR_KILLED, wherever it waits; one running user code on
-// another CPU gets an interrupt, and checks on its way back to user mode.
-sched_kick_for_kill :: proc "contextless" (t: ^Thread) {
-	spin_lock(&sched.lock)
-	defer spin_unlock(&sched.lock)
+// Gets a thread running user code on another CPU into the kernel, to notice
+// something on its way back (a suspension); a thread anywhere else needs
+// nothing.
+sched_poke :: proc "contextless" (t: ^Thread) {
+	spin_guard(&sched.lock)
+	if t.state == .Running && t.cpu != nil && t.cpu != this_cpu() {
+		arch_send_resched(t.cpu)
+	}
+}
+
+// Gets a thread to notice a kill (process.odin) or an interrupt
+// (exception.odin): a blocked thread wakes with `why`, wherever it waits; one
+// running user code on another CPU gets an interrupt, and checks on its way
+// back to user mode. A kill is never downgraded to an interrupt.
+sched_kick :: proc "contextless" (t: ^Thread, why: vx.Status) {
+	spin_guard(&sched.lock)
+	why := why
+	if t.wake_pending && t.pending_result == .Err_Killed {
+		why = .Err_Killed // a kill outranks the rest
+	}
 	if t.state == .Blocked {
 		t.wait_token = nil
-		t.wait_result = .Err_Killed
+		t.wait_result = why
 		make_ready(t)
 	} else if t.state != .Dead {
 		// Ready, or running here or elsewhere: if it is about to block, the
 		// block returns at once; if it is in user mode on another CPU,
-		// interrupt it.
+		// interrupt it. Its next block's result is pending_result, never
+		// wait_result: a wait that has already ended (a reply handed to it,
+		// say) keeps its own. A wake already pending with a result (a packet
+		// taken, a futex woken) stands, but against a kill: the waker counted
+		// it as woken, and the interrupt is not lost, as the thread takes it
+		// on its way back to user mode.
+		if !t.wake_pending || t.pending_result < .Ok || why == .Err_Killed {
+			t.pending_result = why
+		}
 		t.wake_pending = true
-		t.wait_result = .Err_Killed
 		if t.state == .Running && t.cpu != nil && t.cpu != this_cpu() {
 			arch_send_resched(t.cpu)
 		}
+	}
+}
+
+// An interrupt is being delivered (exception.odin): the wake it left pending
+// must not end the thread's next wait as well.
+sched_drop_interrupt_wake :: proc "contextless" (t: ^Thread) {
+	spin_guard(&sched.lock)
+	if t.wake_pending && t.pending_result == .Err_Interrupted {
+		t.wake_pending = false
 	}
 }

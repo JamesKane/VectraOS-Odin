@@ -60,6 +60,16 @@ thread_create :: proc "contextless" (task: vx.Handle) -> (vx.Handle, vx.Status) 
 	return h, st
 }
 
+// The same, and the thread's id in its task (exceptions and thread_interrupt
+// name it so).
+@(require_results)
+thread_create_id :: proc "contextless" (task: vx.Handle) -> (vx.Handle, u32, vx.Status) {
+	h: vx.Handle
+	id: u32
+	st := status(vx_syscall(.Thread_Create, u64(task), addr(&h), addr(&id)))
+	return h, id, st
+}
+
 // The handle, unless HANDLE_NONE, moves to the thread's task, and the thread
 // gets its value there as its first argument.
 @(require_results)
@@ -70,6 +80,72 @@ thread_start :: proc "contextless" (thread: vx.Handle, entry, sp: u64, arg: vx.H
 thread_exit :: proc "contextless" (exit_status: i64) -> ! {
 	vx_syscall(.Thread_Exit, u64(exit_status))
 	for {}
+}
+
+// --- Exceptions, interrupts and debugging (abi.odin describes them) ---
+
+// Where the task's faults go: a port (key in its packets), with
+// {.First_Chance} a debugger's port, or with {.In_Task} a handler in the task
+// (key its address, 0 to unbind).
+@(require_results)
+exception_bind :: proc "contextless" (task, port: vx.Handle, key: u64, options: vx.Exception_Options = {}) -> vx.Status {
+	return status(vx_syscall(.Exception_Bind, u64(task), u64(port), key, u64(transmute(u32)options)))
+}
+
+// Resumes a thread stopped at a port, with regs if given; with thread 0 the
+// caller leaves its handler with regs, and this does not return.
+@(require_results)
+exception_resume :: proc "contextless" (task: vx.Handle, thread: u32, action: vx.Resume_Action, regs: ^vx.Regs = nil) -> vx.Status {
+	return status(vx_syscall(.Exception_Resume, u64(task), u64(thread), u64(action), addr(regs)))
+}
+
+// Reads or writes a thread's state into or from *buf: an Exception, Regs, a
+// u64 thread pointer, Fpregs, a Thread_Info or Watches, as op says. The size
+// is buf's type's.
+@(require_results)
+thread_state :: proc "contextless" (task: vx.Handle, thread: u32, op: vx.Thread_State_Op, buf: ^$T) -> vx.Status {
+	return status(vx_syscall(.Thread_State, u64(task), u64(thread), u64(op), addr(buf), size_of(T)))
+}
+
+// Counted; with thread 0, every thread of the task. Returns once the thread
+// holds still.
+@(require_results)
+thread_suspend :: proc "contextless" (task: vx.Handle, thread: u32) -> vx.Status {
+	return status(vx_syscall(.Thread_Suspend, u64(task), u64(thread)))
+}
+
+@(require_results)
+thread_resume :: proc "contextless" (task: vx.Handle, thread: u32) -> vx.Status {
+	return status(vx_syscall(.Thread_Resume, u64(task), u64(thread)))
+}
+
+// Copies between the task's memory and the caller's, one op each; each op's
+// status says how it went.
+@(require_results)
+task_mem_rw :: proc "contextless" (task: vx.Handle, ops: []vx.Mem_Op) -> vx.Status {
+	return status(vx_syscall(.Task_Mem_Rw, u64(task), addr(raw_data(ops)), u64(len(ops))))
+}
+
+// Posts a note to a thread of the task, or with thread 0 to any (ADR-0010).
+@(require_results)
+thread_interrupt :: proc "contextless" (task: vx.Handle, thread: u32, note: string) -> vx.Status {
+	return status(vx_syscall(.Thread_Interrupt, u64(task), u64(thread), addr(raw_data(note)), u64(len(note))))
+}
+
+// The first of the task's mappings that ends after `at` (INSPECT).
+@(require_results)
+as_query :: proc "contextless" (task: vx.Handle, at: u64) -> (vx.Map_Info, vx.Status) {
+	info: vx.Map_Info
+	st := status(vx_syscall(.As_Query, u64(task), at, addr(&info)))
+	return info, st
+}
+
+// A new VMO holding a copy of [offset, offset + size) of vmo.
+@(require_results)
+vmo_clone :: proc "contextless" (vmo: vx.Handle, offset, size: u64) -> (vx.Handle, vx.Status) {
+	h: vx.Handle
+	st := status(vx_syscall(.Vmo_Clone, u64(vmo), offset, size, 0, addr(&h)))
+	return h, st
 }
 
 @(require_results)

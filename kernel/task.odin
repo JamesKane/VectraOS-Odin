@@ -45,6 +45,7 @@ Mapping :: struct {
 	size, offset: u64,
 	vmo:          ^Vmo,
 	flags:        vx.Map_Options,
+	privatized:   bool, // its VMO is a copy of its own, made for a debugger's write (exception.odin)
 }
 
 TASK_MAX_MAPPINGS :: PAGE_SIZE / size_of(Mapping)
@@ -74,6 +75,13 @@ Task :: struct {
 	parent_id:       u64, // the task that created it, or its nearest live creator; 0 for the root task
 	all_next:        ^Task, // in all_tasks
 	io:              [dynamic; TASK_MAX_IO]Io_Range, // I/O ports it may use (x86_64, device.odin)
+	thread_ids:      u32, // the last thread's id: ids count from 1, in creation order
+	// Where its faults go (exception.odin): an in-task handler, then a port.
+	exc_handler:     Uva,
+	exc_port:        ^Port, // a reference, or nil
+	exc_key:         u64,
+	dbg_port:        ^Port, // a debugger's, which sees faults first (.First_Chance); a reference, or nil
+	dbg_key:         u64,
 }
 
 #assert(offset_of(Task, obj) == 0) // objects are cast from ^Object
@@ -110,9 +118,26 @@ Thread :: struct {
 	wake_at:      Instant, // the deadline it sleeps until
 	wake_late:    Instant, // wake_at plus its leeway: the timer may wait until here
 	wait_token:   rawptr, // what it waits on, until it is woken or times out (sched.odin)
-	wake_pending: bool, // woken between joining a list of waiters and blocking
-	wait_result:  vx.Status,
+	wake_pending:   bool, // woken between joining a list of waiters and blocking
+	pending_result: vx.Status, // and the result that block returns at once
+	wait_result:    vx.Status,
+	// Exceptions and interrupts (exception.odin), under its task's lock.
+	id:                u32, // in its task
+	exited:            bool, // it has exited, and waits to be reaped: no note reaches it
+	exc_stopped:       bool, // stopped at its task's exception port, until exception_resume
+	exc_first:         bool, // and that port is a debugger's
+	exc_action:        Maybe(vx.Resume_Action), // what exception_resume said
+	suspend_count:     u32, // thread_suspend, less thread_resume
+	parked:            bool, // stopped on its way to user mode while suspended
+	stepping:          bool, // a debugger asked for one instruction (arch_frame_step): aarch64 keeps MDSCR_EL1.SS on
+	// thread_interrupt's notes not yet delivered, oldest first: each is its
+	// own exception (Plan 9 queued notes the same way).
+	interrupt_pending: bool, // notes waiting, read without the lock
+	notes:             [dynamic; THREAD_MAX_INTERRUPTS]Note,
+	exc:               vx.Exception, // the exception it stopped at
 }
+
+#assert(size_of(Thread) <= PAGE_SIZE) // a pool object
 
 #assert(offset_of(Thread, obj) == 0) // objects are cast from ^Object
 
@@ -408,8 +433,25 @@ task_name :: proc "contextless" (t: ^Task) -> string {
 	return string(t.name[:n])
 }
 
-// The page-table flags for a user mapping of v.
-@(private="file")
+// The first of t's mappings that ends after addr (as_query).
+@(require_results)
+task_query :: proc "contextless" (t: ^Task, addr: Uva) -> (info: vx.Map_Info, st: vx.Status) {
+	spin_guard(&t.lock)
+	best: ^Mapping
+	if t.maps != nil {
+		for &m in t.maps {
+			if m.size != 0 && m.va + Uva(m.size) > addr && (best == nil || m.va < best.va) {
+				best = &m
+			}
+		}
+	}
+	if best == nil {
+		return {}, .Err_Not_Found
+	}
+	return {base = u64(best.va), size = best.size, offset = best.offset, flags = best.flags}, .Ok
+}
+
+// The page-table flags for a user mapping.
 user_map_flags :: proc "contextless" (flags: vx.Map_Options, device: bool) -> Map_Flags {
 	mf := Map_Flags{.User}
 	if .Write in flags {
@@ -580,6 +622,11 @@ thread_create :: proc "contextless" (t: ^Task) -> (thread: ^Thread, st: vx.Statu
 	}
 	object_init(&th.obj, .Thread) // pool_alloc zeroed the rest
 	th.task = t
+	{
+		spin_guard(&t.lock)
+		t.thread_ids += 1
+		th.id = t.thread_ids
+	}
 	th.kstack = stack
 	th.intent = .Interactive
 	object_ref(&t.obj)

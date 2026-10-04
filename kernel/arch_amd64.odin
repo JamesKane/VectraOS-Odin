@@ -743,6 +743,113 @@ arch_enter_user :: proc "contextless" (entry, sp: Uva, arg, arg2, kstack_top: u6
 	vx_enter_user(u64(entry), u64(sp - 8), arg, arg2, kstack_top)
 }
 
+// --- User-mode registers (exception.odin) ---
+
+// The frame at the top of a thread's kernel stack: its user-mode registers,
+// once it has entered the kernel from user mode.
+arch_user_frame :: proc "contextless" (th: ^Thread) -> ^Trap_Frame {
+	return cast(^Trap_Frame)uintptr(thread_kstack_top(th) - size_of(Trap_Frame))
+}
+
+arch_frame_regs :: proc "contextless" (f: ^Trap_Frame) -> vx.Regs {
+	return {
+		rax = f.rax, rbx = f.rbx, rcx = f.rcx, rdx = f.rdx, rsi = f.rsi, rdi = f.rdi, rbp = f.rbp, rsp = f.rsp,
+		r8 = f.r8, r9 = f.r9, r10 = f.r10, r11 = f.r11, r12 = f.r12, r13 = f.r13, r14 = f.r14, r15 = f.r15,
+		rip = f.rip, rflags = f.rflags,
+	}
+}
+
+// The flags user code may set: carry, parity, adjust, zero, sign, direction,
+// overflow, alignment check and ID. Interrupts stay on; trap (single step)
+// is the debugger's (arch_frame_step).
+@(private="file")
+USER_FLAGS :: u64(0x1 | 0x4 | 0x10 | 0x40 | 0x80 | 0x400 | 0x800 | 0x40000 | 0x200000)
+@(private="file")
+RFLAGS_IF :: u64(0x200)
+@(private="file")
+RFLAGS_TF :: u64(0x100) // trap after the next instruction
+@(private="file")
+RFLAGS_DF :: u64(0x400)
+
+// cs and ss stay user mode's: only what user mode may hold is taken.
+@(require_results)
+arch_frame_set_regs :: proc "contextless" (f: ^Trap_Frame, r: ^vx.Regs) -> vx.Status {
+	if r.rip >= u64(USER_TOP) || r.rsp > u64(USER_TOP) {
+		return .Err_Invalid // iretq would fault on them, in the kernel
+	}
+	f.rax, f.rbx, f.rcx, f.rdx, f.rsi, f.rdi, f.rbp, f.rsp = r.rax, r.rbx, r.rcx, r.rdx, r.rsi, r.rdi, r.rbp, r.rsp
+	f.r8, f.r9, f.r10, f.r11, f.r12, f.r13, f.r14, f.r15 = r.r8, r.r9, r.r10, r.r11, r.r12, r.r13, r.r14, r.r15
+	f.rip = r.rip
+	f.rflags = r.rflags & USER_FLAGS | RFLAGS_IF | 0x2 // bit 1 is always set
+	return .Ok
+}
+
+regs_sp :: proc "contextless" (r: ^vx.Regs) -> Uva {
+	return Uva(r.rsp)
+}
+
+regs_pc :: proc "contextless" (r: ^vx.Regs) -> u64 {
+	return r.rip
+}
+
+// The register a syscall's result goes back in.
+regs_result :: proc "contextless" (r: ^vx.Regs) -> u64 {
+	return r.rax
+}
+
+arch_frame_step :: proc "contextless" (f: ^Trap_Frame, on: bool) {
+	f.rflags = on ? f.rflags | RFLAGS_TF : f.rflags &~ RFLAGS_TF
+}
+
+arch_sync_icache :: proc "contextless" (p: []u8) {} // x86 keeps it coherent itself
+
+// To pc(arg) as if called: a zero return address below arg, which is
+// 16-aligned.
+arch_frame_divert :: proc "contextless" (f: ^Trap_Frame, pc, arg: Uva) -> bool {
+	zero: u64
+	if copy_out(arg - 8, &zero) != .Ok {
+		return false
+	}
+	f.rip = u64(pc)
+	f.rsp = u64(arg - 8)
+	f.rdi = u64(arg)
+	f.rflags &~= RFLAGS_DF // the ABI starts functions with the direction flag clear
+	return true
+}
+
+// A user-mode fault as an exception: its kind, code and address.
+@(private="file")
+x86_exception_kind :: proc "contextless" (f: ^Trap_Frame) -> (kind: vx.Exception_Kind, code: u32, address: u64) {
+	code = u32(f.error)
+	switch f.vector {
+	case 0:
+		return .Arithmetic, code, 0 // divide error
+	case 1:
+		return .Step, code, 0 // the trap flag (exception_raise clears it, or sets it again)
+	case 3:
+		return .Breakpoint, code, 0
+	case 6:
+		return .Illegal, code, 0
+	case 7:
+		return .Fp_Disabled, code, 0
+	case 14:
+		pf := transmute(Pf_Error)f.error
+		code = 0 // read
+		if .Write in pf {
+			code = 1
+		}
+		if .Fetch in pf {
+			code = 2
+		}
+		return .Page_Fault, code, vx_read_cr2()
+	case 16, 19:
+		return .Arithmetic, code, 0 // x87 and SIMD FP exceptions
+	case 17:
+		return .Alignment, code, 0
+	}
+	return .General, u32(f.vector), 0
+}
+
 @(export, link_name="x86_trap")
 x86_trap :: proc "c" (f: ^Trap_Frame) {
 	from_user := f.cs & 3 != 0
@@ -772,12 +879,16 @@ x86_trap :: proc "c" (f: ^Trap_Frame) {
 			return
 		}
 		if from_user {
-			task_fault_start()
-			kput_exception(f)
-			kput(" at rip ")
-			kput_hex(f.rip)
-			kput("\n")
-			task_fault_exit()
+			kind, code, address := x86_exception_kind(f)
+			if !exception_raise(f, kind, code, address) { // nobody took it
+				task_fault_start()
+				kput_exception(f)
+				kput(" at rip ")
+				kput_hex(f.rip)
+				kput("\n")
+				task_fault_exit(kind, code, address, f.rip)
+			}
+			break
 		}
 		panic_start()
 		if (f.vector == 8 || f.vector == 14) && kstack_in_guard(vx_read_cr2()) {

@@ -38,6 +38,7 @@ Trigger :: enum u32 {
 	Counter_Ge, // a counter has reached the binding's threshold; value: the counter
 	Exit, // a task has ended; value: its exit status
 	Irq, // an Irq has fired since it was last bound; value: how many times in all
+	Exception, // a thread stopped at an exception (exception_bind); value: its thread id
 }
 
 // The intents a thread declares. Until scheduling contexts land, every thread
@@ -289,3 +290,210 @@ Map_Options :: bit_set[Map_Option; u32]
 
 // On the wire, an option set is the u32 whose bit i is the option with value i.
 #assert(u32(Map_Option.Write) == 0 && u32(Map_Option.Exec) == 1)
+
+// as_map(task, vmo, offset, size, flags, &address): maps part of a VMO, at
+// address, or where the kernel picks with address 0.
+// as_unmap(task, address, size): unmaps the pages of [address, address +
+// size), whole mappings or parts of them; a mapping cut in the middle becomes
+// two. Pages nothing maps there are left alone. Once it returns, no CPU can
+// reach the pages through those addresses any more.
+
+// The longest note, in bytes: Plan 9's ERRMAX (ADR-0010).
+ERRMAX :: 128
+
+// --- Exceptions and interrupts ---
+//
+// A fault in user mode goes first to a debugger's port, if one is bound with
+// .First_Chance, then to the task's in-task handler, if it has one, then to
+// its exception port, then to the default: the task is killed.
+//
+// thread_create(task, &out, &id): a thread, and (unless id is null) its id
+//     in the task, from 1 in creation order, which exceptions and
+//     thread_interrupt name it by.
+// thread_start(thread, entry, sp, handle, arg2): runs entry(handle, arg2) as
+//     if called, sp being a 16-aligned stack top: on x86_64 with a zero
+//     return address just below it, so any C function can be the entry.
+// exception_bind(task, port, key, options): with no options, faults stop the
+//     thread and post a packet to port: trigger .Exception, the binding's
+//     key, and value the thread's id. A port of HANDLE_NONE unbinds. With
+//     .In_Task, key is a handler in the task (port ignored, 0 unbinds): the
+//     kernel puts an Exception on the faulting thread's own stack, below the
+//     128 bytes under its stack pointer, and starts the thread at
+//     handler(exception). A handler never returns: it resumes with
+//     exception_resume. With .First_Chance (and the DEBUG right), a
+//     debugger's port, as with no options but before the rest; it also gets
+//     .Step exceptions.
+// exception_resume(task, thread, action, regs): resumes a thread stopped at
+//     its port: .Continue (with the registers at regs, if not null; else as
+//     it stopped, retrying the instruction), .Kill, or, from a debugger's
+//     port, .Pass (to whoever is next in line) or .Step (.Continue for one
+//     instruction, then a .Step exception to the debugger). With thread 0,
+//     the caller resumes itself from its handler: .Continue with the
+//     registers its Exception holds, perhaps changed.
+// thread_state(task, thread, op, buffer, size): for a thread stopped at a
+//     port, .Get_Exception reads its Exception; for one stopped or suspended,
+//     .Get_Regs and .Set_Regs its registers (DEBUG for a suspended one).
+//     .Get_Tls and .Set_Tls its thread pointer (x86_64's FS base, aarch64's
+//     TPIDR_EL0), a u64, on the same terms; with thread 0, the caller's own,
+//     at any time. .Get_Fpregs and .Set_Fpregs its FP/SIMD registers, an
+//     Fpregs, on the same terms. .Get_Watch and .Set_Watch (DEBUG), with
+//     thread 0, the task's watchpoints, a Watches, which every thread of it
+//     has, from when each next runs; .Get_Watch says how many the hardware
+//     has in count. .Next_Thread, at any time, describes the live thread with
+//     the next id after `thread` (0: the first) in a Thread_Info;
+//     .Err_Not_Found after the last.
+// thread_suspend(task, thread), thread_resume(task, thread): counted, with
+//     the DEBUG right; with thread 0, every thread of the task. A suspended
+//     thread stops before it next returns to user mode; thread_suspend
+//     returns once it has (stopped there, or blocked in a call), or
+//     .Err_Timed_Out after a second.
+// task_mem_rw(task, ops, count): with the DEBUG right, copies between
+//     another task's memory and the caller's, a Mem_Op each; each op gets its
+//     own status. A write to a mapping that is not writable (code, for a
+//     breakpoint) first gives the task a private copy of that mapping, as
+//     ptrace does: never a writable mapping of it.
+// thread_interrupt(task, thread, note, len): posts a note (ADR-0010), a
+//     string of 1 to ERRMAX bytes, to the thread (any thread of the task,
+//     with thread 0): a call it is blocked in returns .Err_Interrupted, and
+//     on its way back to user mode it is diverted to the in-task handler with
+//     an exception of kind .Interrupt carrying the note. Up to eight notes
+//     wait for delivery, each its own exception; more is .Err_Should_Wait.
+// vmo_clone(vmo, offset, size, options, &out): a new VMO holding a copy of
+//     the range, charged in full (commit, not overcommit).
+// as_query(task, address, &info): with INSPECT on the task, the first of its
+//     mappings that ends after address, in a Map_Info; .Err_Not_Found if
+//     none. A caller lists an address space by asking again from each one's
+//     end.
+//
+// Registers a handler or a debugger may change are checked: a thread can be
+// given any user-mode state, and never a privileged one.
+
+when ODIN_ARCH == .amd64 {
+	Regs :: struct {
+		rax, rbx, rcx, rdx, rsi, rdi, rbp, rsp: u64,
+		r8, r9, r10, r11, r12, r13, r14, r15:   u64,
+		rip, rflags:                            u64,
+	}
+
+	Fpregs :: struct { // FXSAVE's 512-byte image: x87, MXCSR, XMM0-15
+		fxsave: [512]u8,
+	}
+} else {
+	Regs :: struct {
+		x:              [31]u64, // x30 is the link register
+		sp, pc, pstate: u64,
+	}
+
+	Fpregs :: struct {
+		v:          [32][16]u8, // V0-V31
+		fpcr, fpsr: u64,
+	}
+}
+
+Exception_Kind :: enum u32 {
+	Page_Fault = 1, // address: what was touched; code: read 0, write 1, execute 2
+	Illegal, // an undefined or privileged instruction
+	Breakpoint, // int3, brk
+	Arithmetic, // division by zero, an FP exception
+	Alignment,
+	Fp_Disabled, // FP/SIMD while the kernel does not save it
+	General, // any other fault (x86 #GP, say); code: the architecture's
+	Interrupt, // thread_interrupt; code: the note's length, note: its text
+	Step, // one instruction done, after exception_resume(.Step)
+	// A watched address touched; code: the watchpoint's slot, address: what
+	// it watches. x86_64 stops after the access, aarch64 before it (resuming
+	// touches it again: step it with the watchpoint off).
+	Watchpoint,
+}
+
+Exception :: struct {
+	kind:     Exception_Kind,
+	code:     u32,
+	address:  u64,
+	thread:   u32, // the id of the thread it happened to
+	reserved: u32,
+	regs:     Regs,
+	note:     [ERRMAX]u8, // .Interrupt: the note, `code` bytes of it
+}
+
+Exception_Option :: enum u32 {
+	In_Task,
+	First_Chance,
+}
+Exception_Options :: bit_set[Exception_Option; u32]
+
+Resume_Action :: enum u32 {
+	Continue = 1,
+	Kill,
+	Pass,
+	Step,
+}
+
+Thread_State_Op :: enum u32 {
+	Get_Exception = 1,
+	Get_Regs,
+	Set_Regs,
+	Get_Tls,
+	Set_Tls,
+	Get_Fpregs,
+	Set_Fpregs,
+	Next_Thread,
+	Get_Watch,
+	Set_Watch,
+}
+
+// Watchpoints: the debug registers, x86_64's four, aarch64's two to sixteen.
+// An address aligned to its length (1, 2, 4 or 8 bytes), in user space.
+WATCH_MAX :: 16
+
+Watch_Kind :: enum u32 {
+	Off,
+	Write,
+	Rw,
+}
+
+Watch :: struct {
+	address: u64,
+	len:     u32,
+	kind:    Watch_Kind,
+}
+
+Watches :: struct {
+	count:    u32, // .Get_Watch: how many the hardware has; slots from there on are .Off
+	reserved: u32,
+	slot:     [WATCH_MAX]Watch,
+}
+
+Thread_Run_State :: enum u32 {
+	Running = 1, // running or ready
+	Blocked, // waiting in a call
+	Stopped, // at an exception port, until exception_resume
+	Suspended, // parked by thread_suspend
+}
+
+Thread_Info :: struct { // thread_state(.Next_Thread)
+	id:            u32,
+	state:         Thread_Run_State,
+	suspend_count: u32, // thread_suspend's, less thread_resume's
+	first_chance:  b32, // stopped at a debugger's port (exception_bind .First_Chance)
+}
+
+Map_Info :: struct { // as_query
+	base, size: u64,
+	offset:     u64, // into the VMO mapped
+	flags:      Map_Options, // always readable
+	reserved:   u32,
+}
+
+Mem_Op :: struct { // task_mem_rw
+	address: u64, // in the task
+	buffer:  u64, // in the caller
+	size:    u64,
+	write:   b32, // buffer to address; else address to buffer
+	status:  Status, // set by the kernel
+}
+
+#assert(size_of(Exception) == 24 + size_of(Regs) + ERRMAX)
+#assert(size_of(Thread_Info) == 16 && size_of(Map_Info) == 32 && size_of(Mem_Op) == 32)
+#assert(size_of(Watches) == 8 + WATCH_MAX * 16)
+#assert(u32(Exception_Option.In_Task) == 0 && u32(Exception_Option.First_Chance) == 1)

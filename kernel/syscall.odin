@@ -17,7 +17,7 @@ current_task :: #force_inline proc "contextless" () -> ^Task {
 
 // A syscall's options argument as its set, or false if it sets a bit that
 // no option uses.
-@(private="file")
+@(private)
 options_of :: proc "contextless" ($T: typeid, a: u64) -> (T, bool) where intrinsics.type_is_bit_set(T) {
 	return transmute(T)u32(a), a &~ u64(transmute(u32)~T{}) == 0
 }
@@ -123,7 +123,7 @@ handle_out :: proc "contextless" (h: vx.Handle, out: Uva) -> vx.Status {
 }
 
 // Gives the current task a handle to a new object, dropping the creator's reference.
-@(private="file", require_results)
+@(private, require_results)
 return_handle :: proc "contextless" (obj: ^Object, rights: vx.Rights, out: Uva) -> vx.Status {
 	h, st := handle_add(current_task(), obj, rights)
 	object_release(obj)
@@ -740,8 +740,10 @@ sys_task_create :: proc "contextless" (name_ptr: Uva, name_len: u64, out: Uva) -
 	return return_handle(&t.obj, vx.ALL_RIGHTS, out)
 }
 
+// thread_create(task, &out, &id): a thread, and (unless id is 0) its id in
+// the task, which exceptions and thread_interrupt name it by.
 @(private="file", require_results)
-sys_thread_create :: proc "contextless" (th: vx.Handle, out: Uva) -> vx.Status {
+sys_thread_create :: proc "contextless" (th: vx.Handle, out, id_out: Uva) -> vx.Status {
 	t := handle_get_as(current_task(), th, Task, {.Manage}) or_return
 	spin_lock(&t.lock)
 	ending := t.ending || t.killed
@@ -755,7 +757,12 @@ sys_thread_create :: proc "contextless" (th: vx.Handle, out: Uva) -> vx.Status {
 	if st != .Ok {
 		return st
 	}
-	return return_handle(&thr.obj, vx.ALL_RIGHTS, out)
+	id := thr.id
+	return_handle(&thr.obj, vx.ALL_RIGHTS, out) or_return
+	if id_out != 0 {
+		return copy_out(id_out, &id)
+	}
+	return .Ok
 }
 
 // thread_start(thread, entry, sp, handle, arg2): the handle, unless 0, moves
@@ -866,7 +873,7 @@ syscall_dispatch :: proc "contextless" (nr: u64, a: [6]u64) -> i64 {
 	case .Task_Info:
 		return i64(sys_task_info(vx.Handle(a[0]), Uva(a[1]), a[2], a[3]))
 	case .Thread_Create:
-		return i64(sys_thread_create(vx.Handle(a[0]), Uva(a[1])))
+		return i64(sys_thread_create(vx.Handle(a[0]), Uva(a[1]), Uva(a[2])))
 	case .Thread_Start:
 		return i64(sys_thread_start(vx.Handle(a[0]), Uva(a[1]), Uva(a[2]), vx.Handle(a[3]), a[4]))
 	case .Thread_Exit:
@@ -921,6 +928,24 @@ syscall_dispatch :: proc "contextless" (nr: u64, a: [6]u64) -> i64 {
 		return i64(sys_vmo_rw(vx.Handle(a[0]), a[1], a[2], Uva(a[3]), a[4]))
 	case .As_Map:
 		return i64(sys_as_map(vx.Handle(a[0]), vx.Handle(a[1]), a[2], a[3], a[4], Uva(a[5])))
+	case .As_Query:
+		return i64(sys_as_query(vx.Handle(a[0]), Uva(a[1]), Uva(a[2])))
+	case .Exception_Bind:
+		return i64(sys_exception_bind(vx.Handle(a[0]), vx.Handle(a[1]), a[2], a[3]))
+	case .Exception_Resume:
+		return result(sys_exception_resume(vx.Handle(a[0]), a[1], a[2], Uva(a[3])))
+	case .Thread_State:
+		return i64(sys_thread_state(vx.Handle(a[0]), a[1], a[2], Uva(a[3]), a[4]))
+	case .Thread_Interrupt:
+		return i64(sys_thread_interrupt(vx.Handle(a[0]), a[1], Uva(a[2]), a[3]))
+	case .Thread_Suspend:
+		return i64(sys_thread_suspend(vx.Handle(a[0]), a[1], false))
+	case .Thread_Resume:
+		return i64(sys_thread_suspend(vx.Handle(a[0]), a[1], true))
+	case .Task_Mem_Rw:
+		return i64(sys_task_mem_rw(vx.Handle(a[0]), Uva(a[1]), a[2]))
+	case .Vmo_Clone:
+		return i64(sys_vmo_clone(vx.Handle(a[0]), a[1], a[2], a[3], Uva(a[4])))
 	case .As_Unmap:
 		return i64(sys_as_unmap(vx.Handle(a[0]), Uva(a[1]), a[2]))
 	case .Handle_Dup:

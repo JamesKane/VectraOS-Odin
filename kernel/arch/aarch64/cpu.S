@@ -32,6 +32,8 @@ vx_write_\name:
     READ esr, esr_el1
     READ far, far_el1
     READ icc_iar1, icc_iar1_el1
+    READ mdscr, mdscr_el1
+    WRITE mdscr, mdscr_el1
 
     .globl vx_read_cntvct
     .type vx_read_cntvct, %function
@@ -249,5 +251,37 @@ vx_tlb_shootdown:
     b 1b
 2:  tlbi vmalle1is
 3:  dsb ish
+    isb
+    ret
+
+// The OS lock open, so the debug registers and software step take effect.
+    .globl vx_os_unlock
+    .type vx_os_unlock, %function
+vx_os_unlock:
+    msr oslar_el1, xzr
+    isb
+    ret
+
+// (p, len: u64): code written through a data mapping, made runnable: each
+// data cache line cleaned to the point of unification, then every CPU's
+// instruction cache invalidated.
+    .globl vx_sync_icache
+    .type vx_sync_icache, %function
+vx_sync_icache:
+    mrs x2, ctr_el0
+    ubfx x2, x2, #16, #4    // DminLine: log2 of words
+    mov x3, #4
+    lsl x2, x3, x2          // the line size in bytes
+    sub x3, x2, #1
+    add x1, x0, x1
+    bic x0, x0, x3
+1:  cmp x0, x1
+    b.hs 2f
+    dc cvau, x0
+    add x0, x0, x2
+    b 1b
+2:  dsb ish
+    ic ialluis
+    dsb ish
     isb
     ret

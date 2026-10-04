@@ -282,7 +282,11 @@ Child_Code :: enum {
 	Port_Block,
 	Use_Simd,
 	Read_Loop,
+	Fault_Load,
+	Break_Step,
 }
+
+CHILD_DATA :: u64(0x30_0000) // .Fault_Load's page, which nothing maps at first
 
 Child_Image :: [dynamic; 64]u8 // more than any of them needs
 
@@ -300,8 +304,12 @@ write_child :: proc "contextless" (what: Child_Code) -> (code: Child_Image) {
 			emit(&code, 0x66, 0x0f, 0xef, 0xc0) // pxor %xmm0, %xmm0: user tasks have SIMD (ADR-0004)
 			what = .Exit_7
 		}
+		if what == .Break_Step {
+			emit(&code, 0xcc) // int3: a breakpoint, then exit 7
+			what = .Exit_7
+		}
 		switch what {
-		case .Exit_7, .Use_Simd:
+		case .Exit_7, .Use_Simd, .Break_Step:
 			emit(&code, 0xbf); emit32(&code, 7) // mov $7, %edi
 			emit(&code, 0xb8); emit32(&code, u32(vx.Syscall.Thread_Exit)) // mov $thread_exit, %eax
 			emit(&code, 0x0f, 0x05) // syscall
@@ -310,6 +318,12 @@ write_child :: proc "contextless" (what: Child_Code) -> (code: Child_Image) {
 		case .Read_Loop:
 			emit(&code, 0x48, 0x8b, 0x44, 0x24, 0xf8) // 1: mov -8(%rsp), %rax: a load from its stack
 			emit(&code, 0xeb, 0xf9) // jmp 1b, with no system call
+		case .Fault_Load:
+			emit(&code, 0x48, 0xb8); emit32(&code, u32(CHILD_DATA)); emit32(&code, 0) // movabs $CHILD_DATA, %rax
+			emit(&code, 0x48, 0x8b, 0x10) // mov (%rax), %rdx: faults until it is mapped
+			emit(&code, 0x48, 0x89, 0xd7) // mov %rdx, %rdi: what it loaded
+			emit(&code, 0xb8); emit32(&code, u32(vx.Syscall.Thread_Exit)) // mov $thread_exit, %eax: is its exit status
+			emit(&code, 0x0f, 0x05) // syscall
 		case .Port_Block:
 			emit(&code, 0x48, 0x8d, 0x74, 0x24, 0xf0) // lea -16(%rsp), %rsi: the handle's place
 			emit(&code, 0x31, 0xff) // xor %edi, %edi: no options
@@ -342,8 +356,12 @@ write_child :: proc "contextless" (what: Child_Code) -> (code: Child_Image) {
 			emit(&code, 0x9e6703e0) // fmov d0, xzr: user tasks have FP/SIMD (ADR-0004)
 			what = .Exit_7
 		}
+		if what == .Break_Step {
+			emit(&code, 0xd4200020) // brk #1: a breakpoint, then exit 7
+			what = .Exit_7
+		}
 		switch what {
-		case .Exit_7, .Use_Simd:
+		case .Exit_7, .Use_Simd, .Break_Step:
 			emit(&code, 0xd2800000 | 7 << 5) // movz x0, #7
 			emit(&code, 0xd2800008 | u32(vx.Syscall.Thread_Exit) << 5) // movz x8, #thread_exit
 			emit(&code, 0xd4000001) // svc #0
@@ -352,6 +370,12 @@ write_child :: proc "contextless" (what: Child_Code) -> (code: Child_Image) {
 		case .Read_Loop:
 			emit(&code, 0xf85f83e0) // 1: ldur x0, [sp, #-8]: a load from its stack
 			emit(&code, 0x17ffffff) // b 1b, with no system call
+		case .Fault_Load:
+			emit(&code, 0xd2a00001 | u32(CHILD_DATA >> 16) << 5) // movz x1, #CHILD_DATA >> 16, lsl #16
+			emit(&code, 0xf9400022) // ldr x2, [x1]: faults until it is mapped
+			emit(&code, 0xaa0203e0) // mov x0, x2: what it loaded
+			emit(&code, 0xd2800008 | u32(vx.Syscall.Thread_Exit) << 5) // movz x8, #thread_exit: is its exit status
+			emit(&code, 0xd4000001) // svc #0
 		case .Port_Block:
 			emit(&code, 0xd10043e1) // sub x1, sp, #16: the handle's place
 			emit(&code, 0xd2800000) // movz x0, #0: no options
@@ -398,9 +422,16 @@ wait_blocked :: proc "contextless" (task: vx.Handle) -> bool {
 
 // A child task running `what`, started.
 start_child :: proc "contextless" (what: Child_Code) -> (task: vx.Handle, ok: bool) {
+	return start_child_bound(what, vx.HANDLE_NONE, {})
+}
+
+// A child task running `what`, started, with its faults going to exc_port if
+// that is not HANDLE_NONE (bound before it starts), and a handle to itself as
+// its first argument.
+start_child_bound :: proc "contextless" (what: Child_Code, exc_port: vx.Handle, options: vx.Exception_Options) -> (task: vx.Handle, ok: bool) {
 	code := write_child(what)
-	text, stack, th: vx.Handle
-	defer rt.close_all(text, stack, th)
+	text, stack, th, itself: vx.Handle
+	defer rt.close_all(text, stack, th, itself) // itself is the child's once started
 	st: vx.Status
 	if task, st = rt.task_create("child"); st != .Ok {
 		return
@@ -417,10 +448,20 @@ start_child :: proc "contextless" (what: Child_Code) -> (task: vx.Handle, ok: bo
 	if _, st = rt.as_map(task, stack, 0, 4096, {.Write}, CHILD_STACK_TOP - 4096); st != .Ok {
 		return
 	}
+	if exc_port != vx.HANDLE_NONE && rt.exception_bind(task, exc_port, 5, options) != .Ok {
+		return
+	}
 	if th, st = rt.thread_create(task); st != .Ok {
 		return
 	}
-	return task, rt.thread_start(th, CHILD_CODE, CHILD_STACK_TOP, 0, 0) == .Ok
+	if itself, st = rt.handle_dup(task, vx.RIGHTS_SAME); st != .Ok {
+		return
+	}
+	ok = rt.thread_start(th, CHILD_CODE, CHILD_STACK_TOP, itself, 0) == .Ok
+	if ok {
+		itself = vx.HANDLE_NONE
+	}
+	return
 }
 
 // Waits for a task's EXIT binding; returns its exit status, or min(i64).
@@ -1072,6 +1113,287 @@ test_copy_race :: proc "contextless" () {
 	rt.close_all(th, target)
 }
 
+// --- Exceptions (exception.odin) ---
+
+// A page at a child's address, holding one word.
+map_child_word :: proc "contextless" (child: vx.Handle, at, value: u64) -> bool {
+	value := value
+	v, st := rt.vmo_create(4096)
+	defer rt.close_all(v)
+	if st != .Ok || rt.vmo_write(v, 0, memory.ptr_to_bytes(&value)) != .Ok {
+		return false
+	}
+	_, st = rt.as_map(child, v, 0, 4096, {}, at)
+	return st == .Ok
+}
+
+// The packet for a child's fault, at its exception port.
+child_stopped :: proc "contextless" (port: vx.Handle) -> bool {
+	pk: [1]vx.Packet
+	n, _ := rt.port_wait(port, after_ms(2000), 0, pk[:])
+	return n == 1 && pk[0].trigger == .Exception && pk[0].key == 5 && pk[0].value == 1
+}
+
+test_exception_port :: proc "contextless" () {
+	port, _ := rt.port_create()
+	// A child's fault stops it at its port; the port's holder reads what
+	// happened, maps the page it missed, and continues it: the load is retried.
+	child, ok := start_child_bound(.Fault_Load, port, {})
+	check(ok)
+	check(child_stopped(port))
+	e: vx.Exception
+	check(rt.thread_state(child, 1, .Get_Exception, &e) == .Ok)
+	check(e.kind == .Page_Fault && e.address == CHILD_DATA && e.code == 0 && e.thread == 1)
+	small: u64
+	check(rt.thread_state(child, 1, .Get_Exception, &small) == .Err_Too_Small)
+	check(rt.thread_state(child, 2, .Get_Exception, &e) == .Err_Not_Found)
+	check(map_child_word(child, CHILD_DATA, 7))
+	check(rt.exception_resume(child, 1, .Continue) == .Ok)
+	check(rt.exception_resume(child, 1, .Continue) != .Ok) // once
+	check(wait_exit(port, child) == 7) // it exits with what it loaded
+	_ = rt.handle_close(child)
+
+	// Its registers can be changed before it continues: the load goes elsewhere.
+	child, ok = start_child_bound(.Fault_Load, port, {})
+	check(ok)
+	check(child_stopped(port))
+	regs: vx.Regs
+	check(rt.thread_state(child, 1, .Get_Regs, &regs) == .Ok)
+	bad := regs
+	when ODIN_ARCH == .amd64 {
+		check(regs.rax == CHILD_DATA)
+		regs.rax = CHILD_DATA + 4096
+		bad.rip = 0xffff_8000_0000_0000 // a kernel address: refused
+	} else {
+		check(regs.x[1] == CHILD_DATA)
+		regs.x[1] = CHILD_DATA + 4096
+		bad.pc = 0xffff_8000_0000_0000
+	}
+	check(rt.thread_state(child, 1, .Set_Regs, &bad) == .Err_Invalid)
+	check(rt.thread_state(child, 1, .Set_Regs, &regs) == .Ok)
+	check(map_child_word(child, CHILD_DATA + 4096, 9))
+	check(rt.exception_resume(child, 1, .Continue) == .Ok)
+	check(wait_exit(port, child) == 9)
+	_ = rt.handle_close(child)
+
+	// Or it can be killed. (.Step and .Pass are a debugger's, from its own port.)
+	child, ok = start_child_bound(.Fault_Load, port, {})
+	check(ok)
+	check(child_stopped(port))
+	check(rt.exception_resume(child, 1, .Step) == .Err_Bad_State)
+	check(rt.exception_resume(child, 1, .Pass) == .Err_Bad_State)
+	check(rt.exception_resume(child, 1, .Kill) == .Ok)
+	check(wait_exit(port, child) == EXIT_FAULT) // the fault's default
+	_ = rt.handle_close(child)
+
+	// A kill reaches a thread stopped at its port.
+	child, ok = start_child_bound(.Fault_Load, port, {})
+	check(ok)
+	check(child_stopped(port))
+	check(rt.task_kill(child, 44) == .Ok)
+	check(wait_exit(port, child) == 44)
+	rt.close_all(child, port)
+}
+
+EXIT_FAULT :: -1 // a task killed by a fault no one handled
+
+// What the in-task handler sees and does.
+In_Task :: struct {
+	missing:            vx.Handle, // what it maps where a fault was
+	handled:            [vx.Exception_Kind]u32,
+	interrupted_thread: u32,
+	note:               [dynamic; vx.ERRMAX]u8, // the note the last interrupt carried
+}
+
+in_task: In_Task
+
+handler :: proc "c" (e: ^vx.Exception) -> ! {
+	if e.kind >= min(vx.Exception_Kind) && e.kind <= max(vx.Exception_Kind) {
+		intrinsics.atomic_add(&in_task.handled[e.kind], 1)
+	}
+	#partial switch e.kind {
+	case .Page_Fault:
+		_, _ = rt.as_map(rt.self, in_task.missing, 0, 4096, {}, e.address &~ 4095) // then the load is retried
+	case .Breakpoint:
+		when ODIN_ARCH == .arm64 {
+			e.regs.pc += 4 // brk stops at itself; int3 has already been stepped past
+		}
+	case .Interrupt:
+		clear(&in_task.note)
+		_ = append(&in_task.note, ..e.note[:min(e.code, vx.ERRMAX)])
+		intrinsics.atomic_store(&in_task.interrupted_thread, e.thread)
+	}
+	_ = rt.exception_resume(rt.self, 0, .Continue, &e.regs)
+	for {}
+}
+
+Waiter :: struct {
+	word:   u32,
+	result: vx.Status,
+	done:   bool,
+}
+
+interrupted_waiter :: proc "c" (unused: vx.Handle, arg: u64) -> ! {
+	w := cast(^Waiter)uintptr(arg)
+	intrinsics.atomic_store(&w.result, rt.futex_wait(&w.word, 0, vx.INFINITE)) // no deadline: only an interrupt ends it
+	intrinsics.atomic_store(&w.done, true)
+	rt.thread_exit(0)
+}
+
+test_in_task :: proc "contextless" () {
+	check(rt.exception_bind(rt.self, vx.HANDLE_NONE, u64(uintptr(rawptr(handler))), {.In_Task}) == .Ok)
+	// A page fault, handled by mapping the page: the load is retried, and sees it.
+	value := u64(0x1234_5678)
+	st: vx.Status
+	in_task.missing, st = rt.vmo_create(4096)
+	check(st == .Ok && rt.vmo_write(in_task.missing, 0, memory.ptr_to_bytes(&value)) == .Ok)
+	probe, _ := rt.vmo_create(4096)
+	at, mst := rt.as_map(rt.self, probe, 0, 4096, {})
+	check(mst == .Ok)
+	check(rt.as_unmap(rt.self, at, 4096) == .Ok) // an address nothing maps now
+	_ = rt.handle_close(probe)
+	check(at != 0 && intrinsics.volatile_load(cast(^u64)uintptr(at)) == 0x1234_5678)
+	check(intrinsics.atomic_load(&in_task.handled[.Page_Fault]) == 1)
+	check(rt.as_unmap(rt.self, at, 4096) == .Ok)
+	_ = rt.handle_close(in_task.missing)
+	// A breakpoint, stepped past.
+	intrinsics.debug_trap()
+	check(intrinsics.atomic_load(&in_task.handled[.Breakpoint]) == 1)
+	// An interrupt wakes a call that would wait for ever, and goes to the
+	// handler on the way out.
+	@(static) w: Waiter
+	th, id, tst := rt.thread_create_id(rt.self)
+	check(tst == .Ok && id > 1)
+	check(rt.thread_start(th, u64(uintptr(rawptr(interrupted_waiter))), new_stack(), 0, u64(uintptr(&w))) == .Ok)
+	_ = rt.futex_wait(&never, 0, after_ms(30)) // it is waiting
+	check(rt.thread_interrupt(rt.self, id, "wake up") == .Ok)
+	for i := 0; i < 1000 && !intrinsics.atomic_load(&w.done); i += 1 {
+		_ = rt.futex_wait(&never, 0, after_ms(1))
+	}
+	check(intrinsics.atomic_load(&w.done) && intrinsics.atomic_load(&w.result) == .Err_Interrupted)
+	check(intrinsics.atomic_load(&in_task.handled[.Interrupt]) == 1)
+	check(intrinsics.atomic_load(&in_task.interrupted_thread) == id)
+	check(string(in_task.note[:]) == "wake up")
+	check(rt.thread_interrupt(rt.self, 999, "nobody") == .Err_Not_Found)
+	_ = rt.handle_close(th)
+	check(rt.exception_bind(rt.self, vx.HANDLE_NONE, 0, {.In_Task}) == .Ok) // unbound
+}
+
+test_vmo_clone :: proc "contextless" () {
+	words := [2]u64{11, 22}
+	got: [2]u64
+	v, st := rt.vmo_create(2 * 4096)
+	check(st == .Ok && rt.vmo_write(v, 4096, memory.ptr_to_bytes(&words)) == .Ok)
+	c, cst := rt.vmo_clone(v, 4096, 4096) // its second page
+	check(cst == .Ok)
+	words[0] = 99
+	check(rt.vmo_write(v, 4096, memory.ptr_to_bytes(&words)) == .Ok) // the original changes; the copy does not
+	check(rt.vmo_read(c, 0, memory.ptr_to_bytes(&got)) == .Ok && got[0] == 11 && got[1] == 22)
+	_, st = rt.vmo_clone(v, 4096, 2 * 4096)
+	check(st == .Err_Range)
+	_, st = rt.vmo_clone(v, 1, 4096)
+	check(st == .Err_Range)
+	rt.close_all(c, v)
+}
+
+// --- Debugging ---
+
+test_debugger :: proc "contextless" () {
+	port, _ := rt.port_create()
+	e: vx.Exception
+	regs: vx.Regs
+	// A breakpoint goes first to a debugger's port; it steps one instruction,
+	// sees what that did, and continues.
+	child, ok := start_child_bound(.Break_Step, port, {.First_Chance})
+	check(ok)
+	check(child_stopped(port))
+	check(rt.thread_state(child, 1, .Get_Exception, &e) == .Ok && e.kind == .Breakpoint)
+	when ODIN_ARCH == .arm64 {
+		e.regs.pc += 4 // past the brk
+		check(rt.thread_state(child, 1, .Set_Regs, &e.regs) == .Ok)
+	}
+	check(rt.exception_resume(child, 1, .Step) == .Ok)
+	check(child_stopped(port))
+	check(rt.thread_state(child, 1, .Get_Exception, &e) == .Ok && e.kind == .Step)
+	when ODIN_ARCH == .amd64 {
+		check(e.regs.rdi == 7 && e.regs.rip == CHILD_CODE + 1 + 5) // int3, then mov $7, %edi
+	} else {
+		check(e.regs.x[0] == 7 && e.regs.pc == CHILD_CODE + 8) // brk, then movz x0, #7
+	}
+	check(rt.exception_resume(child, 1, .Continue) == .Ok)
+	check(wait_exit(port, child) == 7)
+	_ = rt.handle_close(child)
+
+	// Passed on, the breakpoint reaches nobody else: the default kills it.
+	child, ok = start_child_bound(.Break_Step, port, {.First_Chance})
+	check(ok)
+	check(child_stopped(port))
+	check(rt.exception_resume(child, 1, .Pass) == .Ok)
+	check(wait_exit(port, child) == EXIT_FAULT)
+	_ = rt.handle_close(child)
+
+	// Suspended, a spinning child holds still: its code is patched (a private
+	// copy, as its mapping is not writable), its pc moved there, and it exits.
+	child, ok = start_child(.Spin)
+	check(ok)
+	weak, wst := rt.handle_dup(child, vx.ALL_RIGHTS - {.Debug})
+	check(wst == .Ok)
+	check(rt.thread_suspend(weak, 1) == .Err_Access)
+	check(rt.exception_bind(weak, port, 1, {.First_Chance}) == .Err_Access)
+	check(rt.thread_state(child, 1, .Get_Regs, &regs) == .Err_Bad_State) // running
+	check(rt.thread_suspend(child, 1) == .Ok)
+	check(rt.thread_state(child, 1, .Get_Regs, &regs) == .Ok)
+	check(rt.thread_state(weak, 1, .Get_Regs, &regs) == .Err_Bad_State) // DEBUG needed
+	// Its threads, listed; its mappings, from the code page on.
+	ti: vx.Thread_Info
+	check(rt.thread_state(child, 0, .Next_Thread, &ti) == .Ok && ti.id == 1 && ti.state == .Suspended && ti.suspend_count == 1)
+	check(rt.thread_state(child, 1, .Next_Thread, &ti) == .Err_Not_Found)
+	mi, qst := rt.as_query(child, 0)
+	check(qst == .Ok && mi.base <= CHILD_CODE && mi.base + mi.size > CHILD_CODE && mi.flags == {.Exec})
+	_, qst = rt.as_query(child, ~u64(0) - 4096)
+	check(qst == .Err_Not_Found)
+	when ODIN_ARCH == .amd64 {
+		check(regs.rip == CHILD_CODE)
+		regs.rip = CHILD_CODE + 64
+	} else {
+		check(regs.pc == CHILD_CODE)
+		regs.pc = CHILD_CODE + 64
+	}
+	code := write_child(.Exit_7)
+	back: [64]u8
+	word: u64
+	ops := [3]vx.Mem_Op {
+		{address = CHILD_CODE + 64, buffer = u64(uintptr(&code[0])), size = u64(len(code)), write = true},
+		{address = CHILD_CODE + 64, buffer = u64(uintptr(&back)), size = u64(len(code))},
+		{address = CHILD_DATA, buffer = u64(uintptr(&word)), size = 8}, // nothing mapped there
+	}
+	check(rt.task_mem_rw(child, ops[:]) == .Ok)
+	check(ops[0].status == .Ok && ops[1].status == .Ok && string(code[:]) == string(back[:len(code)]))
+	check(ops[2].status == .Err_Invalid)
+	check(rt.task_mem_rw(weak, ops[:1]) == .Err_Access)
+	check(rt.thread_state(child, 1, .Set_Regs, &regs) == .Ok)
+	check(rt.thread_resume(child, 1) == .Ok)
+	again := rt.thread_resume(child, 1) // counted: not suspended any more, or
+	check(again == .Err_Bad_State || again == .Err_Not_Found) // already run on to its end
+	check(wait_exit(port, child) == 7)
+	rt.close_all(weak, child)
+
+	// A thread blocked in a call holds still too, and goes on waiting once resumed.
+	child, ok = start_child(.Block)
+	check(ok)
+	check(wait_blocked(child))
+	check(rt.thread_suspend(child, 1) == .Ok && rt.thread_suspend(child, 1) == .Ok) // counted
+	check(rt.thread_state(child, 1, .Get_Regs, &regs) == .Ok)
+	check(rt.thread_resume(child, 1) == .Ok && rt.thread_resume(child, 1) == .Ok)
+	check(wait_blocked(child))
+	// Thread 0: every thread of the task, as a process stops as a whole.
+	check(rt.thread_suspend(child, 0) == .Ok && rt.thread_resume(child, 0) == .Ok)
+	check(rt.thread_resume(child, 0) == .Err_Bad_State) // counted: not suspended any more
+	check(wait_blocked(child))
+	check(rt.task_kill(child, 45) == .Ok && wait_exit(port, child) == 45)
+	rt.close_all(child, port)
+}
+
 @(export, link_name="vx_main")
 vx_main :: proc() -> int {
 	test_spawn_message()
@@ -1085,6 +1407,10 @@ vx_main :: proc() -> int {
 	test_port_waiters()
 	test_unmap()
 	test_copy_race()
+	test_exception_port()
+	test_in_task()
+	test_vmo_clone()
+	test_debugger()
 	test_nested_channels()
 	test_rings()
 	test_vmo_rw()
