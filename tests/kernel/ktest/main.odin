@@ -548,8 +548,8 @@ test_rings :: proc "contextless" () {
 	memory := (cast([^]u8)uintptr(base))[:layout.size]
 
 	client: ring.Ring
-	check(ring.attach(&client, memory, true) == .Ok)
-	check(ring.attach(&ring_shared.server, memory, false) == .Ok)
+	check(ring.attach(&client, memory, .Client) == .Ok)
+	check(ring.attach(&ring_shared.server, memory, .Server) == .Ok)
 	ring_shared.end = h.server
 	th, tst := rt.thread_create(self)
 	check(tst == .Ok)

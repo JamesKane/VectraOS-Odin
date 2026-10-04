@@ -17,6 +17,7 @@
 package ndb
 
 import "base:intrinsics"
+import "vx:str"
 import "vx:utf"
 
 MAX_RECORD :: 64 * 1024
@@ -29,8 +30,7 @@ Tuple :: struct {
 }
 
 Record :: struct {
-	tuples: [MAX_TUPLES]Tuple,
-	count:  int,
+	tuples: [dynamic; MAX_TUPLES]Tuple,
 	line:   int, // where the record starts, 1-based
 }
 
@@ -56,7 +56,7 @@ Reader :: struct {
 // rec is left empty.
 @(require_results)
 next :: proc "contextless" (r: ^Reader, rec: ^Record) -> Result {
-	rec.count = 0
+	clear(&rec.tuples)
 	for r.pos < len(r.src) && line_is_empty(r) {
 		skip_line(r)
 	}
@@ -84,29 +84,34 @@ next :: proc "contextless" (r: ^Reader, rec: ^Record) -> Result {
 	}
 }
 
+// The tuple with key, or nil. A record holds each key at most once.
+@(private="file")
+find :: proc "contextless" (rec: ^Record, key: string) -> ^Tuple {
+	for &t in rec.tuples {
+		if t.key == key {
+			return &t
+		}
+	}
+	return nil
+}
+
 // The value of key; ok is false if the record lacks it. A flag gives "" and
 // true, so ask `has` or look at the tuple to tell a flag from an empty value.
 get :: proc "contextless" (rec: ^Record, key: string) -> (value: string, ok: bool) {
-	for &t in rec.tuples[:rec.count] {
-		if t.key == key {
-			return t.value, true
-		}
+	t := find(rec, key)
+	if t == nil {
+		return "", false
 	}
-	return "", false
+	return t.value, true
 }
 
 has :: proc "contextless" (rec: ^Record, key: string) -> bool {
-	_, ok := get(rec, key)
-	return ok
+	return find(rec, key) != nil
 }
 
 is_flag :: proc "contextless" (rec: ^Record, key: string) -> bool {
-	for &t in rec.tuples[:rec.count] {
-		if t.key == key {
-			return t.flag
-		}
-	}
-	return false
+	t := find(rec, key)
+	return t != nil && t.flag
 }
 
 // key's value as a number: decimal digits with no leading zeros, or 0x and
@@ -147,7 +152,7 @@ get_u64 :: proc "contextless" (rec: ^Record, key: string) -> (n: u64, ok: bool) 
 
 @(private="file")
 fail :: proc "contextless" (r: ^Reader, rec: ^Record, msg: string) -> Result {
-	rec.count = 0
+	clear(&rec.tuples)
 	r.error = msg
 	r.error_line = r.line + 1
 	return .Error
@@ -215,17 +220,17 @@ hex_digit :: proc "contextless" (c: int) -> int {
 
 // A "quoted" value. pos is on the opening quote.
 @(private="file")
-quoted :: proc "contextless" (r: ^Reader, rec: ^Record, out: ^string) -> Result {
+quoted :: proc "contextless" (r: ^Reader, rec: ^Record) -> (value: string, res: Result) {
 	r.pos += 1
 	n := 0
 	// First pass: find the end and the decoded length, checking each byte.
 	for p := r.pos;; p += 1 {
 		if p >= len(r.src) || r.src[p] == '\n' {
-			return fail(r, rec, "unterminated quoted value")
+			return "", fail(r, rec, "unterminated quoted value")
 		}
 		c := int(r.src[p])
 		if is_control(c) {
-			return fail(r, rec, "control character in a quoted value; use x\"…\"")
+			return "", fail(r, rec, "control character in a quoted value; use x\"…\"")
 		}
 		if c == '"' {
 			if p + 1 < len(r.src) && r.src[p + 1] == '"' {
@@ -239,7 +244,7 @@ quoted :: proc "contextless" (r: ^Reader, rec: ^Record, out: ^string) -> Result 
 	}
 	dst, ok := take_scratch(r, n)
 	if !ok {
-		return fail(r, rec, "scratch space exhausted")
+		return "", fail(r, rec, "scratch space exhausted")
 	}
 	k := 0
 	for {
@@ -258,39 +263,37 @@ quoted :: proc "contextless" (r: ^Reader, rec: ^Record, out: ^string) -> Result 
 		k += 1
 	}
 	if !utf.valid_bytes(dst) {
-		return fail(r, rec, "invalid UTF-8 in a quoted value")
+		return "", fail(r, rec, "invalid UTF-8 in a quoted value")
 	}
-	out^ = string(dst)
-	return .Record
+	return string(dst), .Record
 }
 
 // An x"hex" value. pos is on the x.
 @(private="file")
-hex :: proc "contextless" (r: ^Reader, rec: ^Record, out: ^string) -> Result {
+hex :: proc "contextless" (r: ^Reader, rec: ^Record) -> (value: string, res: Result) {
 	r.pos += 2
 	start := r.pos
 	for r.pos < len(r.src) && hex_digit(int(r.src[r.pos])) >= 0 {
 		r.pos += 1
 	}
 	if peek(r) != '"' {
-		return fail(r, rec, "bad hex value")
+		return "", fail(r, rec, "bad hex value")
 	}
 	digits := r.pos - start
 	r.pos += 1
 	if digits % 2 != 0 {
-		return fail(r, rec, "odd number of digits in a hex value")
+		return "", fail(r, rec, "odd number of digits in a hex value")
 	}
 	dst, ok := take_scratch(r, digits / 2)
 	if !ok {
-		return fail(r, rec, "scratch space exhausted")
+		return "", fail(r, rec, "scratch space exhausted")
 	}
 	for i in 0 ..< digits / 2 {
 		hi := hex_digit(int(r.src[start + 2 * i]))
 		lo := hex_digit(int(r.src[start + 2 * i + 1]))
 		dst[i] = u8(hi << 4 | lo)
 	}
-	out^ = string(dst)
-	return .Record
+	return string(dst), .Record
 }
 
 // The tuples on one line, up to and including its newline.
@@ -334,9 +337,9 @@ tuples :: proc "contextless" (r: ^Reader, rec: ^Record) -> Result {
 			c = peek(r)
 			res := Result.Record
 			if c == '"' {
-				res = quoted(r, rec, &t.value)
+				t.value, res = quoted(r, rec)
 			} else if c == 'x' && r.pos + 1 < len(r.src) && r.src[r.pos + 1] == '"' {
-				res = hex(r, rec, &t.value)
+				t.value, res = hex(r, rec)
 			} else {
 				vstart := r.pos
 				for {
@@ -371,16 +374,12 @@ tuples :: proc "contextless" (r: ^Reader, rec: ^Record) -> Result {
 		if c != -1 && !is_space(c) && c != '\n' {
 			return fail(r, rec, "junk after a value")
 		}
-		for &u in rec.tuples[:rec.count] {
-			if u.key == t.key {
-				return fail(r, rec, "duplicate key")
-			}
+		if find(rec, t.key) != nil {
+			return fail(r, rec, "duplicate key")
 		}
-		if rec.count == MAX_TUPLES {
+		if append(&rec.tuples, t) != 1 {
 			return fail(r, rec, "too many tuples in one record")
 		}
-		rec.tuples[rec.count] = t
-		rec.count += 1
 	}
 }
 
@@ -388,17 +387,17 @@ tuples :: proc "contextless" (r: ^Reader, rec: ^Record) -> Result {
 
 // A record being written into a caller's buffer. Writing past the end, or a
 // key that could not be read back, sets `failed`, and the record must not be
-// used: nothing is ever written that would read back differently.
+// used: nothing is ever written that would read back differently. Bytes
+// that are already ndb (another program's records, checked by whoever made
+// them) may be added with str.write_string between records.
 Writer :: struct {
-	buf:    []u8,
-	len:    int,
-	failed: bool,
+	using text: str.Buf,
 }
 
 // key=value, in whichever form the value needs.
 put :: proc "contextless" (w: ^Writer, key: string, v: string) {
 	write_key(w, key)
-	out(w, "=")
+	str.write_byte(w, '=')
 	printable := utf.valid(v)
 	bare := len(v) > 0 && printable
 	for i in 0 ..< len(v) {
@@ -415,58 +414,32 @@ put :: proc "contextless" (w: ^Writer, key: string, v: string) {
 	}
 	switch {
 	case bare:
-		out(w, v)
+		str.write_string(w, v)
 	case printable:
-		out(w, "\"")
+		str.write_byte(w, '"')
 		for i in 0 ..< len(v) {
-			out(w, v[i] == '"' ? "\"\"" : v[i:i + 1])
+			str.write_string(w, v[i] == '"' ? "\"\"" : v[i:i + 1])
 		}
-		out(w, "\"")
+		str.write_byte(w, '"')
 	case:
 		digits := "0123456789abcdef"
-		out(w, "x\"")
+		str.write_string(w, "x\"")
 		for i in 0 ..< len(v) {
-			pair := [2]u8{digits[v[i] >> 4], digits[v[i] & 0xf]}
-			out(w, string(pair[:]))
+			str.write_byte(w, digits[v[i] >> 4])
+			str.write_byte(w, digits[v[i] & 0xf])
 		}
-		out(w, "\"")
+		str.write_byte(w, '"')
 	}
 }
 
 put_u64 :: proc "contextless" (w: ^Writer, key: string, value: u64) {
-	buf: [20]u8
-	i := len(buf)
-	v := value
-	for {
-		i -= 1
-		buf[i] = u8('0' + v % 10)
-		v /= 10
-		if v == 0 {
-			break
-		}
-	}
-	put(w, key, string(buf[i:]))
+	buf: [str.U64_DIGITS]u8
+	put(w, key, str.format_u64(buf[:], value))
 }
 
 put_i64 :: proc "contextless" (w: ^Writer, key: string, value: i64) {
-	if value >= 0 {
-		put_u64(w, key, u64(value))
-		return
-	}
-	buf: [21]u8
-	mag := u64(0) - u64(value)
-	i := len(buf)
-	for {
-		i -= 1
-		buf[i] = u8('0' + mag % 10)
-		mag /= 10
-		if mag == 0 {
-			break
-		}
-	}
-	i -= 1
-	buf[i] = '-'
-	put(w, key, string(buf[i:]))
+	buf: [str.I64_DIGITS]u8
+	put(w, key, str.format_i64(buf[:], value))
 }
 
 // A bare key: a flag that is set.
@@ -477,23 +450,13 @@ flag :: proc "contextless" (w: ^Writer, key: string) {
 // Ends the record with its newline. False if the record must not be used.
 @(require_results)
 end :: proc "contextless" (w: ^Writer) -> bool {
-	out(w, "\n")
+	str.write_byte(w, '\n')
 	return !w.failed
 }
 
-// The record written so far.
+// The records written so far.
 written :: proc "contextless" (w: ^Writer) -> string {
-	return string(w.buf[:w.len])
-}
-
-@(private="file")
-out :: proc "contextless" (w: ^Writer, s: string) {
-	if w.failed || len(w.buf) - w.len < len(s) {
-		w.failed = true
-		return
-	}
-	copy(w.buf[w.len:], s)
-	w.len += len(s)
+	return str.to_string(w)
 }
 
 @(private="file")
@@ -508,7 +471,7 @@ write_key :: proc "contextless" (w: ^Writer, key: string) {
 		w.failed = true
 	}
 	if w.len > 0 && w.buf[w.len - 1] != '\n' {
-		out(w, " ")
+		str.write_byte(w, ' ')
 	}
-	out(w, key)
+	str.write_string(w, key)
 }

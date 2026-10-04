@@ -5,7 +5,7 @@ import "vx:rt"
 
 @(export, link_name="vx_main")
 main :: proc() -> int {
-	for i in 0 ..< rt.spawn.argc {
+	for i in 0 ..< len(rt.args()) {
 		if i > 0 {
 			rt.print(" ")
 		}

@@ -1,6 +1,7 @@
 package rt
 
 import vx "abi:vx"
+import "vx:memory"
 
 // Standard input and output: pipes.
 //
@@ -17,7 +18,10 @@ stdio: struct {
 	msg_len, msg_pos:    u32, // and how much of it has been read
 	in_ended:            bool,
 	len:                 int,
-	line:                [size_of(vx.Msg_Header) + 512]u8, // stdout's line, after a header
+	line:                struct {
+		header: vx.Msg_Header,
+		text:   [512]u8, // stdout's line
+	},
 }
 
 @(private="file")
@@ -29,9 +33,9 @@ stdout_flush :: proc "contextless" () {
 	if n == 0 || stdio.output == 0 {
 		return
 	}
-	(cast(^vx.Msg_Header)&stdio.line[0])^ = {}
+	stdio.line.header = {}
 	for tries := 0;; tries += 1 {
-		st := channel_write(stdio.output, stdio.line[:size_of(vx.Msg_Header) + n])
+		st := channel_write(stdio.output, memory.ptr_to_bytes(&stdio.line)[:size_of(vx.Msg_Header) + n])
 		if st != .Err_Should_Wait {
 			return // written, or no one is reading any more
 		}
@@ -42,16 +46,11 @@ stdout_flush :: proc "contextless" () {
 
 @(private="file")
 stdout_print :: proc "contextless" (s: string) {
-	for i in 0 ..< len(s) {
-		stdio.line[size_of(vx.Msg_Header) + stdio.len] = s[i]
-		stdio.len += 1
-		if s[i] == '\n' || stdio.len == len(stdio.line) - size_of(vx.Msg_Header) {
-			stdout_flush()
-		}
-	}
+	buffer_line(stdio.line.text[:], &stdio.len, s, stdout_flush)
 }
 
 // Reads up to len(buf) bytes of standard input: 0 at its end.
+@(require_results)
 read :: proc "contextless" (buf: []u8) -> (int, vx.Status) {
 	if stdio.input == 0 {
 		return console_read(buf)
@@ -87,6 +86,20 @@ read :: proc "contextless" (buf: []u8) -> (int, vx.Status) {
 	return n, .Ok
 }
 
+// Reads standard input until buf is full or the input ends; returns how
+// much it read. A failure ends the read, with what came before it.
+@(require_results)
+read_all :: proc "contextless" (buf: []u8) -> (n: int, st: vx.Status) {
+	for n < len(buf) {
+		got := read(buf[n:]) or_return
+		if got == 0 {
+			break
+		}
+		n += got
+	}
+	return n, .Ok
+}
+
 // Called by start: the console and the pipes the spawn message gives.
 stdio_init :: proc "contextless" () {
 	if c := spawn_take("console"); c != 0 && console_attach(c) != .Ok {
@@ -98,4 +111,3 @@ stdio_init :: proc "contextless" () {
 		print_hook = stdout_print
 	}
 }
-

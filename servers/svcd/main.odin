@@ -83,7 +83,7 @@ image_vmo, port, resource: vx.Handle
 console_attached: bool
 names: [MAX_SERVICES][32]u8
 
-say :: proc "contextless" (parts: ..string) {
+say :: proc "contextless" (parts: ..rt.Print_Arg) {
 	rt.print("svcd: ")
 	rt.print(..parts)
 }
@@ -310,7 +310,7 @@ start :: proc "contextless" (s: ^Service) -> vx.Status {
 			}
 			ndb.put(&w, "src", string(src[:5 + n]))
 		case is_device_record(&rec): // passed on as they are, for the driver to read
-			for t in rec.tuples[:rec.count] {
+			for t in rec.tuples {
 				if t.flag {
 					ndb.flag(&w, t.key)
 				} else {

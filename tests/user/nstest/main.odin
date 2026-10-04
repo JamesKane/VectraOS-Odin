@@ -72,7 +72,7 @@ list :: proc "contextless" (path: string) -> string {
 
 test_spawn :: proc "contextless" () {
 	check(rt.spawn.name == "nstest")
-	check(rt.spawn.argc == 2 && rt.spawn.args[0] == "first" && rt.spawn.args[1] == "second arg")
+	check(len(rt.args()) == 2 && rt.spawn.args[0] == "first" && rt.spawn.args[1] == "second arg")
 	check(rt.spawn_take("bootimage") == vx.HANDLE_NONE) // not granted
 	check(rt.spawn_take("listen") == vx.HANDLE_NONE)
 }
