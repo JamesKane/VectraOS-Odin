@@ -17,9 +17,6 @@ USAGE :: `usage: ./build <command> [--arch x86_64|aarch64] [--release] [-v]
                  with --musl-backend DIR, C programs link against
                  DIR/<arch>/crt1.o and backend.o, not the back end
                  built from ports/musl/vx (bringing it up)
-|aarch64] [--release] [-v]
-  all            the kernel, the Limine loaders, the user programs, and
-                 out/host/vx9pserve once tools/vx9pserve is there
   image [--iso]  GPT disk images: out/<arch>/<mode>/vectra-<arch>.img;
                  with --iso, UEFI CD images too: vectra-<arch>.iso
   qemu           boot an image on the serial console (Ctrl-A X quits)
