@@ -414,48 +414,86 @@ sys_irq_create :: proc "contextless" (rh: vx.Handle, line, options: u64, out, ms
 	return return_handle(&q.obj, vx.Rights{.Wait, .Write} + DEVICE_RIGHTS, out)
 }
 
+// dma_domain_create(resource, source, options, &out): the domain of the
+// PCI function whose requester ID is source.
 @(private="file", require_results)
-sys_dma_domain_create :: proc "contextless" (rh: vx.Handle, options: u64, out: Uva) -> vx.Status {
-	if options != 0 {
-		return .Err_Invalid // pass-through: the only kind so far
+sys_dma_domain_create :: proc "contextless" (rh: vx.Handle, source, options: u64, out: Uva) -> vx.Status {
+	if options != 0 || source > 0xffff {
+		return .Err_Invalid
 	}
 	r := handle_get_as(current_task(), rh, Resource, {.Manage}) or_return
-	d, st := dma_domain_create()
+	d, st := dma_domain_create(u32(source))
 	object_release(&r.obj)
 	if st != .Ok {
 		return st
 	}
-	return return_handle(&d.obj, vx.Rights{.Map} + DEVICE_RIGHTS, out)
+	return return_handle(&d.obj, vx.Rights{.Map, .Manage, .Wait} + DEVICE_RIGHTS, out)
 }
 
-// dma_map(domain, vmo, offset, size, addresses): batched, a page at a time.
+// dma_map(domain, vmo, offset, size, options, &mapped): what the device may
+// do is what the VMO handle allows (.Read to read it, .Write to write it).
 @(private="file", require_results)
-sys_dma_map :: proc "contextless" (dh, vh: vx.Handle, offset, size: u64, out: Uva) -> vx.Status {
+sys_dma_map :: proc "contextless" (dh, vh: vx.Handle, offset, size, options: u64, out: Uva) -> vx.Status {
 	MAX_PAGES :: 512
+	req: vx.Dma_Mapped
+	copy_in(&req, out) or_return
+	list := Uva(uintptr(req.addresses))
+	opts, valid := options_of(vx.Dma_Options, options)
 	pages := size / PAGE_SIZE
-	if pages > MAX_PAGES || !user_range_ok(out, pages * size_of(Paddr), true) {
+	if !valid || opts == {} || pages > MAX_PAGES || !user_range_ok(list, pages * size_of(u64), true) {
 		return .Err_Invalid
 	}
 	d := handle_get_as(current_task(), dh, Dma_Domain, {.Map}) or_return
 	defer object_release(&d.obj)
-	v := handle_get_as(current_task(), vh, Vmo, {.Read, .Write}) or_return
-	defer object_release(&v.obj)
-	addresses: [MAX_PAGES]Paddr
-	slot := dma_map(d, v, offset, size, addresses[:pages]) or_return
-	st := copy_out_slice(out, addresses[:pages])
-	if st != .Ok {
-		dma_unmap_slot(d, slot) // only this one: earlier mappings of the VMO may be in use
+	need: vx.Rights
+	if .Read in opts {
+		need += {.Read}
 	}
-	return st
+	if .Write in opts {
+		need += {.Write}
+	}
+	v := handle_get_as(current_task(), vh, Vmo, need) or_return
+	defer object_release(&v.obj)
+	if v.pager != nil {
+		return .Err_Unsupported // its pages come and go: no device may hold them
+	}
+	addresses: [MAX_PAGES]u64
+	m := dma_map(d, v, offset, size, opts, addresses[:pages]) or_return
+	if st := copy_out_slice(list, addresses[:pages]); st != .Ok { // never handed out: the device was never told of it
+		_ = dma_unmap(m)
+		object_release(&m.obj)
+		return st
+	}
+	return return_handle(&m.obj, {.Inspect}, out + Uva(offset_of(vx.Dma_Mapped, mapping))) // the handle's now, or gone with it
 }
 
 @(private="file", require_results)
-sys_dma_unmap :: proc "contextless" (dh, vh: vx.Handle) -> vx.Status {
-	d := handle_get_as(current_task(), dh, Dma_Domain, {.Map}) or_return
+sys_dma_unmap :: proc "contextless" (mh: vx.Handle) -> vx.Status {
+	m := handle_get_as(current_task(), mh, Dma_Mapping, {}) or_return
+	defer object_release(&m.obj)
+	return dma_unmap(m)
+}
+
+// dma_domain_op(domain, op, 0): .Revoke and .Quiesced are the owner's
+// (.Manage); .Faults, .Inspect's, answers the count.
+@(private="file", require_results)
+sys_dma_domain_op :: proc "contextless" (dh: vx.Handle, op_word, arg: u64) -> (faults: u64, st: vx.Status) {
+	if arg != 0 || op_word < u64(min(vx.Dma_Op)) || op_word > u64(max(vx.Dma_Op)) {
+		return 0, .Err_Invalid
+	}
+	op := vx.Dma_Op(op_word)
+	d := handle_get_as(current_task(), dh, Dma_Domain, op == .Faults ? {.Inspect} : {.Manage}) or_return
 	defer object_release(&d.obj)
-	v := handle_get_as(current_task(), vh, Vmo, {}) or_return
-	defer object_release(&v.obj)
-	return dma_unmap(d, v)
+	switch op {
+	case .Revoke:
+		dma_revoke(d)
+	case .Quiesced:
+		dma_quiesced(d)
+	case .Faults:
+		spin_guard(&d.lock)
+		return min(d.faults, u64(max(i64))), .Ok
+	}
+	return 0, .Ok
 }
 
 @(private="file", require_results)
@@ -699,7 +737,7 @@ sys_counter_read :: proc "contextless" (h: vx.Handle) -> (value: i64, st: vx.Sta
 }
 
 // port_bind(port, source, trigger, key, threshold): a one-shot binding of a
-// channel end, counter, task, ring end or Irq to the port.
+// channel end, counter, task, ring end, Irq or DmaDomain to the port.
 @(private="file", require_results)
 sys_port_bind :: proc "contextless" (ph, sh: vx.Handle, trigger, key, threshold: u64) -> vx.Status {
 	p := handle_get_as(current_task(), ph, Port, {.Write}) or_return
@@ -709,7 +747,7 @@ sys_port_bind :: proc "contextless" (ph, sh: vx.Handle, trigger, key, threshold:
 	}
 	src: ^Object
 	st: vx.Status
-	for type in ([]Obj_Type{.Channel, .Counter, .Task, .Ring, .Irq}) {
+	for type in ([]Obj_Type{.Channel, .Counter, .Task, .Ring, .Irq, .Dma_Domain}) {
 		if src, st = handle_get(current_task(), sh, type, {.Wait}); src != nil {
 			break
 		}
@@ -731,6 +769,8 @@ sys_port_bind :: proc "contextless" (ph, sh: vx.Handle, trigger, key, threshold:
 		st = ring_bind(cast(^Ring_End)src, b)
 	case .Irq:
 		st = irq_bind(cast(^Irq)src, b)
+	case .Dma_Domain:
+		st = dma_bind(cast(^Dma_Domain)src, b)
 	case:
 		st = task_bind(cast(^Task)src, b)
 	}
@@ -1197,11 +1237,13 @@ syscall_dispatch :: proc "contextless" (nr: u64, a: [6]u64) -> i64 {
 	case .Irq_Ack:
 		return i64(sys_irq_ack(vx.Handle(a[0])))
 	case .Dma_Domain_Create:
-		return i64(sys_dma_domain_create(vx.Handle(a[0]), a[1], Uva(a[2])))
+		return i64(sys_dma_domain_create(vx.Handle(a[0]), a[1], a[2], Uva(a[3])))
 	case .Dma_Map:
-		return i64(sys_dma_map(vx.Handle(a[0]), vx.Handle(a[1]), a[2], a[3], Uva(a[4])))
+		return i64(sys_dma_map(vx.Handle(a[0]), vx.Handle(a[1]), a[2], a[3], a[4], Uva(a[5])))
 	case .Dma_Unmap:
-		return i64(sys_dma_unmap(vx.Handle(a[0]), vx.Handle(a[1])))
+		return i64(sys_dma_unmap(vx.Handle(a[0])))
+	case .Dma_Domain_Op:
+		return result(sys_dma_domain_op(vx.Handle(a[0]), a[1], a[2]))
 	case .Pager_Create:
 		return i64(sys_pager_create(vx.Handle(a[0]), vx.Handle(a[1]), a[2], a[3], Uva(a[4])))
 	case .Pager_Supply:

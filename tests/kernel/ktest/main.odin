@@ -963,25 +963,73 @@ test_devices :: proc "contextless" () {
 	check(st == .Ok && msi2.data == msi.data) // freed, so given again
 	_ = rt.handle_close(m1)
 
-	// A DMA domain (pass-through): device addresses for a VMO's pages, held until unmapped.
+	// A DMA domain (pass-through), for one function: device addresses for a
+	// VMO's pages, a mapping for each range, what the device may do as the
+	// VMO handle allows.
 	addrs: [4]u64
-	_, st = rt.dma_domain_create(weak)
+	_, st = rt.dma_domain_create(weak, 0x18)
 	check(st == .Err_Access)
-	dom: vx.Handle
-	dom, st = rt.dma_domain_create(res)
+	_, st = rt.dma_domain_create(res, 0x1_0000)
+	check(st == .Err_Invalid) // no such requester ID
+	dom, map1, map2: vx.Handle
+	dom, st = rt.dma_domain_create(res, 0x18)
 	check(st == .Ok)
 	mem, _ := rt.vmo_create(16 * 1024)
-	check(rt.dma_map(dom, mem, 4096, 16 * 1024, addrs[:]) == .Err_Range)
-	check(rt.dma_map(dom, mem, 0, 16 * 1024, addrs[:]) == .Ok)
+	_, st = rt.dma_map(dom, mem, 4096, 16 * 1024, {.Read}, addrs[:])
+	check(st == .Err_Range)
+	_, st = rt.dma_map(dom, mem, 0, 4096, {}, addrs[:])
+	check(st == .Err_Invalid) // the device must do something
+	ro, _ := rt.handle_dup(mem, {.Read, .Map})
+	_, st = rt.dma_map(dom, ro, 0, 4096, {.Write}, addrs[:])
+	check(st == .Err_Access) // a read-only handle
+	map1, st = rt.dma_map(dom, ro, 0, 4096, {.Read}, addrs[:])
+	check(st == .Ok) // the device reads it: fine
+	check(rt.dma_unmap(map1) == .Ok)
+	_ = rt.handle_close(ro)
+	map1, st = rt.dma_map(dom, mem, 0, 16 * 1024, {.Read, .Write}, addrs[:])
+	check(st == .Ok)
 	check(addrs[0] != 0 && addrs[3] != 0 && addrs[0] & 4095 == 0 && addrs[0] != addrs[1])
 	h, st = rt.vmo_create_physical(res, DEVICE, 4096)
 	check(st == .Ok)
-	check(rt.dma_map(dom, h, 0, 4096, addrs[:]) == .Err_Unsupported) // not RAM: peer-to-peer comes later
+	_, st = rt.dma_map(dom, h, 0, 4096, {.Read}, addrs[:])
+	check(st == .Err_Unsupported) // not RAM, yet
 	_ = rt.handle_close(h)
-	check(rt.dma_unmap(dom, mem) == .Ok)
-	check(rt.dma_unmap(dom, mem) == .Err_Not_Found)
-	check(rt.dma_map(dom, mem, 0, 4096, addrs[:]) == .Ok) // held by the domain when it closes, and let go
-	rt.close_all(mem, dom, weak, res)
+	unmap_only :: proc "contextless" (mapping: vx.Handle) -> i64 { // dma_unmap, the handle kept
+		return rt.vx_syscall(.Dma_Unmap, u64(mapping))
+	}
+	check(unmap_only(map1) == i64(vx.Status.Ok))
+	check(unmap_only(map1) == i64(vx.Status.Err_Bad_State)) // once
+	_ = rt.handle_close(map1)
+	// A driver's duplicate maps, and sees faults; it cannot revoke.
+	user, _ := rt.handle_dup(dom, {.Map, .Wait, .Inspect})
+	map1, st = rt.dma_map(user, mem, 0, 8192, {.Read, .Write}, addrs[:])
+	check(st == .Ok)
+	map2, st = rt.dma_map(user, mem, 8192, 4096, {.Write}, addrs[:])
+	check(st == .Ok)
+	_, st = rt.dma_domain_op(user, .Revoke)
+	check(st == .Err_Access)
+	faults, fst := rt.dma_domain_op(user, .Faults)
+	check(fst == .Ok && faults == 0)
+	port, _ = rt.port_create()
+	check(rt.port_bind(port, user, .Dma_Fault, 9) == .Ok)
+	_, st = rt.port_wait(port, after_ms(2), 0, pk[:])
+	check(st == .Err_Timed_Out) // no faults
+	_ = rt.handle_close(port)
+	// Its owner revokes: the driver can unmap nothing now (its pages are kept
+	// for the device), until the owner says the device is quiet.
+	_ = rt.handle_close(map2) // closed without an unmap: kept for the device
+	_, st = rt.dma_domain_op(dom, .Revoke)
+	check(st == .Ok)
+	check(unmap_only(map1) == i64(vx.Status.Err_Bad_State))
+	_, st = rt.dma_domain_op(dom, .Quiesced)
+	check(st == .Ok) // both let go
+	check(unmap_only(map1) == i64(vx.Status.Err_Bad_State))
+	_ = rt.handle_close(map1)
+	map1, st = rt.dma_map(user, mem, 0, 4096, {.Read}, addrs[:])
+	check(st == .Ok) // the domain goes on
+	rt.close_all(user, mem)
+	_ = rt.handle_close(dom) // the mapping keeps it, and is kept until .Quiesced: a leak no one can see but this
+	rt.close_all(map1, weak, res)
 }
 
 // Review fixes (M3): a killed task's freed tables are never used, and a

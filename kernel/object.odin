@@ -22,6 +22,7 @@ Obj_Type :: enum u8 {
 	Irq,
 	Iorange,
 	Dma_Domain,
+	Dma_Mapping,
 	Pager,
 }
 
@@ -55,6 +56,8 @@ obj_type_of :: #force_inline proc "contextless" ($T: typeid) -> Obj_Type {
 		return .Iorange
 	} else when T == Dma_Domain {
 		return .Dma_Domain
+	} else when T == Dma_Mapping {
+		return .Dma_Mapping
 	} else when T == Pager {
 		return .Pager
 	} else {
@@ -163,6 +166,8 @@ object_destroy :: proc "contextless" (o: ^Object) {
 		pool_free(&iorange_pool, cast(^Iorange)o)
 	case .Dma_Domain:
 		dma_domain_destroy(cast(^Dma_Domain)o)
+	case .Dma_Mapping:
+		dma_mapping_destroy(cast(^Dma_Mapping)o)
 	case .Pager:
 		pager_destroy(cast(^Pager)o)
 	}

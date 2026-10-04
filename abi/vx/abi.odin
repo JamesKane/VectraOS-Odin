@@ -60,6 +60,7 @@ Trigger :: enum u32 {
 	Irq, // an Irq has fired since it was last bound; value: how many times in all
 	Exception, // a thread stopped at an exception (exception_bind); value: its thread id
 	Pager, // a page request (pager_create): source the VMO's key, value its range (pager_offset, pager_pages)
+	Dma_Fault, // a DmaDomain's device faulted (more than threshold in all); value: the count
 }
 
 // The intents a thread declares. Until scheduling contexts land, every thread
@@ -249,14 +250,28 @@ Cqe :: struct #align (32) { // the generic completion entry, 32 bytes
 //       it, and Msi says what the device must write, and where. Always
 //       edge-triggered. (x86_64: an APIC vector; aarch64: an LPI, through the
 //       GIC's ITS, which knows the device by its requester ID.)
-//   dma_domain_create(resource, 0, &out)
-//       a DmaDomain: what a device may reach by DMA. In pass-through mode,
-//       the only one so far (QEMU; the IOMMU comes with M5), a device
-//       address is the physical address.
-//   dma_map(domain, vmo, offset, size, addresses)
+//   dma_domain_create(resource, source, 0, &out)
+//       a DmaDomain: what the PCI function whose requester ID is `source`
+//       may reach by DMA. devmgr makes and keeps it, and gives its driver a
+//       duplicate with .Map (and .Wait, .Inspect). Behind an IOMMU (VT-d,
+//       SMMUv3) a device address is the domain's own, from 4 GiB up; in
+//       pass-through mode, where no IOMMU covers the device, it is the
+//       physical address.
+//   dma_map(domain, vmo, offset, size, options, &mapped)
 //       the device address of each page of [offset, offset + size), into
-//       addresses[size / 4096]; the domain holds the VMO until dma_unmap
-//   dma_unmap(domain, vmo)
+//       mapped.addresses[size / 4096], and a DmaMapping for the range in
+//       mapped.mapping. options: .Read (the device reads the memory: the
+//       VMO handle needs .Read), .Write (it writes it: .Write), or both.
+//       The mapping holds the VMO's pages for the device
+//   dma_unmap(mapping)
+//       the device is done with the range: its pages let go at once. A
+//       mapping whose handles go without it keeps them until .Quiesced
+//   dma_domain_op(domain, op, 0)
+//       .Revoke (.Manage): every mapping's pages kept for the device until
+//       .Quiesced, whatever its driver does; .Quiesced (.Manage): the device
+//       has been stopped (bus mastering off, reset), so what was kept is let
+//       go; .Faults (.Inspect): returns how many faults the IOMMU has
+//       reported for the device (.Dma_Fault)
 //   iorange_create(resource, base, count, &out)
 //       x86_64 only: I/O ports, which a task may use once as_map has been
 //       called with the IoRange in place of a VMO (offset, size and flags 0)
@@ -335,6 +350,28 @@ pager_offset :: #force_inline proc "contextless" (value: u64) -> u64 {
 pager_pages :: #force_inline proc "contextless" (value: u64) -> u64 {
 	return (value & 4095) + 1
 }
+
+Dma_Option :: enum u32 { // dma_map: what the device may do
+	Read,
+	Write,
+}
+Dma_Options :: bit_set[Dma_Option; u32]
+
+#assert(u32(Dma_Option.Read) == 0 && u32(Dma_Option.Write) == 1)
+
+Dma_Op :: enum u32 { // dma_domain_op
+	Revoke = 1,
+	Quiesced,
+	Faults,
+}
+
+Dma_Mapped :: struct { // dma_map's answer
+	addresses: [^]u64, // in: where the pages' device addresses go
+	mapping:   Handle, // out: the DmaMapping
+	reserved:  u32,
+}
+
+#assert(size_of(Dma_Mapped) == 16 && offset_of(Dma_Mapped, mapping) == 8)
 
 Irq_Option :: enum u32 { // irq_create
 	Msi,

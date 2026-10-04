@@ -256,10 +256,12 @@ virtq_init :: proc "contextless" (v: ^Virtio, q: ^Virtq, index, want, vector: u1
 	}
 	QUEUE_BYTES :: 3 * 4096 // descriptors, available ring, used ring
 	vmo := rt.vmo_create(QUEUE_BYTES) or_return
-	defer rt.close_all(vmo) // the mapping and the domain keep it
+	defer rt.close_all(vmo) // the mappings keep it
 	at := rt.as_map(rt.self, vmo, 0, QUEUE_BYTES, {.Write}) or_return
 	pa: [3]u64
-	rt.dma_map(v.dma, vmo, 0, QUEUE_BYTES, pa[:]) or_return
+	// The DMA mapping's handle is kept as long as the driver lives: the
+	// device reads the queue and writes its used ring.
+	_ = rt.dma_map(v.dma, vmo, 0, QUEUE_BYTES, {.Read, .Write}, pa[:]) or_return
 	q^ = {
 		index = index,
 		size  = size,

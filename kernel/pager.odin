@@ -185,12 +185,7 @@ pager_fault :: proc "contextless" (address: u64, access: u32) -> Pager_Result {
 			woke = .Ok // only the retry's wait
 		}
 		spin_lock(&v.lock)
-		for link := &v.waiters; link^ != nil; link = &link^.next {
-			if link^ == &w {
-				link^ = w.next
-				break
-			}
-		}
+		unlink(&v.waiters, &w, "next")
 		supplied := vmo_page(v, index) != 0
 		if !supplied && woke == .Err_Timed_Out && v.pages[index].asked {
 			v.pages[index] = {} // the next fault asks again
