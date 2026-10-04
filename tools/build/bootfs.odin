@@ -16,6 +16,7 @@ import "vx:tar"
 
 @(private="file")
 BOOTFS_DIRS := []string {
+	"adm", // fsd's adm branch, on an installed system (boot/svc/system.ndb)
 	"bin",
 	"boot",
 	"boot/bin",

@@ -81,7 +81,7 @@ programs: [512]u8
 manifests: [512]u8
 
 test_namespace :: proc "contextless" () {
-	check_str(list("/"), "bin boot dev dist lib n net proc srv sys tmp")
+	check_str(list("/"), "adm bin boot dev dist lib n net proc srv sys tmp")
 	boot_bin := list("/boot/bin")
 	copy(programs[:], boot_bin) // list's buffer is reused
 	progs := string(programs[:len(boot_bin)])
