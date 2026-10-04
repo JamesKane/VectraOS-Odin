@@ -1,0 +1,65 @@
+echo hello world
+echo 'it''s' '$x'
+x=(a b c); echo $x $#x $x(2) $"x
+x=(a b c d); echo $x(2-3) $x(3-)
+x=foo; echo $x.c pre^$x a^(b c)
+x=b; echo a$x^c
+x=(1 2); y=(a b); echo $x^$y
+echo a=b
+if(false) echo no; if not echo yes
+if(true) echo yes; if not echo no
+for(i in 1 2 3) echo $i
+x=(a b c); while(! ~ $#x 0) { echo $x(1); x=$x(2-) }
+switch(b){ case a; echo A; case b c; echo BC; case *; echo other }
+switch(zz){ case a; echo A; case *; echo other }
+if(~ foo f*) echo match
+if(! ~ foo b*) echo nomatch
+true && echo t; false || echo f; false && echo no
+false; echo $status
+exitwith 3 | true; echo $status
+if(true | true) echo all; if(false | true) echo no
+fn greet { echo hi $1 $#* }; greet bob jo
+fn show { echo $x }; x=1; x=2 show; show
+fn f { echo in f }; fn f; f; echo $status
+x=`{echo a b}; echo $#x
+if(true) { y=`{echo z}; echo $y }
+x=`:{echo a:b:c}; echo $x(2)
+echo `{for(i in a b) echo $i}
+fn c { echo $* }; c x `{for(i in a b) echo $i}
+echo data > f; cat < f
+echo more >> f; cat < f
+{ echo x; echo y } > g; cat < g
+echo one two three | wc
+echo a b | cat | wc
+echo oops >[1=2]; echo fine
+echo data > f; cat < f | wc
+echo a b c | wc > h; cat < h
+warn oops >[2=1] | wc
+echo hi > f | wc; cat < f
+echo x | echo `{echo a b | wc}
+echo *.c
+echo '*.c' z* ?.h
+echo dir/*.c
+x=*.c; echo $#x
+for(f in *.c) echo $f
+echo `{for(f in dir/*.c) echo $f}
+x='*.c'; echo $x; for(f in '*.c') echo $f
+echo 'echo from dot' > s.rc
+. s.rc
+eval echo evaluated
+if(
+for(i in a b) {
+echo )
+echo 'unterminated
+ifs=() { x=`{echo a b}; echo $#x }
+echo $0 $#0
+x=() ; echo a^$x
+fn f { echo }; f | wc
+echo before; exit 'it failed'; echo after
+echo $status
+cat < nosuchfile
+x=global; y=(a b); fn f { exportx }; x=local f
+exportx
+for(i in 1 2 3 4 5 6 7 8 9 10) { x=`{echo $i $i $i}; y=$x^-; z=$y(1) }; echo $z
+x=`{echo a b c d e f g}; y=($x $x $x); fn f { echo $y }; f > /dev/null
+echo still

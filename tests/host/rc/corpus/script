@@ -1,0 +1,4 @@
+x=(a b c)
+for(i in $x) { if(~ $i b) echo $i^-; if not echo `{echo $#x} > f }
+switch($x(2)){ case a*; true; case *; false || echo no | cat }
+fn f { echo $*(1) $"* }; f 1 2 3
