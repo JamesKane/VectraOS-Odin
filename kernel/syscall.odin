@@ -176,13 +176,13 @@ sys_task_info :: proc "contextless" (h: vx.Handle, out: Uva, id, flags: u64) -> 
 	t := task_target(h, {.Inspect}, id, .Next in opts) or_return
 	spin_lock(&t.lock)
 	info := vx.Task_Summary {
-		id          = t.id,
-		state       = t.state,
-		threads     = t.live_threads,
-		exit_status = t.exit_status,
-		mapped      = t.mapped,
-		name        = t.name,
+		id       = t.id,
+		state    = t.state,
+		threads  = t.live_threads,
+		mapped   = t.mapped,
+		name     = t.name,
 	}
+	info.exit_len = u32(copy(info.exit[:], t.exit[:]))
 	for th := t.threads; th != nil; th = th.task_next {
 		if th.state == .Blocked {
 			info.blocked += 1
@@ -743,7 +743,7 @@ sys_task_create :: proc "contextless" (name_ptr: Uva, name_len: u64, out: Uva, o
 	t.may_debug_write = current_task().may_debug_write
 	if .Fork in opts {
 		if st := task_fork_copy(current_task(), t); st != .Ok {
-			task_kill(t, EXIT_NO_MEMORY) // never started: torn down with its last reference
+			task_kill(t, "sys: no memory") // never started: torn down with its last reference
 			object_release(&t.obj)
 			return st
 		}
@@ -803,10 +803,16 @@ sys_thread_start :: proc "contextless" (h: vx.Handle, entry, sp: Uva, arg: vx.Ha
 	return st
 }
 
+// task_kill(task, msg, len, id): ends it with msg as its exit string.
 @(private="file", require_results)
-sys_task_kill :: proc "contextless" (h: vx.Handle, status, id: u64) -> vx.Status {
+sys_task_kill :: proc "contextless" (h: vx.Handle, msg_ptr: Uva, length, id: u64) -> vx.Status {
+	if length > vx.ERRMAX {
+		return .Err_Range
+	}
+	msg: [vx.ERRMAX]u8
+	copy_in_slice(msg[:length], msg_ptr) or_return
 	t := task_target(h, {.Manage}, id, false) or_return
-	task_kill(t, i64(status))
+	task_kill(t, string(msg[:length]))
 	object_release(&t.obj)
 	return .Ok
 }
@@ -880,7 +886,7 @@ syscall_dispatch :: proc "contextless" (nr: u64, a: [6]u64) -> i64 {
 	case .Task_Create:
 		return i64(sys_task_create(Uva(a[0]), a[1], Uva(a[2]), a[3]))
 	case .Task_Kill:
-		return i64(sys_task_kill(vx.Handle(a[0]), a[1], a[2]))
+		return i64(sys_task_kill(vx.Handle(a[0]), Uva(a[1]), a[2], a[3]))
 	case .Task_Info:
 		return i64(sys_task_info(vx.Handle(a[0]), Uva(a[1]), a[2], a[3]))
 	case .Thread_Create:
@@ -888,7 +894,7 @@ syscall_dispatch :: proc "contextless" (nr: u64, a: [6]u64) -> i64 {
 	case .Thread_Start:
 		return i64(sys_thread_start(vx.Handle(a[0]), Uva(a[1]), Uva(a[2]), vx.Handle(a[3]), a[4]))
 	case .Thread_Exit:
-		thread_exit_current(i64(a[0]))
+		thread_exit_current()
 	case .Port_Create:
 		return i64(sys_port_create(a[0], Uva(a[1])))
 	case .Port_Bind:

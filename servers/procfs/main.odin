@@ -23,7 +23,7 @@ tasks: vx.Handle // the root of what procfs shows
 @(private="file")
 root_id: u64 // its task id
 @(private="file")
-KILLED :: -9 // the exit status a kill through ctl gives, as Unix's SIGKILL reads
+KILLED :: "killed" // the exit string a kill through ctl gives
 
 // Node numbers: 1 is /proc; a task's directory, status and ctl are its id
 // shifted left two, plus its Kind. /proc's number reads as task 0's status,

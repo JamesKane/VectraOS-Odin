@@ -19,7 +19,8 @@ import vx "abi:vx"
 // thread_interrupt is the asynchronous kind: it posts a note (ADR-0010),
 // which wakes whatever call the thread is blocked in with .Err_Interrupted,
 // and on its way back to user mode the thread is diverted to the in-task
-// handler with the note.
+// handler with the note. A task with no handler ends with the note as its
+// exit string, as a Plan 9 process that has not called notify does.
 //
 // The user-mode registers are the frame at the top of the thread's kernel
 // stack, which a stopped thread does not touch: thread_state reads and
@@ -221,8 +222,8 @@ exception_check_interrupt :: proc "contextless" () {
 	sched_drop_interrupt_wake(th) // the wake that brought it here must not end its next wait as well
 	f := arch_user_frame(th)
 	e.regs = arch_frame_regs(f)
-	if !exception_divert(f, &e) { // no handler now, or a stack that cannot take it
-		task_exit_with(EXIT_FAULT)
+	if !exception_divert(f, &e) { // no handler now, or a stack that cannot take it: the note ends it
+		task_exit_with(string(e.note[:e.code]))
 	}
 }
 
@@ -504,28 +505,36 @@ sys_thread_interrupt :: proc "contextless" (h: vx.Handle, id: u64, note_ptr: Uva
 	t := handle_get_as(current_task(), h, Task, {.Manage}) or_return
 	defer object_release(&t.obj)
 	target: ^Thread
+	unhandled: bool
 	{
 		spin_guard(&t.lock)
-		if t.ending || t.killed || t.exc_handler == 0 {
-			return .Err_Bad_State // ending already, or no one to take it
+		if t.ending || t.killed {
+			return .Err_Bad_State // ending already
 		}
-		for x := t.threads; x != nil; x = x.task_next { // a thread that will take it
+		unhandled = t.exc_handler == 0
+		for x := t.threads; x != nil && !unhandled; x = x.task_next { // a thread that will take it
 			if !x.exited && (id != 0 ? u64(x.id) == id : !x.exc_stopped) {
 				target = x
 				break
 			}
 		}
 		switch {
+		case unhandled:
 		case target == nil:
 			return .Err_Not_Found
 		case len(target.notes) == THREAD_MAX_INTERRUPTS:
 			return .Err_Should_Wait // its queue is full: the caller may try again
+		case:
+			note: Note
+			_ = append(&note, ..text[:length])
+			_ = append(&target.notes, note)
+			intrinsics.atomic_store_explicit(&target.interrupt_pending, true, .Relaxed)
+			object_ref(&target.obj)
 		}
-		note: Note
-		_ = append(&note, ..text[:length])
-		_ = append(&target.notes, note)
-		intrinsics.atomic_store_explicit(&target.interrupt_pending, true, .Relaxed)
-		object_ref(&target.obj)
+	}
+	if unhandled { // no one to take it: it ends the task, as in Plan 9
+		task_kill(t, string(text[:length]))
+		return .Ok
 	}
 	sched_kick(target, .Err_Interrupted) // out of a call it is blocked in,
 	sched_poke(target) // or into the kernel from user code on another CPU

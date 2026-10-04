@@ -47,9 +47,11 @@ task_fork :: proc "contextless" (name: string) -> (vx.Handle, vx.Status) {
 	return h, st
 }
 
+// Ends the task, or with an id that task in task's tree, with msg as its
+// exit string: empty for success (ADR-0010).
 @(require_results)
-task_kill :: proc "contextless" (task: vx.Handle, exit_status: i64, id: u64 = 0) -> vx.Status {
-	return status(vx_syscall(.Task_Kill, u64(task), u64(exit_status), id))
+task_kill :: proc "contextless" (task: vx.Handle, msg: string, id: u64 = 0) -> vx.Status {
+	return status(vx_syscall(.Task_Kill, u64(task), addr(raw_data(msg)), u64(len(msg)), id))
 }
 
 // The task itself; or with an id, that task in task's tree; or with
@@ -85,8 +87,10 @@ thread_start :: proc "contextless" (thread: vx.Handle, entry, sp: u64, arg: vx.H
 	return status(vx_syscall(.Thread_Start, u64(thread), entry, sp, u64(arg), arg2))
 }
 
-thread_exit :: proc "contextless" (exit_status: i64) -> ! {
-	vx_syscall(.Thread_Exit, u64(exit_status))
+// Ends the calling thread. The task's last thread to exit ends it with the
+// empty exit string, unless it was killed; to end a program, exits.
+thread_exit :: proc "contextless" () -> ! {
+	vx_syscall(.Thread_Exit)
 	for {}
 }
 

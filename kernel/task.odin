@@ -2,6 +2,7 @@ package kernel
 
 import "base:intrinsics"
 import vx "abi:vx"
+import "vx:utf"
 
 // Tasks, threads, handles and address spaces.
 //
@@ -66,7 +67,7 @@ Task :: struct {
 	state:           vx.Task_State, // .Exited once torn down
 	ending:          bool, // its last thread has exited, or it was killed: torn down soon
 	killed:          bool,
-	exit_status:     i64,
+	exit:            [dynamic; vx.ERRMAX]u8, // its exit string (ADR-0010): empty while it runs, and for success
 	obs:             Observers, // EXIT bindings
 	// The root task's debug capability, until there is a debug-log object; a
 	// task gets it from the task that creates it.
@@ -418,13 +419,31 @@ task_create :: proc "contextless" (name: string, parent_id: u64) -> (task: ^Task
 	t.map_next = USER_MAP_BASE
 	t.handles = cast(^[HANDLE_SLOTS]Handle_Entry)phys_to_virt(handles)
 	t.maps = cast(^[TASK_MAX_MAPPINGS]Mapping)phys_to_virt(maps)
-	copy(t.name[:len(t.name) - 1], name)
+	copy(t.name[:], utf_cut(name, len(t.name) - 1)) // whole runes (ADR-0013)
 	t.parent_id = parent_id
 	spin_lock(&all_tasks_lock)
 	t.all_next = all_tasks
 	all_tasks = t
 	spin_unlock(&all_tasks_lock)
 	return t, .Ok
+}
+
+// The longest prefix of s of at most max bytes that ends at a rune boundary:
+// where a bounded copy of text is cut (ADR-0013). A bad byte is a rune of
+// its own. The kernel cuts, as Plan 9's kstrcpy does, but does not validate.
+utf_cut :: proc "contextless" (s: string, max_bytes: int) -> string {
+	if len(s) <= max_bytes {
+		return s
+	}
+	at := 0
+	for at < max_bytes {
+		_, n := utf.decode(s[at:])
+		if at + n > max_bytes {
+			break
+		}
+		at += n
+	}
+	return s[:at]
 }
 
 task_name :: proc "contextless" (t: ^Task) -> string {

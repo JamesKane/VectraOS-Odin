@@ -18,8 +18,6 @@ import vx "abi:vx"
 // Killing marks the task and kicks its threads (sched_kick_for_kill). Each
 // one exits the next time it heads back to user mode (user_return).
 
-EXIT_FAULT :: i64(-1) // the status of a task killed by a fault
-EXIT_NO_MEMORY :: i64(-2) // a fork the kernel could not finish
 
 @(require_results)
 task_bind :: proc "contextless" (t: ^Task, b: ^Binding) -> vx.Status {
@@ -29,7 +27,7 @@ task_bind :: proc "contextless" (t: ^Task, b: ^Binding) -> vx.Status {
 	spin_lock(&t.lock)
 	defer spin_unlock(&t.lock)
 	if t.state == .Exited {
-		binding_fire(b, u64(t.exit_status))
+		binding_fire(b, u64(len(t.exit)))
 	} else {
 		observers_add(&t.obs, b)
 	}
@@ -74,7 +72,7 @@ task_teardown :: proc "contextless" (t: ^Task) {
 	phys_free(virt_to_phys(handles), 0)
 	spin_lock(&t.lock)
 	t.state = .Exited // only now: an EXIT binding sees the task fully gone
-	observers_fire(&t.obs, .Exit, u64(t.exit_status))
+	observers_fire(&t.obs, .Exit, u64(len(t.exit)))
 	spin_unlock(&t.lock)
 }
 
@@ -108,15 +106,12 @@ thread_start :: proc "contextless" (th: ^Thread, entry, sp: Uva, arg, arg2: u64)
 	return .Ok
 }
 
-// Ends the current thread with an exit status; the last thread's status, or
-// a kill's, becomes the task's.
-thread_exit_current :: proc "contextless" (status: i64) -> ! {
+// Ends the current thread. A task whose last thread exits ends with the
+// empty exit string, unless it was killed, when it ends with the kill's.
+thread_exit_current :: proc "contextless" () -> ! {
 	th := this_cpu().current
 	t := th.task
 	spin_lock(&t.lock)
-	if !t.killed && t.live_threads == 1 {
-		t.exit_status = status
-	}
 	th.exited = true
 	t.live_threads -= 1
 	th.last_of_task = t.live_threads == 0
@@ -141,16 +136,18 @@ thread_reap :: proc "contextless" (th: ^Thread) {
 	object_release(&th.obj) // the reference it held while running
 }
 
-// Kills a task: its exit status is `status`, and its threads exit when they
-// next head for user mode. A task with no live threads ends at once.
-task_kill :: proc "contextless" (t: ^Task, status: i64) {
+// Kills a task: its exit string is msg (at most ERRMAX bytes, cut at a rune
+// boundary, as Plan 9's kstrcpy cuts), and its threads exit when they next
+// head for user mode. A task with no live threads ends at once.
+task_kill :: proc "contextless" (t: ^Task, msg: string) {
 	spin_lock(&t.lock)
 	if t.ending || t.killed {
 		spin_unlock(&t.lock)
 		return
 	}
 	t.killed = true
-	t.exit_status = status
+	clear(&t.exit)
+	_ = append(&t.exit, utf_cut(msg, vx.ERRMAX))
 	idle := t.live_threads == 0
 	if idle {
 		t.ending = true
@@ -173,7 +170,7 @@ user_return :: proc "contextless" () {
 		c := this_cpu()
 		t := c.current.task
 		if t.killed {
-			thread_exit_current(t.exit_status)
+			thread_exit_current()
 		}
 		if exception_check_suspend() {
 			continue // parked until resumed: look at the kill again
@@ -186,15 +183,17 @@ user_return :: proc "contextless" () {
 	exception_check_interrupt() // a thread_interrupt, to its handler
 }
 
-// Ends the current thread's task with this exit status.
-task_exit_with :: proc "contextless" (status: i64) -> ! {
-	task_kill(this_cpu().current.task, status)
-	thread_exit_current(status)
+// Ends the current thread's task with msg as its exit string.
+task_exit_with :: proc "contextless" (msg: string) -> ! {
+	task_kill(this_cpu().current.task, msg)
+	thread_exit_current()
 }
 
-// A fault in user mode that no one handled kills the whole task.
+// A fault in user mode that no one handled kills the whole task, with the
+// trap in Plan 9's words as its exit string.
 task_fault_exit :: proc "contextless" (kind: vx.Exception_Kind, code: u32, address, pc: u64) -> ! {
-	task_exit_with(EXIT_FAULT)
+	text: [vx.ERRMAX]u8
+	task_exit_with(vx.trap_note(kind, code, address, pc, &text))
 }
 
 // The last reference is gone. Threads hold references to their task, so it

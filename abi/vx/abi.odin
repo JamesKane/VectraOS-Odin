@@ -21,7 +21,7 @@ RIGHTS_SAME :: transmute(Rights)(u32(1) << 31)
 // A port packet: 32 bytes.
 Packet :: struct {
 	key:       u64, // chosen by whoever bound or posted it
-	value:     u64, // counter value, IRQ count, exit status; free for user posts
+	value:     u64, // counter value, IRQ count, exit string's length; free for user posts
 	timestamp: Instant,
 	source:    u32, // the handle it came from, or 0 for port_post
 	trigger:   Trigger,
@@ -36,7 +36,7 @@ Trigger :: enum u32 {
 	Readable, // a channel end has a message to read
 	Peer_Closed, // a channel end's peer is gone
 	Counter_Ge, // a counter has reached the binding's threshold; value: the counter
-	Exit, // a task has ended; value: its exit status
+	Exit, // a task has ended; value: its exit string's length (0: success)
 	Irq, // an Irq has fired since it was last bound; value: how many times in all
 	Exception, // a thread stopped at an exception (exception_bind); value: its thread id
 }
@@ -266,19 +266,30 @@ Task_State :: enum u32 {
 }
 
 Task_Summary :: struct { // what task_info returns
-	id:          u64,
-	name:        [24]u8, // NUL-padded
-	state:       Task_State,
-	threads:     u32, // live threads
-	exit_status: i64, // once .Exited
-	mapped:      u64, // bytes mapped into its address space
-	blocked:     u32, // live threads that are waiting
-	reserved:    u32,
+	id:       u64,
+	name:     [24]u8, // NUL-padded
+	state:    Task_State,
+	threads:  u32, // live threads
+	mapped:   u64, // bytes mapped into its address space
+	blocked:  u32, // live threads that are waiting
+	exit_len: u32,
+	exit:     [ERRMAX]u8, // once .Exited, its exit string: exit_len bytes, empty for success
 }
 
-#assert(size_of(Task_Summary) == 64)
+#assert(size_of(Task_Summary) == 56 + ERRMAX)
 
-// task_info(task, &summary, id, flags) and task_kill(task, status, id) act on
+// The task's exit string, from its summary.
+exit_string :: proc "contextless" (s: ^Task_Summary) -> string {
+	return string(s.exit[:min(s.exit_len, ERRMAX)])
+}
+
+// A task ends with an exit string (ADR-0010): empty for success, else why,
+// in at most ERRMAX bytes of UTF-8. task_kill(task, msg, len, id) ends it
+// with msg; a task whose last thread exits (thread_exit) ends with the empty
+// string; a fault no one handles ends it with Plan 9's words for the trap
+// ("sys: trap: fault read addr=0x0 pc=0x401000", trap_note).
+//
+// task_info(task, &summary, id, flags) and task_kill(task, msg, len, id) act on
 // the task itself, or with an id, on that task if it is the task or one of
 // its descendants. With .Next, task_info finds the one with the next id
 // after `id` instead, so a holder of a task handle can list its tree
@@ -314,7 +325,7 @@ Map_Options :: bit_set[Map_Option; u32]
 // two. Pages nothing maps there are left alone. Once it returns, no CPU can
 // reach the pages through those addresses any more.
 
-// The longest note, in bytes: Plan 9's ERRMAX (ADR-0010).
+// The longest exit string or note, in bytes: Plan 9's ERRMAX (ADR-0010).
 ERRMAX :: 128
 
 // --- Exceptions and interrupts ---
@@ -372,8 +383,10 @@ ERRMAX :: 128
 //     string of 1 to ERRMAX bytes, to the thread (any thread of the task,
 //     with thread 0): a call it is blocked in returns .Err_Interrupted, and
 //     on its way back to user mode it is diverted to the in-task handler with
-//     an exception of kind .Interrupt carrying the note. Up to eight notes
-//     wait for delivery, each its own exception; more is .Err_Should_Wait.
+//     an exception of kind .Interrupt carrying the note. A task with no
+//     in-task handler ends instead, with the note as its exit string, as in
+//     Plan 9. Up to eight notes wait for delivery, each its own exception;
+//     more is .Err_Should_Wait.
 // vmo_clone(vmo, offset, size, options, &out): a new VMO holding a copy of
 //     the range, charged in full (commit, not overcommit).
 // as_query(task, address, &info): with INSPECT on the task, the first of its

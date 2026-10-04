@@ -430,8 +430,10 @@ cannot :: proc "contextless" (what: string, s: ^Service, st: vx.Status) {
 
 // A service has exited: restart it if its manifest says so, then say so. In
 // that order, because the service may be the console svcd writes to.
-exited :: proc "contextless" (index: int, exit_status: i64) {
+exited :: proc "contextless" (index: int) {
 	s := &services[index]
+	info, ist := rt.task_info(s.task)
+	why := ist == .Ok ? vx.exit_string(&info) : "?"
 	_ = rt.handle_close(s.task)
 	s.task = vx.HANDLE_NONE
 	gave_up := false
@@ -449,7 +451,7 @@ exited :: proc "contextless" (index: int, exit_status: i64) {
 			}
 		}
 	}
-	say(name_of(s), " exited with status ", exit_status, "\n")
+	say(name_of(s), " exited", len(why) != 0 ? ": " : "", why, "\n")
 	if gave_up {
 		say(name_of(s), " keeps exiting; it is not restarted again\n")
 	}
@@ -540,7 +542,7 @@ vx_main :: proc() -> int {
 		n, _ := rt.port_wait(port, vx.INFINITE, 0, pk[:])
 		for p in pk[:n] {
 			if p.trigger == .Exit && p.key < u64(len(services)) {
-				exited(int(p.key), i64(p.value)) // the exit status, signed
+				exited(int(p.key))
 			}
 		}
 	}

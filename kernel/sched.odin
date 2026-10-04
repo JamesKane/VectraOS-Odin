@@ -314,7 +314,7 @@ sched_start_thread :: proc "contextless" (t: ^Thread) {
 thread_entry :: proc "c" (t: ^Thread) -> ! {
 	reap_after_switch()
 	if t.task.killed {
-		thread_exit_current(t.task.exit_status)
+		thread_exit_current()
 	}
 	arch_enter_user(t.user_entry, t.user_sp, t.user_arg, t.user_arg2, thread_kstack_top(t))
 }

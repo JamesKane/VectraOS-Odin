@@ -2,6 +2,7 @@ package rt
 
 import vx "abi:vx"
 import "vx:memory"
+import "vx:utf"
 
 // Standard input and output: pipes.
 //
@@ -101,6 +102,39 @@ read_all :: proc "contextless" (buf: []u8) -> (n: int, st: vx.Status) {
 		n += got
 	}
 	return n, .Ok
+}
+
+// Ends the program with msg as its exit string (empty: success), as Plan 9's
+// exits does. What it printed goes out first, and its pipe closes, so a
+// reader sees the end of its input before the exit is seen. Every thread
+// ends: the program, not just this one.
+exits :: proc "contextless" (msg: string) -> ! {
+	flush()
+	if stdio.output != 0 {
+		_ = handle_close(stdio.output)
+		stdio.output = 0
+		print_hook = nil
+	}
+	_ = task_kill(self, utf_cut(msg, vx.ERRMAX))
+	thread_exit()
+}
+
+// The longest prefix of s of at most max_bytes bytes that ends at a rune
+// boundary (ADR-0013); a bad byte is a rune of its own.
+@(private="file")
+utf_cut :: proc "contextless" (s: string, max_bytes: int) -> string {
+	if len(s) <= max_bytes {
+		return s
+	}
+	at := 0
+	for at < max_bytes {
+		_, n := utf.decode(s[at:])
+		if at + n > max_bytes {
+			break
+		}
+		at += n
+	}
+	return s[:at]
 }
 
 // Called by start: the console and the pipes the spawn message gives.

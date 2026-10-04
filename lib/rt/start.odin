@@ -4,11 +4,14 @@ import "base:runtime"
 import vx "abi:vx"
 import "vx:memory"
 import "vx:ndb"
+import "vx:str"
 
 // The kernel enters _start with the task's bootstrap channel, like a C call:
 // an aligned stack, a zero return address, the handle as the first argument.
 // _start reads the spawn message from it and calls the program's vx_main,
-// whose return value ends the thread. A program defines it, Odin's way:
+// whose return value ends the program: 0 with the empty exit string
+// (success), anything else with its decimal value, as APE's exit(n) does
+// (ADR-0010). A program defines it, Odin's way:
 //
 //	@(export, link_name = "vx_main")
 //	vx_main :: proc() -> int { ... }
@@ -53,8 +56,11 @@ start :: proc "c" (bootstrap: vx.Handle, arg2: u64) -> ! {
 	stdio_init()
 	context = runtime.default_context()
 	exit_status := vx_main()
-	flush()
-	thread_exit(i64(exit_status))
+	if exit_status == 0 {
+		exits("")
+	}
+	buf: [str.I64_DIGITS]u8
+	exits(str.format_i64(buf[:], i64(exit_status)))
 }
 
 // The program's arguments, from the spawn message's arg= records.

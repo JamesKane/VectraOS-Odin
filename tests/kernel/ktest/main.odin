@@ -225,7 +225,7 @@ worker :: proc "c" (unused: vx.Handle, arg: u64) -> ! {
 	}
 	_ = rt.handle_close(port)
 	set_stage(s, 3)
-	rt.thread_exit(0)
+	rt.thread_exit()
 }
 
 shared: Shared
@@ -335,9 +335,12 @@ write_child :: proc "contextless" (what: Child_Code) -> (code: Child_Image) {
 		case .Fault_Load:
 			emit(&code, 0x48, 0xb8); emit32(&code, u32(CHILD_DATA)); emit32(&code, 0) // movabs $CHILD_DATA, %rax
 			emit(&code, 0x48, 0x8b, 0x10) // mov (%rax), %rdx: faults until it is mapped
-			emit(&code, 0x48, 0x89, 0xd7) // mov %rdx, %rdi: what it loaded
-			emit(&code, 0xb8); emit32(&code, u32(vx.Syscall.Thread_Exit)) // mov $thread_exit, %eax: is its exit status
-			emit(&code, 0x0f, 0x05) // syscall
+			emit(&code, 0x48, 0x89, 0xc6) // mov %rax, %rsi: what it loaded,
+			emit(&code, 0xba); emit32(&code, 1) // mov $1, %edx: its first byte,
+			emit(&code, 0x45, 0x31, 0xd2) // xor %r10d, %r10d
+			emit(&code, 0xb8); emit32(&code, u32(vx.Syscall.Task_Kill)) // mov $task_kill, %eax: is its exit string
+			emit(&code, 0x0f, 0x05) // syscall (%rdi: its handle to itself)
+			emit(&code, 0xeb, 0xfe) // jmp ., until the kill takes it
 		case .Port_Block:
 			emit(&code, 0x48, 0x8d, 0x74, 0x24, 0xf0) // lea -16(%rsp), %rsi: the handle's place
 			emit(&code, 0x31, 0xff) // xor %edi, %edi: no options
@@ -387,9 +390,11 @@ write_child :: proc "contextless" (what: Child_Code) -> (code: Child_Image) {
 		case .Fault_Load:
 			emit(&code, 0xd2a00001 | u32(CHILD_DATA >> 16) << 5) // movz x1, #CHILD_DATA >> 16, lsl #16
 			emit(&code, 0xf9400022) // ldr x2, [x1]: faults until it is mapped
-			emit(&code, 0xaa0203e0) // mov x0, x2: what it loaded
-			emit(&code, 0xd2800008 | u32(vx.Syscall.Thread_Exit) << 5) // movz x8, #thread_exit: is its exit status
-			emit(&code, 0xd4000001) // svc #0
+			emit(&code, 0xd2800022) // movz x2, #1: what it loaded, its first byte,
+			emit(&code, 0xd2800003) // movz x3, #0
+			emit(&code, 0xd2800008 | u32(vx.Syscall.Task_Kill) << 5) // movz x8, #task_kill: is its exit string
+			emit(&code, 0xd4000001) // svc #0 (x0: its handle to itself)
+			emit(&code, 0x14000000) // b ., until the kill takes it
 		case .Port_Block:
 			emit(&code, 0xd10043e1) // sub x1, sp, #16: the handle's place
 			emit(&code, 0xd2800000) // movz x0, #0: no options
@@ -478,28 +483,47 @@ start_child_bound :: proc "contextless" (what: Child_Code, exc_port: vx.Handle, 
 	return
 }
 
-// Waits for a task's EXIT binding; returns its exit status, or min(i64).
-wait_exit :: proc "contextless" (port, task: vx.Handle) -> i64 {
+// Waits for a task's EXIT binding; returns its exit string (ADR-0010), or
+// false if it did not end. The string lasts until the next call.
+wait_exit :: proc "contextless" (port, task: vx.Handle) -> (exit: string, ok: bool) {
+	@(static) buf: [vx.ERRMAX]u8
 	pk: [1]vx.Packet
 	if rt.port_bind(port, task, .Exit, 99) != .Ok {
-		return min(i64)
+		return
 	}
 	if n, _ := rt.port_wait(port, after_ms(2000), 0, pk[:]); n != 1 || pk[0].key != 99 {
-		return min(i64)
+		return
 	}
-	return i64(pk[0].value)
+	info, st := rt.task_info(task)
+	if st != .Ok || u64(info.exit_len) != pk[0].value {
+		return
+	}
+	return string(buf[:copy(buf[:], vx.exit_string(&info))]), true
+}
+
+// Whether the task ends, with exit string want.
+exits_with :: proc "contextless" (port, task: vx.Handle, want: string) -> bool {
+	exit, ok := wait_exit(port, task)
+	return ok && exit == want
+}
+
+// Whether the task ends, with an exit string that starts with prefix.
+exits_starting :: proc "contextless" (port, task: vx.Handle, prefix: string) -> bool {
+	exit, ok := wait_exit(port, task)
+	return ok && str.has_prefix(exit, prefix)
 }
 
 test_tasks :: proc "contextless" () {
 	port, _ := rt.port_create()
 
-	// A child that exits on its own: its status is the task's, and it is torn down.
+	// A child whose thread exits on its own ends with the empty exit string
+	// (success), and is torn down.
 	child, ok := start_child(.Exit_7)
 	check(ok)
-	check(wait_exit(port, child) == 7)
+	check(exits_with(port, child, ""))
 	info, st := rt.task_info(child)
 	check(st == .Ok)
-	check(info.state == .Exited && info.exit_status == 7 && info.threads == 0 && info.mapped == 0)
+	check(info.state == .Exited && info.exit_len == 0 && info.threads == 0 && info.mapped == 0)
 	_, lst := rt.thread_create(child)
 	check(lst == .Err_Bad_State) // an ended task takes no threads
 	_ = rt.handle_close(child)
@@ -509,23 +533,42 @@ test_tasks :: proc "contextless" () {
 	check(ok)
 	info, st = rt.task_info(child)
 	check(st == .Ok && info.state == .Running && info.threads == 1)
-	check(rt.task_kill(child, 99) == .Ok)
-	check(wait_exit(port, child) == 99)
+	check(rt.task_kill(child, "killed while spinning") == .Ok)
+	check(exits_with(port, child, "killed while spinning"))
 	_ = rt.handle_close(child)
 
 	// A child blocked in the kernel is killed too: its wait ends with KILLED.
 	child, ok = start_child(.Block)
 	check(ok)
 	check(wait_blocked(child)) // in futex_wait, so the kill is of a blocked thread
-	check(rt.task_kill(child, 55) == .Ok)
-	check(wait_exit(port, child) == 55)
+	check(rt.task_kill(child, "killed while blocked") == .Ok)
+	check(exits_with(port, child, "killed while blocked"))
 	_ = rt.handle_close(child)
 
 	// A task that never ran ends at once when killed, and its binding fires.
 	child, st = rt.task_create("idle")
 	check(st == .Ok)
-	check(rt.task_kill(child, 3) == .Ok)
-	check(wait_exit(port, child) == 3)
+	check(rt.task_kill(child, "killed before it ran") == .Ok)
+	check(exits_with(port, child, "killed before it ran"))
+	_ = rt.handle_close(child)
+
+	// An exit string is at most ERRMAX bytes.
+	child, st = rt.task_create("idle")
+	check(st == .Ok)
+	@(static) long_msg: [vx.ERRMAX + 1]u8
+	check(rt.task_kill(child, string(long_msg[:])) == .Err_Range)
+	check(rt.task_kill(child, "") == .Ok && exits_with(port, child, ""))
+	_ = rt.handle_close(child)
+
+	// A note to a task with no note handler ends it, with the note as its
+	// exit string, as in Plan 9 (ADR-0010).
+	child, ok = start_child(.Spin)
+	check(ok)
+	check(rt.thread_interrupt(child, 0, "") == .Err_Invalid)
+	check(rt.thread_interrupt(child, 0, string(long_msg[:])) == .Err_Invalid)
+	check(rt.thread_interrupt(child, 0, "interrupt") == .Ok)
+	check(exits_with(port, child, "interrupt"))
+	check(rt.thread_interrupt(child, 0, "again") == .Err_Bad_State) // it has ended
 	_ = rt.handle_close(child)
 	_ = rt.handle_close(port)
 }
@@ -635,7 +678,7 @@ ring_server :: proc "c" (unused: vx.Handle, arg: u64) -> ! {
 	_ = rt.handle_close(port)
 	intrinsics.atomic_store(&s.stage, 1)
 	_, _ = rt.futex_wake(&s.stage, 1)
-	rt.thread_exit(0)
+	rt.thread_exit()
 }
 
 test_rings :: proc "contextless" () {
@@ -911,8 +954,8 @@ test_torn_down :: proc "contextless" () {
 	th: vx.Handle
 	th, st = rt.thread_create(child) // made before the kill, started after
 	check(st == .Ok)
-	check(rt.task_kill(child, -5) == .Ok)
-	check(wait_exit(port, child) == -5) // torn down: no threads ever ran
+	check(rt.task_kill(child, "doomed") == .Ok)
+	check(exits_with(port, child, "doomed")) // torn down: no threads ever ran
 	vmo, _ := rt.vmo_create(4096)
 	_, st = rt.as_map(child, vmo, 0, 4096, {})
 	check(st == .Err_Bad_State) // its mapping table is gone
@@ -929,7 +972,7 @@ test_torn_down :: proc "contextless" () {
 	check(rt.thread_start(th, 0x8000_0000_0000_0000, 0x50_0000, 0, 0) == .Err_Invalid)
 	check(rt.thread_start(th, 0x40_0000, 0xffff_8000_0000_0000, 0, 0) == .Err_Invalid)
 	check(rt.thread_start(th, 0x0000_8000_0000_0000, 0x50_0000, 0, 0) == .Err_Invalid) // just past the top
-	_ = rt.task_kill(child, 0)
+	_ = rt.task_kill(child, "")
 	rt.close_all(th, child)
 
 	// vmo (one page) where the kernel puts it; then two pages ending on it:
@@ -965,7 +1008,7 @@ second_waiter :: proc "c" (unused: vx.Handle, arg: u64) -> ! {
 	pp.got, pp.st = rt.port_wait(pp.port, after_ms(2000), 0, pk[:]) // queued behind the first waiter
 	intrinsics.atomic_store(&pp.stage, 2)
 	_, _ = rt.futex_wake(&pp.stage, 1)
-	rt.thread_exit(0)
+	rt.thread_exit()
 }
 
 test_port_waiters :: proc "contextless" () {
@@ -1003,13 +1046,13 @@ test_port_waiters :: proc "contextless" () {
 	// User tasks have FP/SIMD, saved at every entry (ADR-0004; upstream traps it at M3).
 	child, ok := start_child(.Use_Simd)
 	check(ok)
-	check(wait_exit(port, child) == 7)
+	check(exits_with(port, child, ""))
 	_ = rt.handle_close(child)
 	child, ok = start_child(.Port_Block)
 	check(ok)
 	check(wait_blocked(child)) // in port_wait
-	check(rt.task_kill(child, -3) == .Ok)
-	check(wait_exit(port, child) == -3) // the kill ends the wait
+	check(rt.task_kill(child, "killed in port_wait") == .Ok)
+	check(exits_with(port, child, "killed in port_wait")) // the kill ends the wait
 	rt.close_all(child, port)
 }
 
@@ -1064,7 +1107,7 @@ test_unmap :: proc "contextless" () {
 	check(ok)
 	_ = rt.futex_wait(&never, 0, after_ms(50)) // it is spinning, on another CPU
 	check(rt.as_unmap(child, CHILD_STACK_TOP - 4096, 4096) == .Ok)
-	check(wait_exit(port, child) == -1) // killed by the fault
+	check(exits_starting(port, child, "sys: trap: fault read addr=0x1ffff")) // killed by the fault
 	rt.close_all(child, port)
 }
 
@@ -1090,7 +1133,7 @@ copy_racer :: proc "c" (unused: vx.Handle, arg: u64) -> ! {
 			intrinsics.atomic_add(&r.other, 1)
 		}
 	}
-	rt.thread_exit(0)
+	rt.thread_exit()
 }
 
 test_copy_race :: proc "contextless" () {
@@ -1164,7 +1207,7 @@ test_exception_port :: proc "contextless" () {
 	check(map_child_word(child, CHILD_DATA, 7))
 	check(rt.exception_resume(child, 1, .Continue) == .Ok)
 	check(rt.exception_resume(child, 1, .Continue) != .Ok) // once
-	check(wait_exit(port, child) == 7) // it exits with what it loaded
+	check(exits_with(port, child, "\x07")) // it exits with what it loaded
 	_ = rt.handle_close(child)
 
 	// Its registers can be changed before it continues: the load goes elsewhere.
@@ -1187,7 +1230,7 @@ test_exception_port :: proc "contextless" () {
 	check(rt.thread_state(child, 1, .Set_Regs, &regs) == .Ok)
 	check(map_child_word(child, CHILD_DATA + 4096, 9))
 	check(rt.exception_resume(child, 1, .Continue) == .Ok)
-	check(wait_exit(port, child) == 9)
+	check(exits_with(port, child, "\x09"))
 	_ = rt.handle_close(child)
 
 	// Or it can be killed. (.Step and .Pass are a debugger's, from its own port.)
@@ -1197,19 +1240,17 @@ test_exception_port :: proc "contextless" () {
 	check(rt.exception_resume(child, 1, .Step) == .Err_Bad_State)
 	check(rt.exception_resume(child, 1, .Pass) == .Err_Bad_State)
 	check(rt.exception_resume(child, 1, .Kill) == .Ok)
-	check(wait_exit(port, child) == EXIT_FAULT) // the fault's default
+	check(exits_starting(port, child, "sys: trap: fault read addr=0x300000 pc=")) // the fault's default
 	_ = rt.handle_close(child)
 
 	// A kill reaches a thread stopped at its port.
 	child, ok = start_child_bound(.Fault_Load, port, {})
 	check(ok)
 	check(child_stopped(port))
-	check(rt.task_kill(child, 44) == .Ok)
-	check(wait_exit(port, child) == 44)
+	check(rt.task_kill(child, "killed at its port") == .Ok)
+	check(exits_with(port, child, "killed at its port"))
 	rt.close_all(child, port)
 }
-
-EXIT_FAULT :: -1 // a task killed by a fault no one handled
 
 // What the in-task handler sees and does.
 In_Task :: struct {
@@ -1251,7 +1292,7 @@ interrupted_waiter :: proc "c" (unused: vx.Handle, arg: u64) -> ! {
 	w := cast(^Waiter)uintptr(arg)
 	intrinsics.atomic_store(&w.result, rt.futex_wait(&w.word, 0, vx.INFINITE)) // no deadline: only an interrupt ends it
 	intrinsics.atomic_store(&w.done, true)
-	rt.thread_exit(0)
+	rt.thread_exit()
 }
 
 test_in_task :: proc "contextless" () {
@@ -1335,7 +1376,7 @@ test_debugger :: proc "contextless" () {
 		check(e.regs.x[0] == 7 && e.regs.pc == CHILD_CODE + 8) // brk, then movz x0, #7
 	}
 	check(rt.exception_resume(child, 1, .Continue) == .Ok)
-	check(wait_exit(port, child) == 7)
+	check(exits_with(port, child, ""))
 	_ = rt.handle_close(child)
 
 	// Passed on, the breakpoint reaches nobody else: the default kills it.
@@ -1343,7 +1384,7 @@ test_debugger :: proc "contextless" () {
 	check(ok)
 	check(child_stopped(port))
 	check(rt.exception_resume(child, 1, .Pass) == .Ok)
-	check(wait_exit(port, child) == EXIT_FAULT)
+	check(exits_starting(port, child, "sys: breakpoint pc="))
 	_ = rt.handle_close(child)
 
 	// Suspended, a spinning child holds still: its code is patched (a private
@@ -1408,7 +1449,7 @@ test_debugger :: proc "contextless" () {
 	check(rt.thread_resume(child, 1) == .Ok)
 	again := rt.thread_resume(child, 1) // counted: not suspended any more, or
 	check(again == .Err_Bad_State || again == .Err_Not_Found) // already run on to its end
-	check(wait_exit(port, child) == 7)
+	check(exits_with(port, child, ""))
 	rt.close_all(weak, child)
 
 	// A thread blocked in a call holds still too, and goes on waiting once resumed.
@@ -1423,7 +1464,7 @@ test_debugger :: proc "contextless" () {
 	check(rt.thread_suspend(child, 0) == .Ok && rt.thread_resume(child, 0) == .Ok)
 	check(rt.thread_resume(child, 0) == .Err_Bad_State) // counted: not suspended any more
 	check(wait_blocked(child))
-	check(rt.task_kill(child, 45) == .Ok && wait_exit(port, child) == 45)
+	check(rt.task_kill(child, "killed") == .Ok && exits_with(port, child, "killed"))
 	rt.close_all(child, port)
 }
 
@@ -1432,10 +1473,8 @@ test_debugger :: proc "contextless" () {
 fork_page: [512]u64
 fork_ring: u64 // where a ring's memory is mapped, in the parent
 
-FORK_OK :: 100 // fork_child's exit status when all is well; more says what was not
-
-// The forked child's first thread. Its exit status says what it found:
-// FORK_OK if all is well, more by the bits of what was not.
+// The forked child's first thread. Its exit string says what it found: "ok"
+// if all is well, or "wrong N", N the bits of what was not.
 fork_child :: proc "c" (unused: vx.Handle, my_id: u64) -> ! {
 	wrong: i64
 	if intrinsics.volatile_load(&fork_page[7]) != 0x1234 {
@@ -1449,25 +1488,27 @@ fork_child :: proc "c" (unused: vx.Handle, my_id: u64) -> ! {
 	if fork_ring != 0 {
 		_ = intrinsics.volatile_load(cast(^u64)uintptr(fork_ring)) // not there: a fault ends it
 	}
-	_ = rt.task_kill(rt.self, FORK_OK + wrong)
-	rt.thread_exit(0)
+	msg := [7]u8{'w', 'r', 'o', 'n', 'g', ' ', '0' + u8(wrong)}
+	_ = rt.task_kill(rt.self, wrong != 0 ? string(msg[:]) : "ok")
+	rt.thread_exit()
 }
 
-run_fork :: proc "contextless" (sp: u64, port: vx.Handle) -> i64 {
+// The forked child's exit string, or false.
+run_fork :: proc "contextless" (sp: u64, port: vx.Handle) -> (exit: string, ok: bool) {
 	child, st := rt.task_fork("forked")
 	if st != .Ok {
-		return min(i64)
+		return
 	}
 	defer rt.close_all(child)
 	intrinsics.volatile_store(&fork_page[7], 0x5555) // after the fork: not the child's
 	info, ist := rt.task_info(child)
 	th, tst := rt.thread_create(child)
 	if ist != .Ok || tst != .Ok {
-		return min(i64)
+		return
 	}
 	defer rt.close_all(th)
 	if rt.thread_start(th, u64(uintptr(rawptr(fork_child))), sp, 0, info.id) != .Ok {
-		return min(i64)
+		return
 	}
 	return wait_exit(port, child)
 }
@@ -1477,7 +1518,8 @@ test_fork :: proc "contextless" () {
 	sp := new_stack() // mapped before the fork, so the child has it too
 	check(sp != 0)
 	intrinsics.volatile_store(&fork_page[7], 0x1234)
-	check(run_fork(sp, port) == FORK_OK)
+	exit, ok := run_fork(sp, port)
+	check(ok && exit == "ok")
 	check(intrinsics.volatile_load(&fork_page[7]) == 0x5555) // the child's write stayed in the child
 
 	// A ring's memory is not copied: the child faults where the parent has it.
@@ -1496,7 +1538,8 @@ test_fork :: proc "contextless" () {
 	check(st == .Ok)
 	intrinsics.volatile_store(&fork_page[7], 0x1234)
 	check(intrinsics.volatile_load(cast(^u64)uintptr(fork_ring)) != 0x5a5a) // the parent reads it
-	check(run_fork(sp, port) == EXIT_FAULT) // the child is killed by the fault
+	exit, ok = run_fork(sp, port)
+	check(ok && str.has_prefix(exit, "sys: trap: fault")) // the child is killed by the fault
 	check(rt.as_unmap(rt.self, fork_ring, layout.size) == .Ok)
 	fork_ring = 0
 	rt.close_all(h.memory, h.client, h.server)
@@ -1525,7 +1568,7 @@ tls_worker :: proc "c" (unused: vx.Handle, arg: u64) -> ! {
 		_ = rt.futex_wait(&never, 0, after_ms(1))
 	}
 	set_stage(&tls_shared, 2)
-	rt.thread_exit(0)
+	rt.thread_exit()
 }
 
 test_tls :: proc "contextless" () {
@@ -1575,7 +1618,7 @@ test_tls :: proc "contextless" () {
 	check(rt.thread_state(other, 1, .Get_Tls, &v) == .Err_Bad_State) // DEBUG needed
 	_ = rt.handle_close(other)
 	check(rt.thread_resume(child, 1) == .Ok)
-	check(rt.task_kill(child, 46) == .Ok)
+	check(rt.task_kill(child, "killed") == .Ok)
 	_ = rt.handle_close(child)
 	check(rt.tls_set(0) == .Ok)
 }
@@ -1609,7 +1652,7 @@ fp_worker :: proc "c" (unused: vx.Handle, arg: u64) -> ! {
 		}
 	}
 	set_stage(&fp_shared, 2)
-	rt.thread_exit(0)
+	rt.thread_exit()
 }
 
 test_fp :: proc "contextless" () {

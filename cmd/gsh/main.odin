@@ -250,8 +250,7 @@ builtin :: proc "contextless" (w: []Word) -> bool {
 		}
 		return true
 	case word_is(w[0], "exit"):
-		rt.flush()
-		rt.thread_exit(0)
+		rt.exits("")
 	}
 	return false
 }
