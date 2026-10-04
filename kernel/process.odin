@@ -70,21 +70,21 @@ task_teardown :: proc "contextless" (t: ^Task) {
 @(require_results)
 thread_start :: proc "contextless" (th: ^Thread, entry, sp: Uva, arg, arg2: u64) -> vx.Status {
 	t := th.task
-	spin_lock(&t.lock)
-	if th.state != .New || th.user_entry != 0 || t.ending || t.killed {
-		spin_unlock(&t.lock)
-		return .Err_Bad_State
+	{
+		spin_guard(&t.lock)
+		if th.state != .New || th.user_entry != 0 || t.ending || t.killed {
+			return .Err_Bad_State
+		}
+		th.user_entry = entry
+		th.user_sp = sp
+		th.user_arg = arg
+		th.user_arg2 = arg2
+		t.live_threads += 1
+		t.state = .Running
+		th.task_next = t.threads
+		t.threads = th
+		object_ref(&th.obj)
 	}
-	th.user_entry = entry
-	th.user_sp = sp
-	th.user_arg = arg
-	th.user_arg2 = arg2
-	t.live_threads += 1
-	t.state = .Running
-	th.task_next = t.threads
-	t.threads = th
-	object_ref(&th.obj)
-	spin_unlock(&t.lock)
 	sched_start_thread(th)
 	return .Ok
 }

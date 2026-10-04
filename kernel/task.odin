@@ -362,22 +362,30 @@ task_unlist :: proc "contextless" (t: ^Task) {
 }
 
 @(require_results)
-task_create :: proc "contextless" (name: string, parent_id: u64) -> (^Task, vx.Status) {
+task_create :: proc "contextless" (name: string, parent_id: u64) -> (task: ^Task, st: vx.Status) {
 	t := pool_alloc(&task_pool)
 	if t == nil {
 		return nil, .Err_No_Memory
 	}
-	handles := phys_alloc_zeroed(0)
-	maps := handles != 0 ? phys_alloc_zeroed(0) : 0
-	root := maps != 0 ? arch_new_user_root() : 0
-	if root == 0 {
-		if maps != 0 {
-			phys_free(maps, 0)
-		}
-		if handles != 0 {
-			phys_free(handles, 0)
-		}
+	defer if st != .Ok {
 		pool_free(&task_pool, t)
+	}
+	handles := phys_alloc_zeroed(0)
+	if handles == 0 {
+		return nil, .Err_No_Memory
+	}
+	defer if st != .Ok {
+		phys_free(handles, 0)
+	}
+	maps := phys_alloc_zeroed(0)
+	if maps == 0 {
+		return nil, .Err_No_Memory
+	}
+	defer if st != .Ok {
+		phys_free(maps, 0)
+	}
+	root := arch_new_user_root()
+	if root == 0 {
 		return nil, .Err_No_Memory
 	}
 	object_init(&t.obj, .Task) // pool_alloc zeroed the rest
@@ -471,14 +479,16 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 
 // A thread of task t that has not started (thread_start, process.odin).
 @(require_results)
-thread_create :: proc "contextless" (t: ^Task) -> (^Thread, vx.Status) {
+thread_create :: proc "contextless" (t: ^Task) -> (thread: ^Thread, st: vx.Status) {
 	th := pool_alloc(&thread_pool)
 	if th == nil {
 		return nil, .Err_No_Memory
 	}
+	defer if st != .Ok {
+		pool_free(&thread_pool, th)
+	}
 	stack := kstack_alloc()
 	if stack == 0 {
-		pool_free(&thread_pool, th)
 		return nil, .Err_No_Memory
 	}
 	object_init(&th.obj, .Thread) // pool_alloc zeroed the rest

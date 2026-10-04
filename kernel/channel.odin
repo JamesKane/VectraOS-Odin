@@ -59,7 +59,7 @@ Call_Wait :: struct {
 Channel :: struct {
 	using obj: Object,
 	pair:      ^Channel_Pair,
-	side:      u32, // this end is pair.ends[side]
+	side:      Side, // this end is pair.ends[side]
 	head:      ^Channel_Msg, // messages for this end's reader
 	tail:      ^Channel_Msg,
 	count:     u32,
@@ -73,7 +73,7 @@ Channel :: struct {
 
 Channel_Pair :: struct {
 	lock: Spinlock,
-	ends: [2]^Channel, // nil once that end is destroyed
+	ends: [Side]^Channel, // nil once that end is destroyed
 }
 
 channel_pool: Pool(Channel)
@@ -82,31 +82,40 @@ channel_pair_pool: Pool(Channel_Pair)
 @(require_results)
 channel_create :: proc "contextless" () -> (a, b: ^Channel, st: vx.Status) {
 	pair := pool_alloc(&channel_pair_pool)
-	e0 := pair != nil ? pool_alloc(&channel_pool) : nil
-	e1 := e0 != nil ? pool_alloc(&channel_pool) : nil
-	if e1 == nil {
-		if e0 != nil {
-			pool_free(&channel_pool, e0)
-		}
-		if pair != nil {
-			pool_free(&channel_pair_pool, pair)
-		}
+	if pair == nil {
 		return nil, nil, .Err_No_Memory
 	}
-	ends := [2]^Channel{e0, e1}
-	for e, i in ends {
+	defer if st != .Ok {
+		pool_free(&channel_pair_pool, pair)
+	}
+	e0 := pool_alloc(&channel_pool)
+	if e0 == nil {
+		return nil, nil, .Err_No_Memory
+	}
+	defer if st != .Ok {
+		pool_free(&channel_pool, e0)
+	}
+	e1 := pool_alloc(&channel_pool)
+	if e1 == nil {
+		return nil, nil, .Err_No_Memory
+	}
+	ends := [Side]^Channel {
+		.Client = e0,
+		.Server = e1,
+	}
+	for e, side in ends {
 		object_init(&e.obj, .Channel)
 		e.pair = pair
-		e.side = u32(i)
+		e.side = side
 		e.next_txid = 0x8000_0000 // kernel-picked txids have the top bit set
-		pair.ends[i] = e
+		pair.ends[side] = e
 	}
 	return e0, e1, .Ok
 }
 
 @(private="file")
 channel_peer :: proc "contextless" (c: ^Channel) -> ^Channel {
-	return c.pair.ends[1 - c.side]
+	return c.pair.ends[peer_side(c.side)]
 }
 
 msg_free :: proc "contextless" (m: ^Channel_Msg) {
@@ -126,19 +135,15 @@ msg_list_free :: proc "contextless" (list: ^Channel_Msg) {
 	}
 }
 
-// A message block for `len` body bytes and `count` handles, or nil.
-msg_alloc :: proc "contextless" (len, count: u32) -> ^Channel_Msg {
-	size := u64(size_of(Channel_Msg)) + u64(count) * size_of(Moved_Handle) + u64(len)
-	order := uint(0)
-	for (4096 << order) < size {
-		order += 1
-	}
+// A message block for `body_len` body bytes and `count` handles, or nil.
+msg_alloc :: proc "contextless" (body_len, count: u32) -> ^Channel_Msg {
+	order := order_for(u64(size_of(Channel_Msg)) + u64(count) * size_of(Moved_Handle) + u64(body_len))
 	pa := phys_alloc(order)
 	if pa == 0 {
 		return nil
 	}
 	m := cast(^Channel_Msg)phys_to_virt(pa)
-	m^ = {order = order, len = len, count = count}
+	m^ = {order = order, len = body_len, count = count}
 	return m
 }
 
@@ -187,10 +192,10 @@ channel_write :: proc "contextless" (c: ^Channel, m: ^Channel_Msg) -> vx.Status 
 	return peer != nil ? channel_deliver(peer, m) : .Err_Peer_Closed
 }
 
-// Takes the next message if it fits caps of `cap` bytes and `count_cap`
+// Takes the next message if it fits caps of `cap_bytes` bytes and `count_cap`
 // handles; otherwise reports its size in need and leaves it queued.
 @(require_results)
-channel_read :: proc "contextless" (c: ^Channel, cap, count_cap: u32) -> (out: ^Channel_Msg, need: vx.Msg_Size, st: vx.Status) {
+channel_read :: proc "contextless" (c: ^Channel, cap_bytes, count_cap: u32) -> (out: ^Channel_Msg, need: vx.Msg_Size, st: vx.Status) {
 	spin_lock(&c.pair.lock)
 	defer spin_unlock(&c.pair.lock)
 	m := c.head
@@ -198,7 +203,7 @@ channel_read :: proc "contextless" (c: ^Channel, cap, count_cap: u32) -> (out: ^
 		return nil, {}, channel_peer(c) != nil ? .Err_Should_Wait : .Err_Peer_Closed
 	}
 	need = {m.len, m.count}
-	if m.len > cap || m.count > count_cap {
+	if m.len > cap_bytes || m.count > count_cap {
 		return nil, need, .Err_Too_Small
 	}
 	c.head = m.next

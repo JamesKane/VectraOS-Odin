@@ -27,7 +27,7 @@ Ring_Slot :: struct {
 Ring_End :: struct {
 	using obj: Object,
 	pair:      ^Ring_Pair,
-	side:      u32, // 0: the client, 1: the server
+	side:      Side,
 	doorbell:  ^Counter, // rung by the peer
 	obs:       Observers, // PEER_CLOSED
 }
@@ -36,8 +36,8 @@ Ring_End :: struct {
 
 Ring_Pair :: struct {
 	lock:  Spinlock,
-	ends:  [2]^Ring_End, // nil once that end is destroyed
-	slots: [2][vx.RING_SLOTS]Ring_Slot, // slots[d]: put by side d, taken by the other
+	ends:  [Side]^Ring_End, // nil once that end is destroyed
+	slots: [Side][vx.RING_SLOTS]Ring_Slot, // put by that side, taken by its peer
 }
 
 ring_end_pool: Pool(Ring_End)
@@ -48,51 +48,50 @@ ring_pair_pool: Pool(Ring_Pair)
 ring_create :: proc "contextless" (p: vx.Ring_Params) -> (client, server: ^Ring_End, memory: ^Vmo, st: vx.Status) {
 	h := ring.layout(p) or_return
 	v := vmo_create(h.size) or_return
-	vmo_write(v, 0, (cast([^]u8)&h)[:size_of(h)])
-	pair := pool_alloc(&ring_pair_pool)
-	ends: [2]^Ring_End
-	bells: [2]^Counter
-	ok := pair != nil
-	for i in 0 ..< 2 {
-		if !ok {
-			break
-		}
-		ends[i] = pool_alloc(&ring_end_pool)
-		bell, bst := counter_create(0)
-		bells[i] = bell
-		ok = ends[i] != nil && bst == .Ok
-		if !ok {
-			break
-		}
-		object_init(&ends[i].obj, .Ring)
-		ends[i].pair = pair
-		ends[i].side = u32(i)
-		ends[i].doorbell = bells[i]
-		pair.ends[i] = ends[i]
-	}
-	if !ok {
-		for i in 0 ..< 2 {
-			if bells[i] != nil {
-				object_release(&bells[i].obj)
-			}
-			if ends[i] != nil {
-				pool_free(&ring_end_pool, ends[i])
-			}
-		}
-		if pair != nil {
-			pool_free(&ring_pair_pool, pair)
-		}
+	defer if st != .Ok {
 		object_release(&v.obj)
+	}
+	header := transmute([size_of(vx.Ring_Header)]u8)h
+	vmo_write(v, 0, header[:])
+	pair := pool_alloc(&ring_pair_pool)
+	if pair == nil {
 		return nil, nil, nil, .Err_No_Memory
 	}
-	return ends[0], ends[1], v, .Ok
+	defer if st != .Ok {
+		pool_free(&ring_pair_pool, pair)
+	}
+	ends: [Side]^Ring_End
+	bells: [Side]^Counter
+	defer if st != .Ok {
+		for e, side in ends {
+			if bells[side] != nil {
+				object_release(&bells[side].obj)
+			}
+			if e != nil {
+				pool_free(&ring_end_pool, e)
+			}
+		}
+	}
+	for &e, side in ends {
+		e = pool_alloc(&ring_end_pool)
+		if e == nil {
+			return nil, nil, nil, .Err_No_Memory
+		}
+		bells[side] = counter_create(0) or_return
+		object_init(&e.obj, .Ring)
+		e.pair = pair
+		e.side = side
+		e.doorbell = bells[side]
+		pair.ends[side] = e
+	}
+	return ends[.Client], ends[.Server], v, .Ok
 }
 
 // Rings the peer's doorbell (the producer saw it sleep). PEER_CLOSED if it is gone.
 @(require_results)
 ring_notify :: proc "contextless" (e: ^Ring_End) -> vx.Status {
 	spin_lock(&e.pair.lock)
-	peer := e.pair.ends[1 - e.side]
+	peer := e.pair.ends[peer_side(e.side)]
 	bell := peer != nil ? peer.doorbell : nil
 	if bell != nil {
 		object_ref(&bell.obj)
@@ -117,7 +116,7 @@ ring_bind :: proc "contextless" (e: ^Ring_End, b: ^Binding) -> vx.Status {
 	}
 	spin_lock(&e.pair.lock)
 	defer spin_unlock(&e.pair.lock)
-	if e.pair.ends[1 - e.side] == nil {
+	if e.pair.ends[peer_side(e.side)] == nil {
 		binding_fire(b, 0)
 	} else {
 		observers_add(&e.obs, b)
@@ -152,7 +151,7 @@ ring_take :: proc "contextless" (e: ^Ring_End, slot: u32, out: []Moved_Handle) -
 	}
 	spin_lock(&e.pair.lock)
 	defer spin_unlock(&e.pair.lock)
-	s := &e.pair.slots[1 - e.side][slot]
+	s := &e.pair.slots[peer_side(e.side)][slot]
 	if s.count == 0 {
 		return 0, .Err_Invalid
 	}
@@ -166,7 +165,7 @@ ring_destroy :: proc "contextless" (e: ^Ring_End) {
 	pair := e.pair
 	spin_lock(&pair.lock)
 	pair.ends[e.side] = nil
-	peer := pair.ends[1 - e.side]
+	peer := pair.ends[peer_side(e.side)]
 	if peer != nil {
 		observers_fire(&peer.obs, .Peer_Closed, 0)
 	}
@@ -178,8 +177,8 @@ ring_destroy :: proc "contextless" (e: ^Ring_End) {
 	if peer != nil {
 		return
 	}
-	for d in 0 ..< 2 { // the last end: unclaimed handles go with the ring
-		for &s in pair.slots[d] {
+	for &slots in pair.slots { // the last end: unclaimed handles go with the ring
+		for &s in slots {
 			for h in s.handles[:s.count] {
 				object_drop(h.obj)
 			}

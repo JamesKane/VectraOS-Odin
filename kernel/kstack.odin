@@ -23,26 +23,16 @@ KSTACK_SLOTS :: 8192 // 256 MiB of address space
 
 #assert(KSTACK_SIZE == 1 << 14 && KSTACK_SLOT == 2 * KSTACK_SIZE)
 
+// One bit a slot, 64 slots a word: slot i is bit i % 64 of word i / 64.
+@(private="file")
+Slot_Bits :: [KSTACK_SLOTS / 64]bit_set[0 ..< 64; u64]
+
 @(private="file")
 kstacks: struct {
 	lock:   Spinlock,
-	free:   [KSTACK_SLOTS / 64]u64, // bit i: slot i holds a stack nobody uses
-	mapped: [KSTACK_SLOTS / 64]u64, // bit i: slot i's pages are mapped
+	free:   Slot_Bits, // slots holding a stack nobody uses
+	mapped: Slot_Bits, // slots whose pages are mapped
 	next:   u32, // slots below this have been used
-}
-
-@(private="file")
-bit :: proc "contextless" (bits: []u64, i: u32) -> bool {
-	return bits[i / 64] >> (i % 64) & 1 != 0
-}
-
-@(private="file")
-set_bit :: proc "contextless" (bits: []u64, i: u32, on: bool) {
-	if on {
-		bits[i / 64] |= 1 << (i % 64)
-	} else {
-		bits[i / 64] &~= 1 << (i % 64)
-	}
 }
 
 // Whether addr is in some slot's guard: below a stack, never mapped.
@@ -54,11 +44,11 @@ kstack_in_guard :: proc "contextless" (addr: u64) -> bool {
 // or 0 when there is no memory or no slot left.
 @(require_results)
 kstack_alloc :: proc "contextless" () -> u64 {
-	spin_lock(&kstacks.lock)
+	spin_guard(&kstacks.lock)
 	slot := u32(KSTACK_SLOTS)
-	for w in 0 ..< len(kstacks.free) {
-		if kstacks.free[w] != 0 {
-			slot = u32(w * 64) + u32(intrinsics.count_trailing_zeros(kstacks.free[w]))
+	for w, i in kstacks.free {
+		if w != {} {
+			slot = u32(i * 64) + u32(intrinsics.count_trailing_zeros(transmute(u64)w))
 			break
 		}
 	}
@@ -67,32 +57,29 @@ kstack_alloc :: proc "contextless" () -> u64 {
 		kstacks.next += 1
 	}
 	if slot == KSTACK_SLOTS {
-		spin_unlock(&kstacks.lock)
 		return 0
 	}
-	set_bit(kstacks.free[:], slot, false)
+	word, b := slot / 64, int(slot % 64)
+	kstacks.free[word] -= {b}
 	base := KSTACK_BASE + u64(slot) * KSTACK_SLOT + (KSTACK_SLOT - KSTACK_SIZE)
-	if !bit(kstacks.mapped[:], slot) {
+	if b not_in kstacks.mapped[word] {
 		pa := phys_alloc_zeroed(2) // 16 KiB
 		if pa == 0 || !map_range(kernel_root, base, pa, KSTACK_SIZE, {.Write}) {
 			if pa != 0 {
 				phys_free(pa, 2)
 			}
-			set_bit(kstacks.free[:], slot, true)
-			spin_unlock(&kstacks.lock)
+			kstacks.free[word] += {b}
 			return 0
 		}
-		set_bit(kstacks.mapped[:], slot, true)
+		kstacks.mapped[word] += {b}
 	}
-	spin_unlock(&kstacks.lock)
 	return base
 }
 
 kstack_free :: proc "contextless" (base: u64) {
 	slot := u32((base - KSTACK_BASE) / KSTACK_SLOT)
-	spin_lock(&kstacks.lock)
-	set_bit(kstacks.free[:], slot, true)
-	spin_unlock(&kstacks.lock)
+	spin_guard(&kstacks.lock)
+	kstacks.free[slot / 64] += {int(slot % 64)}
 }
 
 // Makes the region's top-level entry before any user address space copies

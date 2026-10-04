@@ -23,3 +23,11 @@ spin_lock :: proc "contextless" (l: ^Spinlock) {
 spin_unlock :: proc "contextless" (l: ^Spinlock) {
 	intrinsics.atomic_add_explicit(&l.owner, 1, .Release)
 }
+
+// Holds l until the end of the enclosing scope, for code with several ways
+// out. Where a lock is dropped part-way through, or across a context switch,
+// it is taken and released by hand.
+@(deferred_in=spin_unlock)
+spin_guard :: proc "contextless" (l: ^Spinlock) {
+	spin_lock(l)
+}

@@ -81,7 +81,7 @@ root_resource :: proc "contextless" () -> ^Resource {
 // A VMO over [pa, pa + size) of device memory, which may not overlap RAM or
 // firmware memory.
 @(require_results)
-vmo_create_physical :: proc "contextless" (pa: Paddr, size: u64) -> (^Vmo, vx.Status) {
+vmo_create_physical :: proc "contextless" (pa: Paddr, size: u64) -> (vmo: ^Vmo, st: vx.Status) {
 	end, overflow := intrinsics.overflow_add(pa, Paddr(size))
 	if size == 0 || size > VMO_MAX_SIZE || (u64(pa) | size) & 4095 != 0 || overflow {
 		return nil, .Err_Range
@@ -94,23 +94,10 @@ vmo_create_physical :: proc "contextless" (pa: Paddr, size: u64) -> (^Vmo, vx.St
 			return nil, .Err_Access
 		}
 	}
-	count := size / 4096
-	order := page_list_order(count)
-	v := pool_alloc(&vmo_pool)
-	list := v != nil ? phys_alloc(order) : 0
-	if list == 0 {
-		if v != nil {
-			pool_free(&vmo_pool, v)
-		}
-		return nil, .Err_No_Memory
-	}
-	object_init(&v.obj, .Vmo)
-	v.size = size
-	v.pages = (cast([^]Paddr)phys_to_virt(list))[:count]
-	v.list_order = order
+	v := vmo_alloc(size / PAGE_SIZE) or_return
 	v.physical = true
 	for &page, i in v.pages {
-		page = pa + Paddr(i * 4096)
+		page = pa + Paddr(i * PAGE_SIZE)
 	}
 	if arch_console_device(false, u64(pa), size) {
 		console_hand_off()

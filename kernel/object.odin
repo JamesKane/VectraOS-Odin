@@ -172,24 +172,25 @@ Pool_Link :: struct {
 @(require_results)
 pool_alloc :: proc "contextless" (p: ^Pool($T)) -> ^T {
 	SIZE :: (size_of(T) + 15) &~ 15
-	#assert(SIZE <= 4096) // an object fits in a page
-	spin_lock(&p.lock)
-	if p.free == nil {
-		pa := phys_alloc(0)
-		if pa == 0 {
-			spin_unlock(&p.lock)
-			return nil
+	#assert(SIZE <= PAGE_SIZE) // an object fits in a page
+	link: ^Pool_Link
+	{
+		spin_guard(&p.lock)
+		if p.free == nil {
+			pa := phys_alloc(0)
+			if pa == 0 {
+				return nil
+			}
+			page := page_bytes(pa)
+			for off := 0; off + SIZE <= len(page); off += SIZE {
+				l := cast(^Pool_Link)&page[off]
+				l.next = p.free
+				p.free = l
+			}
 		}
-		page := cast([^]u8)phys_to_virt(pa)
-		for off := 0; off + SIZE <= 4096; off += SIZE {
-			link := cast(^Pool_Link)&page[off]
-			link.next = p.free
-			p.free = link
-		}
+		link = p.free
+		p.free = link.next
 	}
-	link := p.free
-	p.free = link.next
-	spin_unlock(&p.lock)
 	intrinsics.mem_zero(link, SIZE)
 	return cast(^T)link
 }
@@ -200,6 +201,17 @@ pool_free :: proc "contextless" (p: ^Pool($T), o: ^T) {
 	link.next = p.free
 	p.free = link
 	spin_unlock(&p.lock)
+}
+
+// The two ends of a channel or a ring. A ring's are its client and server; a
+// channel's ends are alike, and the names only tell them apart.
+Side :: enum u8 {
+	Client,
+	Server,
+}
+
+peer_side :: #force_inline proc "contextless" (s: Side) -> Side {
+	return s == .Client ? .Server : .Client
 }
 
 // A source's port bindings that have not fired (port.odin), under the

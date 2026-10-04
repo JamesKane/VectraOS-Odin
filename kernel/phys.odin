@@ -72,13 +72,12 @@ phys_free :: proc "contextless" (pa: Paddr, order: uint) {
 // The physical address of 2^order free pages, or 0 if there are none.
 @(require_results)
 phys_alloc :: proc "contextless" (order: uint) -> Paddr {
-	spin_lock(&phys.lock)
+	spin_guard(&phys.lock)
 	k := order
 	for k <= PHYS_MAX_ORDER && phys.lists[k] == nil {
 		k += 1
 	}
 	if k > PHYS_MAX_ORDER {
-		spin_unlock(&phys.lock)
 		return 0
 	}
 	pa := virt_to_phys(phys.lists[k])
@@ -91,7 +90,6 @@ phys_alloc :: proc "contextless" (order: uint) -> Paddr {
 		list_push(k, upper)
 	}
 	phys.free_pages -= 1 << order
-	spin_unlock(&phys.lock)
 	return pa
 }
 
@@ -102,6 +100,15 @@ phys_alloc_zeroed :: proc "contextless" (order: uint) -> Paddr {
 		intrinsics.mem_zero(phys_to_virt(pa), int(4096 << order))
 	}
 	return pa
+}
+
+// The smallest order whose block holds `bytes`.
+order_for :: proc "contextless" (bytes: u64) -> uint {
+	order := uint(0)
+	for (PAGE_SIZE << order) < bytes {
+		order += 1
+	}
+	return order
 }
 
 // Frees [start, end) in the largest aligned blocks that fit. Frame 0 is never
