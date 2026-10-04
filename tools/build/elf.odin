@@ -54,34 +54,53 @@ Func_Symbol :: struct {
 }
 
 // Every function symbol in a .text section, by address and then name.
+// Every offset the file gives is checked: a malformed file is an error, not
+// a read past its end.
 elf_functions :: proc(path: string) -> (syms: [dynamic]Func_Symbol, ok: bool) {
-	data := read_file(path) or_return
+	data := transmute([]u8)(read_file(path) or_return)
 	syms = make([dynamic]Func_Symbol, context.temp_allocator)
-	if len(data) < size_of(Elf64_Ehdr) || data[:4] != "\x7fELF" || data[4] != 2 {
+	if len(data) < size_of(Elf64_Ehdr) || string(data[:4]) != "\x7fELF" || data[4] != 2 {
 		fmt.eprintfln("build: %s is not a 64-bit ELF file", path)
 		return syms, false
 	}
 	eh := (^Elf64_Ehdr)(raw_data(data))^
-	if int(eh.shoff) + int(eh.shnum) * size_of(Elf64_Shdr) > len(data) {
+	sh, sh_ok := elf_table(Elf64_Shdr, data, eh.shoff, u64(eh.shnum) * size_of(Elf64_Shdr))
+	sh_ok = sh_ok && int(eh.shstrndx) < len(sh)
+	shstr: []u8
+	if sh_ok {
+		shstr, sh_ok = elf_table(u8, data, sh[eh.shstrndx].offset, sh[eh.shstrndx].size)
+	}
+	if !sh_ok {
 		fmt.eprintfln("build: %s: bad section table", path)
 		return syms, false
 	}
-	sh := slice.from_ptr((^Elf64_Shdr)(raw_data(data[eh.shoff:])), int(eh.shnum))
-	shstr := data[sh[eh.shstrndx].offset:]
 	for s in sh {
 		if s.type != SHT_SYMTAB {
 			continue
 		}
-		st := slice.from_ptr((^Elf64_Sym)(raw_data(data[s.offset:])), int(s.size / size_of(Elf64_Sym)))
-		strs := data[sh[s.link].offset:]
+		st, st_ok := elf_table(Elf64_Sym, data, s.offset, s.size)
+		st_ok = st_ok && int(s.link) < len(sh)
+		strs: []u8
+		if st_ok {
+			strs, st_ok = elf_table(u8, data, sh[s.link].offset, sh[s.link].size)
+		}
+		if !st_ok {
+			fmt.eprintfln("build: %s: bad symbol table", path)
+			return syms, false
+		}
 		for sym in st {
 			if sym.info & 0xf != STT_FUNC || sym.shndx == 0 || int(sym.shndx) >= len(sh) {
 				continue
 			}
-			if !strings.has_prefix(cstring_at(shstr, sh[sym.shndx].name), ".text") {
-				continue
+			section, sok := cstring_at(shstr, sh[sym.shndx].name)
+			name, nok := cstring_at(strs, sym.name)
+			if !sok || !nok {
+				fmt.eprintfln("build: %s: bad symbol name", path)
+				return syms, false
 			}
-			append(&syms, Func_Symbol{sym.value, cstring_at(strs, sym.name)})
+			if strings.has_prefix(section, ".text") {
+				append(&syms, Func_Symbol{sym.value, name})
+			}
 		}
 	}
 	slice.sort_by(syms[:], proc(a, b: Func_Symbol) -> bool {
@@ -90,11 +109,21 @@ elf_functions :: proc(path: string) -> (syms: [dynamic]Func_Symbol, ok: bool) {
 	return syms, true
 }
 
+// The size bytes at offset as a table of T, if they are in the file.
 @(private="file")
-cstring_at :: proc(table: string, off: u32) -> string {
-	s := table[off:]
-	n := strings.index_byte(s, 0)
-	return n < 0 ? s : s[:n]
+elf_table :: proc($T: typeid, data: []u8, offset, size: u64) -> ([]T, bool) {
+	if offset > u64(len(data)) || size > u64(len(data)) - offset {
+		return nil, false
+	}
+	return slice.reinterpret([]T, data[offset:][:size]), true
+}
+
+@(private="file")
+cstring_at :: proc(table: []u8, off: u32) -> (string, bool) {
+	if int(off) >= len(table) {
+		return "", false
+	}
+	return strings.truncate_to_byte(string(table[off:]), 0), true
 }
 
 // A symbol map as assembly: for each function, `.quad address` and `.asciz
@@ -106,10 +135,7 @@ cstring_at :: proc(table: string, off: u32) -> string {
 write_symbol_map :: proc(elf_path, out_path, section, symbol: string, strip := "") -> bool {
 	syms: [dynamic]Func_Symbol
 	if elf_path != "" {
-		ok: bool
-		if syms, ok = elf_functions(elf_path); !ok {
-			return false
-		}
+		syms = elf_functions(elf_path) or_return
 	}
 	b := strings.builder_make(context.temp_allocator)
 	fmt.sbprintf(&b, "%s\n.globl %s\n%s:\n", section, symbol, symbol)
@@ -125,7 +151,7 @@ write_symbol_map :: proc(elf_path, out_path, section, symbol: string, strip := "
 // is cut off; what remains is escaped for .asciz.
 @(private="file")
 map_name :: proc(name, strip: string) -> string {
-	n := strings.trim_prefix(name, strip) if strip != "" else name
+	n := strings.trim_prefix(name, strip)
 	if strings.has_prefix(n, "[") { // a file-private procedure: "[main.odin]::selftests"
 		if i := strings.index(n, "]::"); i > 0 {
 			n = n[i + 3:]
