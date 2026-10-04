@@ -3,6 +3,7 @@ package build
 import "core:fmt"
 import "core:hash"
 import "core:os"
+import "core:slice"
 import "core:strings"
 
 verbose: bool
@@ -99,6 +100,11 @@ cmd_make :: proc(args: ..string) -> Cmd {
 	c := make(Cmd, context.temp_allocator)
 	append(&c, ..args)
 	return c
+}
+
+// A command line wholly known up front, from its parts in order.
+concat :: proc(parts: ..[]string) -> []string {
+	return slice.concatenate(parts, context.temp_allocator)
 }
 
 read_file :: proc(path: string) -> (string, bool) {

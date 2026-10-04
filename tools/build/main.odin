@@ -217,6 +217,7 @@ cmd_loc :: proc() -> bool {
 		}
 		return
 	}
+	// The counts are printed as strings: Odin's %7d pads with zeros, not spaces.
 	FIRST_PARTY :: []string{".odin", ".S", ".ld"}
 	total := 0
 	for dir in ([]string{"kernel", "lib", "servers", "drivers", "cmd", "tools", "abi", "tests", "spikes"}) {
