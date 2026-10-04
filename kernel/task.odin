@@ -13,7 +13,7 @@ USER_TOP :: Uva(0x0000_8000_0000_0000) // first address past the lower half
 USER_MAP_BASE :: Uva(0x0000_1000_0000_0000) // where as_map puts mappings it places
 USER_STACK_TOP :: Uva(0x0000_7fff_ffff_0000)
 USER_STACK_SIZE :: 256 * 1024
-TASK_MAX_IO :: 4 // I/O port ranges per task
+TASK_MAX_IO :: 32 // I/O port ranges per task (bus-acpi: one for each its AML touches)
 
 // I/O ports [base, base + count). The count is a u32 because one range may
 // hold all 65,536 ports.
@@ -349,10 +349,11 @@ next_task_id: u64 = 1
 
 // Every live task, so a task's descendants can be found (task_find). When a
 // task goes, its children pass to its parent, so the chain of creators from
-// any task back to the root never breaks.
-@(private="file")
+// any task back to the root never breaks. The pager walks it too, to find
+// every mapping of a VMO (pager.odin).
+@(private)
 all_tasks: ^Task
-@(private="file")
+@(private)
 all_tasks_lock: Spinlock
 
 @(private="file")
@@ -512,6 +513,16 @@ user_map_flags :: proc "contextless" (flags: vx.Map_Options, device: bool) -> Ma
 	return mf
 }
 
+// How a page of a mapping is mapped: writable only if the mapping is and,
+// for a pager's page, only once it is dirty (pager.odin).
+page_map_flags :: proc "contextless" (v: ^Vmo, flags: vx.Map_Options, page: Page) -> Map_Flags {
+	mf := user_map_flags(flags, v.physical)
+	if v.pager != nil && !page.dirty {
+		mf -= {.Write}
+	}
+	return mf
+}
+
 // Maps [offset, offset + size) of a VMO into a task's address space. With
 // va == 0 the kernel picks the address; otherwise va is used and must be
 // page-aligned and free. The mapping holds a reference on the VMO. W^X:
@@ -548,14 +559,28 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 		st = .Err_No_Memory
 	}
 	// Page by page; a page that is already mapped (by another mapping) fails
-	// it, and only the pages this call mapped are taken back out.
+	// it, and only the pages this call mapped are taken back out. A pager's
+	// pages are mapped as far as it has supplied them, the rest as they are
+	// touched (pager.odin).
 	done: u64
+	if v.pager != nil {
+		spin_lock(&v.lock)
+		if st == .Ok && vmo_end > v.size {
+			st = .Err_Range // shrunk since the check above
+		}
+	}
 	for st == .Ok && done < size {
-		if !map_range(t.root, u64(at) + done, v.pages[(offset + done) / PAGE_SIZE], PAGE_SIZE, mf) {
+		page := v.pages[(offset + done) / PAGE_SIZE]
+		pa := Paddr(page.frame << 12)
+		pf := v.pager != nil ? page_map_flags(v, flags, page) : mf
+		if pa != 0 && !map_range(t.root, u64(at) + done, pa, PAGE_SIZE, pf) {
 			st = .Err_No_Memory
 		} else {
 			done += PAGE_SIZE
 		}
+	}
+	if v.pager != nil {
+		spin_unlock(&v.lock)
 	}
 	if st != .Ok {
 		for off := u64(0); off < done; off += PAGE_SIZE {
@@ -588,6 +613,8 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 //   - Each handle keeps its value and rights, so what the parent's memory
 //     says about its handles (its file descriptors) holds in the child. A
 //     handle to the parent itself becomes one to the child.
+//   - A pager's VMO is shared, not copied: the child maps the same one, as
+//     a file mapped MAP_SHARED is in both.
 //   - The in-task fault handler is the parent's (signal handlers are
 //     inherited); exception ports, a debugger and I/O ports are not.
 @(require_results)
@@ -600,9 +627,13 @@ task_fork_copy :: proc "contextless" (parent, child: ^Task) -> vx.Status {
 		if m.size == 0 || m.vmo.physical || m.vmo.ring {
 			continue
 		}
+		if m.vmo.pager != nil {
+			_ = task_map(child, m.vmo, m.offset, m.size, m.flags, m.va) or_return
+			continue
+		}
 		dup := vmo_create(m.size) or_return
-		for &pa, i in dup.pages {
-			copy(page_bytes(pa), page_bytes(m.vmo.pages[m.offset / PAGE_SIZE + u64(i)]))
+		for i in 0 ..< m.size / PAGE_SIZE {
+			copy(page_bytes(vmo_page(dup, i)), page_bytes(vmo_page(m.vmo, m.offset / PAGE_SIZE + i)))
 		}
 		_, st := task_map(child, dup, 0, m.size, m.flags, m.va)
 		object_release(&dup.obj) // the child's mapping holds it, if it was made

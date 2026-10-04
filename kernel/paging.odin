@@ -166,7 +166,6 @@ paging_init :: proc "contextless" () {
 }
 
 // The leaf entry mapping va in root, and its level, or nil if there is none.
-@(private="file")
 leaf_entry :: proc "contextless" (root: Paddr, va: u64) -> (^Pte, int) {
 	t := table_at(root)
 	for level in 0 ..= 3 {

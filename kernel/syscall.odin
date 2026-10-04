@@ -259,12 +259,26 @@ sys_port_post :: proc "contextless" (h: vx.Handle, packet: Uva) -> vx.Status {
 DEVICE_RIGHTS :: vx.Rights{.Duplicate, .Transfer, .Inspect}
 
 // vmo_create(size, options, &out, resource, physical_address): anonymous
-// memory, or with {.Physical}, device memory minted from a Resource.
+// memory, or with {.Physical}, device memory minted from a Resource, or with
+// {.Pager} (the fourth argument a Pager, the fifth a key), memory a pager
+// supplies.
 @(private="file", require_results)
 sys_vmo_create :: proc "contextless" (size, options: u64, out: Uva, rh: vx.Handle, pa: Paddr) -> vx.Status {
 	opts, valid := options_of(vx.Vmo_Options, options)
-	if !valid {
+	if !valid || opts == {.Physical, .Pager} {
 		return .Err_Invalid
+	}
+	if .Pager in opts {
+		if u64(pa) > u64(max(u32)) {
+			return .Err_Invalid
+		}
+		g := handle_get_as(current_task(), rh, Pager, {.Write}) or_return
+		v, st := vmo_create_pager(size, g, u32(pa))
+		object_release(&g.obj)
+		if st != .Ok {
+			return st
+		}
+		return return_handle(&v.obj, vx.ALL_RIGHTS - {.Debug}, out)
 	}
 	if .Physical in opts {
 		r := handle_get_as(current_task(), rh, Resource, {.Manage}) or_return
@@ -279,6 +293,121 @@ sys_vmo_create :: proc "contextless" (size, options: u64, out: Uva, rh: vx.Handl
 	// EXEC included: loaders and JITs map their own code. W^X holds per
 	// mapping (task_map), never per VMO.
 	return return_handle(&v.obj, vx.ALL_RIGHTS - {.Debug}, out)
+}
+
+// --- Pagers (pager.odin) ---
+
+// pager_create(resource, port, key, deadline_ns, &out): needs a Resource
+// handle with .Pager (what svcd gives a pager), or the root's.
+@(private="file", require_results)
+sys_pager_create :: proc "contextless" (rh, ph: vx.Handle, key, deadline: u64, out: Uva) -> vx.Status {
+	r, st := handle_get_as(current_task(), rh, Resource, {.Pager})
+	if r == nil {
+		r = handle_get_as(current_task(), rh, Resource, {.Manage}) or_return
+	}
+	object_release(&r.obj)
+	p := handle_get_as(current_task(), ph, Port, {.Signal}) or_return
+	g: ^Pager
+	g, st = pager_create(p, key, Instant(deadline))
+	object_release(&p.obj)
+	if st != .Ok {
+		return st
+	}
+	return return_handle(&g.obj, {.Read, .Write, .Duplicate, .Transfer, .Inspect}, out)
+}
+
+// pager_supply(pager, vmo, offset, size, source, source_offset)
+@(private="file", require_results)
+sys_pager_supply :: proc "contextless" (gh, vh: vx.Handle, offset, size: u64, sh: vx.Handle, src_offset: u64) -> vx.Status {
+	g := handle_get_as(current_task(), gh, Pager, {.Write}) or_return
+	defer object_release(&g.obj)
+	v := handle_get_as(current_task(), vh, Vmo, {}) or_return
+	defer object_release(&v.obj)
+	src := handle_get_as(current_task(), sh, Vmo, {.Read}) or_return
+	defer object_release(&src.obj)
+	return pager_supply(g, v, offset, size, src, src_offset)
+}
+
+// pager_op(pager, vmo, op, offset, size, ranges): .Dirty answers how many
+// ranges, .Idle 1 or 0; the rest, a status.
+@(private="file", require_results)
+sys_pager_op :: proc "contextless" (gh, vh: vx.Handle, op_word, offset, size: u64, out: Uva) -> (n: int, st: vx.Status) {
+	if op_word < u64(min(vx.Pager_Op)) || op_word > u64(max(vx.Pager_Op)) || (offset | size) & (PAGE_SIZE - 1) != 0 {
+		return 0, .Err_Invalid
+	}
+	op := vx.Pager_Op(op_word)
+	if _, overflow := intrinsics.overflow_add(offset, size); overflow {
+		return 0, .Err_Range
+	}
+	if op == .Dirty && !user_range_ok(out, vx.PAGER_RANGES * size_of(vx.Pager_Range), true) {
+		return 0, .Err_Invalid
+	}
+	g := handle_get_as(current_task(), gh, Pager, {.Write}) or_return
+	defer object_release(&g.obj)
+	v := handle_get_as(current_task(), vh, Vmo, {}) or_return
+	defer object_release(&v.obj)
+	if v.pager != g {
+		return 0, .Err_Invalid
+	}
+	first, count := offset / PAGE_SIZE, size / PAGE_SIZE
+	switch op {
+	case .Dirty:
+		ranges: [dynamic; vx.PAGER_RANGES]vx.Pager_Range
+		pager_dirty(v, offset, size, &ranges)
+		copy_out_slice(out, ranges[:]) or_return
+		return len(ranges), .Ok
+	case .Resize: // the pager's alone: every mapping of the VMO shares its size
+		if offset != 0 {
+			return 0, .Err_Invalid
+		}
+		return 0, vmo_resize(v, size)
+	case .Idle: // only the caller's handle, and this call's own reference
+		return intrinsics.atomic_load(&v.refs) <= 2 ? 1 : 0, .Ok
+	case .Clean:
+		pager_clean(v, first, count)
+	case .Evict:
+		pager_evict(v, first, count)
+	}
+	return 0, .Ok
+}
+
+// vmo_op(vmo, op, arg): .Resize to arg bytes. A pager-backed VMO is its
+// pager's to resize (pager_op .Resize): anyone it is shared with may write
+// it, and a writer must not shrink it under the others.
+@(private="file", require_results)
+sys_vmo_op :: proc "contextless" (h: vx.Handle, op, arg: u64) -> vx.Status {
+	if op != u64(vx.Vmo_Resize_Op.Resize) {
+		return .Err_Invalid
+	}
+	v := handle_get_as(current_task(), h, Vmo, {.Write}) or_return
+	defer object_release(&v.obj)
+	if v.pager != nil {
+		return .Err_Access
+	}
+	return vmo_resize(v, arg)
+}
+
+// clock_set(resource, utc): the wall clock, with the root Resource's .Manage.
+@(private="file", require_results)
+sys_clock_set :: proc "contextless" (rh: vx.Handle, utc: i64) -> vx.Status {
+	if utc <= 0 {
+		return .Err_Invalid
+	}
+	r := handle_get_as(current_task(), rh, Resource, {.Manage}) or_return
+	object_release(&r.obj)
+	clock_set_utc(utc)
+	return .Ok
+}
+
+// system_power(resource, op): the machine off, with the root Resource's .Manage.
+@(private="file", require_results)
+sys_system_power :: proc "contextless" (rh: vx.Handle, op: u64) -> vx.Status {
+	if op != u64(vx.Power_Op.Off) {
+		return .Err_Invalid
+	}
+	r := handle_get_as(current_task(), rh, Resource, {.Manage}) or_return
+	object_release(&r.obj)
+	return arch_system_off()
 }
 
 // --- Devices (device.odin) ---
@@ -308,48 +437,86 @@ sys_irq_create :: proc "contextless" (rh: vx.Handle, line, options: u64, out, ms
 	return return_handle(&q.obj, vx.Rights{.Wait, .Write} + DEVICE_RIGHTS, out)
 }
 
+// dma_domain_create(resource, source, options, &out): the domain of the
+// PCI function whose requester ID is source.
 @(private="file", require_results)
-sys_dma_domain_create :: proc "contextless" (rh: vx.Handle, options: u64, out: Uva) -> vx.Status {
-	if options != 0 {
-		return .Err_Invalid // pass-through: the only kind so far
+sys_dma_domain_create :: proc "contextless" (rh: vx.Handle, source, options: u64, out: Uva) -> vx.Status {
+	if options != 0 || source > 0xffff {
+		return .Err_Invalid
 	}
 	r := handle_get_as(current_task(), rh, Resource, {.Manage}) or_return
-	d, st := dma_domain_create()
+	d, st := dma_domain_create(u32(source))
 	object_release(&r.obj)
 	if st != .Ok {
 		return st
 	}
-	return return_handle(&d.obj, vx.Rights{.Map} + DEVICE_RIGHTS, out)
+	return return_handle(&d.obj, vx.Rights{.Map, .Manage, .Wait} + DEVICE_RIGHTS, out)
 }
 
-// dma_map(domain, vmo, offset, size, addresses): batched, a page at a time.
+// dma_map(domain, vmo, offset, size, options, &mapped): what the device may
+// do is what the VMO handle allows (.Read to read it, .Write to write it).
 @(private="file", require_results)
-sys_dma_map :: proc "contextless" (dh, vh: vx.Handle, offset, size: u64, out: Uva) -> vx.Status {
+sys_dma_map :: proc "contextless" (dh, vh: vx.Handle, offset, size, options: u64, out: Uva) -> vx.Status {
 	MAX_PAGES :: 512
+	req: vx.Dma_Mapped
+	copy_in(&req, out) or_return
+	list := Uva(uintptr(req.addresses))
+	opts, valid := options_of(vx.Dma_Options, options)
 	pages := size / PAGE_SIZE
-	if pages > MAX_PAGES || !user_range_ok(out, pages * size_of(Paddr), true) {
+	if !valid || opts == {} || pages > MAX_PAGES || !user_range_ok(list, pages * size_of(u64), true) {
 		return .Err_Invalid
 	}
 	d := handle_get_as(current_task(), dh, Dma_Domain, {.Map}) or_return
 	defer object_release(&d.obj)
-	v := handle_get_as(current_task(), vh, Vmo, {.Read, .Write}) or_return
-	defer object_release(&v.obj)
-	addresses: [MAX_PAGES]Paddr
-	slot := dma_map(d, v, offset, size, addresses[:pages]) or_return
-	st := copy_out_slice(out, addresses[:pages])
-	if st != .Ok {
-		dma_unmap_slot(d, slot) // only this one: earlier mappings of the VMO may be in use
+	need: vx.Rights
+	if .Read in opts {
+		need += {.Read}
 	}
-	return st
+	if .Write in opts {
+		need += {.Write}
+	}
+	v := handle_get_as(current_task(), vh, Vmo, need) or_return
+	defer object_release(&v.obj)
+	if v.pager != nil {
+		return .Err_Unsupported // its pages come and go: no device may hold them
+	}
+	addresses: [MAX_PAGES]u64
+	m := dma_map(d, v, offset, size, opts, addresses[:pages]) or_return
+	if st := copy_out_slice(list, addresses[:pages]); st != .Ok { // never handed out: the device was never told of it
+		_ = dma_unmap(m)
+		object_release(&m.obj)
+		return st
+	}
+	return return_handle(&m.obj, {.Inspect}, out + Uva(offset_of(vx.Dma_Mapped, mapping))) // the handle's now, or gone with it
 }
 
 @(private="file", require_results)
-sys_dma_unmap :: proc "contextless" (dh, vh: vx.Handle) -> vx.Status {
-	d := handle_get_as(current_task(), dh, Dma_Domain, {.Map}) or_return
+sys_dma_unmap :: proc "contextless" (mh: vx.Handle) -> vx.Status {
+	m := handle_get_as(current_task(), mh, Dma_Mapping, {}) or_return
+	defer object_release(&m.obj)
+	return dma_unmap(m)
+}
+
+// dma_domain_op(domain, op, 0): .Revoke and .Quiesced are the owner's
+// (.Manage); .Faults, .Inspect's, answers the count.
+@(private="file", require_results)
+sys_dma_domain_op :: proc "contextless" (dh: vx.Handle, op_word, arg: u64) -> (faults: u64, st: vx.Status) {
+	if arg != 0 || op_word < u64(min(vx.Dma_Op)) || op_word > u64(max(vx.Dma_Op)) {
+		return 0, .Err_Invalid
+	}
+	op := vx.Dma_Op(op_word)
+	d := handle_get_as(current_task(), dh, Dma_Domain, op == .Faults ? {.Inspect} : {.Manage}) or_return
 	defer object_release(&d.obj)
-	v := handle_get_as(current_task(), vh, Vmo, {}) or_return
-	defer object_release(&v.obj)
-	return dma_unmap(d, v)
+	switch op {
+	case .Revoke:
+		dma_revoke(d)
+	case .Quiesced:
+		dma_quiesced(d)
+	case .Faults:
+		spin_guard(&d.lock)
+		return min(d.faults, u64(max(i64))), .Ok
+	}
+	return 0, .Ok
 }
 
 @(private="file", require_results)
@@ -593,7 +760,7 @@ sys_counter_read :: proc "contextless" (h: vx.Handle) -> (value: i64, st: vx.Sta
 }
 
 // port_bind(port, source, trigger, key, threshold): a one-shot binding of a
-// channel end, counter, task, ring end or Irq to the port.
+// channel end, counter, task, ring end, Irq or DmaDomain to the port.
 @(private="file", require_results)
 sys_port_bind :: proc "contextless" (ph, sh: vx.Handle, trigger, key, threshold: u64) -> vx.Status {
 	p := handle_get_as(current_task(), ph, Port, {.Write}) or_return
@@ -603,7 +770,7 @@ sys_port_bind :: proc "contextless" (ph, sh: vx.Handle, trigger, key, threshold:
 	}
 	src: ^Object
 	st: vx.Status
-	for type in ([]Obj_Type{.Channel, .Counter, .Task, .Ring, .Irq}) {
+	for type in ([]Obj_Type{.Channel, .Counter, .Task, .Ring, .Irq, .Dma_Domain}) {
 		if src, st = handle_get(current_task(), sh, type, {.Wait}); src != nil {
 			break
 		}
@@ -625,6 +792,8 @@ sys_port_bind :: proc "contextless" (ph, sh: vx.Handle, trigger, key, threshold:
 		st = ring_bind(cast(^Ring_End)src, b)
 	case .Irq:
 		st = irq_bind(cast(^Irq)src, b)
+	case .Dma_Domain:
+		st = dma_bind(cast(^Dma_Domain)src, b)
 	case:
 		st = task_bind(cast(^Task)src, b)
 	}
@@ -922,6 +1091,10 @@ sys_task_exec :: proc "contextless" (sh, bootstrap: vx.Handle, entry, sp: Uva) -
 @(private="file", require_results)
 sys_clock_info :: proc "contextless" (out: Uva) -> (now: Instant, st: vx.Status) {
 	info := vx.Clock_Info{counter_hz = clock.hz, flags = arch_counter_flags()}
+	if intrinsics.atomic_load(&wall_clock.utc_set) {
+		info.flags += {.Utc}
+		info.utc_offset = intrinsics.atomic_load(&wall_clock.utc_offset)
+	}
 	copy_out(out, &info) or_return
 	return clock_now(), .Ok
 }
@@ -948,16 +1121,59 @@ sys_vmo_rw :: proc "contextless" (h: vx.Handle, op, offset: u64, buf: Uva, size:
 	if overflow || end > v.size {
 		return .Err_Range
 	}
+	if v.pager != nil {
+		return pager_vmo_rw(v, reading, offset, buf, size)
+	}
 	// Through the fault-safe copies: another thread may unmap the buffer meanwhile.
 	for done := u64(0); done < size; {
 		at := offset + done
-		page := page_bytes(v.pages[at / PAGE_SIZE])[at % PAGE_SIZE:]
+		page := page_bytes(vmo_page(v, at / PAGE_SIZE))[at % PAGE_SIZE:]
 		n := min(u64(len(page)), size - done)
 		user := buf + Uva(done)
 		if reading {
 			copy_to_user(user, raw_data(page), n) or_return
 		} else {
 			copy_from_user(raw_data(page), user, n) or_return
+		}
+		done += n
+	}
+	return .Ok
+}
+
+// vmo_rw on a pager-backed VMO: its pages can go (.Evict, a shrink), so each
+// is touched under its lock, through a bounce buffer. A page not supplied is
+// .Err_Should_Wait; a write dirties a page as a store through a mapping would.
+@(private="file", require_results)
+pager_vmo_rw :: proc "contextless" (v: ^Vmo, reading: bool, offset: u64, buf: Uva, size: u64) -> vx.Status {
+	for done := u64(0); done < size; {
+		at := offset + done
+		bounce: [256]u8
+		n := min(PAGE_SIZE - at % PAGE_SIZE, size - done, len(bounce))
+		user := buf + Uva(done)
+		if !reading {
+			copy_from_user(&bounce, user, n) or_return
+		}
+		pa: Paddr
+		{
+			spin_guard(&v.lock)
+			if at / PAGE_SIZE < v.size / PAGE_SIZE {
+				pa = vmo_page(v, at / PAGE_SIZE)
+			}
+			if pa != 0 {
+				page := page_bytes(pa)[at % PAGE_SIZE:][:n]
+				if reading {
+					copy(bounce[:n], page)
+				} else {
+					copy(page, bounce[:n])
+					v.pages[at / PAGE_SIZE].dirty = true
+				}
+			}
+		}
+		if pa == 0 {
+			return .Err_Should_Wait // a pager has not supplied it
+		}
+		if reading {
+			copy_to_user(user, &bounce, n) or_return
 		}
 		done += n
 	}
@@ -1048,11 +1264,25 @@ syscall_dispatch :: proc "contextless" (nr: u64, a: [6]u64) -> i64 {
 	case .Irq_Ack:
 		return i64(sys_irq_ack(vx.Handle(a[0])))
 	case .Dma_Domain_Create:
-		return i64(sys_dma_domain_create(vx.Handle(a[0]), a[1], Uva(a[2])))
+		return i64(sys_dma_domain_create(vx.Handle(a[0]), a[1], a[2], Uva(a[3])))
 	case .Dma_Map:
-		return i64(sys_dma_map(vx.Handle(a[0]), vx.Handle(a[1]), a[2], a[3], Uva(a[4])))
+		return i64(sys_dma_map(vx.Handle(a[0]), vx.Handle(a[1]), a[2], a[3], a[4], Uva(a[5])))
 	case .Dma_Unmap:
-		return i64(sys_dma_unmap(vx.Handle(a[0]), vx.Handle(a[1])))
+		return i64(sys_dma_unmap(vx.Handle(a[0])))
+	case .Dma_Domain_Op:
+		return result(sys_dma_domain_op(vx.Handle(a[0]), a[1], a[2]))
+	case .Pager_Create:
+		return i64(sys_pager_create(vx.Handle(a[0]), vx.Handle(a[1]), a[2], a[3], Uva(a[4])))
+	case .Pager_Supply:
+		return i64(sys_pager_supply(vx.Handle(a[0]), vx.Handle(a[1]), a[2], a[3], vx.Handle(a[4]), a[5]))
+	case .Pager_Op:
+		return result(sys_pager_op(vx.Handle(a[0]), vx.Handle(a[1]), a[2], a[3], a[4], Uva(a[5])))
+	case .Vmo_Op:
+		return i64(sys_vmo_op(vx.Handle(a[0]), a[1], a[2]))
+	case .Clock_Set:
+		return i64(sys_clock_set(vx.Handle(a[0]), i64(a[1])))
+	case .System_Power:
+		return i64(sys_system_power(vx.Handle(a[0]), a[1]))
 	case .Iorange_Create:
 		return i64(sys_iorange_create(vx.Handle(a[0]), a[1], a[2], Uva(a[3])))
 	case .Vmo_Rw:

@@ -11,13 +11,19 @@ HANDLE_NONE :: Handle(0)
 
 // clock_read(): the time on the monotonic clock. clock_read(&info): the same,
 // and the cycle counter it is made from, for /sys/clock/info: its frequency
-// (the clock is counter * 10^9 / counter_hz, exactly), and flags. User code
-// may always read the counter: rdtsc, or mrs cntvct_el0.
+// (the clock is counter * 10^9 / counter_hz, exactly), and flags; and the
+// wall clock, as UTC's offset from the monotonic clock (UTC in ns since 1970
+// = monotonic + utc_offset), with .Utc once something has set it (upstream's
+// ADR-0031). User code may always read the counter: rdtsc, or mrs cntvct_el0.
+//
+// clock_set(resource, utc): the wall clock set to utc (ns since 1970, now),
+// with the root Resource's .Manage: devmgr, from a clock driver.
 Clock_Flag :: enum u32 {
 	Invariant, // one rate in every power state
 	User, // readable in user mode
 	Tsc, // x86_64's TSC
 	Cntvct, // aarch64's virtual counter
+	Utc, // utc_offset has been set: there is a wall clock
 }
 Clock_Flags :: bit_set[Clock_Flag; u32]
 
@@ -25,9 +31,10 @@ Clock_Info :: struct {
 	counter_hz: u64,
 	flags:      Clock_Flags,
 	reserved:   u32,
+	utc_offset: i64, // 0 until .Utc
 }
 
-#assert(size_of(Clock_Info) == 16)
+#assert(size_of(Clock_Info) == 24)
 INFINITE :: Instant(max(i64)) // a deadline that never comes
 
 // Every right, and handle_dup's "the rights the handle has": bit 31, which
@@ -59,6 +66,8 @@ Trigger :: enum u32 {
 	Exit, // a task has ended; value: its exit string's length (0: success)
 	Irq, // an Irq has fired since it was last bound; value: how many times in all
 	Exception, // a thread stopped at an exception (exception_bind); value: its thread id
+	Pager, // a page request (pager_create): source the VMO's key, value its range (pager_offset, pager_pages)
+	Dma_Fault, // a DmaDomain's device faulted (more than threshold in all); value: the count
 }
 
 // The intents a thread declares. Until scheduling contexts land, every thread
@@ -248,21 +257,135 @@ Cqe :: struct #align (32) { // the generic completion entry, 32 bytes
 //       it, and Msi says what the device must write, and where. Always
 //       edge-triggered. (x86_64: an APIC vector; aarch64: an LPI, through the
 //       GIC's ITS, which knows the device by its requester ID.)
-//   dma_domain_create(resource, 0, &out)
-//       a DmaDomain: what a device may reach by DMA. In pass-through mode,
-//       the only one so far (QEMU; the IOMMU comes with M5), a device
-//       address is the physical address.
-//   dma_map(domain, vmo, offset, size, addresses)
+//   dma_domain_create(resource, source, 0, &out)
+//       a DmaDomain: what the PCI function whose requester ID is `source`
+//       may reach by DMA. devmgr makes and keeps it, and gives its driver a
+//       duplicate with .Map (and .Wait, .Inspect). Behind an IOMMU (VT-d,
+//       SMMUv3) a device address is the domain's own, from 4 GiB up; in
+//       pass-through mode, where no IOMMU covers the device, it is the
+//       physical address.
+//   dma_map(domain, vmo, offset, size, options, &mapped)
 //       the device address of each page of [offset, offset + size), into
-//       addresses[size / 4096]; the domain holds the VMO until dma_unmap
-//   dma_unmap(domain, vmo)
+//       mapped.addresses[size / 4096], and a DmaMapping for the range in
+//       mapped.mapping. options: .Read (the device reads the memory: the
+//       VMO handle needs .Read), .Write (it writes it: .Write), or both.
+//       The mapping holds the VMO's pages for the device
+//   dma_unmap(mapping)
+//       the device is done with the range: its pages let go at once. A
+//       mapping whose handles go without it keeps them until .Quiesced
+//   dma_domain_op(domain, op, 0)
+//       .Revoke (.Manage): every mapping's pages kept for the device until
+//       .Quiesced, whatever its driver does; .Quiesced (.Manage): the device
+//       has been stopped (bus mastering off, reset), so what was kept is let
+//       go; .Faults (.Inspect): returns how many faults the IOMMU has
+//       reported for the device (.Dma_Fault)
 //   iorange_create(resource, base, count, &out)
 //       x86_64 only: I/O ports, which a task may use once as_map has been
 //       called with the IoRange in place of a VMO (offset, size and flags 0)
+//
+// Pagers: a trusted task's supply of pages for VMOs, as fsd backs mmap of
+// files. Only a task svcd marked a pager has a Resource handle with .Pager
+// (or the root one), which pager_create needs.
+//
+//   pager_create(resource, port, key, deadline_ns, &out)
+//       a Pager: page requests go to port as packets (key, trigger .Pager,
+//       source the VMO's key, value a range: pager_offset, pager_pages),
+//       and a fault waits deadline_ns for its page before the thread takes
+//       a .Pager_Timeout exception
+//   vmo_create(size, {.Pager}, &out, pager, key)
+//       a VMO whose pages the pager supplies, none yet; key (32 bits) names
+//       it in requests. A fault on a page it has not supplied asks for it
+//       (once, however many fault) and waits. vmo_rw on one is
+//       .Err_Should_Wait; vmo_clone and dma_map refuse such a VMO
+//       (.Err_Unsupported). A forked task shares its mappings of it, rather
+//       than copying them.
+//   pager_supply(pager, vmo, offset, size, source, source_offset)
+//       the VMO's pages [offset, offset + size) from an anonymous VMO's:
+//       copied in where the VMO has none (a supplied page stays as it is),
+//       and the threads that wait on them woken
+//   pager_op(pager, vmo, op, offset, size, ranges)
+//       .Dirty: the range's written pages, as at most PAGER_RANGES
+//       Pager_Range into ranges; returns how many. A page is mapped
+//       read-only until it is written, and dirty from then on.
+//       .Clean: the range's pages clean, and write-protected in every
+//       mapping. Clean, then read, then write back: a write before the
+//       clean is in what is read, one after it is dirty again.
+//       .Evict: the range's clean pages freed; a touch asks again.
+//       .Idle: 1 if the caller's handle is the VMO's only reference (no
+//       other handle, no mapping), else 0: the pager may let it go.
+//       .Resize (offset 0, size the new size): the VMO's new size; pages
+//       past it leave every mapping and are freed (a touch there is an
+//       ordinary fault), pages added absent. The pager's alone.
+//   vmo_op(vmo, .Resize, size)
+//       an anonymous VMO's new size: not yet (.Err_Unsupported). A
+//       pager-backed one is its pager's to resize (pager_op .Resize):
+//       .Err_Access
 Vmo_Option :: enum u32 { // vmo_create
 	Physical,
+	Pager,
 }
 Vmo_Options :: bit_set[Vmo_Option; u32]
+
+#assert(u32(Vmo_Option.Physical) == 0 && u32(Vmo_Option.Pager) == 1)
+
+Pager_Op :: enum u32 { // pager_op
+	Dirty = 1,
+	Clean,
+	Evict,
+	Idle,
+	Resize,
+}
+
+Vmo_Resize_Op :: enum u32 { // vmo_op
+	Resize = 1,
+}
+
+PAGER_RANGES :: 64 // pager_op(.Dirty)'s most
+
+Pager_Range :: struct {
+	offset, size: u64,
+}
+
+#assert(size_of(Pager_Range) == 16)
+
+// A page request's range, in its packet's value: the first byte's offset
+// (page-aligned) and how many pages, less one, in the low 12 bits.
+pager_offset :: #force_inline proc "contextless" (value: u64) -> u64 {
+	return value &~ 4095
+}
+
+pager_pages :: #force_inline proc "contextless" (value: u64) -> u64 {
+	return (value & 4095) + 1
+}
+
+Dma_Option :: enum u32 { // dma_map: what the device may do
+	Read,
+	Write,
+}
+Dma_Options :: bit_set[Dma_Option; u32]
+
+#assert(u32(Dma_Option.Read) == 0 && u32(Dma_Option.Write) == 1)
+
+// system_power(resource, op): the whole machine (the root Resource, .Manage).
+// .Off: through PSCI where the firmware has it (aarch64); returns,
+// .Err_Unsupported, where powering off is ACPI's (x86_64: bus-acpi enters S5).
+Power_Op :: enum u32 {
+	Off = 1,
+}
+
+Dma_Op :: enum u32 { // dma_domain_op
+	Revoke = 1,
+	Quiesced,
+	Faults,
+}
+
+Dma_Mapped :: struct { // dma_map's answer
+	addresses: [^]u64, // in: where the pages' device addresses go
+	mapping:   Handle, // out: the DmaMapping
+	reserved:  u32,
+}
+
+#assert(size_of(Dma_Mapped) == 16 && offset_of(Dma_Mapped, mapping) == 8)
 
 Irq_Option :: enum u32 { // irq_create
 	Msi,
@@ -463,6 +586,9 @@ Exception_Kind :: enum u32 {
 	// it watches. x86_64 stops after the access, aarch64 before it (resuming
 	// touches it again: step it with the watchpoint off).
 	Watchpoint,
+	// A pager-backed page not supplied by its pager's deadline; address: the
+	// page, code: read 0, write 1, execute 2 (POSIX's SIGBUS).
+	Pager_Timeout,
 }
 
 Exception :: struct {

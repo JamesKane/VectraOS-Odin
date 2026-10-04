@@ -22,6 +22,9 @@ import "vx:ndb"
 // A scenario= record's rtc= starts QEMU's real-time clock at that time
 // (-rtc base=); its exits flag makes QEMU exiting by itself, once every
 // expect= has matched, the pass (power off).
+// The m5/ scenarios run with the machine's IOMMU, as upstream's runner runs
+// every scenario from M5; a scenario= record's iommu=caching puts VT-d in
+// caching mode.
 
 Expect_Kind :: enum {
 	Contains, // expect=: part of a line
@@ -51,6 +54,7 @@ Scenario :: struct {
 	iso:     bool, // boot the ISO, as a CD, with no disk
 	rtc:     string, // rtc=: the real-time clock's starting time; "" for the host's UTC
 	exits:   bool, // QEMU must then exit by itself
+	iommu:   Iommu_Mode,
 	expects: [dynamic]Expect,
 	fails:   [dynamic]string,
 	hosts:   [dynamic]Host_Check,
@@ -91,7 +95,17 @@ load_scenario :: proc(name: string, a: ^Arch) -> (sc: Scenario, ok: bool) {
 			sc.iso = ndb.has(rec, "iso")
 			sc.rtc = val(rec, "rtc")
 			sc.exits = ndb.has(rec, "exits")
-			for feature in ([]string{"disk", "volume", "iommu", "bus"}) {
+			if strings.has_prefix(name, "m5/") {
+				sc.iommu = .On
+			}
+			if ndb.has(rec, "iommu") {
+				if m := val(rec, "iommu"); m != "caching" {
+					fmt.eprintfln("%s:%d: iommu=%s: only iommu=caching", path, rec.line, m)
+					return sc, false
+				}
+				sc.iommu = .Caching
+			}
+			for feature in ([]string{"disk", "volume", "bus"}) {
 				if ndb.has(rec, feature) {
 					sc.needs = feature
 				}
@@ -218,7 +232,7 @@ run_scenario :: proc(a: ^Arch, mode: Mode, name: string) -> bool {
 		return false
 	}
 	defer os.close(keys_w)
-	cmd := qemu_cmd(a, image, {test = true, share = share, u9fs = u9fs, cdrom = cdrom, rtc = sc.rtc})
+	cmd := qemu_cmd(a, image, {test = true, share = share, u9fs = u9fs, cdrom = cdrom, iommu = sc.iommu, rtc = sc.rtc})
 	if verbose {
 		print_cmd(cmd, "")
 	}

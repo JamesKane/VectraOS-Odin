@@ -168,6 +168,7 @@ Driver :: struct {
 	msis:    u32,
 	listen:  vx.Handle, // the post's server end; each start gets a duplicate
 	bars:    [6]Range, // the memory BARs it was given: no one else's
+	dma:     vx.Handle, // the function's DMA domain, which each start gets a duplicate of
 	task:    vx.Handle,
 	starts:  u32,
 }
@@ -266,7 +267,13 @@ start_driver :: proc "contextless" (index: int) -> vx.Status {
 			ndb.put_u64(&w, "data", u64(msi.data))
 			_ = ndb.end(&w)
 		}
-		grant(&g, "dma", rt.dma_domain_create(resource)) or_return
+		// The function's DMA domain: devmgr's, kept across the driver's
+		// restarts; the driver's duplicate only maps, and cannot revoke what
+		// it mapped.
+		if d.dma == vx.HANDLE_NONE {
+			d.dma = rt.dma_domain_create(resource, pci.rid(&d.f.fn)) or_return
+		}
+		grant(&g, "dma", rt.handle_dup(d.dma, {.Map, .Wait, .Inspect, .Transfer})) or_return
 	}
 	acpi_grants(index, &g, &w) or_return
 	if d.listen != vx.HANDLE_NONE {
@@ -303,13 +310,17 @@ start_driver :: proc "contextless" (index: int) -> vx.Status {
 
 driver_exited :: proc "contextless" (index: int) {
 	d := &drivers[index]
-	// The device may still hold addresses of the dead driver's DMA memory,
-	// which the kernel has freed: stop it reaching memory at all. (Until the
-	// IOMMU, M5, it could write there between the driver's death and now.)
+	// The device may still hold addresses of the dead driver's DMA memory:
+	// the domain keeps those pages (its mappings revoked, the ones whose
+	// handles went with the driver kept) until the device cannot reach
+	// memory at all, and only then lets them go.
 	BUS_MASTER :: 1 << 2
-	if d.f != nil {
+	if d.f != nil { // a PCI function's; an ACPI device has no domain
+		_, _ = rt.dma_domain_op(d.dma, .Revoke)
 		command := pci.read16(&d.f.fn, 0x04)
 		pci.write16(&d.f.fn, 0x04, command &~ BUS_MASTER)
+		_ = pci.read16(&d.f.fn, 0x04) // the write has reached the device
+		_, _ = rt.dma_domain_op(d.dma, .Quiesced)
 	}
 	_ = rt.handle_close(d.task)
 	d.task = vx.HANDLE_NONE

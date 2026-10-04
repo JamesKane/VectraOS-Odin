@@ -55,21 +55,6 @@ Acpi_Match :: struct {
 
 acpi_matches: [dynamic; 8]Acpi_Match
 
-// The calls of upstream's ADR-0031, until lib/rt has them.
-POWER_OFF :: 1 // system_power's op
-
-@(private="file")
-system_power :: proc "contextless" (resource: vx.Handle, op: u32) -> vx.Status {
-	r := rt.vx_syscall(.System_Power, u64(resource), u64(op))
-	return r < 0 ? vx.Status(r) : .Ok
-}
-
-@(private="file")
-clock_set :: proc "contextless" (resource: vx.Handle, utc: i64) -> vx.Status {
-	r := rt.vx_syscall(.Clock_Set, u64(resource), u64(utc))
-	return r < 0 ? vx.Status(r) : .Ok
-}
-
 @(private="file")
 take :: proc "contextless" (list: ^[dynamic; $N]Range, base, size: u64) {
 	if size != 0 {
@@ -219,7 +204,7 @@ answer_mint :: proc "contextless" (m: ^acpi.Mint, bytes: u32) {
 			}
 		case .Off:
 			say("powering off", " (PSCI)", "\n")
-			st = system_power(resource, POWER_OFF) // returns only if it did not happen
+			st = rt.system_power(resource, .Off) // returns only if it did not happen
 		case .Pci:
 			bus := m.base >> 8 & 0xff
 			if m.base >> 16 != 0 || m.size != 4096 || pci_window.base == 0 || bus < u64(pci_window.start_bus) || bus > u64(pci_window.end_bus) {
@@ -419,7 +404,7 @@ clock_report :: proc "contextless" (index: int) {
 			continue
 		}
 		utc := r.utc + (i64(rt.clock_read()) - r.monotonic) // the time since it was read
-		if clock_set(resource, utc) != .Ok {
+		if rt.clock_set(resource, utc) != .Ok {
 			continue
 		}
 		secs := utc / 1_000_000_000

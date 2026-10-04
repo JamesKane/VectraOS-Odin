@@ -985,6 +985,9 @@ x86_trap :: proc "c" (f: ^Trap_Frame) {
 		tlb_answer(this_cpu())
 	case VECTOR_SPURIOUS:
 		return
+	case VECTOR_IOMMU:
+		vtd_fault_interrupt()
+		vx_wrmsr(X2APIC_EOI, 0)
 	case VECTOR_MSI_FIRST ..= VECTOR_MSI_LAST:
 		irq_fire(MSI_LINE_BASE + u32(f.vector))
 		vx_wrmsr(X2APIC_EOI, 0)
@@ -1054,6 +1057,12 @@ arch_clobber_vregs :: proc "contextless" () {
 }
 
 // --- Devices: I/O ports, the IOAPICs and the MADT (device.odin) ---
+
+// x86_64 powers off through ACPI's S5, which takes AML: bus-acpi's.
+@(require_results)
+arch_system_off :: proc "contextless" () -> vx.Status {
+	return .Err_Unsupported
+}
 
 arch_has_io_ports :: proc "contextless" () -> bool {
 	return true
