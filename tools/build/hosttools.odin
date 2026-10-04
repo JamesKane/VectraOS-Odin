@@ -20,7 +20,7 @@ VXSTORE :: "out/host/vxstore"
 VXSTORE_SRC :: "tools/vxstore"
 
 // vxfs, from tools/vxfs: makes, fills and checks vx:fs volume images
-// (upstream's host/vxfs), for scenarios with volume= (disk.odin).
+// (upstream's host/vxfs, docs/11 §7), with the library fsd uses.
 VXFS :: "out/host/vxfs"
 VXFS_SRC :: "tools/vxfs"
 
@@ -152,16 +152,12 @@ build_vxstore :: proc() -> bool {
 	return true
 }
 
-// Builds out/host/vxfs if it is stale, as tools/vxfs says it is built.
+// Builds out/host/vxfs if it is stale.
 build_vxfs :: proc() -> bool {
 	if vxfs_state != .Untried {
 		return vxfs_state == .Built
 	}
 	vxfs_state = .Failed
-	if !os.is_dir(VXFS_SRC) {
-		fmt.eprintfln("build: %s is missing, so %s cannot be built", VXFS_SRC, VXFS)
-		return false
-	}
 	if s := stale(VXFS, {VXFS_SRC, "lib", "abi"}, ".odin") or_return; s {
 		make_dirs("out/host") or_return
 		fmt.eprintln("  HOST  vxfs")
@@ -169,6 +165,82 @@ build_vxfs :: proc() -> bool {
 	}
 	vxfs_state = .Built
 	return true
+}
+
+// Runs a command with its output (both streams) in the file log, replaced,
+// unless -v asks for it on the terminal: as upstream's build runs the steps
+// whose output only matters when they fail. True if it exited with 0.
+run_logged :: proc(cmd: []string, log: string) -> bool {
+	if verbose {
+		return run(cmd)
+	}
+	f, err := os.open(log, {.Write, .Create, .Trunc}, os.Permissions_Default_File)
+	if err != nil {
+		fmt.eprintfln("build: cannot write %s: %v", log, err)
+		return false
+	}
+	defer os.close(f)
+	p, perr := os.process_start({command = cmd, stdin = os.stdin, stdout = f, stderr = f})
+	if perr != nil {
+		fmt.eprintfln("build: cannot run %s: %v", cmd[0], perr)
+		return false
+	}
+	state, werr := os.process_wait(p)
+	if werr != nil || !state.exited || state.exit_code != 0 {
+		fmt.eprint("build: failed: ")
+		print_cmd(cmd, "")
+		return false
+	}
+	return true
+}
+
+// The system volume's branches (upstream 11 §5), in the order make_volume
+// gives them.
+VOLUME_BRANCHES :: [4]string{"store", "cfg", "home", "adm"}
+
+// A volume image of mib MiB at path, with the system volume's branches,
+// each given the tree under the directory its entry in trees names (or left
+// empty), then checked: what ./build makes for tests and, later, releases.
+make_volume :: proc(path: string, mib: int, trees: [4]string) -> bool {
+	build_vxfs() or_return
+	branches := VOLUME_BRANCHES
+	mk := cmd_make(VXFS, "mkfs", path, fmt.tprint(mib))
+	append(&mk, ..branches[:])
+	run(mk[:]) or_return
+	log := fmt.tprintf("%s.log", path)
+	for tree, i in trees {
+		if tree != "" {
+			run_logged({VXFS, "put", path, branches[i], tree}, log) or_return
+		}
+	}
+	return run_logged({VXFS, "check", path}, log)
+}
+
+// check's round trip through a volume image: docs/ put in a branch, read
+// back byte for byte, a snapshot, a fork and a deletion, checked clean each
+// time.
+check_vxfs_image :: proc() -> bool {
+	img :: "out/vxfs/check.img"
+	log :: img + ".log"
+	ok := make_dirs("out/vxfs") && make_volume(img, 64, {"", "", "docs", ""})
+	STEPS :: [][]string {
+		{"verify", "home", "docs"},
+		{"snap", "home", "home@check"},
+		{"fork", "home@check", "scratch"},
+		{"del", "home@check"},
+		{"verify", "scratch", "docs"},
+		{"check"},
+	}
+	for step in STEPS {
+		if !ok {
+			break
+		}
+		c := cmd_make(VXFS, step[0], img)
+		append(&c, ..step[1:])
+		ok = run_logged(c[:], log)
+	}
+	fmt.eprintfln("  VXFS  image            %s", ok ? "ok" : "FAIL: see " + log)
+	return ok
 }
 
 // Builds out/host/u9fs if it is stale, as ADR-0006 says: GNU C89, warnings

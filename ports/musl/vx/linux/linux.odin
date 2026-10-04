@@ -36,6 +36,7 @@ Errno :: enum i32 {
 	ENFILE          = 23,
 	EMFILE          = 24,
 	ENOTTY          = 25,
+	ENOSPC          = 28,
 	ESPIPE          = 29,
 	EPIPE           = 32,
 	EDOM            = 33,
@@ -100,6 +101,7 @@ Sys_Amd64 :: enum int {
 	select          = 23,
 	sched_yield     = 24,
 	mremap          = 25,
+	msync           = 26,
 	madvise         = 28,
 	dup             = 32,
 	dup2            = 33,
@@ -286,6 +288,7 @@ Sys_Arm64 :: enum int {
 	execve          = 221,
 	mmap            = 222,
 	mprotect        = 226,
+	msync           = 227,
 	madvise         = 233,
 	accept4         = 242,
 	wait4           = 260,
@@ -373,6 +376,7 @@ PROT_NONE :: Prot_Flags{}
 
 MAP_SHARED :: 0x01
 MAP_PRIVATE :: 0x02
+MAP_SHARED_VALIDATE :: 0x03
 MAP_TYPE :: 0x0f
 MAP_FIXED :: 0x10
 MAP_ANONYMOUS :: 0x20
@@ -417,7 +421,11 @@ NCCS :: 32
 IOV_MAX :: 1024
 UTIME_NOW :: 0x3fffffff
 UTIME_OMIT :: 0x3ffffffe
-CLOCK_BOOTTIME_ALARM :: 9 // the highest clock id
+CLOCK_REALTIME :: 0
+CLOCK_REALTIME_COARSE :: 5
+CLOCK_REALTIME_ALARM :: 8
+CLOCK_BOOTTIME_ALARM :: 9
+CLOCK_TAI :: 11 // the highest clock id
 TIMER_ABSTIME :: 1
 RLIM_INFINITY :: max(u64)
 RWF_NOAPPEND :: 0x20
@@ -475,6 +483,7 @@ SI_USER :: 0
 SI_KERNEL :: 128
 SEGV_MAPERR :: 1
 BUS_ADRALN :: 1
+BUS_ADRERR :: 2
 ILL_ILLOPC :: 1
 FPE_INTDIV :: 1
 TRAP_BRKPT :: 1

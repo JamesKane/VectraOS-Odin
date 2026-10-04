@@ -23,6 +23,7 @@ now: i64
 counter_hz: u64
 clock_flags: u32
 info_status: i64 // what clock_read(&info) answers
+utc_offset: i64 // the wall clock's, as clock_read(&info) gives it
 
 @(export, link_name="vx_syscall")
 fake_syscall :: proc "c" (nr: vx.Syscall, a0, a1, a2, a3, a4, a5: u64) -> i64 {
@@ -39,6 +40,7 @@ fake_syscall :: proc "c" (nr: vx.Syscall, a0, a1, a2, a3, a4, a5: u64) -> i64 {
 			info := ([^]u64)(uintptr(a0))
 			info[0] = counter_hz
 			info[1] = u64(clock_flags) // and reserved, 0
+			info[2] = u64(utc_offset)
 		}
 		return now
 	case .Handle_Close:
@@ -131,8 +133,12 @@ test_sysfs :: proc(t: ^testing.T) {
 	testing.expect_value(t, read_file(&c, root, "clock/info", buf[:]), "") // no counter to tell of
 	info_status = 0
 
-	// /sys/clock/now: realtime counts from boot, until there is a wall clock.
+	// /sys/clock/now: realtime counts from boot, until there is a wall clock;
+	// then it is UTC.
 	now = 1234567890
 	testing.expect_value(t, read_file(&c, root, "clock/now", buf[:]), "monotonic=1234567890 realtime=1234567890\n")
 	testing.expect_value(t, read_file(&c, root, "clock/now", buf[:5], 3), "otoni")
+	utc_offset = 1_767_225_600_000_000_000
+	testing.expect_value(t, read_file(&c, root, "clock/now", buf[:]), "monotonic=1234567890 realtime=1767225601234567890\n")
+	utc_offset = 0
 }

@@ -11,7 +11,8 @@ import "core:slice"
 // system partition of 8 MiB at 1 MiB and a VectraOS system volume of 32 MiB
 // after it, each with a line naming it in its first sector (upstream's
 // docs/proto/block.md §6). With volume=DIR, the system partition holds a
-// vx-fs volume instead, its home branch DIR's tree, made by tools/vxfs (out/host/vxfs).
+// vx-fs volume instead, its home branch DIR's tree, made by tools/vxfs
+// (hosttools.odin's make_volume).
 
 TEST_DISK_SIGNATURE :: "VectraOS block test disk"
 
@@ -61,7 +62,7 @@ test_disk :: proc(path: string, mib: i64, home: string) -> bool {
 	if home != "" { // the volume, made beside the disk and copied into the partition
 		vol := fmt.tprintf("%s.vxfs", path)
 		trees := [4]string{2 = home} // store, cfg, home, adm
-		make_volume(vol, i64(parts[1].count * SECTOR >> 20), trees) or_return
+		make_volume(vol, int(parts[1].count * SECTOR >> 20), trees) or_return
 		copy_into(disk, path, vol, i64(parts[1].count * SECTOR), i64(parts[1].first * SECTOR)) or_return
 	}
 	disk_guid := derived_guid(0, "test disk")
@@ -112,57 +113,6 @@ copy_into :: proc(f: ^os.File, path, from: string, size, offset: i64) -> bool {
 		}
 		write_at(f, path, buf[:n], offset + off) or_return
 		off += i64(n)
-	}
-	return true
-}
-
-// A volume image of mib MiB at path, with the system volume's branches
-// (upstream's docs/11 §5), each given the tree under the directory its entry
-// names (or left empty), then checked: what ./build makes for tests. As
-// upstream's build.c runs host/vxfs: mkfs, a put for each tree, a check, the
-// last two logged to path.log.
-make_volume :: proc(path: string, mib: i64, trees: [4]string) -> bool {
-	BRANCHES :: [4]string{"store", "cfg", "home", "adm"}
-	branches := BRANCHES
-	if !build_vxfs() {
-		fmt.eprintfln("build: volume= needs a vx:fs volume, which %s makes", VXFS)
-		return false
-	}
-	mk := cmd_make(VXFS, "mkfs", path, fmt.tprint(mib))
-	append(&mk, ..branches[:])
-	run(mk[:]) or_return
-	log_path := fmt.tprintf("%s.log", path)
-	_ = os.remove(log_path)
-	for tree, i in trees {
-		if tree != "" {
-			run_logged({VXFS, "put", path, branches[i], tree}, log_path) or_return
-		}
-	}
-	return run_logged({VXFS, "check", path}, log_path)
-}
-
-// Runs a command with its output appended to the file at log_path.
-@(private="file")
-run_logged :: proc(cmd: []string, log_path: string) -> bool {
-	if verbose {
-		print_cmd(cmd, "")
-	}
-	log, err := os.open(log_path, {.Write, .Create, .Append}, os.Permissions_Read_All + {.Write_User})
-	if err != nil {
-		fmt.eprintfln("build: cannot write %s: %v", log_path, err)
-		return false
-	}
-	defer os.close(log)
-	p, serr := os.process_start({command = cmd, stdout = log, stderr = log})
-	if serr != nil {
-		fmt.eprintfln("build: cannot run %s: %v", cmd[0], serr)
-		return false
-	}
-	state, werr := os.process_wait(p)
-	if werr != nil || !state.exited || state.exit_code != 0 {
-		fmt.eprintf("build: failed (see %s): ", log_path)
-		print_cmd(cmd, "")
-		return false
 	}
 	return true
 }

@@ -41,7 +41,7 @@ import "vx:utf"
 MAX_PATH :: 256
 MAX_ENTRIES :: 32
 MAX_MEMBERS :: 8
-MAX_CONNS :: 8
+MAX_CONNS :: 16 // the POSIX template has 7, and fsd's branches come on top
 MAX_SRC :: 64
 MAX_DEPTH :: 64 // names in a path
 

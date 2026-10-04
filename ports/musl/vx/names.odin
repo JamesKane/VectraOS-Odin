@@ -308,8 +308,14 @@ fd_setattr :: proc "contextless" (fd: int, dirfd: int, path: string, has_path: b
 	return r
 }
 
+// EACCES from the server is POSIX's EPERM here: not the owner's to change.
+@(private="file")
+not_owner :: proc "contextless" (r: int) -> int {
+	return r == fail(.EACCES) ? fail(.EPERM) : r
+}
+
 fd_chmod :: proc "contextless" (fd, dirfd: int, path: string, has_path: bool, mode: u32) -> int {
-	return fd_setattr(fd, dirfd, path, has_path, true, {valid = {.Mode}, mode = mode & 0o7777})
+	return not_owner(fd_setattr(fd, dirfd, path, has_path, true, {valid = {.Mode}, mode = mode & 0o7777}))
 }
 
 fd_chown :: proc "contextless" (fd, dirfd: int, path: string, has_path: bool, uid, gid: u32, follow: bool) -> int {
@@ -323,7 +329,7 @@ fd_chown :: proc "contextless" (fd, dirfd: int, path: string, has_path: bool, ui
 	if gid != max(u32) {
 		a.valid += {.Gid}
 	}
-	return a.valid != {} ? fd_setattr(fd, dirfd, path, has_path, follow, a) : 0
+	return a.valid != {} ? not_owner(fd_setattr(fd, dirfd, path, has_path, follow, a)) : 0
 }
 
 fd_truncate :: proc "contextless" (fd: int, path: string, has_path: bool, size: i64) -> int {

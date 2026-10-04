@@ -244,6 +244,7 @@ cmd_check :: proc() -> bool {
 		fmt.eprintln("build: no packages in tests/host")
 		ok = false
 	}
+	ok = check_vxfs_image() && ok
 	ok = cmd_vendor_check() && ok
 	return ok
 }

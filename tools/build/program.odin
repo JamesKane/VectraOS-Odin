@@ -36,6 +36,7 @@ PROGRAMS := []Program {
 	{name = "bootfs", dir = "servers/bootfs", place = .Bootfs},
 	{name = "bus-acpi", dir = "servers/bus-acpi", place = .Bootfs, cports = {"acpica"}},
 	{name = "nstest", dir = "tests/user/nstest", place = .Tests},
+	{name = "dreftest", dir = "tests/user/dreftest", place = .Tests},
 	{name = "constest", dir = "tests/user/constest", place = .Tests},
 	{name = "nettest", dir = "tests/user/nettest", place = .Tests},
 	{name = "tcptest", dir = "tests/user/tcptest", place = .Tests},
@@ -67,10 +68,13 @@ PROGRAMS := []Program {
 	{name = "drv-nvme", dir = "drivers/drv-nvme", place = .Bootfs},
 	{name = "blktest", dir = "tests/user/blktest", place = .Tests},
 	{name = "partd", dir = "servers/partd", place = .Bootfs},
+	{name = "fsd", dir = "servers/fsd", place = .Bootfs},
 	{name = "dosfs", dir = "servers/dosfs", place = .Bootfs},
 	{name = "isofs", dir = "servers/isofs", place = .Bootfs},
 	{name = "ctest", source = "tests/posix/ctest.c", place = .Tests, kind = .C},
+	{name = "ctestfsd", source = "tests/posix/ctest.c", place = .Tests, kind = .C}, // ctest again, with /tmp on fsd
 	{name = "sbasetest", source = "tests/posix/sbasetest.c", place = .Tests, kind = .C},
+	{name = "maptest", source = "tests/posix/maptest.c", place = .Tests, kind = .C},
 	// dbg's fixture, as upstream builds it but against musl: its own
 	// functions are optnone, and the house flags give -g and frame pointers.
 	// Its lib/vx-rt/rt.c is this tree's stand-in for upstream's runtime.
