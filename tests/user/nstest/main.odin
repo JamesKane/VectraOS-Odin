@@ -86,7 +86,7 @@ test_namespace :: proc "contextless" () {
 	copy(programs[:], boot_bin) // list's buffer is reused
 	progs := string(programs[:len(boot_bin)])
 	check_str(list("/bin"), progs) // the empty /bin, then /boot/bin
-	check(len(progs) > 14 && progs[:14] == "bootfs nstest ")
+	check(len(progs) > 20 && progs[:20] == "posix bootfs nstest ") // sbase's directory first
 	svc := list("/boot/svc")
 	copy(manifests[:], svc) // list's buffer is reused
 	svcs := string(manifests[:len(svc)])
@@ -147,6 +147,21 @@ test_confinement :: proc "contextless" () {
 	check(len(list("/bin")) > 6) // still serving
 }
 
+// A ring connection that ends takes its mapping with it (as_unmap): twenty
+// connections to bootfs, each ended, leave the address space as it was.
+test_connections_unmap :: proc "contextless" () {
+	connector := space.conns[0].connector
+	before, bst := rt.task_info(rt.self)
+	check(connector != vx.HANDLE_NONE && bst == .Ok)
+	for _ in 0 ..< 20 {
+		@(static) k: rt.Conn
+		check(rt.p9_connect(connector, &k) == .Ok) // which negotiates the version too
+		rt.p9_disconnect(&k)
+	}
+	after, ast := rt.task_info(rt.self)
+	check(ast == .Ok && after.mapped == before.mapped)
+}
+
 @(export, link_name="vx_main")
 vx_main :: proc() -> int {
 	test_spawn()
@@ -155,7 +170,8 @@ vx_main :: proc() -> int {
 	if st == .Ok {
 		test_namespace()
 		test_confinement()
+		test_connections_unmap()
 	}
 	rt.print("nstest: ", u64(checks), " checks, ", u64(failures), " failed\n")
-	return failures != 0 ? 1 : 0
+	rt.exits(failures != 0 ? "failed" : "")
 }
