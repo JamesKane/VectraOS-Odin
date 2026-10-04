@@ -1,13 +1,12 @@
 // The image every suite here reads: the ISO upstream's tests read
 // (out/host/test.iso, which its build makes with make_test_iso and
-// write_iso, with Rock Ridge and Joliet). This tree's tools/build/iso.odin
-// writes plain ISO 9660 only, so the image was made by upstream's own
-// write_iso, compiled with clang from build.c at 1976c1f, with
+// write_iso, with Rock Ridge and Joliet). The image was made by upstream's
+// own write_iso, compiled with clang from build.c at 1976c1f, with
 // SOURCE_DATE_EPOCH=1759536000; test.iso.gz is that image cut before
 // big.bin's extent, its last 147 sectors, which load_image makes again from
 // the pattern make_test_iso writes. The whole image's SHA-256 is checked, so
-// the bytes are upstream writer's exactly, and a later port of the writer
-// can be checked against them.
+// the bytes are upstream writer's exactly; writer_test checks this tree's
+// port of the writer (tools/build/iso.odin) against them.
 package iso_test
 
 import "core:bytes"

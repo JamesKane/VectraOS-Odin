@@ -37,7 +37,8 @@
 // tables, which only devmgr needs. entropy: a seed of its own for a random
 // generator, from svcd's, which the kernel seeded from the bootloader's
 // entropy (vx:drbg). cmdline: the kernel command line, as svcd's own spawn
-// message has it (devmgr, which gives it to drivers for their options).
+// message has it (devmgr, which gives it to bus-acpi and to drivers for
+// their options).
 //
 // Drivers, the services with ioport, mmio or irq records, start first. svcd
 // mints their device objects from the root Resource once, keeps them, and

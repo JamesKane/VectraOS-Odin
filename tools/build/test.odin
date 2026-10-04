@@ -19,12 +19,17 @@ import "vx:ndb"
 // the CD image (image --iso) instead of the disk. After a pass, each host=
 // record's file, under the run's directory (share/ is what vx9pserve served,
 // u9fs/ what u9fs did), must hold its text= (with or without a final newline).
+// A scenario= record's rtc= starts QEMU's real-time clock at that time
+// (-rtc base=); its exits flag makes QEMU exiting by itself, once every
+// expect= has matched, the pass (power off).
 // The m5/ scenarios run with the machine's IOMMU, as upstream's runner runs
 // every scenario from M5; a scenario= record's iommu=caching puts VT-d in
 // caching mode. Its disk=MIB gives QEMU a second disk, made fresh for the run
 // (disk.odin's test_disk), on virtio-blk or, with bus=nvme, on NVMe; with
 // volume=DIR its system partition is a vx-fs volume whose home branch is
-// DIR's tree.
+// DIR's tree; with fat=12|16|32 it is one FAT volume, no partition table
+// (fatdisk.odin), which with fsck the host's fsck must find sound after the
+// run. isodisk makes the second disk the test ISO (iso.odin's make_test_iso).
 
 Expect_Kind :: enum {
 	Contains, // expect=: part of a line
@@ -52,10 +57,15 @@ Scenario :: struct {
 	only:    ^Arch, // arch=: run on this architecture only; nil for all
 	needs:   string, // a feature this tree's build cannot provide yet
 	iso:     bool, // boot the ISO, as a CD, with no disk
+	rtc:     string, // rtc=: the real-time clock's starting time; "" for the host's UTC
+	exits:   bool, // QEMU must then exit by itself
 	iommu:   Iommu_Mode,
 	disk:    i64, // disk=MIB: a second disk, made fresh for the run; 0 for none
 	nvme:    bool, // and bus=nvme: on NVMe, not virtio-blk
 	volume:  string, // and volume=DIR: its system partition a volume, home DIR
+	fat:     int, // and fat=12|16|32: the disk is one FAT volume, no GPT
+	fsck:    bool, // and fsck: the host's fsck must find that volume sound after
+	isodisk: bool, // the second disk is the test ISO
 	expects: [dynamic]Expect,
 	fails:   [dynamic]string,
 	hosts:   [dynamic]Host_Check,
@@ -94,6 +104,8 @@ load_scenario :: proc(name: string, a: ^Arch) -> (sc: Scenario, ok: bool) {
 				sc.only = only
 			}
 			sc.iso = ndb.has(rec, "iso")
+			sc.rtc = val(rec, "rtc")
+			sc.exits = ndb.has(rec, "exits")
 			if strings.has_prefix(name, "m5/") {
 				sc.iommu = .On
 			}
@@ -123,8 +135,18 @@ load_scenario :: proc(name: string, a: ^Arch) -> (sc: Scenario, ok: bool) {
 					return sc, false
 				}
 			}
+			if ndb.has(rec, "fat") {
+				f, fok := strconv.parse_int(val(rec, "fat"), 10)
+				if !fok || (f != 12 && f != 16 && f != 32) {
+					fmt.eprintfln("%s:%d: fat= is 12, 16 or 32", path, rec.line)
+					return sc, false
+				}
+				sc.fat = f
+			}
+			sc.fsck = ndb.has(rec, "fsck")
+			sc.isodisk = ndb.has(rec, "isodisk")
 			// What upstream's runner does that this one does not yet.
-			for feature in ([]string{"fat", "fsck", "isodisk", "installer", "blank", "media", "storetree", "rtc", "exits"}) {
+			for feature in ([]string{"installer", "blank", "media", "storetree"}) {
 				if ndb.has(rec, feature) {
 					sc.needs = feature
 				}
@@ -166,6 +188,18 @@ load_scenario :: proc(name: string, a: ^Arch) -> (sc: Scenario, ok: bool) {
 	}
 	if sc.volume != "" && sc.disk == 0 {
 		fmt.eprintfln("%s: volume= needs disk=", path)
+		return sc, false
+	}
+	if (sc.fat != 0 || sc.fsck) && (sc.disk == 0 || sc.volume != "") {
+		fmt.eprintfln("%s: fat= and fsck need disk= and no volume=", path)
+		return sc, false
+	}
+	if sc.fsck && sc.fat == 0 {
+		fmt.eprintfln("%s: fsck needs fat=", path)
+		return sc, false
+	}
+	if sc.isodisk && (sc.disk != 0 || sc.fat != 0) {
+		fmt.eprintfln("%s: isodisk is the second disk: no disk= or fat=", path)
 		return sc, false
 	}
 	return sc, true
@@ -234,12 +268,22 @@ run_scenario :: proc(a: ^Arch, mode: Mode, name: string) -> bool {
 		fresh_u9fs_root(u9fs) or_return
 	}
 	disk := ""
-	if sc.disk != 0 {
+	disk_made := true
+	switch {
+	case sc.isodisk:
+		disk = fmt.tprintf("%s/test.iso", run_dir)
+		epoch, eok := source_date_epoch()
+		disk_made = eok && make_test_iso(disk, epoch)
+	case sc.fat != 0:
 		disk = fmt.tprintf("%s/disk.img", run_dir)
-		if !test_disk(disk, sc.disk, sc.volume) {
-			fmt.eprintfln("%s FAILED: cannot make its disk, %s", label, disk)
-			return false
-		}
+		disk_made = make_fat_disk(disk, int(sc.disk), sc.fat)
+	case sc.disk != 0:
+		disk = fmt.tprintf("%s/disk.img", run_dir)
+		disk_made = test_disk(disk, sc.disk, sc.volume)
+	}
+	if !disk_made {
+		fmt.eprintfln("%s FAILED: cannot make its disk, %s", label, disk)
+		return false
 	}
 
 	log_path := fmt.tprintf("%s/test-%s.log", out_dir(a, mode), file_name)
@@ -263,7 +307,7 @@ run_scenario :: proc(a: ^Arch, mode: Mode, name: string) -> bool {
 		return false
 	}
 	defer os.close(keys_w)
-	cmd := qemu_cmd(a, image, {test = true, share = share, u9fs = u9fs, cdrom = cdrom, iommu = sc.iommu, disk = disk, nvme = sc.nvme})
+	cmd := qemu_cmd(a, image, {test = true, share = share, u9fs = u9fs, cdrom = cdrom, iommu = sc.iommu, rtc = sc.rtc, disk = disk, nvme = sc.nvme})
 	if verbose {
 		print_cmd(cmd, "")
 	}
@@ -281,6 +325,13 @@ run_scenario :: proc(a: ^Arch, mode: Mode, name: string) -> bool {
 	_, _ = os.process_wait(qemu)
 	if passed {
 		why, passed = check_hosts(&sc, run_dir)
+	}
+	// What the guest left on its FAT disk, checked by another implementation.
+	if passed && sc.fsck {
+		fsck_log := fmt.tprintf("%s/fsck.log", run_dir)
+		if !fsck_fat_disk(disk, fsck_log, int(sc.disk), sc.fat) {
+			why, passed = fmt.tprintf("the host's fsck found the FAT disk unsound (%s)", fsck_log), false
+		}
 	}
 
 	if passed {
@@ -321,9 +372,10 @@ match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File
 	buf: [4096]u8
 	n, pos := 0, 0
 	stale := 0 // bytes of buf, from pos, read before the last typing
+	all_seen := false // every expect= met; with exits, QEMU's exit is what is waited for now
 
 	for {
-		if typed < next && sc.expects[next].input != "" {
+		if !all_seen && typed < next && sc.expects[next].input != "" {
 			if _, err := os.write(keys, transmute([]u8)sc.expects[next].input); err != nil {
 				return "cannot type into QEMU (it has exited?)", false
 			}
@@ -335,11 +387,14 @@ match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File
 		if pos == n { // all looked at: read more
 			left := sc.timeout - time.duration_seconds(time.tick_since(start))
 			if left <= 0 {
+				if all_seen {
+					return "QEMU did not exit (exits)", false
+				}
 				return fmt.tprintf("timed out waiting for %q", sc.expects[next].text), false
 			}
 			has, herr := os.pipe_has_data(out)
 			if herr != nil {
-				return "QEMU exited", false
+				return all_seen ? "" : "QEMU exited", all_seen // with exits, the exit was the last thing waited for
 			}
 			if !has {
 				time.sleep(2 * time.Millisecond)
@@ -347,7 +402,7 @@ match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File
 			}
 			got, rerr := os.read(out, buf[:])
 			if rerr != nil || got <= 0 {
-				return "QEMU exited", false
+				return all_seen ? "" : "QEMU exited", all_seen
 			}
 			n, pos = got, 0
 			_, _ = os.write(log, buf[:n])
@@ -381,6 +436,10 @@ match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File
 					return fmt.tprintf("failure line: %s", text), false
 				}
 			}
+			strings.builder_reset(&line)
+			if all_seen {
+				continue
+			}
 			matched := false
 			switch e := sc.expects[next]; e.kind {
 			case .Contains:
@@ -389,11 +448,14 @@ match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File
 				matched = text == e.text
 			case .Prompt: // matched below, against all output since the last typing
 			}
-			strings.builder_reset(&line)
 			if matched {
 				next += 1
 				if next == len(sc.expects) {
-					return "", true
+					if !sc.exits {
+						return "", true
+					}
+					all_seen = true
+					continue
 				}
 				if sc.expects[next].input != "" && typed < next {
 					advanced = true
@@ -415,7 +477,10 @@ match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File
 				since_cut = false
 				next += 1
 				if next == len(sc.expects) {
-					return "", true
+					if !sc.exits {
+						return "", true
+					}
+					all_seen = true
 				}
 			}
 		}

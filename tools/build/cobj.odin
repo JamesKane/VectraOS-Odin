@@ -53,6 +53,8 @@ cobj_load :: proc(name: string) -> (p: Port, ok: bool) {
 		fmt.eprintfln("%s/port.ndb: no sources=", p.dir)
 		return p, false
 	}
+	// Headers of the port's own (ACPICA's acvectra.h) are inputs too.
+	p.input_hash = hash_tree(p.input_hash, p.dir) or_return
 	return p, true
 }
 
