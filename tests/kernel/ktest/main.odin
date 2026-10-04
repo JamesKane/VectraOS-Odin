@@ -9,6 +9,7 @@ import vx "abi:vx"
 import "vx:memory"
 import "vx:ring"
 import "vx:rt"
+import "vx:ndb"
 import "vx:str"
 
 checks, failures: u32
@@ -845,6 +846,13 @@ test_spawn_message :: proc "contextless" () {
 	check(rt.self != vx.HANDLE_NONE)
 	check(rt.spawn.name == "ktest")
 	check(str.contains(rt.spawn.cmdline, "vx.root=ktest"))
+	// This tree's check of the bootloader's entropy, which the kernel passes
+	// on (upstream's M4 step 3e): 32 bytes, not all zero.
+	rec: ndb.Record
+	check(rt.spawn_record("entropy", &rec))
+	seed, _ := ndb.get(&rec, "entropy")
+	zero: [32]u8
+	check(len(seed) == 32 && seed != string(zero[:]))
 	image := rt.spawn_take("bootimage")
 	check(image != vx.HANDLE_NONE && rt.spawn_take("bootimage") == vx.HANDLE_NONE)
 	magic: [5]u8

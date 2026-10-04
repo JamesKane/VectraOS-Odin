@@ -1,6 +1,7 @@
 package kernel
 
 import vx "abi:vx"
+import "vx:memory"
 import "vx:ndb"
 
 // Starts the root task from the boot module of that name: svcd, or whatever
@@ -127,7 +128,12 @@ root_spawn_message :: proc "contextless" (t: ^Task) -> ^Channel {
 	}
 	give(&w, &given, "resource", {&root_resource().obj, ROOT_RESOURCE_RIGHTS})
 	ndb.put(&w, "cmdline", boot.cmdline)
-	if !ndb.end(&w) {
+	fits := ndb.end(&w)
+	if boot.seeded { // the root task seeds everything after it from this
+		ndb.put(&w, "entropy", string(memory.ptr_to_bytes(&boot.seed)))
+		fits = ndb.end(&w)
+	}
+	if !fits {
 		kpanic("the root task's spawn message does not fit")
 	}
 

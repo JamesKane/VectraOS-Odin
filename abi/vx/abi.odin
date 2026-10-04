@@ -99,6 +99,9 @@ Msg_Size :: struct { // what channel_read and channel_call report
 //   handle=NAME index=N              the message's handle N; "self" is the task
 //   arg=VALUE                        an argument; repeated, in order
 //   cmdline=VALUE                    the kernel command line (the root task's)
+//   entropy=BYTES                    32 bytes to seed a random generator: the
+//                                    bootloader's (the root task's), or one its
+//                                    parent made for it
 //   bootimage size=N                 the boot image's length (the bootimage handle)
 //   mount=OLD handle=NAME [aname=A] [flags=F] [src=S]    the namespace, as
 //   bind=OLD new=NEW [flags=F]                           vx-ns replays it
