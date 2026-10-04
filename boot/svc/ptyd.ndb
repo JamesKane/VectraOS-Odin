@@ -1,0 +1,7 @@
+# boot/svc/ptyd.ndb: pseudo-terminals, posted as /srv/ptyd and mounted on
+# /dev by the POSIX template. It signals process groups through /proc.
+# Not restarted: its terminals live only in it.
+
+service=ptyd program=/boot/bin/ptyd post=ptyd console entropy
+mount=/ srv=bootfs
+mount=/proc srv=proc

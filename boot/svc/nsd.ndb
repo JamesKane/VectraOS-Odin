@@ -1,0 +1,5 @@
+# boot/svc/nsd.ndb: namespace groups (ADR-0009), posted as /srv/nsd: the
+# namespace text and connectors each group's members share. Not restarted:
+# the groups live only in it.
+
+service=nsd program=/boot/bin/nsd post=nsd console

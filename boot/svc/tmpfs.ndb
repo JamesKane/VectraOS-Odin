@@ -1,0 +1,4 @@
+# boot/svc/tmpfs.ndb: /tmp, a file system in memory, posted as /srv/tmpfs.
+# Not restarted: what it holds lives only in it.
+
+service=tmpfs program=/boot/bin/tmpfs post=tmpfs console entropy
