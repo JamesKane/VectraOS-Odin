@@ -60,6 +60,10 @@ PROGRAMS := []Program {
 	{name = "drv-uart-16550", dir = "drivers/drv-uart-16550", place = .Bootfs, only = {.X86_64}},
 	{name = "drv-uart-pl011", dir = "drivers/drv-uart-pl011", place = .Bootfs, only = {.AArch64}},
 	{name = "drv-virtio-net", dir = "drivers/drv-virtio-net", place = .Bootfs},
+	{name = "drv-virtio-blk", dir = "drivers/drv-virtio-blk", place = .Bootfs},
+	{name = "drv-nvme", dir = "drivers/drv-nvme", place = .Bootfs},
+	{name = "blktest", dir = "tests/user/blktest", place = .Tests},
+	{name = "partd", dir = "servers/partd", place = .Bootfs},
 	{name = "ctest", source = "tests/posix/ctest.c", place = .Tests, kind = .C},
 	{name = "sbasetest", source = "tests/posix/sbasetest.c", place = .Tests, kind = .C},
 	// dbg's fixture, as upstream builds it but against musl: its own

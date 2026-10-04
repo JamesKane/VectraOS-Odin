@@ -1,0 +1,6 @@
+# boot/drv/nvme.ndb: an NVMe controller (PCI class 01:08:02, whoever made it),
+# whose driver serves its first namespace as the block class
+# (docs/proto/block.md) on /srv/disk0, /srv/disk1, ..., numbered with the
+# other disks in the order devmgr finds them (docs/11 §10).
+
+match=pci class=0x010802 program=/boot/bin/drv-nvme post=disk# msi=8
