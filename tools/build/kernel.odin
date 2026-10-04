@@ -14,6 +14,7 @@ KERNEL_ODIN_FLAGS := []string {
 	"-no-crt",
 	"-default-to-nil-allocator",
 	"-disable-init-fini",
+	"-disable-non-constant-globals", // their initialisers would need the startup code -disable-init-fini drops
 	"-no-rtti",
 	"-no-thread-local",
 	"-reloc-mode:static",

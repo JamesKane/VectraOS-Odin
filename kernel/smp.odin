@@ -12,13 +12,7 @@ import "base:intrinsics"
 
 MAX_CPUS :: 64 // Limine's others stay parked
 
-Cpu :: struct {
-	index:      u32,
-	arch_id:    u64, // the LAPIC ID or the MPIDR
-	idle_stack: u64,
-}
-
-cpus: [MAX_CPUS]Cpu
+cpus: [MAX_CPUS]Cpu // sched.odin's
 cpu_total: u32 // started, or being started
 cpus_online: u32
 
@@ -72,6 +66,7 @@ ap_main :: proc "c" (index: u32) -> ! {
 	arch_switch_tables(kernel_root)
 	arch_cpu_init(index)
 	arch_timer_init()
+	sched_enter_cpu()
 	intrinsics.atomic_add_explicit(&cpus_online, 1, .Release)
 	if cmdline_has("vx.selftest=smp") {
 		for !intrinsics.atomic_load_explicit(&smp_test_go, .Acquire) {
@@ -80,7 +75,7 @@ ap_main :: proc "c" (index: u32) -> ! {
 		smp_stress(index)
 		intrinsics.atomic_add_explicit(&smp_test_done, 1, .Release)
 	}
-	idle_loop()
+	sched_idle_loop()
 }
 
 // Starts every AP and waits up to a second for all of them to come online.
@@ -113,7 +108,9 @@ smp_init :: proc "contextless" () {
 		if stack == 0 {
 			kpanic("no memory for an idle stack")
 		}
-		cpus[index] = {index = index, arch_id = id, idle_stack = stack}
+		cpus[index].index = index
+		cpus[index].arch_id = id
+		cpus[index].idle_stack = stack
 		top := cast([^]u64)uintptr(stack + KSTACK_SIZE)
 		(top[-1:])[0] = u64(index)
 		info.extra_argument = u64(uintptr(rawptr(&(top[-2:])[0]))) // ap_start: sp = this, and its index just above
@@ -145,11 +142,4 @@ selftest_smp :: proc "contextless" () {
 	kput(" cpus, ")
 	kput_u64(u64(cpu_total) * SMP_TEST_ROUNDS)
 	kput(" allocations\n")
-}
-
-// Until there is a scheduler: wait for interrupts, for ever.
-idle_loop :: proc "contextless" () -> ! {
-	for {
-		arch_wait()
-	}
 }

@@ -95,6 +95,7 @@ timer_interrupt :: proc "contextless" () {
 		}
 	}
 	intrinsics.atomic_add_explicit(&t.fired, 1, .Release)
+	sched_timer()
 }
 
 // The log prefix: "[    s.mmm] ", seconds since kernel entry.

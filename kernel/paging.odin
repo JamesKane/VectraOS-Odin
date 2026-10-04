@@ -149,3 +149,74 @@ paging_init :: proc "contextless" () {
 	arch_kernel_mappings(kernel_root)
 	arch_switch_tables(kernel_root)
 }
+
+// The leaf entry mapping va in root, and its level, or nil if there is none.
+@(private="file")
+leaf_entry :: proc "contextless" (root, va: u64) -> (^u64, int) {
+	t := table_at(root)
+	for level in 0 ..= 3 {
+		e := &t[(va >> uint(39 - 9 * level)) & 511]
+		if !arch_pte_valid(e^) {
+			return nil, 0
+		}
+		if !arch_pte_is_table(e^, level) {
+			return e, level
+		}
+		t = table_at(arch_pte_addr(e^))
+	}
+	return nil, 0
+}
+
+// The physical address behind user address va in root, or 0 if it is not
+// mapped for user access. Futexes are keyed on it.
+user_page_pa :: proc "contextless" (root, va: u64) -> u64 {
+	e, level := leaf_entry(root, va)
+	if e == nil || !arch_pte_user_ok(e^, false) {
+		return 0
+	}
+	page := u64(1) << uint(39 - 9 * level)
+	return arch_pte_addr(e^) + (va & (page - 1))
+}
+
+// Whether va is mapped in root for user access, and writable if asked.
+user_page_ok :: proc "contextless" (root, va: u64, write: bool) -> bool {
+	e, _ := leaf_entry(root, va)
+	return e != nil && arch_pte_user_ok(e^, write)
+}
+
+// Clears a 4 KiB page's entry. Its translation may still be cached on a CPU
+// that has the tables loaded; nothing unmaps a page another thread may still
+// use until as_unmap brings shootdowns.
+unmap_page :: proc "contextless" (root, va: u64) {
+	e, level := leaf_entry(root, va)
+	if e != nil && level == 3 {
+		e^ = 0
+	}
+}
+
+// Frees the user half's page tables and the top table itself. The leaves are
+// VMO pages, which their VMOs free. No CPU may be using the address space.
+// Three nested loops rather than recursion.
+free_user_tables :: proc "contextless" (root: u64) {
+	top := table_at(root)
+	for i in 0 ..< arch_user_top_slots() {
+		if !arch_pte_valid(top[i]) || !arch_pte_is_table(top[i], 0) {
+			continue
+		}
+		l1 := table_at(arch_pte_addr(top[i]))
+		for j in 0 ..< 512 {
+			if !arch_pte_valid(l1[j]) || !arch_pte_is_table(l1[j], 1) {
+				continue
+			}
+			l2 := table_at(arch_pte_addr(l1[j]))
+			for k in 0 ..< 512 {
+				if arch_pte_valid(l2[k]) && arch_pte_is_table(l2[k], 2) {
+					phys_free(arch_pte_addr(l2[k]), 0)
+				}
+			}
+			phys_free(arch_pte_addr(l1[j]), 0)
+		}
+		phys_free(arch_pte_addr(top[i]), 0)
+	}
+	phys_free(root, 0)
+}

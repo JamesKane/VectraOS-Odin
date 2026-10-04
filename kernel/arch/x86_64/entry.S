@@ -113,9 +113,10 @@ vector_\v:
 
 trap_entry:
     testb $3, 24(%rsp)     // the saved CS: was the CPU in user mode?
-    jz 1f
+    jz trap_save
     swapgs
-1:  pushq %r15
+trap_save:
+    pushq %r15
     pushq %r14
     pushq %r13
     pushq %r12
@@ -148,6 +149,8 @@ trap_entry:
     xsave64 (%rsp)
     movq %rbx, %rdi
     call x86_trap
+// rbx: the general-register frame; rsp: the XSAVE area below it.
+trap_restore:
     movl $-1, %eax
     movl $-1, %edx
     xrstor64 (%rsp)
@@ -172,6 +175,100 @@ trap_entry:
     jz 2f
     swapgs
 2:  iretq
+
+// SYSCALL: rip in rcx, rflags in r11, interrupts masked by FMASK, still on
+// the user stack. Build a trap frame on the kernel stack and join the common
+// path, with vector 0x100.
+    .p2align 4
+    .globl syscall_entry
+    .type syscall_entry, @function
+syscall_entry:
+    swapgs
+    movq %rsp, %gs:8
+    movq %gs:0, %rsp
+    pushq $0x1b            // ss: user data
+    pushq %gs:8            // rsp
+    pushq %r11             // rflags
+    pushq $0x23            // cs: user code
+    pushq %rcx             // rip
+    pushq $0               // error code
+    pushq $0x100           // vector
+    jmp trap_save
+
+// vx_context_switch(save_sp: ^u64, load_sp: u64): saves the callee-saved
+// registers on this stack, switches stacks, and restores the other thread's.
+// SysV keeps no vector register across a call, so none is saved here; user
+// vector state is in each thread's trap frame (ADR-0004). A new thread's
+// stack (arch_thread_initial_sp) "returns" into thread_trampoline.
+    .globl vx_context_switch
+    .type vx_context_switch, @function
+vx_context_switch:
+    pushq %rbp
+    pushq %rbx
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    movq %rsp, (%rdi)
+    movq %rsi, %rsp
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %rbx
+    popq %rbp
+    ret
+
+// A new thread's first stop: its thread pointer is in r12.
+    .globl thread_trampoline
+    .type thread_trampoline, @function
+thread_trampoline:
+    movq %r12, %rdi
+    xorl %ebp, %ebp
+    call thread_entry
+    ud2
+
+// vx_enter_user(entry, sp, arg, arg2, kstack_top): user mode at entry with
+// interrupts on, through a trap frame built at the top of the thread's
+// kernel stack, with vector state in its initial state: an XSAVE area whose
+// header is zero (every component at its reset value) but for MXCSR, which
+// XRSTOR always loads.
+    .globl vx_enter_user
+    .type vx_enter_user, @function
+vx_enter_user:
+    movq %r8, %rsp
+    pushq $0x1b            // ss
+    pushq %rsi             // rsp
+    pushq $0x202           // rflags: IF
+    pushq $0x23            // cs
+    pushq %rdi             // rip
+    pushq $0               // error code
+    pushq $0               // vector
+    pushq $0               // r15
+    pushq $0               // r14
+    pushq $0               // r13
+    pushq $0               // r12
+    pushq $0               // r11
+    pushq $0               // r10
+    pushq $0               // r9
+    pushq $0               // r8
+    pushq $0               // rbp
+    pushq %rdx             // rdi: arg
+    pushq %rcx             // rsi: arg2
+    pushq $0               // rdx
+    pushq $0               // rcx
+    pushq $0               // rbx
+    pushq $0               // rax
+    movq %rsp, %rbx
+    subq vx_xsave_size(%rip), %rsp
+    andq $~63, %rsp
+    movq %rsp, %rdi
+    movq vx_xsave_size(%rip), %rcx
+    xorl %eax, %eax
+    rep stosb
+    movw $0x37f, 0(%rsp)   // FCW
+    movl $0x1f80, 24(%rsp) // MXCSR
+    jmp trap_restore
 
     .set i, 0
     .rept 256

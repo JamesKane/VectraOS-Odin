@@ -39,6 +39,12 @@ foreign _ {
 	vx_frame_address :: proc "c" () -> u64 ---
 	vx_run_on_stack :: proc "c" (top: u64, fn: proc "c" () -> !) -> ! ---
 	vx_vreg_irq_test :: proc "c" (input, output: ^[512]u8, fired: ^u64, target: u64) ---
+	vx_switch_user_root :: proc "c" (root: u64) ---
+	vx_write_icc_sgi1r :: proc "c" (v: u64) ---
+	vx_pan_off :: proc "c" () ---
+	vx_context_switch :: proc "c" (save_sp: ^u64, load_sp: u64) ---
+	vx_enter_user :: proc "c" (entry, sp, arg, arg2, kstack_top: u64) -> ! ---
+	thread_trampoline :: proc "c" () --- // entry.S: an address only
 	vx_clobber_vregs :: proc "c" () ---
 	aarch64_vectors :: proc "c" () --- // entry.S's vector table: an address only
 }
@@ -179,6 +185,25 @@ empty_user_root: u64 // TTBR0 while a CPU runs no task, shared by all
 
 // Installs the kernel's tables in TTBR1, and an empty table in TTBR0 until
 // there is a user address space, then drops every cached translation.
+// The user half has its own tables in TTBR0; the kernel's stay in TTBR1.
+arch_new_user_root :: proc "contextless" () -> u64 {
+	return phys_alloc_zeroed(0)
+}
+
+// Loads a task's tables into TTBR0, or with root 0 (no task, as for the idle
+// thread) the empty table.
+arch_switch_user_root :: proc "contextless" (root: u64) {
+	vx_switch_user_root(root != 0 ? root : empty_user_root)
+}
+
+arch_user_top_slots :: proc "contextless" () -> int {
+	return 512
+}
+
+arch_pte_user_ok :: proc "contextless" (e: u64, write: bool) -> bool {
+	return e & PTE_VALID != 0 && e & PTE_USER != 0 && (!write || e & PTE_READ_ONLY == 0)
+}
+
 arch_switch_tables :: proc "contextless" (root: u64) {
 	if empty_user_root == 0 {
 		empty_user_root = phys_alloc_zeroed(0) // first on the boot CPU, before the others start
@@ -231,6 +256,7 @@ percpu_ready: bool // TPIDR_EL1 holds this CPU's index
 // attribute 2 as device memory. FP and SIMD were enabled in entry.S.
 arch_cpu_init :: proc "contextless" (index: u32) {
 	vx_cpu_set(rawptr(aarch64_vectors), u64(index))
+	vx_pan_off()
 	vx_write_mair(vx_read_mair() &~ (0xff << 16))
 	percpu_ready = true
 }
@@ -259,6 +285,8 @@ arch_run_on_stack :: proc "contextless" (top: u64, fn: proc "c" () -> !) -> ! {
 
 // The virtual timer's PPI: 27 at EL1. At EL2 with VHE the CNTV_*_EL0 names
 // reach the EL2 virtual timer instead, which raises PPI 28.
+@(private="file")
+INTID_RESCHED :: 0 // an SGI: another CPU made a thread ready
 @(private="file")
 INTID_VIRTUAL_TIMER :: 27
 @(private="file")
@@ -311,9 +339,11 @@ arch_timer_init :: proc "contextless" () {
 	sgi := rd + 0x1_0000 // the SGI and PPI frame
 	ppi := timer_ppi()
 	group := cast(^u32)uintptr(sgi + 0x080) // GICR_IGROUPR0: group 1
-	intrinsics.volatile_store(group, intrinsics.volatile_load(group) | 1 << ppi)
-	intrinsics.volatile_store(cast(^u8)uintptr(sgi + 0x400 + u64(ppi)), 0x80) // its priority
-	intrinsics.volatile_store(cast(^u32)uintptr(sgi + 0x100), 1 << ppi) // GICR_ISENABLER0
+	lines := u32(1) << ppi | 1 << INTID_RESCHED
+	intrinsics.volatile_store(group, intrinsics.volatile_load(group) | lines)
+	intrinsics.volatile_store(cast(^u8)uintptr(sgi + 0x400 + u64(ppi)), 0x80) // priorities
+	intrinsics.volatile_store(cast(^u8)uintptr(sgi + 0x400 + INTID_RESCHED), 0x80)
+	intrinsics.volatile_store(cast(^u32)uintptr(sgi + 0x100), lines) // GICR_ISENABLER0
 	vx_gic_cpu_init()
 }
 
@@ -335,6 +365,8 @@ aarch64_irq :: proc "contextless" () {
 	if intid == INTID_VIRTUAL_TIMER || intid == INTID_EL2_VIRTUAL_TIMER {
 		vx_timer_disarm() // disarm before the EOI: the line is level-triggered
 		timer_interrupt()
+	} else if intid == INTID_RESCHED {
+		this_cpu().resched = true
 	}
 	vx_write_icc_eoir1(iar)
 }
@@ -398,17 +430,68 @@ aarch64_kernel_stack_fault :: proc "c" (sp: u64) -> ! {
 	panic_end(elr, 0)
 }
 
+// SGI 0 to one CPU, through ICC_SGI1R_EL1: its affinity levels 3 to 1, and
+// level 0 as a bit in the target list.
+arch_send_resched :: proc "contextless" (c: ^Cpu) {
+	m := c.arch_id
+	aff3, aff2, aff1, aff0 := (m >> 32) & 0xff, (m >> 16) & 0xff, (m >> 8) & 0xff, m & 0xf
+	vx_write_icc_sgi1r(aff3 << 48 | aff2 << 32 | aff1 << 16 | u64(INTID_RESCHED) << 24 | 1 << aff0)
+}
+
+// Exceptions from EL0 land on SP_EL1, which is the top of the current
+// thread's kernel stack whenever it runs in user mode: nothing to set.
+arch_set_kernel_stack :: proc "contextless" (top: u64) {}
+
+// A new thread's stack, as the context switch will pop it: x19 to x30, then
+// d8 to d15, with x19 carrying the thread and x30 returning into
+// thread_trampoline. It starts below the frame vx_enter_user builds at the top.
+arch_thread_initial_sp :: proc "contextless" (th: ^Thread) -> u64 {
+	sp := cast([^]u64)uintptr(thread_kstack_top(th) - TRAP_FRAME_SIZE - 160)
+	sp[0] = u64(uintptr(th)) // x19
+	sp[11] = u64(uintptr(rawptr(thread_trampoline))) // x30
+	return u64(uintptr(sp))
+}
+
+arch_context_switch :: proc "contextless" (save_sp: ^u64, load_sp: u64) {
+	vx_context_switch(save_sp, load_sp)
+}
+
+arch_enter_user :: proc "contextless" (entry, sp, arg, arg2, kstack_top: u64) -> ! {
+	vx_enter_user(entry, sp, arg, arg2, kstack_top)
+}
+
+// The frame entry.S builds: Trap_Frame, then q0-q31, FPCR and FPSR.
+TRAP_FRAME_SIZE :: size_of(Trap_Frame) + 32 * 16 + 16
+
+@(private="file")
+EC_SVC64 :: 0x15
+
 @(export, link_name="aarch64_trap")
 aarch64_trap :: proc "c" (f: ^Trap_Frame, index: u64) {
-	if index & 3 == 1 { // IRQ
+	from_user := index >= 8
+	ec := u32(f.esr >> 26) & 0x3f
+	switch {
+	case index & 3 == 1: // IRQ
 		aarch64_irq()
-		return
+	case from_user && index & 3 == 0 && ec == EC_SVC64:
+		f.x[0] = u64(syscall_dispatch(f.x[8], {f.x[0], f.x[1], f.x[2], f.x[3], f.x[4], f.x[5]}))
+	case from_user:
+		task_fault_start()
+		kput_exception(f, index)
+		kput(" at pc ")
+		kput_hex(f.elr)
+		kput("\n")
+		task_fault_exit()
+	case:
+		panic_start()
+		kput_exception(f, index)
+		kput(" at pc ")
+		kput_hex(f.elr)
+		panic_end(f.elr, f.x[29])
 	}
-	panic_start()
-	kput_exception(f, index)
-	kput(" at pc ")
-	kput_hex(f.elr)
-	panic_end(f.elr, f.x[29])
+	if from_user {
+		user_return()
+	}
 }
 
 // --- ADR-0004's test (main.odin) ---

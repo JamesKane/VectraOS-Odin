@@ -39,6 +39,12 @@ _2026-10-03, macOS host (Apple M4 Max), Odin `dev-2026-09:a2fb372b7`, LLVM 22.1.
 - **Symbol names:** polymorphic and some runtime procedures carry their signature in the symbol (`response:proc"contextless"(...)`), and file-private ones a file prefix (`[main.odin]::selftests`). The kernel's symbol map trims both, so backtraces read like upstream's (`kernel_main_on_kstack+0x88`).
 - **Odin's runtime trap** after a failed bounds check is `ud2` (x86_64) or `brk #1` (aarch64); its message goes to a freestanding stderr that discards it. The trap handler names it.
 
+## Found during P2
+
+- **Non-constant global initialisers need Odin's startup code.** A global like `x := f()` is filled in by `__$startup_runtime`, which the kernel and user programs never run (`-disable-init-fini`). The global stays zero, silently: a pool with size 0 made `pool_alloc` spin for ever. Both builds now pass `-disable-non-constant-globals`, which makes such an initialiser a compile error.
+- **No `intrinsics.syscall` on freestanding targets.** User space reaches the kernel through a six-instruction `vx_syscall` stub per architecture (`lib/rt/arch`). `_start` itself is an ordinary `proc "c"`: the kernel enters user mode exactly as a C call would.
+- **Debugging with lldb:** QEMU's `-gdb tcp::1234` plus `lldb` (`gdb-remote 1234`, `thread backtrace all`) gives a symbolized backtrace for every CPU, through the Odin kernel's DWARF and frame pointers.
+
 ## Not yet covered
 
 - Preemption and migration in the vector-state test: they need threads (P2). (SMP entry, asynchronous interrupts and XSAVE sizing from CPUID leaf 0Dh are done in P1.)

@@ -1,0 +1,302 @@
+package kernel
+
+import vx "abi:vx"
+
+// Channels, the control plane.
+//
+// A channel is two ends. A message written to one end is queued at the
+// other: a 16-byte header, a body of up to 64 KiB, and up to 64 handles,
+// which move out of the writer's handle table and into the reader's. The
+// kernel copies the body twice, in and out, and writes the header's
+// sender_intent itself.
+//
+// Each end's queue is bounded by CHANNEL_QUEUE_MESSAGES and
+// CHANNEL_QUEUE_BYTES, so a flood fails the writer with SHOULD_WAIT and never
+// grows the kernel.
+//
+// channel_call writes a request and waits on its own end for the reply whose
+// txid matches; the kernel picks the txid, and the reply goes straight to the
+// waiting caller instead of the queue.
+//
+// Both ends share one lock. Objects that leave the kernel's hands (a
+// message's handles, a dying end's bindings) are released after it is
+// dropped, because releasing one may destroy another channel.
+
+CHANNEL_QUEUE_MESSAGES :: 64
+CHANNEL_QUEUE_BYTES :: u64(1) << 20
+
+// A message lives in one physical block: this header, then `count` moved
+// handles, then the body.
+Channel_Msg :: struct {
+	next:  ^Channel_Msg,
+	order: uint, // the physical block it lives in
+	len:   u32, // body bytes, header included
+	count: u32, // handles
+}
+
+msg_handles :: proc "contextless" (m: ^Channel_Msg) -> []Moved_Handle {
+	return (cast([^]Moved_Handle)(cast([^]Channel_Msg)m)[1:])[:m.count]
+}
+
+msg_body :: proc "contextless" (m: ^Channel_Msg) -> []u8 {
+	after := cast([^]u8)raw_data(msg_handles(m)[m.count:])
+	return after[:m.len]
+}
+
+msg_header :: proc "contextless" (m: ^Channel_Msg) -> ^vx.Msg_Header {
+	return cast(^vx.Msg_Header)raw_data(msg_body(m))
+}
+
+// A thread in channel_call, waiting on its own end for its reply.
+@(private="file")
+Call_Wait :: struct {
+	next:   ^Call_Wait,
+	thread: ^Thread,
+	txid:   u32,
+	reply:  ^Channel_Msg, // set by the writer of the reply
+}
+
+Channel :: struct {
+	using obj: Object,
+	pair:      ^Channel_Pair,
+	side:      u32, // this end is pair.ends[side]
+	head:      ^Channel_Msg, // messages for this end's reader
+	tail:      ^Channel_Msg,
+	count:     u32,
+	bytes:     u64,
+	obs:       Observers, // READABLE and PEER_CLOSED bindings on this end
+	calls:     ^Call_Wait, // channel_calls waiting for a reply on this end
+	next_txid: u32,
+}
+
+Channel_Pair :: struct {
+	lock: Spinlock,
+	ends: [2]^Channel, // nil once that end is destroyed
+}
+
+channel_pool := Pool{size = (size_of(Channel) + 15) &~ 15}
+channel_pair_pool := Pool{size = (size_of(Channel_Pair) + 15) &~ 15}
+
+@(require_results)
+channel_create :: proc "contextless" () -> (a, b: ^Channel, st: vx.Status) {
+	pair := cast(^Channel_Pair)pool_alloc(&channel_pair_pool)
+	e0 := pair != nil ? cast(^Channel)pool_alloc(&channel_pool) : nil
+	e1 := e0 != nil ? cast(^Channel)pool_alloc(&channel_pool) : nil
+	if e1 == nil {
+		if e0 != nil {
+			pool_free(&channel_pool, e0)
+		}
+		if pair != nil {
+			pool_free(&channel_pair_pool, pair)
+		}
+		return nil, nil, .Err_No_Memory
+	}
+	ends := [2]^Channel{e0, e1}
+	for e, i in ends {
+		object_init(&e.obj, .Channel)
+		e.pair = pair
+		e.side = u32(i)
+		e.next_txid = 0x8000_0000 // kernel-picked txids have the top bit set
+		pair.ends[i] = e
+	}
+	return e0, e1, .Ok
+}
+
+@(private="file")
+channel_peer :: proc "contextless" (c: ^Channel) -> ^Channel {
+	return c.pair.ends[1 - c.side]
+}
+
+msg_free :: proc "contextless" (m: ^Channel_Msg) {
+	for h in msg_handles(m) {
+		object_drop(h.obj)
+	}
+	phys_free(u64(uintptr(m)) - boot.hhdm, m.order)
+}
+
+@(private="file")
+msg_list_free :: proc "contextless" (list: ^Channel_Msg) {
+	m := list
+	for m != nil {
+		next := m.next
+		msg_free(m)
+		m = next
+	}
+}
+
+// A message block for `len` body bytes and `count` handles, or nil.
+msg_alloc :: proc "contextless" (len, count: u32) -> ^Channel_Msg {
+	size := u64(size_of(Channel_Msg)) + u64(count) * size_of(Moved_Handle) + u64(len)
+	order := uint(0)
+	for (4096 << order) < size {
+		order += 1
+	}
+	pa := phys_alloc(order)
+	if pa == 0 {
+		return nil
+	}
+	m := cast(^Channel_Msg)phys_to_virt(pa)
+	m^ = {order = order, len = len, count = count}
+	return m
+}
+
+// Queues m for the reader of `to`, or hands it to the channel_call waiting
+// for it there. Called with the pair's lock held. Fails with SHOULD_WAIT when
+// the queue is full.
+@(private="file")
+channel_deliver :: proc "contextless" (to: ^Channel, m: ^Channel_Msg) -> vx.Status {
+	txid := msg_header(m).txid
+	if txid != 0 {
+		for link := &to.calls; link^ != nil; link = &link^.next {
+			w := link^
+			if w.txid != txid {
+				continue
+			}
+			link^ = w.next
+			w.reply = m
+			_ = thread_wake_token(w.thread, w, i64(vx.Status.Ok))
+			return .Ok
+		}
+	}
+	if to.count == CHANNEL_QUEUE_MESSAGES || to.bytes + u64(m.len) > CHANNEL_QUEUE_BYTES {
+		return .Err_Should_Wait
+	}
+	m.next = nil
+	if to.tail != nil {
+		to.tail.next = m
+	} else {
+		to.head = m
+	}
+	to.tail = m
+	to.count += 1
+	to.bytes += u64(m.len)
+	observers_fire(&to.obs, .Readable, u64(to.count))
+	return .Ok
+}
+
+// Sends a message the caller has filled in, handles included, to c's peer.
+// On success the message belongs to the channel; on failure to the caller.
+@(require_results)
+channel_write :: proc "contextless" (c: ^Channel, m: ^Channel_Msg) -> vx.Status {
+	msg_header(m).sender_intent = .Interactive
+	spin_lock(&c.pair.lock)
+	defer spin_unlock(&c.pair.lock)
+	peer := channel_peer(c)
+	return peer != nil ? channel_deliver(peer, m) : .Err_Peer_Closed
+}
+
+// Takes the next message if it fits caps of `cap` bytes and `count_cap`
+// handles; otherwise reports its size in need and leaves it queued.
+@(require_results)
+channel_read :: proc "contextless" (c: ^Channel, cap, count_cap: u32) -> (out: ^Channel_Msg, need: vx.Msg_Size, st: vx.Status) {
+	spin_lock(&c.pair.lock)
+	defer spin_unlock(&c.pair.lock)
+	m := c.head
+	if m == nil {
+		return nil, {}, channel_peer(c) != nil ? .Err_Should_Wait : .Err_Peer_Closed
+	}
+	need = {m.len, m.count}
+	if m.len > cap || m.count > count_cap {
+		return nil, need, .Err_Too_Small
+	}
+	c.head = m.next
+	if c.head == nil {
+		c.tail = nil
+	}
+	c.count -= 1
+	c.bytes -= u64(m.len)
+	return m, need, .Ok
+}
+
+// Writes a request with a kernel-picked txid and waits on c for the reply, or
+// the deadline. The reply is returned whole; the caller checks its size.
+// `sent` says whether the request went out: if so it belongs to the channel,
+// whatever happens next; if not it is still the caller's.
+@(require_results)
+channel_call :: proc "contextless" (c: ^Channel, request: ^Channel_Msg, deadline: Instant) -> (reply: ^Channel_Msg, sent: bool, st: vx.Status) {
+	t := this_cpu().current
+	w := Call_Wait{thread = t}
+	spin_lock(&c.pair.lock)
+	peer := channel_peer(c)
+	if peer == nil {
+		spin_unlock(&c.pair.lock)
+		return nil, false, .Err_Peer_Closed
+	}
+	w.txid = c.next_txid
+	c.next_txid += 1
+	if c.next_txid & 0x8000_0000 == 0 {
+		c.next_txid = 0x8000_0000
+	}
+	h := msg_header(request)
+	h.txid = w.txid
+	h.sender_intent = .Interactive
+	st = channel_deliver(peer, request)
+	if st == .Ok {
+		sent = true
+		t.wait_token = &w
+		w.next = c.calls
+		c.calls = &w
+	}
+	spin_unlock(&c.pair.lock)
+	if st != .Ok {
+		return nil, false, st
+	}
+
+	woke := thread_block(deadline, 0)
+	spin_lock(&c.pair.lock) // stop waiting, whatever woke us
+	for link := &c.calls; link^ != nil; link = &link^.next {
+		if link^ == &w {
+			link^ = w.next
+			break
+		}
+	}
+	spin_unlock(&c.pair.lock)
+	if w.reply != nil {
+		return w.reply, true, .Ok
+	}
+	return nil, true, woke == i64(vx.Status.Ok) ? .Err_Peer_Closed : vx.Status(woke)
+}
+
+// Attaches a READABLE or PEER_CLOSED binding, or fires it at once if it holds.
+@(require_results)
+channel_bind :: proc "contextless" (c: ^Channel, b: ^Binding) -> vx.Status {
+	if b.trigger != .Readable && b.trigger != .Peer_Closed {
+		return .Err_Invalid
+	}
+	spin_lock(&c.pair.lock)
+	defer spin_unlock(&c.pair.lock)
+	switch {
+	case b.trigger == .Readable && c.head != nil:
+		binding_fire(b, u64(c.count))
+	case b.trigger == .Peer_Closed && channel_peer(c) == nil:
+		binding_fire(b, 0)
+	case:
+		observers_add(&c.obs, b)
+	}
+	return .Ok
+}
+
+// The last reference to an end is gone: its peer sees PEER_CLOSED, and calls
+// waiting on the peer end fail.
+channel_destroy :: proc "contextless" (c: ^Channel) {
+	pair := c.pair
+	spin_lock(&pair.lock)
+	queued := c.head
+	bindings := c.obs.head
+	pair.ends[c.side] = nil
+	peer := channel_peer(c)
+	if peer != nil {
+		observers_fire(&peer.obs, .Peer_Closed, 0)
+		for w := peer.calls; w != nil; w = w.next {
+			_ = thread_wake_token(w.thread, w, i64(vx.Status.Err_Peer_Closed))
+		}
+		peer.calls = nil
+	}
+	spin_unlock(&pair.lock)
+	msg_list_free(queued)
+	observers_free(bindings)
+	pool_free(&channel_pool, c)
+	if peer == nil {
+		pool_free(&channel_pair_pool, pair)
+	}
+}

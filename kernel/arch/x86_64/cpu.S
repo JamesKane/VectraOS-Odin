@@ -171,6 +171,12 @@ vx_mfence:
     mfence
     ret
 
+    .globl vx_write_cr3
+    .type vx_write_cr3, @function
+vx_write_cr3:
+    movq %rdi, %cr3
+    ret
+
 // The caller's frame pointer: this procedure makes no frame of its own.
     .globl vx_frame_address
     .type vx_frame_address, @function

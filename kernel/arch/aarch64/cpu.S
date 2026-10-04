@@ -1,6 +1,7 @@
 // cpu.S (aarch64): instructions Odin has no way to say, one small procedure
 // each (ADR-0003: clang-assembled stubs, not Odin's asm blocks).
 
+    .arch armv8.1-a
     .text
 
 .macro READ name, reg
@@ -194,4 +195,36 @@ vx_clobber_vregs:
     .irp n, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
     movi v\n\().2d, #0xffffffffffffffff
     .endr
+    ret
+
+// (root: u64): the user half's tables in TTBR0, every cached translation
+// dropped (no ASIDs yet).
+    .globl vx_switch_user_root
+    .type vx_switch_user_root, %function
+vx_switch_user_root:
+    msr ttbr0_el1, x0
+    isb
+    tlbi vmalle1
+    dsb ish
+    isb
+    ret
+
+    .globl vx_write_icc_sgi1r
+    .type vx_write_icc_sgi1r, %function
+vx_write_icc_sgi1r:
+    msr icc_sgi1r_el1, x0
+    isb
+    ret
+
+// The kernel reaches user memory directly (syscall.odin's checked copies):
+// SCTLR_EL1.SPAN set, so taking an exception never sets PSTATE.PAN, and PAN
+// cleared now.
+    .globl vx_pan_off
+    .type vx_pan_off, %function
+vx_pan_off:
+    mrs x0, sctlr_el1
+    orr x0, x0, #(1 << 23)
+    msr sctlr_el1, x0
+    msr pan, #0
+    isb
     ret

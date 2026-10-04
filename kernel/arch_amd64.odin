@@ -27,6 +27,11 @@ foreign _ {
 	vx_frame_address :: proc "c" () -> u64 ---
 	vx_run_on_stack :: proc "c" (top: u64, fn: proc "c" () -> !) -> ! ---
 	vx_read_xcr0 :: proc "c" () -> u64 ---
+	vx_write_cr3 :: proc "c" (root: u64) ---
+	vx_context_switch :: proc "c" (save_sp: ^u64, load_sp: u64) ---
+	vx_enter_user :: proc "c" (entry, sp, arg, arg2, kstack_top: u64) -> ! ---
+	syscall_entry :: proc "c" () --- // entry.S: an address only
+	thread_trampoline :: proc "c" () --- // entry.S: an address only
 	vx_vreg_irq_test_avx :: proc "c" (input, output: ^[512]u8, fired: ^u64, target: u64) ---
 	vx_vreg_irq_test_sse :: proc "c" (input, output: ^[512]u8, fired: ^u64, target: u64) ---
 	vx_clobber_vregs_avx :: proc "c" () ---
@@ -186,6 +191,9 @@ idt: [256]Idt_Entry
 percpu_ready: bool // %gs holds this CPU's Cpu_Local
 
 MSR_EFER :: 0xc0000080
+MSR_STAR :: 0xc0000081
+MSR_LSTAR :: 0xc0000082
+MSR_FMASK :: 0xc0000084
 MSR_GS_BASE :: 0xc0000101
 MSR_KERNEL_GS_BASE :: 0xc0000102
 
@@ -247,7 +255,12 @@ simd_init :: proc "contextless" () {
 // the shared IDT (built by the boot CPU).
 arch_cpu_init :: proc "contextless" (index: u32) {
 	xc := &x86_cpus[index]
-	vx_wrmsr(MSR_EFER, vx_rdmsr(MSR_EFER) | 1 << 11) // NXE: the NX bit is honoured
+	// NXE: the NX bit is honoured. SCE: SYSCALL and SYSRET are enabled.
+	vx_wrmsr(MSR_EFER, vx_rdmsr(MSR_EFER) | 1 << 11 | 1 << 0)
+	// SYSCALL loads CS 0x08 and SS 0x10; returns go through IRETQ.
+	vx_wrmsr(MSR_STAR, u64(0x10) << 48 | u64(SEL_KERNEL_CODE) << 32)
+	vx_wrmsr(MSR_LSTAR, u64(uintptr(rawptr(syscall_entry))))
+	vx_wrmsr(MSR_FMASK, 0x47700) // clear TF, IF, DF, NT and AC on entry
 	xc.local.index = u64(index)
 	vx_wrmsr(MSR_GS_BASE, u64(uintptr(&xc.local)))
 	vx_wrmsr(MSR_KERNEL_GS_BASE, 0)
@@ -364,6 +377,30 @@ arch_kernel_mappings :: proc "contextless" (root: u64) {
 		}
 		top[i] = arch_pte_table(page)
 	}
+}
+
+// Every task's top table shares the kernel's upper half by copying its 256
+// upper entries (arch_kernel_mappings made them all).
+arch_new_user_root :: proc "contextless" () -> u64 {
+	root := phys_alloc_zeroed(0)
+	if root != 0 {
+		copy(table_at(root)[256:512], table_at(kernel_root)[256:512])
+	}
+	return root
+}
+
+// Loads a task's tables, or with root 0 (no task, as for the idle thread)
+// the kernel's.
+arch_switch_user_root :: proc "contextless" (root: u64) {
+	vx_write_cr3(root != 0 ? root : kernel_root)
+}
+
+arch_user_top_slots :: proc "contextless" () -> int {
+	return 256
+}
+
+arch_pte_user_ok :: proc "contextless" (e: u64, write: bool) -> bool {
+	return e & X86_PRESENT != 0 && e & X86_USER != 0 && (!write || e & X86_WRITE != 0)
 }
 
 arch_switch_tables :: proc "contextless" (root: u64) {
@@ -532,14 +569,72 @@ kput_exception :: proc "contextless" (f: ^Trap_Frame) {
 	}
 }
 
+@(private="file")
+VECTOR_RESCHED :: 0x21 // another CPU made a thread ready
+@(private="file")
+VECTOR_SYSCALL :: 0x100 // entry.S
+@(private="file")
+X2APIC_ICR :: 0x830
+
+// A fixed interrupt to one CPU by its x2APIC ID: one 64-bit write to the ICR.
+arch_send_resched :: proc "contextless" (c: ^Cpu) {
+	vx_wrmsr(X2APIC_ICR, c.arch_id << 32 | VECTOR_RESCHED)
+}
+
+// Where traps from user mode land: the TSS's for interrupts and exceptions,
+// the per-CPU block's for SYSCALL.
+arch_set_kernel_stack :: proc "contextless" (top: u64) {
+	xc := &x86_cpus[arch_cpu_index()]
+	xc.tss.rsp[0] = top
+	xc.local.kernel_rsp = top
+}
+
+// A new thread's stack, as the context switch will pop it: six callee-saved
+// registers (r12 carrying the thread), then a return into thread_trampoline.
+// It starts a page below the top, clear of the trap frame and XSAVE area
+// vx_enter_user builds there.
+arch_thread_initial_sp :: proc "contextless" (th: ^Thread) -> u64 {
+	sp := cast([^]u64)uintptr(thread_kstack_top(th) - 4096 - 7 * 8)
+	sp[3] = u64(uintptr(th)) // r12
+	sp[6] = u64(uintptr(rawptr(thread_trampoline))) // the return address
+	return u64(uintptr(sp))
+}
+
+arch_context_switch :: proc "contextless" (save_sp: ^u64, load_sp: u64) {
+	vx_context_switch(save_sp, load_sp)
+}
+
+// As if called (thread_start): a zero return address below sp. If it cannot
+// be written, the thread faults on its first use of its stack.
+arch_enter_user :: proc "contextless" (entry, sp, arg, arg2, kstack_top: u64) -> ! {
+	zero: u64
+	_ = copy_to_user(sp - 8, &zero, size_of(zero))
+	vx_enter_user(entry, sp - 8, arg, arg2, kstack_top)
+}
+
 @(export, link_name="x86_trap")
 x86_trap :: proc "c" (f: ^Trap_Frame) {
+	from_user := f.cs & 3 != 0
 	switch f.vector {
+	case VECTOR_SYSCALL:
+		f.rax = u64(syscall_dispatch(f.rax, {f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9}))
 	case VECTOR_TIMER:
 		vx_wrmsr(X2APIC_EOI, 0)
 		timer_interrupt()
+	case VECTOR_RESCHED:
+		vx_wrmsr(X2APIC_EOI, 0)
+		this_cpu().resched = true
 	case VECTOR_SPURIOUS:
+		return
 	case:
+		if from_user {
+			task_fault_start()
+			kput_exception(f)
+			kput(" at rip ")
+			kput_hex(f.rip)
+			kput("\n")
+			task_fault_exit()
+		}
 		panic_start()
 		if (f.vector == 8 || f.vector == 14) && kstack_in_guard(vx_read_cr2()) {
 			kput("kernel stack overflow: ") // a double fault: the page fault had nowhere to push its frame
@@ -548,6 +643,9 @@ x86_trap :: proc "c" (f: ^Trap_Frame) {
 		kput(" at rip ")
 		kput_hex(f.rip)
 		panic_end(f.rip, f.rbp)
+	}
+	if from_user {
+		user_return()
 	}
 }
 

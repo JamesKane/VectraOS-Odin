@@ -25,6 +25,10 @@ console_lock: Spinlock
 @(private="file")
 panicking: bool
 
+// A driver has the console's device (device.odin): from then on the kernel
+// writes to it only to report a panic.
+console_handed_off: bool
+
 kmesg: struct {
 	buf:     [16 * 1024]u8,
 	written: u64, // in all; the ring holds the last len(buf) bytes
@@ -36,7 +40,9 @@ console_emit :: proc "contextless" (s: string) {
 		kmesg.buf[kmesg.written % len(kmesg.buf)] = s[i]
 		kmesg.written += 1
 	}
-	arch_console_write(s)
+	if !console_handed_off || intrinsics.atomic_load_explicit(&panicking, .Relaxed) {
+		arch_console_write(s)
+	}
 }
 
 @(private="file")
@@ -57,6 +63,24 @@ kput :: proc "contextless" (s: string) {
 		if s[i] == '\n' || line.len == len(line.buf) {
 			console_flush()
 		}
+	}
+}
+
+// One debug_write call's bytes, into the writing thread's line buffer. User
+// threads can move between CPUs between two calls, so each has a buffer of
+// its own, and a line goes out whole when it ends (or fills the buffer).
+console_user_write :: proc "contextless" (s: string, buf: []u8, length: ^int) {
+	for i in 0 ..< len(s) {
+		buf[length^] = s[i]
+		length^ += 1
+		if s[i] != '\n' && length^ < len(buf) {
+			continue
+		}
+		spin_lock(&console_lock)
+		kput_stamp()
+		console_emit(string(buf[:length^]))
+		spin_unlock(&console_lock)
+		length^ = 0
 	}
 }
 

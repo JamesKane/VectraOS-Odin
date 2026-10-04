@@ -28,6 +28,7 @@ build_image :: proc(a: ^Arch, mode: Mode, image: string, cmdline := "") -> bool 
 	limine := port_load("limine") or_return
 	loader := build_port_target(&limine, a.limine) or_return
 	kernel := build_kernel(a, mode) or_return
+	build_programs(a, mode) or_return
 
 	config := "boot/limine.conf"
 	conf_text := read_file(config) or_return
@@ -40,6 +41,11 @@ build_image :: proc(a: ^Arch, mode: Mode, image: string, cmdline := "") -> bool 
 	seed = fnv(seed, read_file(loader) or_return)
 	seed = fnv(seed, read_file(kernel) or_return)
 	seed = fnv(seed, read_file(config) or_return)
+	for p in PROGRAMS {
+		if p.place == .Module {
+			seed = fnv(seed, read_file(program_path(a, mode, p.name)) or_return)
+		}
+	}
 
 	esp := fmt.tprintf("%s.esp", image)
 	write_file(esp, string(make([]u8, ESP_BYTES, context.temp_allocator))) or_return
@@ -49,6 +55,11 @@ build_image :: proc(a: ^Arch, mode: Mode, image: string, cmdline := "") -> bool 
 	mtools(MMD, esp, "::/EFI", "::/EFI/BOOT", "::/boot", "::/boot/vx", "::/boot/limine") or_return
 	mtools(MCOPY, esp, loader, fmt.tprintf("::/EFI/BOOT/%s", a.loader)) or_return
 	mtools(MCOPY, esp, kernel, "::/boot/vx/kernel.elf") or_return
+	for p in PROGRAMS {
+		if p.place == .Module {
+			mtools(MCOPY, esp, program_path(a, mode, p.name), fmt.tprintf("::/boot/vx/%s", p.name)) or_return
+		}
+	}
 	mtools(MCOPY, esp, config, "::/boot/limine/limine.conf") or_return
 	write_gpt_disk(image, esp, seed) or_return
 	_ = os.remove(esp)

@@ -87,7 +87,8 @@ main :: proc() {
 			for a in arches {
 				_, lok := build_port_target(&limine, a.limine)
 				_, kok := build_kernel(a, mode)
-				ok = ok && lok && kok
+				pok := kok && build_programs(a, mode)
+				ok = ok && lok && kok && pok
 			}
 		case "image":
 			for a in arches {

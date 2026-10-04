@@ -97,6 +97,67 @@ vx_run_on_stack:
     blr x1
     brk #0
 
+// vx_context_switch(save_sp: ^u64, load_sp: u64): saves the callee-saved
+// registers on this stack, switches stacks, and restores the other thread's.
+// AAPCS64 keeps d8-d15 across a call, and the kernel's Odin code uses vector
+// registers, so they are saved with x19-x30 (ADR-0004); user vector state is
+// in each thread's trap frame. A new thread's stack (arch_thread_initial_sp)
+// "returns" into thread_trampoline.
+    .globl vx_context_switch
+    .type vx_context_switch, %function
+vx_context_switch:
+    stp x19, x20, [sp, #-160]!
+    stp x21, x22, [sp, #16]
+    stp x23, x24, [sp, #32]
+    stp x25, x26, [sp, #48]
+    stp x27, x28, [sp, #64]
+    stp x29, x30, [sp, #80]
+    stp d8, d9, [sp, #96]
+    stp d10, d11, [sp, #112]
+    stp d12, d13, [sp, #128]
+    stp d14, d15, [sp, #144]
+    mov x9, sp
+    str x9, [x0]
+    mov sp, x1
+    ldp d8, d9, [sp, #96]
+    ldp d10, d11, [sp, #112]
+    ldp d12, d13, [sp, #128]
+    ldp d14, d15, [sp, #144]
+    ldp x21, x22, [sp, #16]
+    ldp x23, x24, [sp, #32]
+    ldp x25, x26, [sp, #48]
+    ldp x27, x28, [sp, #64]
+    ldp x29, x30, [sp, #80]
+    ldp x19, x20, [sp], #160
+    ret
+
+// A new thread's first stop: its thread pointer is in x19.
+    .globl thread_trampoline
+    .type thread_trampoline, %function
+thread_trampoline:
+    mov x0, x19
+    mov x29, xzr
+    bl thread_entry
+    brk #0
+
+// vx_enter_user(entry, sp, arg, arg2, kstack_top): EL0 at entry with
+// interrupts unmasked (SPSR 0: EL0t, DAIF clear), through a frame built at
+// the top of the thread's kernel stack, with every register and the vector
+// state zero.
+    .globl vx_enter_user
+    .type vx_enter_user, %function
+vx_enter_user:
+    sub x5, x4, #FRAME_SIZE
+    mov x6, x5
+1:  stp xzr, xzr, [x6], #16
+    cmp x6, x4
+    b.lo 1b
+    stp x2, x3, [x5, #0]   // x0, x1
+    str x0, [x5, #248]     // elr
+    str x1, [x5, #280]     // sp_el0
+    mov sp, x5
+    b trap_restore
+
 .macro ENTRY index
     .p2align 7
     sub sp, sp, #FRAME_SIZE

@@ -42,6 +42,7 @@ kernel_main :: proc "c" () -> ! {
 @(export, link_name="kernel_main_on_kstack")
 kernel_main_on_kstack :: proc "c" () -> ! {
 	arch_timer_init()
+	sched_enter_cpu()
 	smp_init()
 
 	online := intrinsics.atomic_load(&cpus_online)
@@ -51,9 +52,12 @@ kernel_main_on_kstack :: proc "c" () -> ! {
 	kput_u64(u64(online))
 	kput(online == 1 ? " cpu\n" : " cpus\n")
 
+	find_root_module()
 	reclaim_boot_memory() // every CPU is on the kernel's tables and stacks, and the responses are read
-	selftests() // after the reclaim, so the allocator tests cover that memory too
-	idle_loop()
+	selftests() // after the reclaim, so the allocator tests cover that memory too, and before
+	// the root task, so nothing else allocates while they count
+	start_root_task()
+	sched_idle_loop()
 }
 
 // Recurses until the kernel stack's guard page stops it: a frame a level,
