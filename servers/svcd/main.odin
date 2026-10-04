@@ -53,6 +53,7 @@ import "vx:memory"
 import "vx:ndb"
 import "vx:ns"
 import "vx:p9"
+import "vx:process"
 import "vx:rt"
 import "vx:str"
 import "vx:tar"
@@ -103,6 +104,7 @@ image: []u8
 image_vmo, port, resource, acpi_vmo: vx.Handle
 acpi_size: u64
 console_attached: bool
+procfs_started: bool // procfs serves /srv/proc: services are registered with it as they start
 randomness: drbg.Drbg // seeded from the kernel's entropy; each service that asks gets a seed from it
 
 name_of :: proc "contextless" (s: ^Service) -> string {
@@ -408,6 +410,7 @@ start :: proc "contextless" (index: int) -> vx.Status {
 	}
 	srv, _ := ndb.get(&rec, "post")
 	posts_console := srv == "cons" // decided now: rec moves on to the records below
+	posts_proc := srv == "proc"
 	if srv != "" {
 		p := find_post(srv)
 		if p == nil {
@@ -500,10 +503,30 @@ start :: proc "contextless" (index: int) -> vx.Status {
 		handles      = g.handles[:],
 		handle_names = g.names[:],
 		records      = ndb.written(&w),
+		// Registered with procfs before it runs (ADR-0011): in a session and
+		// note group of its own, as Plan 9's daemons run (RFNOTEG), so a note
+		// to one group never reaches the rest of the system; svcd watches its
+		// end itself, so it leaves no wait record. procfs itself, and what
+		// started before it, are registered below, once procfs serves.
+		proc_flags   = PROC_FLAGS,
+	}
+	if procfs_started && !posts_proc {
+		a.proc_conn = find_post("proc").client
 	}
 	given = true
 	s.task = rt.spawn_elf(&a) or_return
 	rt.port_bind(port, s.task, .Exit, u64(index)) or_return
+	if posts_proc { // procfs serves now: it learns of every service already running, itself among them
+		procfs_started = true
+		for &x in services {
+			if x.task == vx.HANDLE_NONE {
+				continue
+			}
+			if _, reg := rt.proc_register(find_post("proc").client, x.task, PROC_FLAGS); reg != .Ok && reg != .Err_Exists {
+				cannot("cannot register ", &x, reg)
+			}
+		}
+	}
 	info, _ := rt.task_info(s.task)
 	if posts_console && !console_attached && cons != nil {
 		c, dst := rt.handle_dup(cons.client, CONNECTOR_RIGHTS)
@@ -512,6 +535,9 @@ start :: proc "contextless" (index: int) -> vx.Status {
 	say("started ", name_of(s), " (task ", info.id, ")\n")
 	return .Ok
 }
+
+// How every service is registered with procfs.
+PROC_FLAGS :: process.Flags{.No_Wait, .Set_Sid}
 
 cannot :: proc "contextless" (what: string, s: ^Service, st: vx.Status) {
 	say(what, name_of(s), ": ", p9.error_text(st), "\n")

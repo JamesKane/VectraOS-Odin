@@ -18,10 +18,8 @@
 //   zones     gives procfs a profiling ring, then times a zone of work every
 //             few milliseconds, for ever (05 §9)
 //
-// Upstream's spawn registers a child with procfs between building it and
-// starting its thread (vx_spawn_args.proc). Until vx:rt's spawn_elf does, the
-// parent registers each child just after spawn_elf returns, and a child waits
-// to see itself in /proc before it does anything, so it cannot end first.
+// spawn_elf registers each child with procfs between building it and
+// starting its thread (Spawn_Args.proc_conn), so a child cannot end first.
 package proctest
 
 import "base:intrinsics"
@@ -101,31 +99,6 @@ number :: proc "contextless" (buf: []u8) -> u64 {
 image: [1 << 20]u8
 image_size: int
 
-// Registers task with procfs as a child of this process (vx:process), as
-// upstream's vx_proc_register does; the task stays the caller's.
-register :: proc "contextless" (task: vx.Handle) -> (pid: u64, st: vx.Status) {
-	dup := rt.handle_dup(task, vx.RIGHTS_SAME) or_return
-	req := process.Msg {
-		header = {ordinal = process.REGISTER},
-		arg = {i64(me), 0, 0},
-	}
-	rep: process.Msg
-	c := vx.Call {
-		wr_bytes   = &req,
-		wr_len     = size_of(req),
-		wr_handles = &dup,
-		wr_count   = 1,
-		rd_bytes   = &rep,
-		rd_cap     = size_of(rep),
-	}
-	rt.channel_call(ns.connector(&space, "/proc"), &c, rt.clock_read() + 2_000_000_000) or_return
-	if c.actual.bytes < size_of(rep) {
-		return 0, .Err_Invalid
-	}
-	process.reply_status(&rep) or_return
-	return u64(rep.arg[0]), .Ok
-}
-
 // Spawns a copy of this program as a child, registered with procfs, in mode
 // `what`. Returns its pid, or 0.
 spawn :: proc "contextless" (what: string) -> u64 {
@@ -145,25 +118,30 @@ spawn :: proc "contextless" (what: string) -> u64 {
 			count += 1
 		}
 	}
+	pid: u64
 	a := rt.Spawn_Args {
 		name         = "proctest",
 		image        = image[:image_size],
 		handles      = handles[:count],
 		handle_names = names[:count],
 		records      = ndb.written(&rec),
+		proc_conn    = ns.connector(&space, "/proc"), // registered before it runs
+		registered   = note_pid,
+		ctx          = &pid,
 	}
 	task: vx.Handle
 	task, st = rt.spawn_elf(&a)
 	if st != .Ok {
 		return 0
 	}
-	defer _ = rt.handle_close(task) // procfs watches it; this test waits through /proc
-	pid, rst := register(task)
-	if rst != .Ok {
-		_ = rt.task_kill(task, "cannot register")
-		return 0
-	}
+	_ = rt.handle_close(task) // procfs watches it; this test waits through /proc
 	return pid
+}
+
+// spawn_elf's registered: the child's pid, from procfs.
+note_pid :: proc "contextless" (ctx: rawptr, pid: u64) -> vx.Status {
+	(^u64)(ctx)^ = pid
+	return .Ok
 }
 
 // The next wait record, into buf; its length, or a status.
@@ -200,20 +178,7 @@ work := prof.Zone {
 	name = "work",
 }
 
-// A child waits until its parent has registered it (see the top of the file).
-await_registration :: proc "contextless" () {
-	info, _ := rt.task_info(rt.self)
-	buf: [24]u8
-	for _ in 0 ..< 2000 {
-		if _, st := read_file(info.id, "ppid", buf[:]); st == .Ok {
-			return
-		}
-		nap(1)
-	}
-}
-
 child :: proc "contextless" (mode: string) -> ! {
-	await_registration()
 	switch mode {
 	case "loop":
 		for i in u64(0) ..< 20 {
