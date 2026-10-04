@@ -64,6 +64,10 @@ errno_of :: proc "contextless" (st: vx.Status) -> int {
 		return fail(.EINTR)
 	case .Err_No_Child:
 		return fail(.ECHILD)
+	case .Err_Io:
+		return fail(.EIO)
+	case .Err_No_Space:
+		return fail(.ENOSPC)
 	case .Err_Not_Found:
 		return fail(.ENOENT)
 	case .Err_Exists:
@@ -220,7 +224,11 @@ dispatch :: proc "contextless" (n, a1, a2, a3, a4, a5, a6: int) -> int {
 		return mem_remap(uintptr(a1), uint(a2), uint(a3), int(i32(a4)))
 	case .mprotect:
 		return mem_protect()
-	case .madvise, // advice
+	// Mapped files' writes reach fsd's page cache at once, and the volume
+	// within 10 s or at the file's next fsync: msync has nothing to start,
+	// and MS_SYNC does not yet wait (upstream's docs/milestones.md).
+	case .msync,
+	     .madvise, // advice
 	     .brk: // no break: musl's malloc maps instead
 		return 0
 

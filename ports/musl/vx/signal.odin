@@ -261,6 +261,8 @@ sig_note :: proc "contextless" (e: ^vx.Exception, text: string) -> rt.Noted {
 	#partial switch e.kind {
 	case .Alignment:
 		sig, code = linux.SIGBUS, linux.BUS_ADRALN
+	case .Pager_Timeout: // a mapped file's page that did not come
+		sig, code = linux.SIGBUS, linux.BUS_ADRERR
 	case .Illegal, .Fp_Disabled:
 		sig, code = linux.SIGILL, linux.ILL_ILLOPC
 	case .Arithmetic:

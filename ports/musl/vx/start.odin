@@ -198,17 +198,27 @@ proc_set_tls :: proc "contextless" (p: u64) -> int {
 
 // --- Time ---
 //
-// Every clock is the kernel's: nanoseconds since boot. There is no wall
-// clock yet, so CLOCK_REALTIME starts in 1970 (a known gap), and the
-// CPU-time clocks are the same clock.
+// Every clock is the kernel's monotonic one, in nanoseconds since boot; the
+// realtime clocks add the kernel's UTC offset (upstream ADR-0031), which is
+// 0 until a clock driver has set it (no RTC: 1970, as before). The CPU-time
+// clocks are the monotonic clock too.
 
 NS_PER_SEC :: 1_000_000_000
 
+@(private="file")
+time_is_utc :: proc "contextless" (clock: int) -> bool {
+	switch clock {
+	case linux.CLOCK_REALTIME, linux.CLOCK_REALTIME_COARSE, linux.CLOCK_REALTIME_ALARM, linux.CLOCK_TAI:
+		return true
+	}
+	return false
+}
+
 time_get :: proc "contextless" (clock: int, ts: ^linux.Timespec) -> int {
-	if clock < 0 || clock > linux.CLOCK_BOOTTIME_ALARM {
+	if clock < 0 || clock > linux.CLOCK_TAI {
 		return fail(.EINVAL)
 	}
-	now := rt.clock_read()
+	now := max(time_is_utc(clock) ? rt.clock_utc() : rt.clock_read(), 0)
 	ts^ = {now / NS_PER_SEC, now % NS_PER_SEC}
 	return 0
 }
@@ -239,7 +249,7 @@ time_deadline :: proc "contextless" (ts: ^linux.Timespec, absolute: bool) -> (vx
 // left in rem; made again after the signal (signal.odin), it keeps its
 // deadline.
 time_sleep :: proc "contextless" (clock: int, flags: int, req: ^linux.Timespec, rem: ^linux.Timespec) -> int {
-	if clock < 0 || clock > linux.CLOCK_BOOTTIME_ALARM {
+	if clock < 0 || clock > linux.CLOCK_TAI {
 		return fail(.EINVAL)
 	}
 	absolute := flags & linux.TIMER_ABSTIME != 0
@@ -247,6 +257,9 @@ time_sleep :: proc "contextless" (clock: int, flags: int, req: ^linux.Timespec, 
 		d, e := time_deadline(req, absolute)
 		if e < 0 {
 			return e
+		}
+		if absolute && time_is_utc(clock) && d != vx.INFINITE {
+			d -= rt.clock_utc() - i64(rt.clock_read()) // a time of day: on the monotonic clock
 		}
 		sig_call_deadline = d
 	}
