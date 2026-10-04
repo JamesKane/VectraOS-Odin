@@ -17,11 +17,16 @@ import "vx:ndb"
 // records are typed into the serial port once every expect= before them has
 // matched; send= then presses return.
 
+Expect_Kind :: enum {
+	Contains, // expect=: part of a line
+	Line, // line=: the whole line
+	Prompt, // prompt=: it has started a line since the last thing typed
+}
+
 Expect :: struct {
-	text:   string,
-	whole:  bool, // from line=: the whole line must be it
-	prompt: bool, // from prompt=: it has started a line since the last thing typed
-	input:  string, // typed once every expect before this one has matched
+	text:  string,
+	kind:  Expect_Kind,
+	input: string, // typed once every expect before this one has matched
 }
 
 Scenario :: struct {
@@ -78,9 +83,9 @@ load_scenario :: proc(name: string, a: ^Arch) -> (sc: Scenario, ok: bool) {
 			pending = ""
 			switch {
 			case ndb.has(rec, "line"):
-				e.text, e.whole = val(rec, "line"), true
+				e.text, e.kind = val(rec, "line"), .Line
 			case ndb.has(rec, "prompt"):
-				e.text, e.prompt = val(rec, "prompt"), true
+				e.text, e.kind = val(rec, "prompt"), .Prompt
 			case:
 				e.text = val(rec, "expect")
 			}
@@ -131,42 +136,48 @@ run_scenario :: proc(a: ^Arch, mode: Mode, name: string) -> bool {
 	}
 	defer os.close(log)
 
-	out_r, out_w, e1 := os.pipe()
-	keys_r, keys_w, e2 := os.pipe()
-	if e1 != nil || e2 != nil {
+	out_r, out_w, perr := os.pipe()
+	if perr != nil {
 		fmt.eprintln("build: pipe failed")
 		return false
 	}
+	defer os.close(out_r)
+	keys_r, keys_w, kerr := os.pipe()
+	if kerr != nil {
+		os.close(out_w)
+		fmt.eprintln("build: pipe failed")
+		return false
+	}
+	defer os.close(keys_w)
 	cmd := qemu_cmd(a, image, {test = true})
 	if verbose {
 		print_cmd(cmd, "")
 	}
-	qemu, perr := os.process_start({command = cmd, stdout = out_w, stderr = out_w, stdin = keys_r})
+	// The child's ends close once it has them.
+	qemu, serr := os.process_start({command = cmd, stdout = out_w, stderr = out_w, stdin = keys_r})
 	os.close(out_w)
 	os.close(keys_r)
-	if perr != nil {
-		fmt.eprintfln("build: cannot run %s: %v", cmd[0], perr)
+	if serr != nil {
+		fmt.eprintfln("build: cannot run %s: %v", cmd[0], serr)
 		return false
 	}
 
-	verdict := match_output(&sc, out_r, keys_w, log)
+	why, passed := match_output(&sc, out_r, keys_w, log)
 	_ = os.process_kill(qemu)
 	_, _ = os.process_wait(qemu)
-	os.close(out_r)
-	os.close(keys_w)
 
-	if verdict == "ok" {
+	if passed {
 		fmt.eprintfln("%s ok", label)
 		return true
 	}
-	fmt.eprintfln("%s FAILED: %s (log: %s)", label, verdict, log_path)
+	fmt.eprintfln("%s FAILED: %s (log: %s)", label, why, log_path)
 	return false
 }
 
 // Reads QEMU's serial output, typing and matching as the scenario says.
-// Returns "ok" or why not.
+// Returns whether every expect matched, and if not, why not.
 @(private="file")
-match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File) -> string {
+match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File) -> (why: string, ok: bool) {
 	start := time.tick_now()
 	next, typed := 0, -1 // expects[typed].input has been typed
 	line := strings.builder_make(context.temp_allocator)
@@ -182,7 +193,7 @@ match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File
 	for {
 		if typed < next && sc.expects[next].input != "" {
 			if _, err := os.write(keys, transmute([]u8)sc.expects[next].input); err != nil {
-				return "cannot type into QEMU (it has exited?)"
+				return "cannot type into QEMU (it has exited?)", false
 			}
 			typed = next
 			clear(&since)
@@ -192,11 +203,11 @@ match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File
 		if pos == n { // all looked at: read more
 			left := sc.timeout - time.duration_seconds(time.tick_since(start))
 			if left <= 0 {
-				return fmt.tprintf("timed out waiting for %q", sc.expects[next].text)
+				return fmt.tprintf("timed out waiting for %q", sc.expects[next].text), false
 			}
 			has, herr := os.pipe_has_data(out)
 			if herr != nil {
-				return "QEMU exited"
+				return "QEMU exited", false
 			}
 			if !has {
 				time.sleep(2 * time.Millisecond)
@@ -204,7 +215,7 @@ match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File
 			}
 			got, rerr := os.read(out, buf[:])
 			if rerr != nil || got <= 0 {
-				return "QEMU exited"
+				return "QEMU exited", false
 			}
 			n, pos = got, 0
 			_, _ = os.write(log, buf[:n])
@@ -232,18 +243,25 @@ match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File
 				}
 				continue
 			}
-			text := strings.clone(strings.to_string(line), context.temp_allocator)
-			strings.builder_reset(&line)
+			text := strings.to_string(line)
 			for f in sc.fails {
 				if strings.contains(text, f) {
-					return fmt.tprintf("failure line: %s", text)
+					return fmt.tprintf("failure line: %s", text), false
 				}
 			}
-			e := &sc.expects[next]
-			if !e.prompt && (e.whole ? text == e.text : strings.contains(text, e.text)) {
+			matched := false
+			switch e := sc.expects[next]; e.kind {
+			case .Contains:
+				matched = strings.contains(text, e.text)
+			case .Line:
+				matched = text == e.text
+			case .Prompt: // matched below, against all output since the last typing
+			}
+			strings.builder_reset(&line)
+			if matched {
 				next += 1
 				if next == len(sc.expects) {
-					return "ok"
+					return "", true
 				}
 				if sc.expects[next].input != "" && typed < next {
 					advanced = true
@@ -257,21 +275,16 @@ match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File
 		// A prompt has no newline after it, and may share its line with other
 		// programs' output: it counts if it started any line since the last
 		// thing typed.
-		if next < len(sc.expects) && sc.expects[next].prompt {
+		if next < len(sc.expects) && sc.expects[next].kind == .Prompt {
 			p := sc.expects[next].text
 			s := string(since[:])
-			for at := 0; at + len(p) <= len(s); at += 1 {
-				line_start := at > 0 ? s[at - 1] == '\n' : !since_cut
-				if !line_start || s[at:at + len(p)] != p {
-					continue
-				}
+			if (!since_cut && strings.has_prefix(s, p)) || strings.contains(s, fmt.tprintf("\n%s", p)) {
 				clear(&since) // used: the next prompt= needs a prompt after this one
 				since_cut = false
 				next += 1
 				if next == len(sc.expects) {
-					return "ok"
+					return "", true
 				}
-				break
 			}
 		}
 	}
