@@ -52,7 +52,7 @@ Mapping :: struct {
 TASK_MAX_MAPPINGS :: PAGE_SIZE / size_of(Mapping)
 
 // A task's lock covers its handle table, its address space, its threads and
-// its life (state, exit status, bindings on its exit).
+// its life (state, exit string, bindings on its exit) and where its faults go.
 Task :: struct {
 	using obj:       Object,
 	lock:            Spinlock,

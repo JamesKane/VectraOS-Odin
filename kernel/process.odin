@@ -6,17 +6,17 @@ import vx "abi:vx"
 //
 // A task runs while it has live threads. When the last one exits, or the
 // task is killed, the task is .Exited: its handles are closed, its mappings
-// dropped and its page tables freed, and its EXIT bindings fire with its exit
-// status. The task object itself lives on while anything holds a handle to
-// it, so its status can still be read.
+// dropped and its page tables freed, and its EXIT bindings fire with the
+// length of its exit string (ADR-0010). The task object itself lives on while
+// anything holds a handle to it, so its exit string can still be read.
 //
 // A thread cannot free the kernel stack it runs on, so a dead thread is
 // reaped by the next thread to run on its CPU (sched.odin), and the teardown
 // of a task whose last thread died happens there too. By then that CPU has
 // left the task's address space, as every CPU that ran its threads already has.
 //
-// Killing marks the task and kicks its threads (sched_kick_for_kill). Each
-// one exits the next time it heads back to user mode (user_return).
+// Killing marks the task and kicks its threads (sched_kick). Each one exits
+// the next time it heads back to user mode (user_return).
 
 
 @(require_results)
