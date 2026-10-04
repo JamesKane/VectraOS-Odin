@@ -20,8 +20,14 @@ take :: proc "contextless" (p: []u8) {
 	}
 }
 
+// The program ends with run's exit string, as upstream's programs return
+// theirs: empty for success (ADR-0010).
 @(export, link_name="vx_main")
 vx_main :: proc() -> int {
+	rt.exits(run())
+}
+
+run :: proc() -> string {
 	args := rt.args()
 	lines := u64(10)
 	if len(args) > 0 && len(args[0]) > 1 && args[0][0] == '-' {
@@ -29,8 +35,8 @@ vx_main :: proc() -> int {
 		// The digits stop being taken once they make more than 100000, so
 		// the largest count is 1000009.
 		if !ok || n / 10 > 100_000 {
-			rt.print("usage: tail [-N] [file]\n")
-			return 1
+			rt.eprint("usage: tail [-N] [file]\n")
+			return "usage"
 		}
 		lines = n
 		args = args[1:]
@@ -38,8 +44,8 @@ vx_main :: proc() -> int {
 	if len(args) > 0 {
 		f: ns.File
 		if procns.from_spawn(&space) != .Ok || ns.open(&space, args[0], p9.OREAD, &f) != .Ok {
-			rt.print("tail: cannot open it\n")
-			return 1
+			rt.eprint("tail: cannot open it\n")
+			return "cannot open"
 		}
 		for {
 			n, _ := ns.read(&f, buf[:])
@@ -77,5 +83,5 @@ vx_main :: proc() -> int {
 	count := int(total - start)
 	first := min(count, len(text) - from)
 	rt.print(string(text[from:][:first]), string(text[:count - first]))
-	return 0
+	return ""
 }
