@@ -9,6 +9,15 @@
 // A driver manifest:
 //
 //   match=pci vendor=0x1af4 device=0x1041 program=/boot/bin/drv-virtio-net post=ether0 msi=2
+//   match=pci vendor=0x1af4 device=0x1042 program=/boot/bin/drv-virtio-blk post=disk# msi=1
+//   match=pci class=0x010802 program=/boot/bin/drv-nvme post=disk# msi=8
+//
+// A match names a vendor and device, or a class (a standard interface:
+// NVMe's, whoever makes the controller). A post ending in # is numbered: the
+// matches of every record with that prefix get disk0, disk1, ..., in the
+// order the functions were found. Each driver is told which start it is
+// (start=1, then 2 after a restart) and, in a cmdline= record, the kernel
+// command line, whose PROGRAM.KEY=VALUE words are its options.
 //
 // svcd gives it the root Resource, the ACPI tables, a namespace with the boot
 // image at /, and the claims. Configuration space is mapped one bus (1 MiB)
@@ -36,6 +45,7 @@ Function :: struct {
 	config_pa: u64, // its 4 KiB of configuration space
 	vendor:    u16,
 	device:    u16,
+	class:     u32, // class, subclass and programming interface: 0x010802, an NVMe controller
 }
 
 functions: [dynamic; 64]Function
@@ -103,7 +113,7 @@ scan_bus :: proc "contextless" (e: ^acpi.Ecam, bus: u8) {
 			device := pci.read16(&f, 0x02)
 			found += 1
 			if header & 0x7f == 0 {
-				_ = append(&functions, Function{fn = f, config_pa = e.base + (u64(bus) << 20 | u64(offset)), vendor = vendor, device = device}) // past 64, unmatched
+				_ = append(&functions, Function{fn = f, config_pa = e.base + (u64(bus) << 20 | u64(offset)), vendor = vendor, device = device, class = class}) // past 64, unmatched
 			}
 			rt.print("devmgr: ")
 			print_hex(u64(bus), 2)
@@ -156,12 +166,13 @@ scan_bus :: proc "contextless" (e: ^acpi.Ecam, bus: u8) {
 MAX_DRIVERS :: 16
 MAX_STARTS :: 5
 MAX_PROGRAM :: 63
-MAX_POST :: 25
+MAX_POST :: 25 // in a manifest; a numbered one's digits may take it to 31
 
 Driver :: struct {
 	f:       ^Function,
 	program: [dynamic; MAX_PROGRAM]u8,
-	post:    [dynamic; MAX_POST]u8,
+	post:    [dynamic; 31]u8,
+	prefix:  int, // a numbered post's (disk# is "disk"): its length; 0 if not numbered
 	msis:    u32,
 	listen:  vx.Handle, // the post's server end; each start gets a duplicate
 	dma:     vx.Handle, // the function's DMA domain, which each start gets a duplicate of
@@ -273,6 +284,12 @@ start_driver :: proc "contextless" (index: int) -> vx.Status {
 			_ = grant(&g, "console", h, st) // without one, it says nothing
 		}
 	}
+	ndb.put_u64(&w, "start", u64(d.starts) + 1) // which start this is: 1, then 2 after a restart
+	_ = ndb.end(&w)
+	if rt.spawn.cmdline != "" { // a driver's options: PROGRAM.KEY=VALUE words, its to read
+		ndb.put(&w, "cmdline", rt.spawn.cmdline)
+		_ = ndb.end(&w)
+	}
 	size := read_whole(program_of(d), image[:])
 	if size == 0 {
 		return .Err_Not_Found
@@ -297,6 +314,36 @@ start_driver :: proc "contextless" (index: int) -> vx.Status {
 	return .Ok
 }
 
+never: u32 // what a pause waits on: nothing wakes it
+
+// A function-level reset (PCIe's FLR), where the function has one: whatever
+// the dead driver left it doing is stopped. The configuration header is
+// saved and put back after, since the reset clears the BARs; bus mastering
+// stays off for the next driver to turn on.
+reset_function :: proc "contextless" (f: ^pci.Function) {
+	PCI_EXPRESS :: 0x10
+	DEVCAP_FLR :: 1 << 28 // Device Capabilities: Function Level Reset
+	INITIATE_FLR :: 1 << 15 // Device Control
+	BUS_MASTER :: 1 << 2
+	at := u32(pci.cap(f, PCI_EXPRESS, 0))
+	if at == 0 || pci.read32(f, at + 4) & DEVCAP_FLR == 0 {
+		return
+	}
+	saved: [16]u32
+	for &v, i in saved {
+		v = pci.read32(f, 4 * u32(i))
+	}
+	control := pci.read16(f, at + 8)
+	pci.write16(f, at + 8, control | INITIATE_FLR)
+	_ = rt.futex_wait(&never, 0, rt.clock_read() + 100_000_000) // 100 ms, as PCIe asks
+	for i in u32(4) ..< 10 { // the BARs
+		pci.write32(f, 4 * i, saved[i])
+	}
+	pci.write32(f, 0x3c, saved[15])
+	pci.write16(f, 0x04, u16(saved[1]) &~ BUS_MASTER) // decoding on, mastering off
+	say("reset the function (FLR)\n")
+}
+
 driver_exited :: proc "contextless" (index: int) {
 	d := &drivers[index]
 	// The device may still hold addresses of the dead driver's DMA memory:
@@ -308,10 +355,13 @@ driver_exited :: proc "contextless" (index: int) {
 	command := pci.read16(&d.f.fn, 0x04)
 	pci.write16(&d.f.fn, 0x04, command &~ BUS_MASTER)
 	_ = pci.read16(&d.f.fn, 0x04) // the write has reached the device
+	reset_function(&d.f.fn)
 	_, _ = rt.dma_domain_op(d.dma, .Quiesced)
+	info, ist := rt.task_info(d.task)
+	why := ist == .Ok ? vx.exit_string(&info) : "?"
 	_ = rt.handle_close(d.task)
 	d.task = vx.HANDLE_NONE
-	say(program_of(d), " exited\n")
+	say(program_of(d), " exited", why != "" ? ": " : "", why, "\n")
 	if d.starts >= MAX_STARTS {
 		say(program_of(d), " keeps exiting; it is not started again\n")
 		return
@@ -321,36 +371,64 @@ driver_exited :: proc "contextless" (index: int) {
 	}
 }
 
-// Starts a driver for each function this manifest record matches.
+// Adds a driver for each function this manifest record matches; they are
+// started once every manifest has been read (start_drivers).
 match_record :: proc "contextless" (rec: ^ndb.Record) {
 	vendor, vok := ndb.get_u64(rec, "vendor")
 	device, dok := ndb.get_u64(rec, "device")
+	by_id := vok && dok
+	class, by_class := ndb.get_u64(rec, "class")
+	by_class = !by_id && by_class
 	program, _ := ndb.get(rec, "program")
 	post, _ := ndb.get(rec, "post")
-	if !ndb.has(rec, "match") || !vok || !dok || program == "" || len(program) > MAX_PROGRAM || len(post) > MAX_POST {
+	if !ndb.has(rec, "match") || (!by_id && !by_class) || program == "" || len(program) > MAX_PROGRAM || len(post) > MAX_POST {
 		return
 	}
 	msis, _ := ndb.get_u64(rec, "msi")
+	numbered := str.has_suffix(post, "#")
 	for &f in functions {
 		if len(drivers) == MAX_DRIVERS {
 			return
 		}
-		if u64(f.vendor) != vendor || u64(f.device) != device {
+		if by_id ? u64(f.vendor) != vendor || u64(f.device) != device : u64(f.class) != class {
 			continue
 		}
-		claim_buf: [len("claim:") + MAX_POST]u8
+		d := Driver{f = &f, msis = u32(msis)}
+		_ = append(&d.program, program) // both fit: checked above
+		_ = append(&d.post, post)
+		if numbered {
+			d.prefix = len(post) - 1
+			resize(&d.post, d.prefix)
+		}
+		_ = append(&drivers, d)
+	}
+}
+
+// Numbered posts in bus order, whichever drivers serve them: disk0 is the
+// first disk found, virtio or NVMe; then each driver claims its post and is
+// started.
+start_drivers :: proc "contextless" () {
+	for &d, k in drivers {
+		if d.prefix != 0 { // disk# is disk0, disk1, ...
+			v: u64
+			for &o in drivers {
+				if o.prefix == d.prefix && string(o.post[:o.prefix]) == string(d.post[:d.prefix]) && uintptr(o.f) < uintptr(d.f) {
+					v += 1
+				}
+			}
+			digits: [20]u8
+			_ = append(&d.post, str.format_u64(digits[:], v))
+		}
+		post := string(d.post[:])
+		claim_buf: [len("claim:") + 31]u8
 		claim, _ := str.join(claim_buf[:], "claim:", post)
-		listen := rt.spawn_take(claim) // one device to a post: the first match takes it
-		if listen == vx.HANDLE_NONE {
+		d.listen = rt.spawn_take(claim) // one device to a post: the first match takes it
+		if d.listen == vx.HANDLE_NONE {
 			say("no claim on /srv/", post, " for its driver\n")
 			continue
 		}
-		d := Driver{f = &f, msis = u32(msis), listen = listen}
-		_ = append(&d.program, program) // both fit: checked above
-		_ = append(&d.post, post)
-		_ = append(&drivers, d)
-		if start_driver(len(drivers) - 1) != .Ok {
-			say("cannot start ", program, "\n")
+		if start_driver(k) != .Ok {
+			say("cannot start ", program_of(&d), "\n")
 		}
 	}
 }
@@ -386,6 +464,7 @@ match_drivers :: proc "contextless" () {
 			}
 		}
 	}
+	start_drivers()
 }
 
 @(export, link_name="vx_main")

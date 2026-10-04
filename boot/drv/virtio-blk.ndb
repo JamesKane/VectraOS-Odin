@@ -1,0 +1,5 @@
+# boot/drv/virtio-blk.ndb: the virtio block device (modern, 1af4:1042), whose
+# driver serves the block class (docs/proto/block.md) on /srv/disk0,
+# /srv/disk1, ..., in the order the devices are found (docs/11 §10).
+
+match=pci vendor=0x1af4 device=0x1042 program=/boot/bin/drv-virtio-blk post=disk# msi=1

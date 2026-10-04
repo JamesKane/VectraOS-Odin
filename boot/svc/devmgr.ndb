@@ -3,6 +3,10 @@
 # drivers from the boot image (/boot/drv/*.ndb), giving each the post it
 # serves.
 
-service=devmgr program=/boot/bin/devmgr resource acpi console restart
+service=devmgr program=/boot/bin/devmgr resource acpi console cmdline restart
 mount=/ srv=bootfs
 claim=ether0
+claim=disk0
+claim=disk1
+claim=disk2
+claim=disk3
