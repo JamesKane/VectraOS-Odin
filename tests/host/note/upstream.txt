@@ -1,0 +1,61 @@
+trap 0 0 sys: trap: general fault pc=0x0
+trap 0 1 sys: trap: general fault pc=0x0
+trap 0 2 sys: trap: general fault pc=0x0
+trap 0 3 sys: trap: general fault pc=0x0
+trap 1 0 sys: trap: fault read addr=0xdeadbeef000 pc=0x401000
+trap 1 1 sys: trap: fault write addr=0xdeadbeef001 pc=0x401000
+trap 1 2 sys: trap: fault exec addr=0xdeadbeef002 pc=0x401000
+trap 1 3 sys: trap: fault read addr=0xdeadbeef003 pc=0x401000
+trap 2 0 sys: trap: illegal instruction pc=0x802000
+trap 2 1 sys: trap: illegal instruction pc=0x802000
+trap 2 2 sys: trap: illegal instruction pc=0x802000
+trap 2 3 sys: trap: illegal instruction pc=0x802000
+trap 3 0 sys: breakpoint pc=0xc03000
+trap 3 1 sys: breakpoint pc=0xc03000
+trap 3 2 sys: breakpoint pc=0xc03000
+trap 3 3 sys: breakpoint pc=0xc03000
+trap 4 0 sys: trap: arithmetic pc=0x1004000
+trap 4 1 sys: trap: arithmetic pc=0x1004000
+trap 4 2 sys: trap: arithmetic pc=0x1004000
+trap 4 3 sys: trap: arithmetic pc=0x1004000
+trap 5 0 sys: trap: misaligned addr=0xdeadbeef000 pc=0x1405000
+trap 5 1 sys: trap: misaligned addr=0xdeadbeef001 pc=0x1405000
+trap 5 2 sys: trap: misaligned addr=0xdeadbeef002 pc=0x1405000
+trap 5 3 sys: trap: misaligned addr=0xdeadbeef003 pc=0x1405000
+trap 6 0 sys: trap: fp disabled pc=0x1806000
+trap 6 1 sys: trap: fp disabled pc=0x1806000
+trap 6 2 sys: trap: fp disabled pc=0x1806000
+trap 6 3 sys: trap: fp disabled pc=0x1806000
+trap 7 0 sys: trap: general fault pc=0x1c07000
+trap 7 1 sys: trap: general fault pc=0x1c07000
+trap 7 2 sys: trap: general fault pc=0x1c07000
+trap 7 3 sys: trap: general fault pc=0x1c07000
+trap 8 0 sys: trap: general fault pc=0x2008000
+trap 8 1 sys: trap: general fault pc=0x2008000
+trap 8 2 sys: trap: general fault pc=0x2008000
+trap 8 3 sys: trap: general fault pc=0x2008000
+trap 9 0 sys: trap: step pc=0x2409000
+trap 9 1 sys: trap: step pc=0x2409000
+trap 9 2 sys: trap: step pc=0x2409000
+trap 9 3 sys: trap: step pc=0x2409000
+trap 10 0 sys: trap: general fault pc=0x280a000
+trap 10 1 sys: trap: general fault pc=0x280a000
+trap 10 2 sys: trap: general fault pc=0x280a000
+trap 10 3 sys: trap: general fault pc=0x280a000
+trap 11 0 sys: trap: general fault pc=0x2c0b000
+trap 11 1 sys: trap: general fault pc=0x2c0b000
+trap 11 2 sys: trap: general fault pc=0x2c0b000
+trap 11 3 sys: trap: general fault pc=0x2c0b000
+cut 0 0 []
+cut 1 1 [a]
+cut 2 2 [ab]
+cut 3 2 [ab]
+cut 4 4 [abé]
+cut 5 5 [abé4]
+cut 6 6 [abé42]
+cut 7 6 [abé42]
+cut 8 6 [abé42]
+cut 9 9 [abé42€]
+cut 10 10 [abé42€0]
+cut 11 11 [abé42€0x]
+cut 12 12 [abé42€0xf]

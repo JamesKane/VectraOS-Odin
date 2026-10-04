@@ -1,7 +1,7 @@
-// lib/utf's strict decoding and validation (upstream ADR-0013), ported from
-// the decoding and validity cases of upstream's tests/host/utf_test.c. The
-// rest of vx-utf (encoding, cutting, searching) is ported when something
-// needs it.
+// lib/utf at every boundary of the encoding (upstream ADR-0013), ported from
+// upstream's tests/host/utf_test.c: the first and last rune of each length,
+// overlong forms, surrogates, past U+10FFFF, truncated and stray bytes;
+// cutting, stepping back, and names.
 package utf_test
 
 import "core:testing"
@@ -63,5 +63,99 @@ test_valid :: proc(t: ^testing.T) {
 	}
 	for c in cases {
 		testing.expectf(t, utf.valid(c.s) == c.want, "valid(%q) is %v", c.s, !c.want)
+	}
+}
+
+@(test)
+test_encode :: proc(t: ^testing.T) {
+	runes := []rune{0, 'a', 0x7f, 0x80, 0x7ff, 0x800, 0xd7ff, 0xe000, 0xffff, 0x10000, 0x10ffff}
+	for want in runes {
+		buf: [utf.UTF_MAX]u8
+		n := utf.encode(&buf, want)
+		testing.expectf(t, n == utf.rune_len(want), "encode(%U) wrote %d bytes, rune_len says %d", want, n, utf.rune_len(want))
+		r, size := utf.decode(string(buf[:n]))
+		testing.expectf(t, r == want, "encode(%U) decodes as %U", want, r)
+		testing.expectf(t, size == n, "encode(%U) decodes in %d bytes, not %d", want, size, n)
+		testing.expectf(t, utf.full_rune(string(buf[:n])), "encode(%U) is not a full rune", want)
+		testing.expectf(t, n == 1 || !utf.full_rune(string(buf[:n - 1])), "encode(%U) less a byte is a full rune", want)
+	}
+	buf: [utf.UTF_MAX]u8
+	testing.expect_value(t, utf.encode(&buf, 0xd800), 3) // as U+FFFD
+	r, size := utf.decode(string(buf[:3]))
+	testing.expect_value(t, r, utf.RUNE_ERROR)
+	testing.expect_value(t, size, 3)
+	testing.expect_value(t, utf.encode(&buf, 0x110000), 3)
+	testing.expect_value(t, utf.rune_len(0x110000), 3)
+	testing.expect(t, utf.full_rune("\xe2\x28")) // bad already: no more bytes needed to know
+}
+
+@(test)
+test_strings :: proc(t: ^testing.T) {
+	s := "a\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80z" // a é € 😀 z: 1+2+3+4+1 bytes
+	testing.expect_value(t, utf.rune_count(s), 5)
+	testing.expect(t, utf.valid(s))
+	at, ok := utf.index_rune(s, 0x20ac)
+	testing.expect(t, ok)
+	testing.expect_value(t, at, 3)
+	_, ok = utf.index_rune(s, 'q')
+	testing.expect(t, !ok)
+	at, ok = utf.index_rune("abab", 'b')
+	testing.expect_value(t, at, 1)
+	at, ok = utf.last_index_rune("abab", 'b')
+	testing.expect(t, ok)
+	testing.expect_value(t, at, 3)
+	testing.expect(t, !utf.valid("a\xc3"))
+	testing.expect(t, !utf.valid("\xed\xa0\x80"))
+	testing.expect(t, utf.valid(""))
+	testing.expect_value(t, utf.rune_count("\xff\xfe"), 2) // a bad byte is one rune
+
+	// Cuts end at rune boundaries: never inside é, €, 😀.
+	Cut :: struct {
+		max, want: int,
+	}
+	cuts := []Cut{{100, len(s)}, {1, 1}, {2, 1}, {3, 3}, {5, 3}, {6, 6}, {9, 6}, {10, 10}}
+	for c in cuts {
+		testing.expectf(t, utf.cut(s, c.max) == c.want, "cut(s, %d) is %d, want %d", c.max, utf.cut(s, c.max), c.want)
+	}
+	testing.expect_value(t, utf.cut("\xff\xfe", 1), 1) // bad bytes cut anywhere
+
+	// Back over one rune at a time.
+	Back :: struct {
+		s:        string,
+		at, want: int,
+	}
+	backs := []Back {
+		{s, len(s), 10},
+		{s, 10, 6},
+		{s, 6, 3},
+		{s, 3, 1},
+		{s, 1, 0},
+		{s, 0, 0},
+		{"a\x80", 2, 1}, // a stray continuation byte: one byte back
+		{"\xc3\xa9\x80", 3, 2},
+	}
+	for c in backs {
+		testing.expectf(t, utf.back(c.s, c.at) == c.want, "back(%q, %d) is %d, want %d", c.s, c.at, utf.back(c.s, c.at), c.want)
+	}
+}
+
+@(test)
+test_names :: proc(t: ^testing.T) {
+	Case :: struct {
+		s:    string,
+		want: bool,
+	}
+	cases := []Case {
+		{"caf\xc3\xa9", true},
+		{"a b", true},
+		{"a\nb", false},
+		{"a\tb", false},
+		{"\x7f", false},
+		{"a\x00b", false},
+		{"\xc3", false},
+		{"\xc0\xaf", false},
+	}
+	for c in cases {
+		testing.expectf(t, utf.is_name(c.s) == c.want, "is_name(%q) is %v", c.s, !c.want)
 	}
 }
