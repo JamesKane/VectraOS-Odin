@@ -22,7 +22,7 @@ ls :: proc(path: string) -> bool {
 		_ = p9.client_clunk(c, fid)
 	}
 	if e != .Ok {
-		rt.print("ls: ", path, ": ", p9.error_text(e), "\n")
+		rt.eprint("ls: ", path, ": ", p9.error_text(e), "\n")
 		return false
 	}
 	if st.mode & p9.DMDIR == 0 {
@@ -68,19 +68,25 @@ ls :: proc(path: string) -> bool {
 	return n == 0 && rst == .Ok
 }
 
+// The program ends with run's exit string, as upstream's programs return
+// theirs: empty for success (ADR-0010).
 @(export, link_name="vx_main")
 vx_main :: proc() -> int {
+	rt.exits(run())
+}
+
+run :: proc() -> string {
 	if procns.from_spawn(&space) != .Ok {
-		return 1
+		return "no namespace"
 	}
 	if len(rt.args()) == 0 {
-		return ls("/") ? 0 : 1
+		return ls("/") ? "" : "error"
 	}
-	exit_status := 0
+	exit := ""
 	for a in rt.args() {
 		if !ls(a) {
-			exit_status = 1
+			exit = "error"
 		}
 	}
-	return exit_status
+	return exit
 }

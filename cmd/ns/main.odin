@@ -9,12 +9,18 @@ import "vx:rt"
 space: ns.Namespace
 text: [8192]u8
 
+// The program ends with run's exit string, as upstream's programs return
+// theirs: empty for success (ADR-0010).
 @(export, link_name="vx_main")
 vx_main :: proc() -> int {
+	rt.exits(run())
+}
+
+run :: proc() -> string {
 	if procns.from_spawn(&space) != .Ok {
-		return 1
+		return "no namespace"
 	}
 	n := ns.print(&space, text[:])
 	rt.print(string(text[:n]))
-	return n > 0 ? 0 : 1
+	return n > 0 ? "" : "too long"
 }
