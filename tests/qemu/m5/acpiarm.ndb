@@ -1,0 +1,18 @@
+# tests/qemu/acpiarm.ndb: bus-acpi on aarch64 (M5 step 7a), as acpi.ndb on x86_64. devmgr starts it; ACPICA loads
+# QEMU's tables from the kernel's copies (behind an RSDP and XSDT bus-acpi
+# makes), runs the AML, and bus-acpi lists the devices present with their
+# resources: its AML's regions, ports and configuration space minted by
+# devmgr on request (step 7b), and with bus-acpi.probe=1, what devmgr must
+# refuse refused.
+
+scenario=acpiarm timeout=60 arch=aarch64 cmdline="vx.skip=gsh bus-acpi.probe=1"
+expect="devmgr: started bus-acpi"
+expect="bus-acpi: probe: the interrupt controller refused, RAM refused, the console's ports refused"
+expect="ACPI: DSDT 0x00007F00"
+expect="_SB.COM0 ARMH0011 mem=0x9000000/0x1000 irq=33"
+expect=" present with a hardware ID"
+fail="vx: panic"
+fail="bus-acpi: FAILED"
+fail="ACPI Error"
+fail="given"
+fail=") killed: "

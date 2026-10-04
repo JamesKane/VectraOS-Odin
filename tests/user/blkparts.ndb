@@ -1,0 +1,12 @@
+# tests/user/blkparts.ndb: partd for the block scenario (tests/qemu/block.ndb),
+# serving the test disk's two partitions (./build's test_disk) on posts of
+# their own, and a third post for a partition the disk does not have.
+
+service=partd program=/boot/bin/partd console
+connect=disk1
+claim=disk1.esp
+part=disk1.esp type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+claim=disk1.vectra
+part=disk1.vectra name=vectra
+claim=disk1.none
+part=disk1.none name=nosuch

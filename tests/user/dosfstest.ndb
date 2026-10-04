@@ -1,0 +1,22 @@
+# tests/user/dosfstest.ndb: the boot disk's EFI system partition, served by dosfs
+# (tests/qemu/dosfs.ndb): partd serves disk0's ESP by its type, dosfs mounts
+# it read-only (-r), owned by vectra, and gsh runs /boot/tests/dosfstest.rc with it on /n.
+
+service=partd program=/boot/bin/partd console
+connect=disk0
+claim=disk0.esp
+part=disk0.esp type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+
+service=dosfs program=/boot/bin/dosfs post=esp console
+connect=disk0.esp
+arg=-r
+arg=-u
+arg=vectra
+
+service=dosfstest program=/boot/bin/gsh console
+arg=/boot/tests/dosfstest.rc
+ns=posix
+mount=/n srv=esp
+connect=nsd
+env=PATH=/bin
+env=HOME=/tmp

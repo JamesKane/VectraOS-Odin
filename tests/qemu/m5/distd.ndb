@@ -1,0 +1,14 @@
+# tests/qemu/distd.ndb: distd (M5 step 9b): a release in the fsd test volume's
+# store branch (storetree), its tree served with verified reads, and a block
+# rewritten through the file system refused (tests/user/disttest.ndb, .rc).
+
+scenario=distd timeout=120 cmdline=vx.skip=gsh with=disttest,fsdvol disk=64 storetree
+expect="distd: 1 releases for "
+expect="distd: a block does not match its hash: /other.bin (refused)"
+expect="disttest: 13 checks, 0 failed"
+line="svcd: disttest exited"
+fail="vx: panic"
+fail="disttest: FAILED"
+fail="distd: FAILED"
+fail="svcd: disttest exited: "
+fail=") killed: "

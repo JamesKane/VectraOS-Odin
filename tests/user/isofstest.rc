@@ -1,0 +1,41 @@
+# tests/user/isofstest.rc: isofs (M5 step 8c) through the POSIX userland, on
+# ./build's test ISO (make_test_iso). /n is read with Rock Ridge: a name
+# continued in a continuation area, UTF-8, names differing only in case, a
+# deep directory, symbolic links followed and read, a file of many sectors.
+# /j is the Joliet tree: case ignored, names cut at 64, no links. The last
+# line counts the checks.
+
+checks=0
+failed=0
+
+fn check {
+  checks=`{expr $checks + 1}
+  name=$1
+  want=$2
+  shift 2
+  if(! ~ $"* $want) {
+    failed=`{expr $failed + 1}
+    echo 'isofstest: FAILED' $name: wanted $want, got $"*
+  }
+}
+
+long='A Long Mixed-Case Name That Goes On And On, Past What One Directory Record Can Hold, So Its Rock Ridge NM Entry Has To Continue In The Directory''s Continuation Area, Which Is The Point Of It.txt'
+check long long `{cat /n/$long}
+check unicode unicode `{cat '/n/Ünïcode file.txt'}
+check smile smile `{cat '/n/😀 smile.txt'}
+check upper upper `{cat '/n/dir with spaces/Same Name.txt'}
+check lower lower `{cat '/n/dir with spaces/same name.txt'}
+check deep deep `{cat /n/deep/er/still/deeper/file.txt}
+check readlink README.txt `{readlink /n/link-to-readme}
+check follow readme `{cat /n/link-to-readme}
+check absolute /boot/limine/limine.conf `{readlink /n/abs-link}
+check relative lower `{cat /n/deep/er/up-link}
+check big 300000 `{wc -c </n/big.bin}
+check root 11 `{ls /n | wc -l}
+check write refused `{if(touch /n/new >[2]/dev/null) echo written; if not echo refused}
+
+check joliet-case readme `{cat /j/readme.TXT}
+check joliet-cut long `{cat '/j/A Long Mixed-Case Name That Goes On And On, Past What One Direct'}
+check joliet-links none `{if(test -e /j/link-to-readme) echo there; if not echo none}
+
+echo isofstest: $checks checks, $failed failed

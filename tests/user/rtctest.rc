@@ -1,0 +1,15 @@
+# tests/user/rtctest.rc: the wall clock (tests/qemu/rtc.ndb). QEMU's RTC
+# starts at 2030-01-02T03:04:05; drv-rtc-cmos reads it, devmgr sets the
+# kernel's wall clock, and the POSIX userland sees it: date through musl's
+# CLOCK_REALTIME, and a new file's time through tmpfs.
+
+# Nothing orders this service after devmgr's setting the clock: wait for it
+# (a known gap), at most 30 s.
+tries=0
+while(~ `{date -u +%Y} 1970 && ! ~ $tries 300) {
+  sleep 0.1
+  tries=`{expr $tries + 1}
+}
+echo rtctest: date `{date -u '+%Y-%m-%d %H'}
+touch /tmp/stamped
+echo rtctest: file `{ls -l /tmp/stamped}

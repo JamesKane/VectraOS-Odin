@@ -1,0 +1,35 @@
+# tests/user/fsdnone.rc: fsd's permissions as none sees them (tests/qemu/fsd.ndb).
+# gsh runs it as user none, with fsd's home branch on /tmp: none gets only
+# other's bits, so it reads what anyone may and is refused what only the owner
+# may, and adm's ctl refuses it. The last line counts the checks.
+
+checks=0
+failed=0
+
+fn check {
+  checks=`{expr $checks + 1}
+  name=$1
+  want=$2
+  shift 2
+  if(! ~ $"* $want) {
+    failed=`{expr $failed + 1}
+    echo 'fsdnone: FAILED' $name: wanted $want, got $"*
+  }
+}
+
+check read 'hello from a vx-fs volume' `{cat /tmp/hello.txt}
+check list 'docs greeting hello.txt' `{ls /tmp | sort}
+if(touch /tmp/none-was-here >[2]/dev/null) r=written
+if not r=refused
+check create refused $r
+if(rm /tmp/hello.txt >[2]/dev/null) r=removed
+if not r=refused
+check remove refused $r
+check still 'hello from a vx-fs volume' `{cat /tmp/hello.txt}
+if(echo sync | tee /adm/ctl >/dev/null >[2]/dev/null) r=obeyed
+if not r=refused
+check ctl refused $r
+
+echo 'fsdnone:' $checks checks, $failed failed
+if(~ $failed 0) exit # an empty status: success, as rc's
+exit $failed^' failed'

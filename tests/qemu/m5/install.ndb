@@ -1,0 +1,22 @@
+# tests/qemu/install.ndb: install from the ISO (M5 step 9c), two boots. The
+# first is the install medium (installer: the ISO with store.tar, booted as a
+# CD, vx.live) with a blank disk: install checks the medium, writes the GPT,
+# the ESP with slot a and the system volume, and powers off. The second boots
+# that disk alone (reboot): Limine from the ESP checks the slot's hashes, the
+# installed system starts its disk's services (vx.system), and
+# installtest.rc reads the release back (tests/user/installtest.ndb, .rc).
+
+scenario=install timeout=300 alone installer cmdline=vx.skip=gsh with=installtest disk=256 blank
+expect="install: release 1 on the medium, checked: "
+expect="install: slot a written"
+expect="install: done: "
+reboot
+expect="svcd: started sys-fsd"
+expect="distd: 1 releases for "
+expect="installtest: 6 checks, 0 failed"
+fail="vx: panic"
+fail="install: FAILED"
+fail="installtest: FAILED"
+fail="fsd: FAILED"
+fail="distd: FAILED"
+fail=") killed: "

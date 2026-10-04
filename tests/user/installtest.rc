@@ -1,0 +1,29 @@
+# tests/user/installtest.rc: the installed system (M5 step 9c), booted from
+# the disk install wrote: its release in /dist, fetched; a program read from
+# the store's tree through distd's verified reads, the same bytes as bootfs's;
+# the record in the store branch; the slot's kernel in the tree. The last
+# line counts the checks.
+
+checks=0
+failed=0
+
+fn check {
+  checks=`{expr $checks + 1}
+  name=$1
+  want=$2
+  shift 2
+  if(! ~ $"* $want) {
+    failed=`{expr $failed + 1}
+    echo 'installtest: FAILED' $name: wanted $want, got $"*
+  }
+}
+
+t=/dist/releases/1/tree
+check releases 1 `{sed -n 's/.*releases=\([0-9]*\).*/\1/p' /dist/status}
+check fetched fetched `{sed -n 's/.*state=\([a-z]*\).*/\1/p' /dist/releases/1/status}
+check program same `{if(cmp -s $t/boot/bin/gsh /boot/bin/gsh) echo same; if not echo differs}
+check record test-1 `{sed -n 's/.* name=\([a-z0-9-]*\).*/\1/p' /n/records/1.ndb}
+check kernel there `{if(test -f $t/boot/vx/kernel.elf) echo there; if not echo missing}
+check objects b2 `{ls /dist/store}
+
+echo installtest: $checks checks, $failed failed

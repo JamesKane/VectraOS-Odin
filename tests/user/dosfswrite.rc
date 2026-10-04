@@ -1,0 +1,64 @@
+# tests/user/dosfswrite.rc: dosfs writing (M5 step 8b) through the POSIX
+# userland: directories, long and short names, a file of many clusters,
+# truncation, renames within and across directories and over a file,
+# removal, chmod as FAT's read-only bit. The host's fsck.fat -n checks the
+# disk after. The last line counts the checks.
+
+checks=0
+failed=0
+
+fn check {
+  checks=`{expr $checks + 1}
+  name=$1
+  want=$2
+  shift 2
+  if(! ~ $"* $want) {
+    failed=`{expr $failed + 1}
+    echo 'dosfswrite: FAILED' $name: wanted $want, got $"*
+  }
+}
+
+mkdir /n/dir '/n/A Long Directory'
+echo hello >'/n/dir/a long file name.txt'
+echo small >/n/small.txt
+echo UPPER >/n/UPPER.TXT
+check long hello `{cat '/n/DIR/A LONG FILE NAME.TXT'}
+check names 'A Long Directory UPPER.TXT dir small.txt' `{ls /n}
+
+# Many clusters: a program, copied and compared.
+cp /boot/bin/dosfs /n/dir/copy
+check copy same `{if(cmp -s /boot/bin/dosfs /n/dir/copy) echo same; if not echo differs}
+
+# Appending, and truncation as a file is opened.
+echo one two three >/n/trunc
+echo four >>/n/trunc
+check append 'one two three four' `{cat /n/trunc}
+echo one >/n/trunc # opened with truncation, then shorter than it was
+check truncate one `{cat /n/trunc}
+
+# Renames: in a directory, across directories, over a file; a directory.
+mv /n/small.txt /n/renamed.txt
+check rename small `{cat /n/renamed.txt}
+mv /n/renamed.txt '/n/A Long Directory/moved.txt'
+check across small `{cat '/n/A Long Directory/moved.txt'}
+mv /n/UPPER.TXT '/n/A Long Directory/moved.txt'
+check over UPPER `{cat '/n/A Long Directory/moved.txt'}
+mv '/n/A Long Directory' /n/dir/inner
+check dirmove UPPER `{cat /n/dir/inner/moved.txt}
+
+# Removal: a file; a directory only when empty.
+rm /n/dir/inner/moved.txt
+check rmfile gone `{if(test -e /n/dir/inner/moved.txt) echo there; if not echo gone}
+check rmdir-full refused `{if(rmdir /n/dir >[2]/dev/null) echo removed; if not echo refused}
+rmdir /n/dir/inner
+check rmdir gone `{if(test -d /n/dir/inner) echo there; if not echo gone}
+
+# chmod: the owner's write bit is FAT's read-only bit.
+chmod a-w /n/trunc
+long=`{ls -l /n/trunc}
+check readonly '-r--r--r--' $long(1)
+chmod u+w /n/trunc
+long=`{ls -l /n/trunc}
+check writable '-rw-r--r--' $long(1)
+
+echo dosfswrite: $checks checks, $failed failed

@@ -1,0 +1,14 @@
+# tests/qemu/dosfs.ndb: dosfs (M5 step 8a), read-only, on the boot disk's EFI
+# system partition: FAT32, made by ./build with mtools (tests/user/dosfstest.ndb,
+# .rc). lib/vx-fat's FAT12 and FAT16 are tested on the host
+# (tests/host/fat_test.c).
+
+scenario=dosfs timeout=90 cmdline=vx.skip=gsh with=dosfstest
+expect="dosfs: /srv/disk0.esp: FAT32 "
+expect="dosfstest: 6 checks, 0 failed"
+line="svcd: dosfstest exited"
+fail="vx: panic"
+fail="dosfstest: FAILED"
+fail="dosfs: FAILED"
+fail="svcd: dosfstest exited: "
+fail=") killed: "

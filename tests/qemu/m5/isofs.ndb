@@ -1,0 +1,16 @@
+# tests/qemu/isofs.ndb: isofs (M5 step 8c) on ./build's test ISO, attached as
+# the second disk (isodisk: a CD would need virtio-scsi), read with Rock
+# Ridge and, by a second instance, through its Joliet tree
+# (tests/user/isofstest.ndb, .rc). lib/vx-iso's three ways of reading it,
+# and damage, are tested on the host (tests/host/iso_test.c).
+
+scenario=isofs timeout=90 cmdline=vx.skip=gsh with=isofstest isodisk
+expect="isofs: /srv/disk1: ISO 9660 with " # Rock Ridge, and Joliet, in either order
+expect="isofs: /srv/disk1: ISO 9660 with "
+expect="isofstest: 16 checks, 0 failed"
+line="svcd: isofstest exited"
+fail="vx: panic"
+fail="isofstest: FAILED"
+fail="isofs: FAILED"
+fail="svcd: isofstest exited: "
+fail=") killed: "

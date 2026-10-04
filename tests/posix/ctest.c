@@ -25,6 +25,7 @@
 #include <string.h>
 #include <sys/auxv.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/random.h>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -37,6 +38,31 @@
 #include <uchar.h>
 #include <unistd.h>
 #include <wchar.h>
+
+// Its own program, and where procfs saves crashes: what the scenario's
+// manifest says (CTEST_SELF, CTEST_CRASH), else the posix scenario's. The
+// fsd scenario runs it as /boot/bin/ctestfsd, with /tmp on fsd.
+static const char *self = "/boot/bin/ctest", *self_name = "ctest", *crash_dir = "/tmp/crash";
+// Its manifest, a file it knows: /boot/svc/NAME.ndb, which starts "# tests/user/NAME.ndb".
+static char manifest[64], manifest_rel[64], manifest_head[64];
+// The file server under /tmp keeps owners and checks permissions (fsd), as
+// CTEST_OWNERS=kept says, rather than keeping none (tmpfs).
+static bool owners_kept;
+// Its files can be mapped shared (fsd, a pager: CTEST_MAPPED=shared), not only copied.
+static bool maps_shared;
+
+static void where_am_i(void) {
+  const char *s = getenv("CTEST_SELF"), *c = getenv("CTEST_CRASH");
+  if (s && *s) self = s, self_name = strrchr(s, '/') ? strrchr(s, '/') + 1 : s;
+  if (c && *c) crash_dir = c;
+  const char *o = getenv("CTEST_OWNERS");
+  owners_kept = o && strcmp(o, "kept") == 0;
+  const char *m = getenv("CTEST_MAPPED");
+  maps_shared = m && strcmp(m, "shared") == 0;
+  snprintf(manifest, sizeof manifest, "/boot/svc/%s.ndb", self_name);
+  snprintf(manifest_rel, sizeof manifest_rel, "svc/../svc/%s.ndb", self_name);
+  snprintf(manifest_head, sizeof manifest_head, "# tests/user/%s.ndb", self_name);
+}
 
 static int checks, failed;
 
@@ -178,14 +204,14 @@ static void test_processes(void) {
   errno = 0;
   CHECK(waitpid(-1, &status, 0) == -1 && errno == ECHILD);
 
-  CHECK(spawn_wait("/boot/bin/ctest", false, "exit", nullptr) == 7);
-  CHECK(spawn_wait("/boot/bin/ctest", false, "env", nullptr) == 4);
-  CHECK(spawn_wait("ctest", true, "exit", nullptr) == 7); // posix_spawnp, through PATH
+  CHECK(spawn_wait(self, false, "exit", nullptr) == 7);
+  CHECK(spawn_wait(self, false, "env", nullptr) == 4);
+  CHECK(spawn_wait(self_name, true, "exit", nullptr) == 7); // posix_spawnp, through PATH
   posix_spawnattr_t attr;
   posix_spawnattr_init(&attr);
   posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
   posix_spawnattr_setpgroup(&attr, 0);
-  CHECK(spawn_wait("/boot/bin/ctest", false, "group", &attr) == 9);
+  CHECK(spawn_wait(self, false, "group", &attr) == 9);
   posix_spawnattr_destroy(&attr);
   CHECK(spawn_wait("/boot/bin/no-such-program", false, "exit", nullptr) == -ENOENT);
 
@@ -194,7 +220,7 @@ static void test_processes(void) {
   snprintf(parent, sizeof parent, "%d", (int)me);
   char *args[] = {"ctest", "sleep", parent, nullptr};
   pid_t child = 0;
-  CHECK(posix_spawn(&child, "/boot/bin/ctest", nullptr, nullptr, args, environ) == 0 && child > me);
+  CHECK(posix_spawn(&child, self, nullptr, nullptr, args, environ) == 0 && child > me);
   CHECK(getpgid(child) == me && getsid(child) == me);
   CHECK(waitpid(child, &status, WNOHANG) == 0);
   CHECK(waitpid(-1, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 3);
@@ -211,7 +237,6 @@ static size_t read_all(int fd, char *buf, size_t cap) {
 
 // fork, execve and pipes; descriptors given to children.
 static void test_fork_exec_pipes(void) {
-  static const char manifest[] = "/boot/svc/ctest.ndb"; // it starts "# tests/user/ctest.ndb"
   char buf[64] = {}, parent[24];
   pid_t me = getpid();
   snprintf(parent, sizeof parent, "%d", (int)me);
@@ -255,7 +280,7 @@ static void test_fork_exec_pipes(void) {
   child = fork();
   if (child == 0) {
     char *args[] = {"ctest", "exit", parent, "6", nullptr};
-    execv("/boot/bin/ctest", args);
+    execv(self, args);
     _exit(1);
   }
   CHECK(child > me && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 6);
@@ -264,7 +289,7 @@ static void test_fork_exec_pipes(void) {
     char pid[16];
     snprintf(pid, sizeof pid, "%d", (int)getpid());
     char *args[] = {"ctest", "same", parent, pid, nullptr};
-    execv("/boot/bin/ctest", args);
+    execv(self, args);
     _exit(1);
   }
   CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 15);
@@ -283,7 +308,7 @@ static void test_fork_exec_pipes(void) {
   posix_spawn_file_actions_addclose(&fa, p[0]);
   posix_spawn_file_actions_addclose(&fa, p[1]);
   char *echo[] = {"ctest", "echo", parent, nullptr};
-  CHECK(posix_spawn(&child, "/boot/bin/ctest", &fa, nullptr, echo, environ) == 0);
+  CHECK(posix_spawn(&child, self, &fa, nullptr, echo, environ) == 0);
   posix_spawn_file_actions_destroy(&fa);
   close(p[1]);
   memset(buf, 0, sizeof buf);
@@ -300,7 +325,7 @@ static void test_fork_exec_pipes(void) {
   posix_spawn_file_actions_addopen(&fa, 5, manifest, O_RDONLY, 0);
   CHECK(lseek(file, 2, SEEK_SET) == 2 && chdir("/boot") == 0);
   char *fds[] = {"ctest", "fds", parent, nullptr};
-  CHECK(posix_spawn(&child, "/boot/bin/ctest", &fa, nullptr, fds, environ) == 0);
+  CHECK(posix_spawn(&child, self, &fa, nullptr, fds, environ) == 0);
   CHECK(chdir("/") == 0);
   posix_spawn_file_actions_destroy(&fa);
   CHECK(waitpid(child, &status, 0) == child && WEXITSTATUS(status) == 10);
@@ -313,7 +338,7 @@ static int spawn_child(const char *what, posix_spawn_file_actions_t *fa, pid_t *
   char parent[24];
   snprintf(parent, sizeof parent, "%d", (int)getpid());
   char *args[] = {"ctest", (char *)what, parent, nullptr};
-  return posix_spawn(child, "/boot/bin/ctest", fa, nullptr, args, environ);
+  return posix_spawn(child, self, fa, nullptr, args, environ);
 }
 
 static double now_seconds(void) {
@@ -376,12 +401,12 @@ static void test_signals(void) {
   CHECK(waitpid(child, &status, 0) == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV);
   { // and its crash directory (05 §5), its note the fault in Plan 9's words
     char path[64], note[96] = {};
-    snprintf(path, sizeof path, "/tmp/crash/ctest.%d/note", (int)child);
+    snprintf(path, sizeof path, "%s/%s.%d/note", crash_dir, self_name, (int)child);
     int fd = open(path, O_RDONLY);
     CHECK(fd >= 0 && read(fd, note, sizeof note - 1) > 0 &&
           strncmp(note, "sys: trap: fault read addr=0x10", 31) == 0);
     if (fd >= 0) close(fd);
-    snprintf(path, sizeof path, "/tmp/crash/ctest.%d/threads/1/regs.ndb", (int)child);
+    snprintf(path, sizeof path, "%s/%s.%d/threads/1/regs.ndb", crash_dir, self_name, (int)child);
     struct stat cst;
     CHECK(stat(path, &cst) == 0 && cst.st_size > 0);
   }
@@ -445,7 +470,7 @@ static void test_signals(void) {
   posix_spawnattr_init(&defaults);
   posix_spawnattr_setflags(&defaults, POSIX_SPAWN_SETSIGDEF);
   posix_spawnattr_setsigdefault(&defaults, &hup);
-  CHECK(spawn_wait("/boot/bin/ctest", false, "kept", &defaults) == 23);
+  CHECK(spawn_wait(self, false, "kept", &defaults) == 23);
   posix_spawnattr_destroy(&defaults);
   CHECK(sigprocmask(SIG_UNBLOCK, &usr1, nullptr) == 0);
   signal(SIGUSR2, SIG_DFL);
@@ -829,12 +854,156 @@ static void test_names_and_attributes(void) {
                   0) == 0);
   CHECK(stat("/tmp/rd/r3", &st) == 0 && st.st_mtime == 1000);
   CHECK(futimens(fd, nullptr) == 0 && fstat(fd, &st) == 0 && st.st_mtime != 1000); // now
-  CHECK(chown("/tmp/rd/r3", 0, 0) == 0); // owners are not kept, and no one may not
+  // tmpfs keeps no owners, so any change succeeds; fsd's are adm's to give,
+  // and the user ctestfsd runs as is in adm (host/vxfs mkfs's /adm/users).
+  CHECK(chown("/tmp/rd/r3", 0, 0) == 0);
   errno = 0;
   CHECK(link("/tmp/rd/r3", "/tmp/hard") == -1 && errno == EPERM);
   close(fd);
   CHECK(unlink("/tmp/dl") == 0 && unlink("/tmp/dangling") == 0 && unlink("/tmp/loop") == 0);
   CHECK(unlink("/tmp/rd/r3") == 0 && rmdir("/tmp/rd") == 0);
+}
+
+// Permissions, where the server keeps them: a directory without w takes no
+// new entries, a file without w opens for no writing, and the owner may
+// change both back.
+// mmap of files: on fsd, its page cache, shared by every mapping; elsewhere
+// MAP_SHARED is refused and MAP_PRIVATE is a copy.
+static void test_mmap(void) {
+  int fd = open("/tmp/mapped", O_RDWR | O_CREAT | O_TRUNC, 0644);
+  CHECK(fd >= 0);
+  if (fd < 0) return;
+  char page[4096];
+  for (int i = 0; i < 3; i++) {
+    memset(page, 'a' + i, sizeof page);
+    CHECK(write(fd, page, sizeof page) == (ssize_t)sizeof page);
+  }
+  CHECK(write(fd, "tail", 4) == 4); // 3 pages and 4 bytes
+  errno = 0;
+  char *p = mmap(nullptr, 16384, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  if (!maps_shared) {
+    CHECK(p == MAP_FAILED && errno == ENODEV);
+    p = mmap(nullptr, 16384, PROT_READ, MAP_PRIVATE, fd, 4096); // a copy
+    CHECK(p != MAP_FAILED && p[0] == 'b' && p[8192] == 't' && p[8196] == 0);
+    if (p != MAP_FAILED) munmap(p, 16384);
+    close(fd);
+    unlink("/tmp/mapped");
+    return;
+  }
+  CHECK(p != MAP_FAILED);
+  if (p == MAP_FAILED) return;
+  CHECK(p[0] == 'a' && p[4095] == 'a' && p[4096] == 'b' && p[12288] == 't' && p[12292] == 0);
+  // Written through the mapping, read with read(); written with write(), seen in the mapping.
+  p[5000] = 'Z';
+  char c = 0;
+  CHECK(pread(fd, &c, 1, 5000) == 1 && c == 'Z');
+  CHECK(pwrite(fd, "Y", 1, 6000) == 1 && p[6000] == 'Y');
+  // A forked child shares the mapping: what it writes, its parent sees.
+  pid_t pid = fork();
+  if (pid == 0) {
+    p[100] = 'C';
+    _exit(0);
+  }
+  int status = -1;
+  CHECK(pid > 0 && waitpid(pid, &status, 0) == pid && status == 0 && p[100] == 'C');
+  // A second mapping, read-only and private, is the same pages, not a copy.
+  char *q = mmap(nullptr, 8192, PROT_READ, MAP_PRIVATE, fd, 4096);
+  CHECK(q != MAP_FAILED);
+  if (q != MAP_FAILED) {
+    CHECK(q[5000 - 4096] == 'Z');
+    p[7000] = 'W';
+    CHECK(q[7000 - 4096] == 'W');
+    munmap(q, 8192);
+  }
+  CHECK(msync(p, 16384, MS_SYNC) == 0 && fsync(fd) == 0);
+  // Truncated: past the end, zeros, in the mapping and in the file grown again.
+  CHECK(ftruncate(fd, 4106) == 0 && p[4100] == 'b' && p[5000] == 0);
+  CHECK(ftruncate(fd, 8192) == 0 && pread(fd, &c, 1, 5000) == 1 && c == 0);
+  CHECK(munmap(p, 16384) == 0);
+  // What the descriptor allows: a shared writable mapping needs O_RDWR.
+  int ro = open("/tmp/mapped", O_RDONLY);
+  errno = 0;
+  CHECK(mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, ro, 0) == MAP_FAILED && errno == EACCES);
+  p = mmap(nullptr, 4096, PROT_READ, MAP_SHARED, ro, 0);
+  CHECK(p != MAP_FAILED && p[100] == 'C');
+  if (p != MAP_FAILED) munmap(p, 4096);
+  close(ro);
+  // Removed while mapped: its pages still come, until the mapping goes.
+  p = mmap(nullptr, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  close(fd);
+  CHECK(p != MAP_FAILED && unlink("/tmp/mapped") == 0);
+  if (p != MAP_FAILED) {
+    CHECK(p[4100] == 'b' && p[0] == 'a');
+    munmap(p, 8192);
+  }
+  CHECK(access("/tmp/mapped", F_OK) == -1);
+
+  // Written in many places through a mapping (more dirty ranges than one
+  // DIRTY call answers), unmapped at once: every write reaches the file.
+  static constexpr size_t PAGES = 160;
+  fd = open("/tmp/many", O_RDWR | O_CREAT | O_TRUNC, 0644);
+  CHECK(fd >= 0 && ftruncate(fd, (off_t)(PAGES * 4096)) == 0);
+  p = mmap(nullptr, PAGES * 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  CHECK(p != MAP_FAILED);
+  if (p != MAP_FAILED) {
+    for (size_t i = 0; i < PAGES; i += 2) p[i * 4096 + 7] = (char)('A' + i % 26);
+    CHECK(munmap(p, PAGES * 4096) == 0);
+  }
+  size_t right = 0;
+  for (size_t i = 0; i < PAGES; i += 2)
+    right += pread(fd, &c, 1, (off_t)(i * 4096 + 7)) == 1 && c == (char)('A' + i % 26);
+  CHECK(right == PAGES / 2);
+  // Mapped past the file's end: the file's pages there, the rest not.
+  CHECK(ftruncate(fd, 100) == 0);
+  p = mmap(nullptr, 3ul * 4096, PROT_READ, MAP_SHARED, fd, 0);
+  CHECK(p != MAP_FAILED && p[7] == 'A' && p[100] == 0);
+  if (p != MAP_FAILED) munmap(p, 3ul * 4096);
+  close(fd);
+  unlink("/tmp/many");
+
+  // Renamed over while open: the open file is still the old one.
+  int old = open("/tmp/r-old", O_RDWR | O_CREAT | O_TRUNC, 0644);
+  CHECK(old >= 0 && write(old, "old", 3) == 3);
+  int fresh = open("/tmp/r-new", O_RDWR | O_CREAT | O_TRUNC, 0644);
+  CHECK(fresh >= 0 && write(fresh, "new", 3) == 3 && close(fresh) == 0);
+  CHECK(rename("/tmp/r-new", "/tmp/r-old") == 0);
+  char got[4] = {};
+  CHECK(pread(old, got, 3, 0) == 3 && memcmp(got, "old", 3) == 0);
+  CHECK(close(old) == 0);
+  fresh = open("/tmp/r-old", O_RDONLY);
+  CHECK(fresh >= 0 && read(fresh, got, 3) == 3 && memcmp(got, "new", 3) == 0);
+  close(fresh);
+  unlink("/tmp/r-old");
+}
+
+static void test_permissions(void) {
+  if (!owners_kept) return;
+  // Owners are adm's to give (vectra is a member); but through an ordinary
+  // attach an adm member gets no more than anyone else, so a group the
+  // file's new owner's rules do not allow is refused (gefs: only the
+  // permissive attach bypasses them).
+  int given = open("/tmp/given", O_RDWR | O_CREAT | O_TRUNC, 0644);
+  CHECK(given >= 0);
+  if (given < 0) return;
+  CHECK(fchown(given, 0, (gid_t)-1) == 0);
+  errno = 0;
+  CHECK(fchown(given, (uid_t)-1, 0) == -1 && errno == EPERM);
+  close(given);
+  unlink("/tmp/given");
+  CHECK(mkdir("/tmp/locked", 0755) == 0 && chmod("/tmp/locked", 0555) == 0);
+  errno = 0;
+  CHECK(open("/tmp/locked/x", O_WRONLY | O_CREAT, 0644) == -1 && errno == EACCES);
+  errno = 0;
+  CHECK(mkdir("/tmp/locked/d", 0755) == -1 && errno == EACCES);
+  CHECK(chmod("/tmp/locked", 0755) == 0);
+  int fd = open("/tmp/locked/x", O_WRONLY | O_CREAT, 0644);
+  CHECK(fd >= 0 && write(fd, "x", 1) == 1 && close(fd) == 0);
+  CHECK(chmod("/tmp/locked/x", 0444) == 0);
+  errno = 0;
+  CHECK(open("/tmp/locked/x", O_WRONLY) == -1 && errno == EACCES);
+  fd = open("/tmp/locked/x", O_RDONLY);
+  CHECK(fd >= 0 && close(fd) == 0);
+  CHECK(chmod("/tmp/locked/x", 0644) == 0 && unlink("/tmp/locked/x") == 0 && rmdir("/tmp/locked") == 0);
 }
 
 // The posix extension's open files, kept by the server: a child's writes
@@ -938,7 +1107,7 @@ static void test_terminals(void) {
   if (s < 0) return;
   struct stat st;
   CHECK(isatty(s) && isatty(m) && fstat(s, &st) == 0 && S_ISCHR(st.st_mode));
-  int plain = open("/boot/svc/ctest.ndb", O_RDONLY);
+  int plain = open(manifest, O_RDONLY);
   CHECK(plain >= 0);
   if (plain >= 0) {
     CHECK(!isatty(plain));
@@ -1064,7 +1233,7 @@ static void test_poll(void) {
   close(p[0]);
 
   // A file is always ready; a closed descriptor is not valid.
-  int f = open("/boot/svc/ctest.ndb", O_RDONLY);
+  int f = open(manifest, O_RDONLY);
   struct pollfd ff[2] = {{.fd = f, .events = POLLIN | POLLOUT}, {.fd = 60, .events = POLLIN}};
   CHECK(poll(ff, 2, 0) == 2 && (ff[0].revents & POLLIN) && ff[1].revents == POLLNVAL);
   fd_set rd;
@@ -1109,11 +1278,20 @@ static void test_poll(void) {
 }
 
 int main(int argc, char **argv) {
+  where_am_i();
   if (argc >= 3 && strcmp(argv[1], "one") != 0) return child_main(argv);
   printf("ctest: hello from musl\n");
+  const char *file = getenv("CTEST_FILE"); // one a scenario put there, to show it is there
+  if (file) {
+    char text[128] = {};
+    FILE *f = fopen(file, "r");
+    CHECK(f && fgets(text, sizeof text, f) != nullptr);
+    if (f) fclose(f);
+    printf("ctest: %s: %s", file, text);
+  }
   // The spawn message's arguments, after the program's name, and environment.
   bool args = argc == 3 && argv[0] && argv[1] && argv[2];
-  CHECK(args && strcmp(argv[0], "ctest") == 0);
+  CHECK(args && strcmp(argv[0], self_name) == 0);
   if (args) printf("ctest: argv %s|%s\n", argv[1], argv[2]);
   CHECK(args && strcmp(argv[2], "two words") == 0);
   const char *greeting = getenv("GREETING");
@@ -1152,23 +1330,23 @@ int main(int argc, char **argv) {
   CHECK(numbers[0] == 1 && numbers[4] == 9);
 
   // Files in the namespace: its own manifest, by absolute and relative paths.
-  FILE *f = fopen("/boot/svc/ctest.ndb", "r");
+  FILE *f = fopen(manifest, "r");
   CHECK(f != nullptr);
   if (f) {
-    CHECK(fgets(buf, sizeof buf, f) && strncmp(buf, "# tests/user/ctest.ndb", 22) == 0);
+    CHECK(fgets(buf, sizeof buf, f) && strncmp(buf, manifest_head, strlen(manifest_head)) == 0);
     CHECK(fseek(f, 0, SEEK_END) == 0);
     CHECK(fseek(f, 0, SEEK_SET) == 0 && fgetc(f) == '#');
     fclose(f);
   }
   struct stat st;
-  CHECK(stat("/boot/svc/ctest.ndb", &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 100);
+  CHECK(stat(manifest, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 100);
   CHECK(stat("/boot/bin", &st) == 0 && S_ISDIR(st.st_mode));
   CHECK(getcwd(buf, sizeof buf) && strcmp(buf, "/") == 0);
   CHECK(chdir("/boot") == 0 && getcwd(buf, sizeof buf) && strcmp(buf, "/boot") == 0);
-  f = fopen("svc/../svc/ctest.ndb", "r");
+  f = fopen(manifest_rel, "r");
   CHECK(f != nullptr);
   if (f) fclose(f);
-  CHECK(chdir("/boot/svc/ctest.ndb") == -1 && errno == ENOTDIR);
+  CHECK(chdir(manifest) == -1 && errno == ENOTDIR);
 
   // A directory, read whole.
   DIR *d = opendir("/boot/bin");
@@ -1177,7 +1355,7 @@ int main(int argc, char **argv) {
   bool found = false;
   for (struct dirent *e; d && (e = readdir(d));) {
     entries++;
-    if (strcmp(e->d_name, "ctest") == 0) found = e->d_type == DT_REG;
+    if (strcmp(e->d_name, self_name) == 0) found = e->d_type == DT_REG;
   }
   if (d) closedir(d);
   CHECK(found && entries > 5);
@@ -1210,6 +1388,8 @@ int main(int argc, char **argv) {
   test_tmp_and_devices();
   test_names_and_attributes();
   test_shared_offsets_and_locks();
+  test_permissions();
+  test_mmap();
   test_terminals();
   test_poll();
   test_utf8();

@@ -1,0 +1,16 @@
+# tests/user/dosfswrite.ndb: dosfs writing (tests/qemu/dosfswrite.ndb): the
+# test disk is one FAT16 volume, no partitions; dosfs serves it, owned by
+# vectra, and gsh runs /boot/tests/dosfswrite.rc with it on /n.
+
+service=dosfs program=/boot/bin/dosfs post=fat console
+connect=disk1
+arg=-u
+arg=vectra
+
+service=dosfswrite program=/boot/bin/gsh console
+arg=/boot/tests/dosfswrite.rc
+ns=posix
+mount=/n srv=fat
+connect=nsd
+env=PATH=/bin
+env=HOME=/tmp

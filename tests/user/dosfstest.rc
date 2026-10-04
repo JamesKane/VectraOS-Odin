@@ -1,0 +1,27 @@
+# tests/user/dosfstest.rc: dosfs read-only (M5 step 8a) on the boot disk's
+# EFI system partition, which ./build made with mtools: listing, names in
+# either case, a small file's text, and bootfs.tar (megabytes, across many
+# clusters) read whole by tar. The last line counts the checks.
+
+checks=0
+failed=0
+
+fn check {
+  checks=`{expr $checks + 1}
+  name=$1
+  want=$2
+  shift 2
+  if(! ~ $"* $want) {
+    failed=`{expr $failed + 1}
+    echo 'dosfstest: FAILED' $name: wanted $want, got $"*
+  }
+}
+
+check root 'EFI boot' `{ls /n}
+check case `{ls /n/efi/boot | sed 's/BOOT.*EFI/BOOTEFI/'} BOOTEFI
+check conf 'timeout: 0' `{grep '^timeout' /n/boot/limine/limine.conf}
+long=`{ls -l /n/boot/limine/limine.conf}
+check mode '-r--r--r--' $long(1)
+check tar boot/bin/dosfs `{tar -tf /n/boot/vx/bootfs.tar | grep '^boot/bin/dosfs$'}
+check write refused `{if(touch /n/new >[2]/dev/null) echo written; if not echo refused}
+echo dosfstest: $checks checks, $failed failed

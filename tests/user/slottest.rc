@@ -1,0 +1,66 @@
+# tests/user/slottest.rc: boot slots and rollback by hand (M5 step 9d). Run on
+# every boot of the installed system; its stage is in the store branch
+# (/n/stage), which neither apply nor rollback rolls back, written before the
+# command that commits it. Stage 0 (release 1, slot a): release 2 copied from
+# the media into the store, applied. Stage 1 (release 2, slot b, its marker
+# in /boot/svc): /cfg changed, rolled back. Stage 2 (release 1 again, slot a):
+# /cfg as it was before release 2 was applied.
+
+checks=0
+failed=0
+
+fn check {
+  checks=`{expr $checks + 1}
+  name=$1
+  want=$2
+  shift 2
+  if(! ~ $"* $want) {
+    failed=`{expr $failed + 1}
+    echo 'slottest: FAILED' $name: wanted $want, got $"*
+  }
+}
+
+fn field {
+  sed -n 's/.* '$1'=\([^ ]*\).*/\1/p' /dist/status
+}
+
+stage=0
+if(test -f /n/stage) stage=`{cat /n/stage}
+marker=no
+if(test -f /boot/svc/release2.ndb) marker=yes
+cur=`{field current}
+sl=`{field slot}
+echo slottest: stage $stage, release $cur^, slot $sl
+
+switch($stage) {
+case 0
+  check current 1 `{field current}
+  check slot a `{field slot}
+  check marker no $marker
+  echo before release 2 >/c/note
+  # Release 2's objects into the store, merged prefix by prefix (cp -r of
+  # /m/b2 onto the existing /n/b2 would nest it), and its record.
+  prefixes=`{ls /m/b2}
+  mkdir -p /n/b2/$prefixes
+  for(d in $prefixes) cp /m/b2/$d/* /n/b2/$d/
+  cp /m/records/2.ndb /n/records/
+  echo rescan >/dist/ctl
+  check releases 2 `{field releases}
+  echo 1 >/n/stage
+  echo apply 2 >/dist/ctl
+  check next 2 `{field boot}
+case 1
+  check current 2 `{field current}
+  check slot b `{field slot}
+  check marker yes $marker
+  echo in release 2 >/c/note
+  echo 2 >/n/stage
+  echo rollback >/dist/ctl
+  check next 1 `{field boot}
+case 2
+  check current 1 `{field current}
+  check slot a `{field slot}
+  check marker no $marker
+  check cfg 'before release 2' `{cat /c/note}
+}
+echo slottest: stage $stage done, $checks checks, $failed failed

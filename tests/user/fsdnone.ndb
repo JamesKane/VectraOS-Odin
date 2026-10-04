@@ -1,0 +1,12 @@
+# tests/user/fsdnone.ndb: gsh runs /boot/tests/fsdnone.rc as user none, with
+# fsd's home branch on /tmp (tests/qemu/fsd.ndb, tests/user/ctestfsd.ndb).
+
+service=fsdnone program=/boot/bin/gsh console entropy
+user=none
+arg=/boot/tests/fsdnone.rc
+ns=posix
+mount=/tmp srv=fsd aname=home flags=c
+mount=/adm srv=fsd aname=adm
+connect=nsd
+env=PATH=/bin
+env=HOME=/tmp

@@ -1,0 +1,12 @@
+# tests/user/fsdvol.ndb: the volume the fsd scenarios serve (tests/qemu/fsd.ndb,
+# fsdperm.ndb): partd serves the test disk's system partition, which ./build
+# made a vx-fs volume (volume=, its home branch tests/fsd/home), and fsd mounts
+# it and serves it at /srv/fsd. A test that mounts /srv/fsd waits for it.
+
+service=partd program=/boot/bin/partd console
+connect=disk1
+claim=disk1.vectra
+part=disk1.vectra name=vectra
+
+service=fsd program=/boot/bin/fsd post=fsd console entropy pager
+connect=disk1.vectra

@@ -1,0 +1,5 @@
+# tests/user/release2.ndb: a marker, only in release 2's bootfs (the install
+# scenarios' media, build.c's make_install_store): a booted system has it in
+# /boot/svc if it is release 2. Its service never starts.
+
+service=release2 program=/boot/bin/gsh when=never

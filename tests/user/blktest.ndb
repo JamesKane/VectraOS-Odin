@@ -1,0 +1,10 @@
+# tests/user/blktest.ndb: the block class's conformance test (tests/qemu/block.ndb).
+# devmgr serves /srv/disk1, the scenario's second disk, through the driver it
+# starts; this connects to it, and to the partitions partd serves
+# (tests/user/blkparts.ndb), and kills the drivers to see them restarted.
+
+service=blktest program=/boot/bin/blktest console tasks
+connect=disk1
+connect=disk1.esp
+connect=disk1.vectra
+connect=disk1.none

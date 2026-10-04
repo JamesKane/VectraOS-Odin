@@ -1,0 +1,22 @@
+# tests/user/isofstest.ndb: isofs (tests/qemu/isofs.ndb) on the test disk,
+# ./build's test ISO: one instance reads its Rock Ridge (/srv/cd), another,
+# with -r, its Joliet tree (/srv/cdj); gsh runs /boot/tests/isofstest.rc with
+# them on /n and /j.
+
+service=isofs program=/boot/bin/isofs post=cd console
+connect=disk1
+arg=-u
+arg=vectra
+
+service=isofsj program=/boot/bin/isofs post=cdj console
+connect=disk1
+arg=-r
+
+service=isofstest program=/boot/bin/gsh console
+arg=/boot/tests/isofstest.rc
+ns=posix
+mount=/n srv=cd
+mount=/j srv=cdj
+connect=nsd
+env=PATH=/bin
+env=HOME=/tmp

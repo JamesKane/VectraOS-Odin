@@ -1,0 +1,45 @@
+# tests/qemu/mount.ndb: 9P over TCP (M3, step 4), as M3's exit test does it
+# (docs/04 §5). QEMU gives each connection to 10.0.2.100!5640 a vx9pserve of
+# its own, serving a fresh copy of tests/fixtures/share. (The exit test
+# names 10.0.2.2, the host, with vx9pserve listening there; QEMU will not
+# forward the gateway's own address, so a test uses another.) The shell mounts it
+# through /net/cs and /net/tcp; ls and cat, children, dial it again from
+# their spawn records; a write reads back, and the harness finds it in the
+# host's copy once the run has passed (host=). The
+# same server mounts as 9p://, and the namespace records the mount.
+
+scenario=mount timeout=40
+expect="netd: 10.0.2.15/24 from dhcp, gateway 10.0.2.2"
+prompt="vx% "
+send="cat /net/ipifc/0/status"
+line="dev=ether0 addr=10.0.2.15/24 gw=10.0.2.2 dhcp lease=86400s"
+prompt="vx% "
+send="mount tcp!10.0.2.100!5640 /n/host"
+prompt="vx% "
+send="ls /n/host"
+line="hello.txt"
+prompt="vx% "
+send="cat /n/host/hello.txt"
+line="hello from the host"
+prompt="vx% "
+send="echo hi > /n/host/out.txt"
+prompt="vx% "
+send="cat /n/host/out.txt"
+line="hi"
+prompt="vx% "
+send="mount 9p://10.0.2.100:5640 /n/again"
+prompt="vx% "
+send="ls /n/again"
+line="hello.txt  out.txt"
+prompt="vx% "
+send="ns | tail -2"
+line="mount tcp!10.0.2.100!5640 /n/host"
+line="mount tcp!10.0.2.100!5640 /n/again"
+prompt="vx% "
+send="echo done"
+line="done"
+host=share/out.txt text=hi
+fail="vx: panic"
+fail="FAILED"
+fail=") killed: "
+fail="gsh: "

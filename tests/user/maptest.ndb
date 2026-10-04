@@ -1,0 +1,14 @@
+# tests/user/maptest.ndb: maptest (tests/qemu/maptest.ndb) as vectra on the
+# fsd scenarios' volume (fsdvol.ndb): home on /tmp, adm on /adm (vectra is in
+# adm's group: snap, rollback, sync), the dump view on /n, home again on /s.
+
+service=maptest program=/boot/bin/maptest console
+user=vectra
+ns=posix
+mount=/tmp srv=fsd aname=home flags=c
+mount=/adm srv=fsd aname=adm
+mount=/n srv=fsd aname=dump
+mount=/s srv=fsd aname=home
+connect=nsd
+env=PATH=/bin
+env=HOME=/tmp

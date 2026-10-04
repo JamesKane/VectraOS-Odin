@@ -1,0 +1,24 @@
+# tests/user/ctestfsd.ndb: ctest with /tmp on fsd (tests/qemu/fsd.ndb), which
+# tests/user/fsdvol.ndb serves. ctest runs as in the posix scenario but with
+# fsd's home branch on /tmp, as vectra, whom the volume's /adm/users names and home's root
+# belongs to (./build's make_volume, host/vxfs mkfs), so fsd's owners and
+# permissions are checked too (CTEST_OWNERS=kept). Crash dumps still go to
+# tmpfs (procfs writes them there), mounted on /n for ctest to find them.
+
+service=ctestfsd program=/boot/bin/ctestfsd console entropy
+user=vectra
+arg=one
+arg="two words"
+env=GREETING=hello
+ns=posix
+mount=/tmp srv=fsd aname=home flags=c
+mount=/n srv=tmpfs flags=c
+connect=nsd
+env=PATH=/bin
+env=HOME=/tmp
+env=TMPDIR=/tmp
+env=CTEST_CRASH=/n/crash
+env=CTEST_SELF=/boot/bin/ctestfsd
+env=CTEST_FILE=/tmp/hello.txt
+env=CTEST_OWNERS=kept
+env=CTEST_MAPPED=shared

@@ -1,0 +1,43 @@
+# tests/user/disttest.rc: distd (M5 step 9b) through the POSIX userland: the
+# release's record and status, its tree read through verified reads (a file
+# of several blocks compared with the same bytes stored plainly, a link, a
+# UTF-8 name, a nested directory), the store's objects as they are; then one
+# block of a file never read before rewritten in the store, so the file
+# system's own checks pass, and distd refusing it. The last line counts the
+# checks.
+
+checks=0
+failed=0
+
+fn check {
+  checks=`{expr $checks + 1}
+  name=$1
+  want=$2
+  shift 2
+  if(! ~ $"* $want) {
+    failed=`{expr $failed + 1}
+    echo 'disttest: FAILED' $name: wanted $want, got $"*
+  }
+}
+
+t=/dist/releases/1/tree
+check status 1 `{sed -n 's/.*releases=\([0-9]*\).*/\1/p' /dist/status}
+check record test-1 `{sed -n 's/.* name=\([a-z0-9-]*\).*/\1/p' /dist/releases/1/record}
+check fetched fetched `{sed -n 's/.*state=\([a-z]*\).*/\1/p' /dist/releases/1/status}
+check readme readme `{cat $t/README.txt}
+check deep deep `{cat $t/bin/deeper/file.txt}
+check unicode unicode `{cat $t/Ünïcode.txt}
+check link README.txt `{readlink $t/readme-link}
+check big same `{if(cmp -s $t/big.bin /n/plain/big.bin) echo same; if not echo differs}
+check list 'README.txt big.bin bin other.bin readme-link Ünïcode.txt' `{ls $t}
+check objects b2 `{ls /dist/store}
+check raw same `{p=`{cat /n/plain/damage}; if(cmp -s /dist/store/$p /n/$p) echo same; if not echo differs}
+
+# Damage: other.bin's second block rewritten in the store.
+p=`{cat /n/plain/damage}
+chmod u+w /n/$p
+echo not the block >/n/$p
+check damaged refused `{if(cat $t/other.bin >/dev/null >[2]/dev/null) echo read; if not echo refused}
+check still readme `{cat $t/README.txt}
+
+echo disttest: $checks checks, $failed failed

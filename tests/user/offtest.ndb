@@ -1,0 +1,5 @@
+# tests/user/offtest.ndb: poweroff run as a service (tests/qemu/poweroff.ndb),
+# with bus-acpi's post as its connector.
+
+service=offtest program=/boot/bin/poweroff console
+connect=acpi

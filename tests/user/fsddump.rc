@@ -1,0 +1,62 @@
+# tests/user/fsddump.rc: fsd's snapshots, read-only, and its dump view
+# (tests/qemu/fsddump.ndb). gsh runs it as vectra with fsd's home branch on
+# /tmp, its adm branch on /adm, and the dump view on /n. Snapshots are made
+# through ctl, dated (home@YYYY-MM-DD) and not, then read: through the dump
+# view, and one mounted by its label. The last line counts the checks.
+
+checks=0
+failed=0
+
+fn check {
+  checks=`{expr $checks + 1}
+  name=$1
+  want=$2
+  shift 2
+  if(! ~ $"* $want) {
+    failed=`{expr $failed + 1}
+    echo 'fsddump: FAILED' $name: wanted $want, got $"*
+  }
+}
+
+fn refused {
+  if($* >[2]/dev/null) echo done
+  if not echo refused
+}
+
+fn ctl {
+  echo $* | tee /adm/ctl >/dev/null
+}
+
+echo first >/tmp/a.txt
+ctl snap home home@2027-03-14
+echo second >/tmp/b.txt
+ctl snap home home@2027-03-15
+ctl snap home home@2026-12-31
+echo third >/tmp/c.txt
+ctl snap home before-c-went
+rm /tmp/c.txt
+
+check years '2026 2027' `{ls /n}
+check days '0314 0315' `{ls /n/2027}
+check branches home `{ls /n/2027/0314}
+check old first `{cat /n/2027/0314/home/a.txt}
+check not-yet '' `{ls /n/2027/0314/home | grep '^b.txt'}
+check later second `{cat /n/2027/0315/home/b.txt}
+check dotdot '0314 0315' `{ls /n/2027/0314/home/../..}
+check read-only refused `{refused touch /n/2027/0315/home/x}
+check rm-refused refused `{refused rm /n/2027/0315/home/a.txt}
+check kept first `{cat /n/2027/0315/home/a.txt}
+
+# A snapshot by its label, mounted on its own.
+mount /srv/fsd /srv before-c-went
+check by-label third `{cat /srv/c.txt}
+check gone '' `{ls /tmp | grep '^c.txt'}
+check label-ro refused `{refused touch /srv/y}
+
+# A label deleted: its snapshot leaves the dump view.
+ctl del home@2026-12-31
+check deleted 2027 `{ls /n}
+
+echo 'fsddump:' $checks checks, $failed failed
+if(~ $failed 0) exit # an empty status: success, as rc's
+exit $failed^' failed'

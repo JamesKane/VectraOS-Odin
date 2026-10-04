@@ -1,0 +1,8 @@
+# tests/user/dreftest.ndb: dreftest with fsd's home branch on /tmp
+# (tests/qemu/fsddref.ndb), as vectra, whose home it is.
+
+service=dreftest program=/boot/bin/dreftest console
+user=vectra
+ns=posix
+mount=/tmp srv=fsd aname=home flags=c
+connect=nsd
