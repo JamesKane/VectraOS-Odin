@@ -46,6 +46,8 @@ foreign _ {
 	vx_write_mdscr :: proc "c" (v: u64) ---
 	vx_os_unlock :: proc "c" () ---
 	vx_sync_icache :: proc "c" (p: rawptr, length: u64) ---
+	vx_read_tpidr_el0 :: proc "c" () -> u64 ---
+	vx_write_tpidr_el0 :: proc "c" (v: u64) ---
 	vx_write_icc_sgi1r :: proc "c" (v: u64) ---
 	vx_pan_off :: proc "c" () ---
 	vx_context_switch :: proc "c" (save_sp: ^u64, load_sp: u64) ---
@@ -682,6 +684,37 @@ step_on_return :: proc "contextless" () {
 	mdscr := vx_read_mdscr()
 	vx_write_mdscr(want ? mdscr | MDSCR_SS : mdscr &~ MDSCR_SS)
 	step_enabled[cpu] = want
+}
+
+// TPIDR_EL0 is the user's to write directly; the kernel only keeps it with
+// its thread.
+arch_tls_read :: proc "contextless" () -> u64 {
+	return vx_read_tpidr_el0()
+}
+
+arch_tls_write :: proc "contextless" (value: u64) {
+	vx_write_tpidr_el0(value)
+}
+
+// The vector state entry.S saves above the general registers (ADR-0004):
+// q0-q31, FPCR and FPSR, laid out as an Fpregs.
+@(private="file")
+frame_fp :: proc "contextless" (f: ^Trap_Frame) -> ^vx.Fpregs {
+	return cast(^vx.Fpregs)uintptr(u64(uintptr(f)) + size_of(Trap_Frame))
+}
+
+#assert(size_of(vx.Fpregs) == TRAP_FRAME_SIZE - size_of(Trap_Frame))
+
+arch_frame_fpregs :: proc "contextless" (f: ^Trap_Frame) -> vx.Fpregs {
+	return frame_fp(f)^
+}
+
+// FPCR and FPSR are kept to their defined bits.
+arch_frame_set_fpregs :: proc "contextless" (f: ^Trap_Frame, r: ^vx.Fpregs) {
+	fp := frame_fp(f)
+	fp^ = r^
+	fp.fpcr &= 0x07ff_9f00
+	fp.fpsr &= 0xf800_009f
 }
 
 // Code written through the direct map: cleaned to the point of unification,

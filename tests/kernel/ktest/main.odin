@@ -1348,6 +1348,25 @@ test_debugger :: proc "contextless" () {
 	ti: vx.Thread_Info
 	check(rt.thread_state(child, 0, .Next_Thread, &ti) == .Ok && ti.id == 1 && ti.state == .Suspended && ti.suspend_count == 1)
 	check(rt.thread_state(child, 1, .Next_Thread, &ti) == .Err_Not_Found)
+	// Its FP registers, read and written back (a bad MXCSR made safe).
+	fp: vx.Fpregs
+	check(rt.thread_state(child, 1, .Get_Fpregs, &fp) == .Ok)
+	when ODIN_ARCH == .amd64 {
+		mxcsr := intrinsics.unaligned_load((^u32)(&fp.fxsave[24]))
+		check(mxcsr == 0x1f80) // the reset value: every exception masked
+		intrinsics.unaligned_store((^u32)(&fp.fxsave[24]), 0xffff_1f80) // reserved bits: XRSTOR would fault on them
+		fp.fxsave[160] = 0x5a // XMM0's first byte
+		check(rt.thread_state(child, 1, .Set_Fpregs, &fp) == .Ok)
+		check(rt.thread_state(child, 1, .Get_Fpregs, &fp) == .Ok)
+		check(intrinsics.unaligned_load((^u32)(&fp.fxsave[24])) == 0x1f80 && fp.fxsave[160] == 0x5a)
+	} else {
+		fp.v[0][0] = 0x5a
+		fp.fpcr = ~u64(0)
+		check(rt.thread_state(child, 1, .Set_Fpregs, &fp) == .Ok)
+		check(rt.thread_state(child, 1, .Get_Fpregs, &fp) == .Ok)
+		check(fp.v[0][0] == 0x5a && fp.fpcr == 0x07ff9f00)
+	}
+	check(rt.thread_state(weak, 1, .Get_Fpregs, &fp) == .Err_Bad_State) // DEBUG needed
 	mi, qst := rt.as_query(child, 0)
 	check(qst == .Ok && mi.base <= CHILD_CODE && mi.base + mi.size > CHILD_CODE && mi.flags == {.Exec})
 	_, qst = rt.as_query(child, ~u64(0) - 4096)
@@ -1394,6 +1413,137 @@ test_debugger :: proc "contextless" () {
 	rt.close_all(child, port)
 }
 
+// --- The thread pointer (a C library's TLS) ---
+
+tls_shared: Shared
+tls_worker_bad: u32
+
+// Its own thread pointer, kept across the switches its sleeps cause.
+tls_worker :: proc "c" (unused: vx.Handle, arg: u64) -> ! {
+	@(static) mine: u64 = 0xb0b0_b0b0
+	if rt.tls_set(u64(uintptr(&mine))) != .Ok {
+		intrinsics.atomic_add(&tls_worker_bad, 1)
+	}
+	set_stage(&tls_shared, 1)
+	for _ in 0 ..< 20 {
+		got, st := rt.tls_get()
+		if rt.thread_word() != mine || st != .Ok || got != u64(uintptr(&mine)) {
+			intrinsics.atomic_add(&tls_worker_bad, 1)
+		}
+		_ = rt.futex_wait(&never, 0, after_ms(1))
+	}
+	set_stage(&tls_shared, 2)
+	rt.thread_exit(0)
+}
+
+test_tls :: proc "contextless" () {
+	@(static) main_word: u64 = 0xa1a1_a1a1
+	main_at := u64(uintptr(&main_word))
+	check(rt.tls_set(main_at) == .Ok)
+	got, gst := rt.tls_get()
+	check(gst == .Ok && got == main_at && rt.thread_word() == main_word)
+	// Each thread keeps its own, though both sleep and run on whichever CPU.
+	sp := new_stack()
+	check(sp != 0)
+	th, st := rt.thread_create(rt.self)
+	check(st == .Ok)
+	check(rt.thread_start(th, u64(uintptr(rawptr(tls_worker))), sp, 0, 0) == .Ok)
+	wait_for_stage(&tls_shared, 1)
+	kept := true
+	for _ in 0 ..< 20 {
+		kept = kept && rt.thread_word() == main_word
+		_ = rt.futex_wait(&never, 0, after_ms(1))
+	}
+	check(kept)
+	wait_for_stage(&tls_shared, 2)
+	check(intrinsics.atomic_load(&tls_worker_bad) == 0)
+	got, gst = rt.tls_get()
+	check(rt.thread_word() == main_word && gst == .Ok && got == main_at)
+	_ = rt.handle_close(th)
+
+	// Only a user address, and thread 0 only of the caller's own task.
+	bad := u64(0xffff_8000_0000_0000) // the kernel half
+	check(rt.thread_state(rt.self, 0, .Set_Tls, &bad) == .Err_Range)
+	small: u32
+	check(rt.thread_state(rt.self, 0, .Set_Tls, &small) == .Err_Too_Small)
+	child, ok := start_child(.Spin)
+	check(ok)
+	check(rt.thread_state(child, 0, .Get_Tls, &bad) == .Err_Invalid)
+	// Another thread's, while it is suspended: read, set, read back.
+	v := u64(1)
+	check(rt.thread_state(child, 1, .Get_Tls, &v) == .Err_Bad_State) // running
+	check(rt.thread_suspend(child, 1) == .Ok)
+	check(rt.thread_state(child, 1, .Get_Tls, &v) == .Ok && v == 0) // never set
+	v = 0x1000
+	check(rt.thread_state(child, 1, .Set_Tls, &v) == .Ok)
+	v = 0
+	check(rt.thread_state(child, 1, .Get_Tls, &v) == .Ok && v == 0x1000)
+	other, ost := rt.handle_dup(child, vx.ALL_RIGHTS - {.Debug})
+	check(ost == .Ok)
+	check(rt.thread_state(other, 1, .Get_Tls, &v) == .Err_Bad_State) // DEBUG needed
+	_ = rt.handle_close(other)
+	check(rt.thread_resume(child, 1) == .Ok)
+	check(rt.task_kill(child, 46) == .Ok)
+	_ = rt.handle_close(child)
+	check(rt.tls_set(0) == .Ok)
+}
+
+// --- FP/SIMD state, kept per thread (ADR-0004) ---
+
+when ODIN_ARCH == .amd64 {
+	FP_CTL_DEFAULT :: u32(0x1f80)
+	FP_CTL_ZERO :: u32(0x7f80) // round toward zero
+} else {
+	FP_CTL_DEFAULT :: u32(0)
+	FP_CTL_ZERO :: u32(3) << 22 // FPCR.RMode: toward zero
+}
+
+fp_shared: Shared
+fp_worker_bad: u32
+
+// A new thread's registers are clean; then its own survive its sleeps.
+fp_worker :: proc "c" (unused: vx.Handle, arg: u64) -> ! {
+	v, ctl := rt.fp_probe_get()
+	if v != 0 || ctl != FP_CTL_DEFAULT {
+		intrinsics.atomic_add(&fp_worker_bad, 1)
+	}
+	rt.fp_probe_put(0xb0b0_b0b0_b0b0_b0b0, FP_CTL_ZERO)
+	set_stage(&fp_shared, 1)
+	for _ in 0 ..< 20 {
+		_ = rt.futex_wait(&never, 0, after_ms(1))
+		v, ctl = rt.fp_probe_get()
+		if v != 0xb0b0_b0b0_b0b0_b0b0 || ctl != FP_CTL_ZERO {
+			intrinsics.atomic_add(&fp_worker_bad, 1)
+		}
+	}
+	set_stage(&fp_shared, 2)
+	rt.thread_exit(0)
+}
+
+test_fp :: proc "contextless" () {
+	rt.fp_probe_put(0xa1a1_a1a1_a1a1_a1a1, FP_CTL_DEFAULT)
+	sp := new_stack()
+	check(sp != 0)
+	th, st := rt.thread_create(rt.self)
+	check(st == .Ok)
+	check(rt.thread_start(th, u64(uintptr(rawptr(fp_worker))), sp, 0, 0) == .Ok)
+	wait_for_stage(&fp_shared, 1)
+	kept := true
+	for _ in 0 ..< 20 {
+		_ = rt.futex_wait(&never, 0, after_ms(1))
+		v, ctl := rt.fp_probe_get()
+		kept = kept && v == 0xa1a1_a1a1_a1a1_a1a1 && ctl == FP_CTL_DEFAULT
+	}
+	check(kept)
+	wait_for_stage(&fp_shared, 2)
+	check(intrinsics.atomic_load(&fp_worker_bad) == 0)
+	_ = rt.handle_close(th)
+	// And floating point itself, compiled: 1/3 rounds differently by mode.
+	third, three := 1.0, 3.0
+	q := intrinsics.volatile_load(&third) / intrinsics.volatile_load(&three)
+	check(q > 0.333 && q < 0.334)
+}
+
 @(export, link_name="vx_main")
 vx_main :: proc() -> int {
 	test_spawn_message()
@@ -1411,6 +1561,8 @@ vx_main :: proc() -> int {
 	test_in_task()
 	test_vmo_clone()
 	test_debugger()
+	test_tls()
+	test_fp()
 	test_nested_channels()
 	test_rings()
 	test_vmo_rw()

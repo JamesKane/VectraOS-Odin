@@ -130,6 +130,8 @@ Thread :: struct {
 	suspend_count:     u32, // thread_suspend, less thread_resume
 	parked:            bool, // stopped on its way to user mode while suspended
 	stepping:          bool, // a debugger asked for one instruction (arch_frame_step): aarch64 keeps MDSCR_EL1.SS on
+	tls:               u64, // its user thread pointer while it is not running (sched.odin's user_switch)
+	user_held:         bool, // stopped at an exception: tls is its own, saved, for a debugger (exception_stop)
 	// thread_interrupt's notes not yet delivered, oldest first: each is its
 	// own exception (Plan 9 queued notes the same way).
 	interrupt_pending: bool, // notes waiting, read without the lock

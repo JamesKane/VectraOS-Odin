@@ -34,6 +34,8 @@ vx_write_\name:
     READ icc_iar1, icc_iar1_el1
     READ mdscr, mdscr_el1
     WRITE mdscr, mdscr_el1
+    READ tpidr_el0, tpidr_el0
+    WRITE tpidr_el0, tpidr_el0
 
     .globl vx_read_cntvct
     .type vx_read_cntvct, %function

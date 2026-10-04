@@ -56,6 +56,12 @@ exception_divert :: proc "contextless" (f: ^Trap_Frame, e: ^vx.Exception) -> boo
 exception_stop :: proc "contextless" (p: ^Port, key: u64, first: bool, e: ^vx.Exception) -> Maybe(vx.Resume_Action) {
 	th := this_cpu().current
 	t := th.task
+	// Its thread pointer saved now, before the packet goes: a debugger may
+	// read it at once, before this thread has switched out, and what it sets
+	// is loaded when the thread goes on. (Its FP/SIMD registers are in its
+	// trap frame already: ADR-0004.)
+	th.tls = arch_tls_read()
+	th.user_held = true
 	{
 		spin_guard(&t.lock)
 		th.exc = e^
@@ -90,6 +96,8 @@ exception_stop :: proc "contextless" (p: ^Port, key: u64, first: bool, e: ^vx.Ex
 		th.exc_first = false
 		th.wait_token = nil
 	}
+	arch_tls_write(th.tls) // what a debugger set, or what was saved
+	th.user_held = false
 	if intrinsics.atomic_load(&t.killed) {
 		return nil
 	}
@@ -324,6 +332,28 @@ sys_exception_resume :: proc "contextless" (h: vx.Handle, id, action_arg: u64, r
 	return 0, .Ok
 }
 
+// A thread's own thread pointer, with a handle to its own task (any rights).
+@(private="file", require_results)
+thread_tls_self :: proc "contextless" (h: vx.Handle, op: vx.Thread_State_Op, buf: Uva) -> vx.Status {
+	t := handle_get_as(current_task(), h, Task, {}) or_return
+	own := t == current_task()
+	object_release(&t.obj)
+	if !own {
+		return .Err_Invalid
+	}
+	value: u64
+	if op == .Get_Tls {
+		value = arch_tls_read()
+		return copy_out(buf, &value)
+	}
+	copy_in(&value, buf) or_return
+	if value >= u64(USER_TOP) {
+		return .Err_Range // x86_64's FS base must be canonical
+	}
+	arch_tls_write(value)
+	return .Ok
+}
+
 // The live thread of the task with the next id after `after`: .Next_Thread.
 @(private="file", require_results)
 thread_next :: proc "contextless" (h: vx.Handle, after: u64, buf: Uva) -> vx.Status {
@@ -391,12 +421,26 @@ sys_thread_state :: proc "contextless" (h: vx.Handle, id, op_arg: u64, buf: Uva,
 	#partial switch op {
 	case .Next_Thread:
 		return thread_next(h, id, buf)
-	case .Get_Tls, .Set_Tls, .Get_Fpregs, .Set_Fpregs, .Get_Watch, .Set_Watch:
+	case .Get_Watch, .Set_Watch:
 		return .Err_Unsupported
+	case .Get_Tls, .Set_Tls:
+		if id == 0 {
+			return thread_tls_self(h, op, buf)
+		}
 	}
 	regs: vx.Regs
-	if op == .Set_Regs {
+	fpr: vx.Fpregs
+	tls: u64
+	#partial switch op {
+	case .Set_Regs:
 		copy_in(&regs, buf) or_return
+	case .Set_Tls:
+		copy_in(&tls, buf) or_return
+		if tls >= u64(USER_TOP) {
+			return .Err_Range
+		}
+	case .Set_Fpregs:
+		copy_in(&fpr, buf) or_return
 	}
 	t := handle_get_as(current_task(), h, Task, {.Manage}) or_return
 	as_debugger, _ := handle_get_as(current_task(), h, Task, {.Debug})
@@ -427,10 +471,25 @@ sys_thread_state :: proc "contextless" (h: vx.Handle, id, op_arg: u64, buf: Uva,
 			e.regs = arch_frame_regs(arch_user_frame(target))
 		case .Set_Regs:
 			return arch_frame_set_regs(arch_user_frame(target), &regs)
+		case .Get_Tls:
+			tls = target.tls // saved: by exception_stop, or as it switched out
+		case .Set_Tls:
+			target.tls = tls // loaded when it next runs
+			return .Ok
+		case .Get_Fpregs:
+			fpr = arch_frame_fpregs(arch_user_frame(target)) // saved at its entry (ADR-0004)
+		case .Set_Fpregs:
+			arch_frame_set_fpregs(arch_user_frame(target), &fpr) // loaded on its way out
+			return .Ok
 		}
 	}
-	if op == .Get_Exception {
+	#partial switch op {
+	case .Get_Exception:
 		return copy_out(buf, &e)
+	case .Get_Tls:
+		return copy_out(buf, &tls)
+	case .Get_Fpregs:
+		return copy_out(buf, &fpr)
 	}
 	return copy_out(buf, &e.regs)
 }

@@ -207,6 +207,7 @@ MSR_EFER :: 0xc0000080
 MSR_STAR :: 0xc0000081
 MSR_LSTAR :: 0xc0000082
 MSR_FMASK :: 0xc0000084
+MSR_FS_BASE :: 0xc0000100
 MSR_GS_BASE :: 0xc0000101
 MSR_KERNEL_GS_BASE :: 0xc0000102
 
@@ -802,6 +803,67 @@ arch_frame_step :: proc "contextless" (f: ^Trap_Frame, on: bool) {
 }
 
 arch_sync_icache :: proc "contextless" (p: []u8) {} // x86 keeps it coherent itself
+
+// The user thread pointer: the FS base. User code changes it only through
+// thread_state (CR4.FSGSBASE is off).
+arch_tls_read :: proc "contextless" () -> u64 {
+	return vx_rdmsr(MSR_FS_BASE)
+}
+
+arch_tls_write :: proc "contextless" (value: u64) {
+	vx_wrmsr(MSR_FS_BASE, value)
+}
+
+// The XSAVE area entry.S keeps below a trap frame, 64-byte aligned: the
+// interrupted context's vector state (ADR-0004). Its first 512 bytes are
+// FXSAVE's image; XSTATE_BV, at 512, says which components it holds, and a
+// component it does not hold is in its initial state.
+@(private="file")
+Xsave_Legacy :: struct {
+	fxsave:    [512]u8,
+	xstate_bv: u64,
+	xcomp_bv:  u64,
+}
+
+@(private="file")
+XSTATE_X87 :: u64(1)
+@(private="file")
+XSTATE_SSE :: u64(2)
+
+@(private="file")
+frame_xsave :: proc "contextless" (f: ^Trap_Frame) -> ^Xsave_Legacy {
+	return cast(^Xsave_Legacy)uintptr((u64(uintptr(f)) - intrinsics.volatile_load(&vx_xsave_size)) &~ 63)
+}
+
+// The FXSAVE image of a thread's saved FP/SIMD state, with any component in
+// its initial state written out as such: FCW 0x37f, every register zero.
+arch_frame_fpregs :: proc "contextless" (f: ^Trap_Frame) -> (r: vx.Fpregs) {
+	x := frame_xsave(f)
+	r.fxsave = x.fxsave
+	if x.xstate_bv & XSTATE_X87 == 0 {
+		mxcsr := r.fxsave[24:32]
+		saved: [8]u8
+		copy(saved[:], mxcsr) // MXCSR and its mask, which XSAVE writes whatever XSTATE_BV says
+		intrinsics.mem_zero(&r.fxsave[0], 160)
+		copy(r.fxsave[24:32], saved[:])
+		r.fxsave[0], r.fxsave[1] = 0x7f, 0x03 // FCW 0x37f
+	}
+	if x.xstate_bv & XSTATE_SSE == 0 {
+		intrinsics.mem_zero(&r.fxsave[160], 16 * 16) // XMM0-15
+	}
+	return
+}
+
+// Writes the FXSAVE image in, which XRSTOR loads on the way out. MXCSR is
+// made safe first: no reserved bit set (XRSTOR would fault in the kernel).
+// The upper halves of the YMM registers stay as they were.
+arch_frame_set_fpregs :: proc "contextless" (f: ^Trap_Frame, r: ^vx.Fpregs) {
+	x := frame_xsave(f)
+	x.fxsave = r.fxsave
+	mxcsr := intrinsics.unaligned_load((^u32)(&x.fxsave[24]))
+	intrinsics.unaligned_store((^u32)(&x.fxsave[24]), mxcsr & 0xffbf) // MXCSR_MASK's default: DAZ aside, every defined bit
+	x.xstate_bv |= XSTATE_X87 | XSTATE_SSE
+}
 
 // To pc(arg) as if called: a zero return address below arg, which is
 // 16-aligned.
