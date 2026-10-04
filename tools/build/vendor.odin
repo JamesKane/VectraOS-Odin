@@ -102,5 +102,31 @@ cmd_vendor_check :: proc() -> bool {
 			fmt.eprintfln("  VENDOR %s: warning: review pending", name)
 		}
 	}
+
+	// Every directory under third_party/ has a record, and nothing else is
+	// there but VENDOR.ndb: no files, links or other entries outside a record.
+	entries, err := os.read_directory_by_path("third_party", -1, context.temp_allocator)
+	if err != nil {
+		fmt.eprintfln("build: cannot read third_party/: %v", err)
+		return false
+	}
+	for e in entries {
+		if e.name == "VENDOR.ndb" {
+			continue
+		}
+		if e.type != .Directory {
+			fmt.eprintfln("  VENDOR third_party/%s is not a vendored tree (a directory with a record)", e.name)
+			ok = false
+			continue
+		}
+		recorded := false
+		for rec in f.records {
+			recorded = recorded || val(rec, "name") == e.name
+		}
+		if !recorded {
+			fmt.eprintfln("  VENDOR third_party/%s has no record in %s", e.name, path)
+			ok = false
+		}
+	}
 	return ok
 }

@@ -11,3 +11,12 @@ name=limine
     adr=docs/adr/0005-limine.md
     port=ports/limine/port.ndb
     reviewed.by=pending
+
+name=u9fs
+    version="plan9 ed1a9c2"
+    upstream=https://github.com/plan9foundation/plan9/tree/ed1a9c21e3297d7497a48053d33683375c75fbb4/sys/src/cmd/unix/u9fs
+    git.tree=7ce2c33ea401a78b4975888f980569b4ced224ee
+    tree.sha256=426ecd594603676850f7311b964b232c66151714cb6acad1761f06a817515a52
+    license="Lucent Technologies' permissive notice (LICENSE); Plan 9 is MIT since 2021"
+    adr=docs/adr/0006-u9fs.md
+    reviewed.by=pending
