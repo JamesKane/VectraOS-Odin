@@ -1,6 +1,6 @@
 # ADR-0005: Limine
 
-Status: proposed, 2026-10-04. Review of the import pending (`reviewed.by=pending` in `third_party/VENDOR.ndb`).
+Status: accepted, 2026-10-04. The import was reviewed by James Kane, 2026-10-04 (`third_party/VENDOR.ndb`).
 
 ## Context
 
