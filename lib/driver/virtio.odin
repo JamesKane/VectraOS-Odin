@@ -106,14 +106,6 @@ Virtq :: struct {
 	notify:    ^u16,
 }
 
-// An MSI-X table entry (PCI 3.0 §6.8.2).
-Msix_Entry :: struct {
-	address_lo: u32,
-	address_hi: u32,
-	data:       u32,
-	control:    u32, // bit 0 masks it
-}
-
 Virtio :: struct {
 	fn:          pci.Function,
 	bar:         [6][]u8, // mapped by the driver; empty if not given
@@ -122,7 +114,7 @@ Virtio :: struct {
 	notify_mult: u32,
 	isr:         ^u8,
 	device:      []u8, // the device-specific configuration
-	msix:        []Msix_Entry,
+	msix:        []pci.Msix_Entry,
 	dma:         vx.Handle, // the DMA domain
 }
 
@@ -172,14 +164,7 @@ virtio_find :: proc "contextless" (v: ^Virtio) -> vx.Status {
 			}
 		}
 	}
-	if msix := pci.cap(&v.fn, 0x11, 0); msix != 0 {
-		table := pci.read32(&v.fn, u32(msix) + 4)
-		bir, offset := table & 7, u64(table &~ 7)
-		count := u64(pci.read16(&v.fn, u32(msix) + 2) & 0x7ff) + 1
-		if bir < 6 && offset + size_of(Msix_Entry) * count <= u64(len(v.bar[bir])) {
-			v.msix = (cast([^]Msix_Entry)&v.bar[bir][offset])[:count]
-		}
-	}
+	v.msix = pci.msix_table(&v.fn, v.bar[:])
 	if v.common == nil || v.notify_base == nil || v.isr == nil || v.device == nil || v.msix == nil {
 		return .Err_Unsupported
 	}
@@ -189,21 +174,8 @@ virtio_find :: proc "contextless" (v: ^Virtio) -> vx.Status {
 // Points MSI-X table entry i at an MSI (from irq_create_msi), unmasked, and
 // turns MSI-X on (PCI 3.0 §6.8.2).
 virtio_msix :: proc "contextless" (v: ^Virtio, i: int, msi: vx.Msi) {
-	e := &v.msix[i]
-	intrinsics.volatile_store(&e.address_lo, u32(msi.address))
-	intrinsics.volatile_store(&e.address_hi, u32(msi.address >> 32))
-	intrinsics.volatile_store(&e.data, msi.data)
-	intrinsics.volatile_store(&e.control, 0) // unmasked
-	MSIX_ENABLE :: 1 << 15
-	MSIX_FUNCTION_MASK :: 1 << 14
-	cap := u32(pci.cap(&v.fn, 0x11, 0))
-	control := pci.read16(&v.fn, cap + 2)
-	pci.write16(&v.fn, cap + 2, (control | MSIX_ENABLE) &~ MSIX_FUNCTION_MASK)
-	MEMORY :: 1 << 1
-	BUS_MASTER :: 1 << 2
-	INTX_DISABLE :: 1 << 10
-	command := pci.read16(&v.fn, 0x04)
-	pci.write16(&v.fn, 0x04, command | BUS_MASTER | MEMORY | INTX_DISABLE)
+	pci.msix_set(&v.fn, v.msix, i, msi)
+	pci.enable(&v.fn)
 }
 
 @(private="file")
