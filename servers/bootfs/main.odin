@@ -189,6 +189,7 @@ fs_readdir :: proc "contextless" (ctx: rawptr, dir: p9.Node, index: u32) -> (chi
 server := p9ring.Server {
 	fs = {attach = fs_attach, walk = fs_walk, parent = fs_parent, stat = fs_stat, open = fs_open, read = fs_read, readdir = fs_readdir},
 	name = "bootfs",
+	supported = {.Xattr}, // Tgetattr, for stat; nothing can be changed
 }
 
 @(export, link_name="vx_main")

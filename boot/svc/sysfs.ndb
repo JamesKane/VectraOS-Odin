@@ -1,0 +1,4 @@
+# boot/svc/sysfs.ndb: /sys (02 §5), posted as /srv/sys: for now its clock,
+# /sys/clock/info and now (05 §9).
+
+service=sysfs program=/boot/bin/sysfs post=sys console restart
