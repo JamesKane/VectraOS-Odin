@@ -37,6 +37,7 @@ PROGRAMS := []Program {
 	{name = "constest", dir = "tests/user/constest", place = .Tests},
 	{name = "nettest", dir = "tests/user/nettest", place = .Tests},
 	{name = "tcptest", dir = "tests/user/tcptest", place = .Tests},
+	{name = "proctest", dir = "tests/user/proctest", place = .Tests},
 	{name = "procfs", dir = "servers/procfs", place = .Bootfs},
 	{name = "devmgr", dir = "servers/devmgr", place = .Bootfs},
 	{name = "netd", dir = "servers/netd", place = .Bootfs},

@@ -1,4 +1,7 @@
-# boot/svc/procfs.ndb: /proc, the tasks (docs/02 §5.1), posted as /srv/proc.
-# It sees every task through svcd's own.
+# boot/svc/procfs.ndb: /proc, the one process table (ADR-0011), posted as
+# /srv/proc. It sees every task through svcd's own, asks nsd for a
+# process's namespace (/proc/N/ns), and writes crash directories to tmpfs.
 
 service=procfs program=/boot/bin/procfs post=proc tasks console restart
+connect=nsd
+connect=tmpfs
