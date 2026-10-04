@@ -35,6 +35,19 @@ P9_MSG(Rseek,    155, P9F_OFFSET)
 P9_MSG(Tdesc,    156, P9F_FID, P9F_DESCFLAGS)
 P9_MSG(Rdesc,    157)
 
+// 9Px's map extension (docs/proto/map.md): a file's range as a VMO, which
+// comes back in one of the transport's handle slots.
+P9_MSG(Tmap,     158, P9F_FID, P9F_OFFSET, P9F_LENGTH, P9F_PROT)
+P9_MSG(Rmap,     159, P9F_OFFSET, P9F_LENGTH) // where in the VMO the range starts, and how much is there
+
+// 9Px's dref extension (docs/proto/dref.md): a read or write whose data is
+// in a VMO of the client's, which comes in one of the transport's handle
+// slots, not in the message.
+P9_MSG(Treadref,  160, P9F_FID, P9F_OFFSET, P9F_COUNT, P9F_ROFFSET)
+P9_MSG(Rreadref,  161, P9F_COUNT)
+P9_MSG(Twriteref, 162, P9F_FID, P9F_OFFSET, P9F_COUNT, P9F_ROFFSET)
+P9_MSG(Rwriteref, 163, P9F_COUNT)
+
 P9_MSG(Tversion, 100, P9F_MSIZE, P9F_VERSION)
 P9_MSG(Rversion, 101, P9F_MSIZE, P9F_VERSION)
 P9_MSG(Tauth,    102, P9F_AFID, P9F_UNAME, P9F_ANAME)

@@ -9,6 +9,9 @@
 // Messages. One 9P message is one submission: opcode RING_MSG, its bytes at
 // arena_off in the client's arena, len bytes long. The reply is one
 // completion: result is its length, aux2 its offset in the server's arena.
+// A reply that carries a handle (Rmap's VMO) has CQE_HANDLE in flags and the
+// ring's handle slot in aux (ring_put_handles), which the client takes. A
+// request that carries one (dref's VMO) has .Handles and handle_slot.
 // Each side copies the other's bytes out once before it decodes them, and a
 // peer that names bytes outside its arena, or sends a reply that does not
 // fit, is treated as gone. This client has one request in flight; a
@@ -27,6 +30,7 @@ import "vx:ring"
 CONNECT :: u32(0x3970_6e63) // the listen channel's one ordinal: "cnp9"
 CONNECT_REFUSED :: u32(1) // a CONNECT reply's flags: no ring, and no handles
 RING_MSG :: u16(1) // the one submission opcode
+CQE_HANDLE :: u32(1) // a completion's flags: a handle in slot aux
 MSIZE :: 16 * 1024
 
 PARAMS :: vx.Ring_Params {
@@ -85,6 +89,17 @@ put :: proc "contextless" (k: ^Conn, req: []u8) -> bool {
 	}
 	copy(arena, req)
 	e := vx.Sqe{opcode = RING_MSG, len = u32(len(req))}
+	if k.c.send_handle != vx.HANDLE_NONE { // dref's VMO, moved to a slot for the server
+		h := [1]vx.Handle{k.c.send_handle}
+		k.c.send_handle = vx.HANDLE_NONE
+		hslot, hst := ring_put_handles(k.end, h[:])
+		if hst != .Ok {
+			close_all(h[0])
+			return false // the slots are full: a server not taking them
+		}
+		e.flags = {.Handles}
+		e.handle_slot = hslot
+	}
 	copy(slot, memory.ptr_to_bytes(&e))
 	if ring.produce(&k.ring) {
 		_ = ring_notify(k.end)
@@ -107,7 +122,16 @@ take :: proc "contextless" (k: ^Conn, resp: []u8) -> (n: int, st: vx.Status) {
 	if !ok {
 		return 0, .Err_Peer_Closed
 	}
-	return copy(resp, p), .Ok
+	n = copy(resp, p)
+	close_all(k.c.handle) // one no call took
+	k.c.handle = vx.HANDLE_NONE
+	if c.flags & CQE_HANDLE != 0 {
+		h: [1]vx.Handle
+		if got, _ := ring_take_handles(k.end, c.aux, h[:]); got == 1 {
+			k.c.handle = h[0]
+		}
+	}
+	return n, .Ok
 }
 
 @(private="file")
@@ -149,8 +173,8 @@ rpc :: proc "contextless" (ctx: rawptr, req, resp: []u8) -> int {
 }
 
 // Opens a connection through a connector (a listen channel's client end,
-// which stays the caller's) and negotiates 9Px, with the posix and xattr
-// extensions where the server has them. The connection is ready to attach.
+// which stays the caller's) and negotiates 9Px, with the posix, xattr, map
+// and dref extensions where the server has them. The connection is ready to attach.
 @(require_results)
 p9_connect :: proc "contextless" (connector: vx.Handle, k: ^Conn) -> (st: vx.Status) {
 	k^ = {}
@@ -181,14 +205,14 @@ p9_connect :: proc "contextless" (connector: vx.Handle, k: ^Conn) -> (st: vx.Sta
 	k.port = port_create() or_return
 	port_bind(k.port, k.end, .Peer_Closed, KEY_CLOSED) or_return
 	k.c = {rpc = rpc, ctx = k, tbuf = k.tbuf[:], rbuf = k.rbuf[:]}
-	return p9.client_version(&k.c, MSIZE, {.Posix, .Xattr})
+	return p9.client_version(&k.c, MSIZE, {.Posix, .Xattr, .Map, .Dref})
 }
 
 // Ends the connection: its ring's memory is unmapped and its handles
 // closed. Safe on a connection that never connected.
 p9_disconnect :: proc "contextless" (k: ^Conn) {
 	ring_unmap(&k.ring)
-	close_all(k.end, k.port)
+	close_all(k.c.handle, k.end, k.port)
 	k^ = {dead = true}
 }
 
@@ -247,4 +271,34 @@ p9_arm :: proc "contextless" (k: ^Conn, port: vx.Handle, key: u64) -> bool {
 		return false
 	}
 	return port_bind(port, k.end, .Counter_Ge, key, seen + 1) == .Ok
+}
+
+// --- dref ---
+//
+// Treadref and Twriteref (upstream's docs/proto/dref.md), here rather than in
+// lib/p9, which is built for the host too: count bytes of the file at offset
+// copied into (or from) vmo at roffset by the server, in one message whatever
+// the msize. The VMO stays the caller's: the request carries a duplicate (so
+// it needs .Duplicate and .Transfer). Returns how many bytes moved.
+
+@(private="file", require_results)
+p9_ref :: proc "contextless" (k: ^Conn, type: p9.Type, fid: p9.Fid, offset: u64, vmo: vx.Handle, roffset: u64, count: u32) -> (done: u32, st: vx.Status) {
+	if .Dref not_in k.c.extensions {
+		return 0, .Err_Unsupported
+	}
+	k.c.send_handle = handle_dup(vmo, vx.RIGHTS_SAME) or_return
+	done, st = p9.client_ref(&k.c, type, fid, offset, roffset, count)
+	close_all(k.c.send_handle) // never sent
+	k.c.send_handle = vx.HANDLE_NONE
+	return
+}
+
+@(require_results)
+p9_readref :: proc "contextless" (k: ^Conn, fid: p9.Fid, offset: u64, vmo: vx.Handle, roffset: u64, count: u32) -> (done: u32, st: vx.Status) {
+	return p9_ref(k, .Treadref, fid, offset, vmo, roffset, count)
+}
+
+@(require_results)
+p9_writeref :: proc "contextless" (k: ^Conn, fid: p9.Fid, offset: u64, vmo: vx.Handle, roffset: u64, count: u32) -> (done: u32, st: vx.Status) {
+	return p9_ref(k, .Twriteref, fid, offset, vmo, roffset, count)
 }

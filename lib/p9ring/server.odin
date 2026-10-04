@@ -98,10 +98,19 @@ Server :: struct {
 	shared:        p9.Shared, // the open files and locks all its connections share (posix)
 }
 
+// The handle a request came with, if any (dref's VMO): the server's while it
+// serves it.
+@(private="file")
+drop_request_handle :: proc "contextless" (c: ^Server_Conn) {
+	rt.close_all(c.srv.request_handle)
+	c.srv.request_handle = vx.HANDLE_NONE
+}
+
 // A connection goes: every fid is clunked, and its ring leaves the address
 // space, so a long-lived server does not run out of mappings.
 @(private="file")
 close_conn :: proc "contextless" (c: ^Server_Conn) {
+	drop_request_handle(c)
 	p9.hang_up(&c.srv)
 	_ = rt.handle_close(c.end)
 	rt.session_unmap(&c.ring)
@@ -180,29 +189,44 @@ drain :: proc "contextless" (c: ^Server_Conn) -> Drained {
 				return .Broken
 			}
 			copy(c.req[:], p)
+			if .Handles in e.flags { // dref's VMO, for Treadref and Twriteref
+				h: [1]vx.Handle
+				if got, _ := rt.ring_take_handles(c.end, e.handle_slot, h[:]); got == 1 {
+					c.srv.request_handle = h[0]
+				}
+			}
 		}
 		n, res := p9.serve(&c.srv, c.req[:e.len], c.resp[:])
-		switch res {
-		case .Defer:
-			c.holding = true
+		c.holding = res == .Defer
+		if c.holding {
+			// A held request keeps its VMO until it is served.
 			c.held_len = e.len
 			c.held_user_data = e.user_data
 			return .Drained
-		case .Hang_Up:
-			return .Broken // unanswerable
-		case .Reply:
-			c.holding = false
 		}
+		drop_request_handle(c)
 		arena := ring.arena(&c.ring)
-		if n > len(arena) {
-			return .Broken
+		slot: []u8
+		ok := false
+		if res == .Reply && n <= len(arena) {
+			slot, ok = ring.produce_slot(&c.ring)
 		}
-		slot, ok := ring.produce_slot(&c.ring)
 		if !ok {
-			return .Broken // a client that does not drain its completions
+			rt.close_all(c.srv.reply_handle) // no reply to carry it
+			c.srv.reply_handle = vx.HANDLE_NONE
+			return .Broken // unanswerable, or a client that does not drain its completions
 		}
 		copy(arena, c.resp[:n])
 		out := vx.Cqe{user_data = e.user_data, result = i64(n)}
+		if c.srv.reply_handle != vx.HANDLE_NONE { // Rmap's VMO, in a slot the completion names
+			h := [1]vx.Handle{c.srv.reply_handle}
+			c.srv.reply_handle = vx.HANDLE_NONE
+			if hslot, hst := rt.ring_put_handles(c.end, h[:]); hst == .Ok {
+				out.flags, out.aux = rt.CQE_HANDLE, hslot
+			} else {
+				rt.close_all(h[0]) // the client finds none, and its call fails
+			}
+		}
 		copy(slot, memory.ptr_to_bytes(&out))
 		if ring.produce(&c.ring) {
 			_ = rt.ring_notify(c.end)

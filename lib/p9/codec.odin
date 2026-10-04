@@ -191,6 +191,15 @@ Desc_Flag :: enum u32 {
 }
 Desc_Flags :: bit_set[Desc_Flag;u32]
 
+// Tmap's prot: what the mapping may do with the pages. On the wire, bit i
+// is the member of value i (read 1, write 2, exec 4).
+Prot_Flag :: enum u32 {
+	Read,
+	Write,
+	Exec,
+}
+Prot :: bit_set[Prot_Flag;u32]
+
 TOKEN_SIZE :: 16
 
 Msg :: struct {
@@ -228,6 +237,8 @@ Msg :: struct {
 	proc_id:    u32,
 	holds:      u32,
 	desc_flags: Desc_Flags,
+	prot:       Prot, // Tmap's; bits outside the set reach the server as they came
+	roffset:    u64, // Treadref's and Twriteref's
 	start:      u64,
 	length:     u64,
 	client_id:  string,
@@ -419,6 +430,10 @@ encode :: proc "contextless" (m: ^Msg, buf: []u8) -> int {
 			put(&o, u8(m.whence))
 		case .Descflags:
 			put(&o, transmute(u32)m.desc_flags)
+		case .Prot:
+			put(&o, transmute(u32)m.prot)
+		case .Roffset:
+			put(&o, m.roffset)
 		}
 	}
 	if o.failed || u64(o.len) > u64(max(u32)) {
@@ -640,6 +655,10 @@ decode :: proc "contextless" (buf: []u8, m: ^Msg) -> vx.Status {
 			m.whence = Whence(get(&in_, u8))
 		case .Descflags:
 			m.desc_flags = transmute(Desc_Flags)get(&in_, u32)
+		case .Prot:
+			m.prot = transmute(Prot)get(&in_, u32)
+		case .Roffset:
+			m.roffset = get(&in_, u64)
 		}
 	}
 	if in_.failed || in_.pos != len(buf) {
@@ -835,6 +854,8 @@ ERRORS := [?]Error_Text {
 	{.Err_Peer_Closed, "i/o on hungup channel"},
 	{.Err_Interrupted, "interrupted"},
 	{.Err_No_Child, "no living children"},
+	{.Err_Io, "i/o error"},
+	{.Err_No_Space, "file system full"},
 	{.Err_Invalid, "bad message"},
 }
 
@@ -850,7 +871,7 @@ ERRORS_HEARD := [?]Error_Text {
 	{.Err_Access, "is a directory"},
 	{.Err_Access, "operation not permitted"},
 	{.Err_Bad_Handle, "fid unknown or out of range"},
-	{.Err_No_Memory, "no space left on device"},
+	{.Err_No_Space, "no space left on device"},
 }
 
 error_text :: proc "contextless" (st: vx.Status) -> string {
