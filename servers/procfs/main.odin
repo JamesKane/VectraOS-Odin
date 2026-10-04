@@ -16,6 +16,7 @@ import "vx:ndb"
 import "vx:p9"
 import "vx:p9ring"
 import "vx:rt"
+import "vx:str"
 
 @(private="file")
 tasks: vx.Handle // the root of what procfs shows
@@ -25,15 +26,28 @@ root_id: u64 // its task id
 KILLED :: -9 // the exit status a kill through ctl gives, as Unix's SIGKILL reads
 
 // Node numbers: 1 is /proc; a task's directory, status and ctl are its id
-// shifted left two, plus 0, 1 or 2.
+// shifted left two, plus its Kind. /proc's number reads as task 0's status,
+// which walk and readdir never make, so it is tested for first.
 @(private="file")
 ROOT :: p9.Node(1)
+
 @(private="file")
-DIR :: p9.Node(0)
+Kind :: enum u64 {
+	Dir,
+	Status,
+	Ctl,
+	// 3 is never made
+}
+
 @(private="file")
-STATUS :: p9.Node(1)
+node_of :: proc "contextless" (id: u64, k: Kind) -> p9.Node {
+	return p9.Node(id << 2 | u64(k))
+}
+
 @(private="file")
-CTL :: p9.Node(2)
+kind_of :: proc "contextless" (node: p9.Node) -> Kind {
+	return Kind(node & 3)
+}
 
 @(private="file")
 task_of :: proc "contextless" (node: p9.Node) -> u64 {
@@ -58,22 +72,20 @@ fs_attach :: proc "contextless" (ctx: rawptr, aname: string) -> (root: p9.Node, 
 @(private="file")
 fs_walk :: proc "contextless" (ctx: rawptr, dir: p9.Node, name: string) -> (child: p9.Node, st: vx.Status) {
 	if dir == ROOT {
-		id: u64
-		if len(name) == 0 || len(name) > 19 || name[0] == '0' {
+		// A task's id, in decimal, without leading zeros.
+		if len(name) > 19 || str.has_prefix(name, "0") {
 			return 0, .Err_Not_Found
 		}
-		for c in transmute([]u8)name {
-			if c < '0' || c > '9' {
-				return 0, .Err_Not_Found
-			}
-			id = id * 10 + u64(c - '0')
-		}
-		if _, ok := task_exists(id); !ok {
+		id, ok := str.parse_u64(name)
+		if !ok {
 			return 0, .Err_Not_Found
 		}
-		return p9.Node(id << 2) | DIR, .Ok
+		if _, exists := task_exists(id); !exists {
+			return 0, .Err_Not_Found
+		}
+		return node_of(id, .Dir), .Ok
 	}
-	if dir & 3 != DIR {
+	if kind_of(dir) != .Dir {
 		return 0, .Err_Not_Found
 	}
 	if _, ok := task_exists(task_of(dir)); !ok {
@@ -81,43 +93,34 @@ fs_walk :: proc "contextless" (ctx: rawptr, dir: p9.Node, name: string) -> (chil
 	}
 	switch name {
 	case "status":
-		return dir | STATUS, .Ok
+		return node_of(task_of(dir), .Status), .Ok
 	case "ctl":
-		return dir | CTL, .Ok
+		return node_of(task_of(dir), .Ctl), .Ok
 	}
 	return 0, .Err_Not_Found
 }
 
 @(private="file")
 fs_parent :: proc "contextless" (ctx: rawptr, node: p9.Node) -> (parent: p9.Node, st: vx.Status) {
-	return node & 3 == DIR ? ROOT : node &~ 3, .Ok
+	return kind_of(node) == .Dir ? ROOT : node_of(task_of(node), .Dir), .Ok
 }
 
 @(private="file")
-name_buf: [24]u8
+name_buf: [str.U64_DIGITS]u8
 
 @(private="file")
 fs_stat :: proc "contextless" (ctx: rawptr, node: p9.Node, out: ^p9.Stat) -> vx.Status {
 	if node == ROOT {
 		out^ = {qid = {type = p9.QTDIR, path = u64(ROOT)}, mode = p9.DMDIR | 0o555, name = "/"}
 	} else {
-		switch node & 3 {
-		case DIR:
+		switch kind_of(node) {
+		case .Dir:
 			// The name of a task's directory is its id, in decimal.
-			id := task_of(node)
-			n := len(name_buf)
-			for {
-				n -= 1
-				name_buf[n] = u8('0' + id % 10)
-				id /= 10
-				if id == 0 {
-					break
-				}
-			}
-			out^ = {qid = {type = p9.QTDIR, path = u64(node)}, mode = p9.DMDIR | 0o555, name = string(name_buf[n:])}
-		case STATUS:
+			name := str.format_u64(name_buf[:], task_of(node))
+			out^ = {qid = {type = p9.QTDIR, path = u64(node)}, mode = p9.DMDIR | 0o555, name = name}
+		case .Status:
 			out^ = {qid = {type = p9.QTFILE, path = u64(node)}, mode = 0o444, name = "status"}
-		case CTL:
+		case .Ctl:
 			out^ = {qid = {type = p9.QTFILE, path = u64(node)}, mode = 0o222, name = "ctl"}
 		case:
 			// Never made: walk and readdir give only the three kinds above.
@@ -130,10 +133,10 @@ fs_stat :: proc "contextless" (ctx: rawptr, node: p9.Node, out: ^p9.Stat) -> vx.
 
 @(private="file")
 fs_open :: proc "contextless" (ctx: rawptr, node: p9.Node, mode: p9.Open_Mode) -> vx.Status {
-	if node & 3 == STATUS && p9.writes(mode) {
+	if kind_of(node) == .Status && p9.writes(mode) {
 		return .Err_Access
 	}
-	if node & 3 == CTL && mode.access != .Write {
+	if kind_of(node) == .Ctl && mode.access != .Write {
 		return .Err_Access
 	}
 	return mode.trunc || mode.rclose ? .Err_Access : .Ok
@@ -147,12 +150,8 @@ status_text :: proc "contextless" (id: u64, buf: []u8) -> int {
 	if !ok {
 		return 0
 	}
-	name_len := 0
-	for name_len < len(info.name) && info.name[name_len] != 0 {
-		name_len += 1
-	}
 	w := ndb.Writer{buf = buf}
-	ndb.put(&w, "name", string(info.name[:name_len]))
+	ndb.put(&w, "name", str.from_nul_padded(info.name[:]))
 	state := "running"
 	if info.state == .New {
 		state = "new"
@@ -161,20 +160,11 @@ status_text :: proc "contextless" (id: u64, buf: []u8) -> int {
 	}
 	ndb.put(&w, "state", state)
 	ndb.put_u64(&w, "threads", u64(info.threads))
-	mem: [24]u8
-	kib := info.mapped / 1024
-	n := len(mem)
-	n -= 1
-	mem[n] = 'K'
-	for {
-		n -= 1
-		mem[n] = u8('0' + kib % 10)
-		kib /= 10
-		if kib == 0 {
-			break
-		}
-	}
-	ndb.put(&w, "mem", string(mem[n:]))
+	mem_buf: [str.U64_DIGITS + 1]u8
+	mem := str.Buf{buf = mem_buf[:]}
+	str.write_u64(&mem, info.mapped / 1024)
+	str.write_byte(&mem, 'K')
+	ndb.put(&w, "mem", str.to_string(&mem))
 	_ = ndb.end(&w)
 	return w.failed ? 0 : w.len
 }
@@ -182,7 +172,7 @@ status_text :: proc "contextless" (id: u64, buf: []u8) -> int {
 @(private="file")
 fs_read :: proc "contextless" (ctx: rawptr, node: p9.Node, offset: u64, buf: []u8) -> (count: u32, st: vx.Status) {
 	text: [256]u8
-	n := node & 3 == STATUS ? status_text(task_of(node), text[:]) : 0
+	n := kind_of(node) == .Status ? status_text(task_of(node), text[:]) : 0
 	left := offset < u64(n) ? u64(n) - offset : 0
 	count = u32(min(u64(len(buf)), left))
 	if count > 0 {
@@ -193,7 +183,7 @@ fs_read :: proc "contextless" (ctx: rawptr, node: p9.Node, offset: u64, buf: []u
 
 @(private="file")
 fs_write :: proc "contextless" (ctx: rawptr, node: p9.Node, offset: u64, data: []u8) -> (count: u32, st: vx.Status) {
-	if node & 3 != CTL {
+	if kind_of(node) != .Ctl {
 		return 0, .Err_Access
 	}
 	n := len(data)
@@ -219,7 +209,7 @@ fs_readdir :: proc "contextless" (ctx: rawptr, dir: p9.Node, index: u32) -> (chi
 		if index > 1 {
 			return 0, .Err_Not_Found
 		}
-		return dir | (index != 0 ? CTL : STATUS), .Ok
+		return node_of(task_of(dir), index != 0 ? .Ctl : .Status), .Ok
 	}
 	id: u64
 	seen: u32
@@ -237,7 +227,7 @@ fs_readdir :: proc "contextless" (ctx: rawptr, dir: p9.Node, index: u32) -> (chi
 		}
 		seen += 1
 	}
-	return p9.Node(id << 2) | DIR, .Ok
+	return node_of(id, .Dir), .Ok
 }
 
 // Not file-private: tests/host drives its Fs on the host.

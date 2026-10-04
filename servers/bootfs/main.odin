@@ -15,6 +15,7 @@ import "vx:memory"
 import "vx:p9"
 import "vx:p9ring"
 import "vx:rt"
+import "vx:str"
 import "vx:tar"
 
 @(private="file")
@@ -87,18 +88,13 @@ load :: proc "contextless" (image: []u8) {
 	st: vx.Status
 	for st = tar.next(&t, &e); st == .Ok; st = tar.next(&t, &e) {
 		at := ROOT
-		start := 0
-		path := tar.entry_path(&e)
-		for i in 0 ..= len(path) {
-			if i < len(path) && path[i] != '/' {
-				continue
-			}
-			last := i == len(path)
-			at = add_child(at, path[start:i], e.dir if last else true)
+		rest := tar.entry_path(&e) // never empty, and no component is
+		for part in str.split_iterator(&rest, '/') {
+			last := rest == ""
+			at = add_child(at, part, e.dir if last else true)
 			if at == 0 {
 				fail("the boot image has a file and a directory with one name")
 			}
-			start = i + 1
 		}
 		if !e.dir {
 			nodes[at].data = e.data
@@ -121,14 +117,9 @@ fs_walk :: proc "contextless" (ctx: rawptr, dir: p9.Node, name: string) -> (chil
 @(private="file")
 fs_attach :: proc "contextless" (ctx: rawptr, aname: string) -> (root: p9.Node, st: vx.Status) {
 	at := ROOT
-	start := 0
-	for i in 0 ..= len(aname) {
-		if i < len(aname) && aname[i] != '/' {
-			continue
-		}
-		part := aname[start:i]
-		start = i + 1
-		if len(part) == 0 {
+	rest := aname
+	for part in str.split_iterator(&rest, '/') {
+		if part == "" {
 			continue
 		}
 		// part is not empty and holds no '/', so of lib/p9's name rules
@@ -228,10 +219,6 @@ vx_main :: proc() -> int {
 			files += 1
 		}
 	}
-	rt.print("bootfs: serving ")
-	rt.print_u64(files)
-	rt.print(" files in ")
-	rt.print_u64(dirs)
-	rt.print(" directories\n")
+	rt.print("bootfs: serving ", files, " files in ", dirs, " directories\n")
 	return int(p9ring.serve(&server))
 }
