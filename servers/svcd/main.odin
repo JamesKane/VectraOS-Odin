@@ -463,10 +463,11 @@ main :: proc() -> int {
 	st: vx.Status
 	for st = tar.next(&t, &e); st == .Ok; st = tar.next(&t, &e) {
 		DIR :: "boot/svc/"
-		if e.dir || len(e.path) < len(DIR) + 5 || e.path[:len(DIR)] != DIR || e.path[len(e.path) - 4:] != ".ndb" {
+		path := tar.entry_path(&e)
+		if e.dir || len(path) < len(DIR) + 5 || path[:len(DIR)] != DIR || path[len(path) - 4:] != ".ndb" {
 			continue
 		}
-		read_manifest(e.path, string(e.data))
+		read_manifest(path, string(e.data))
 	}
 	if st == .Err_Invalid {
 		fail("the boot image is malformed")

@@ -17,33 +17,70 @@ package p9
 
 import "base:intrinsics"
 import "abi:vx"
+import "vx:str"
 
 MAXWELEM :: 16 // names in one walk
 NOTAG :: u16(0xffff) // Tversion's tag
-NOFID :: u32(0xffff_ffff) // no fid (Tattach's afid without auth)
+NOFID :: Fid(0xffff_ffff) // no fid (Tattach's afid without auth)
 IOHDRSZ :: 24 // the Rread and Twrite overhead: a read or write carries msize - 24 bytes
 MIN_MSIZE :: 256
 MAX_MSIZE :: 1 << 20
 
-// qid.type, and the top byte of a stat's mode.
-QTDIR :: u8(0x80)
-QTAPPEND :: u8(0x40)
-QTEXCL :: u8(0x20)
-QTAUTH :: u8(0x08)
-QTFILE :: u8(0x00)
+// A fid: the client's name for a file on one connection. Its own type, so a
+// tag or a count cannot be passed for one.
+Fid :: distinct u32
 
-DMDIR :: u32(0x8000_0000) // a stat's mode: a directory
+// qid.type, and the top byte of a stat's mode: one bit each. Bits a peer
+// sends that are not named here survive a decode and an encode unchanged.
+Qid_Type_Bit :: enum u8 {
+	Tmp    = 2,
+	Auth   = 3,
+	Mount  = 4,
+	Excl   = 5,
+	Append = 6,
+	Dir    = 7,
+}
+Qid_Type :: bit_set[Qid_Type_Bit;u8]
+#assert(size_of(Qid_Type) == 1)
 
-// Topen and Tcreate modes.
-OREAD :: u8(0)
-OWRITE :: u8(1)
-ORDWR :: u8(2)
-OEXEC :: u8(3)
-OTRUNC :: u8(0x10)
-ORCLOSE :: u8(0x40)
+QTDIR :: Qid_Type{.Dir}
+QTAPPEND :: Qid_Type{.Append}
+QTEXCL :: Qid_Type{.Excl}
+QTAUTH :: Qid_Type{.Auth}
+QTFILE :: Qid_Type{}
+
+DMDIR :: u32(0x8000_0000) // a stat's mode: a directory (beside the permission bits, so a plain u32)
+
+// Topen's and Tcreate's mode: the access in its low two bits, and flags.
+Access :: enum u8 {
+	Read,
+	Write,
+	Rdwr,
+	Exec,
+}
+
+Open_Mode :: bit_field u8 {
+	access: Access | 2,
+	_:      u8     | 2,
+	trunc:  bool   | 1, // OTRUNC, 0x10
+	_:      u8     | 1,
+	rclose: bool   | 1, // ORCLOSE, 0x40
+	_:      u8     | 1,
+}
+#assert(size_of(Open_Mode) == 1)
+
+OREAD :: Open_Mode{access = .Read}
+OWRITE :: Open_Mode{access = .Write}
+ORDWR :: Open_Mode{access = .Rdwr}
+OEXEC :: Open_Mode{access = .Exec}
+
+// Whether a fid opened in this mode may write.
+writes :: proc "contextless" (m: Open_Mode) -> bool {
+	return m.access == .Write || m.access == .Rdwr
+}
 
 Qid :: struct {
-	type:    u8,
+	type:    Qid_Type,
 	version: u32,
 	path:    u64,
 }
@@ -51,15 +88,15 @@ Qid :: struct {
 Msg :: struct {
 	type:   Type,
 	tag:    u16,
-	fid:    u32,
-	newfid: u32,
-	afid:   u32,
+	fid:    Fid,
+	newfid: Fid,
+	afid:   Fid,
 	msize:  u32,
 	iounit: u32,
 	perm:   u32,
 	count:  u32,
 	offset: u64,
-	mode:   u8,
+	mode:   Open_Mode,
 	oldtag: u16,
 	version, uname, aname, ename, name: string,
 	qid:    Qid,
@@ -73,51 +110,34 @@ Msg :: struct {
 
 // --- Encoding ---
 
+// A little-endian integer of v's own width; the field's type says how wide
+// it is on the wire, so no width is written twice.
 @(private="file")
-Out :: struct {
-	buf:    []u8,
-	len:    int,
-	failed: bool,
-}
-
-@(private="file")
-put :: proc "contextless" (o: ^Out, v: u64, bytes: int) {
-	if o.failed || len(o.buf) - o.len < bytes {
+put :: proc "contextless" (o: ^str.Buf, v: $T) where intrinsics.type_is_integer(T) {
+	if o.failed || len(o.buf) - o.len < size_of(T) {
 		o.failed = true
 		return
 	}
-	for i in 0 ..< bytes {
-		o.buf[o.len] = u8(v >> (8 * uint(i)))
+	for i in 0 ..< size_of(T) {
+		o.buf[o.len] = u8(u64(v) >> (8 * uint(i)))
 		o.len += 1
 	}
 }
 
 @(private="file")
-put_bytes :: proc "contextless" (o: ^Out, p: []u8) {
-	if o.failed || len(o.buf) - o.len < len(p) {
-		o.failed = true
-		return
-	}
-	// Rread's data may already sit where it is going (server.odin reads it
-	// there), and copy is a memmove, so that is a no-op, not a corruption.
-	copy(o.buf[o.len:], p)
-	o.len += len(p)
-}
-
-@(private="file")
-put_str :: proc "contextless" (o: ^Out, s: string) {
+put_str :: proc "contextless" (o: ^str.Buf, s: string) {
 	if len(s) > 0xffff {
 		o.failed = true
 	}
-	put(o, u64(len(s)), 2)
-	put_bytes(o, transmute([]u8)s)
+	put(o, u16(len(s)))
+	str.write_string(o, s)
 }
 
 @(private="file")
-put_qid :: proc "contextless" (o: ^Out, q: Qid) {
-	put(o, u64(q.type), 1)
-	put(o, u64(q.version), 4)
-	put(o, q.path, 8)
+put_qid :: proc "contextless" (o: ^str.Buf, q: Qid) {
+	put(o, transmute(u8)q.type)
+	put(o, q.version)
+	put(o, q.path)
 }
 
 // Encodes m into buf. Returns its length, or 0 if it does not fit or is not a
@@ -126,32 +146,32 @@ encode :: proc "contextless" (m: ^Msg, buf: []u8) -> int {
 	if !known(m.type) {
 		return 0
 	}
-	o := Out{buf = buf}
-	put(&o, 0, 4) // the size, filled in below
-	put(&o, u64(m.type), 1)
-	put(&o, u64(m.tag), 2)
+	o := str.Buf{buf = buf}
+	put(&o, u32(0)) // the size, filled in below
+	put(&o, u8(m.type))
+	put(&o, m.tag)
 	for f in MESSAGES[u8(m.type)].fields {
 		switch f {
 		case .Fid:
-			put(&o, u64(m.fid), 4)
+			put(&o, m.fid)
 		case .Newfid:
-			put(&o, u64(m.newfid), 4)
+			put(&o, m.newfid)
 		case .Afid:
-			put(&o, u64(m.afid), 4)
+			put(&o, m.afid)
 		case .Msize:
-			put(&o, u64(m.msize), 4)
+			put(&o, m.msize)
 		case .Iounit:
-			put(&o, u64(m.iounit), 4)
+			put(&o, m.iounit)
 		case .Perm:
-			put(&o, u64(m.perm), 4)
+			put(&o, m.perm)
 		case .Count:
-			put(&o, u64(m.count), 4)
+			put(&o, m.count)
 		case .Offset:
-			put(&o, m.offset, 8)
+			put(&o, m.offset)
 		case .Mode:
-			put(&o, u64(m.mode), 1)
+			put(&o, transmute(u8)m.mode)
 		case .Oldtag:
-			put(&o, u64(m.oldtag), 2)
+			put(&o, m.oldtag)
 		case .Version:
 			put_str(&o, m.version)
 		case .Uname:
@@ -167,45 +187,43 @@ encode :: proc "contextless" (m: ^Msg, buf: []u8) -> int {
 		case .Wnames:
 			if m.nwname > MAXWELEM {
 				o.failed = true
+				break
 			}
-			put(&o, u64(m.nwname), 2)
-			for i in 0 ..< int(m.nwname) {
-				if o.failed {
-					break
-				}
-				put_str(&o, m.wname[i])
+			put(&o, m.nwname)
+			for name in m.wname[:m.nwname] {
+				put_str(&o, name)
 			}
 		case .Wqids:
 			if m.nwqid > MAXWELEM {
 				o.failed = true
+				break
 			}
-			put(&o, u64(m.nwqid), 2)
-			for i in 0 ..< int(m.nwqid) {
-				if o.failed {
-					break
-				}
-				put_qid(&o, m.wqid[i])
+			put(&o, m.nwqid)
+			for q in m.wqid[:m.nwqid] {
+				put_qid(&o, q)
 			}
 		case .Data:
 			if u64(len(m.data)) > u64(max(u32)) {
 				o.failed = true
 			}
-			put(&o, u64(len(m.data)), 4)
-			put_bytes(&o, m.data)
+			put(&o, u32(len(m.data)))
+			// Rread's data may already sit where it is going (server.odin reads it
+			// there), and write_bytes copies with a memmove, so that is a no-op,
+			// not a corruption.
+			str.write_bytes(&o, m.data)
 		case .Stat:
 			if len(m.stat) > 0xffff {
 				o.failed = true
 			}
-			put(&o, u64(len(m.stat)), 2)
-			put_bytes(&o, m.stat)
+			put(&o, u16(len(m.stat)))
+			str.write_bytes(&o, m.stat)
 		}
 	}
 	if o.failed || u64(o.len) > u64(max(u32)) {
 		return 0
 	}
-	for i in 0 ..< 4 {
-		buf[i] = u8(o.len >> (8 * uint(i)))
-	}
+	size := str.Buf{buf = buf[:4]} // the size field, written in place
+	put(&size, u32(o.len))
 	return o.len
 }
 
@@ -225,18 +243,19 @@ remaining :: proc "contextless" (in_: ^In) -> u64 {
 	return u64(len(in_.buf) - in_.pos)
 }
 
+// A little-endian integer of T's width.
 @(private="file")
-get :: proc "contextless" (in_: ^In, bytes: int) -> u64 {
-	if in_.failed || remaining(in_) < u64(bytes) {
+get :: proc "contextless" (in_: ^In, $T: typeid) -> T where intrinsics.type_is_integer(T) {
+	if in_.failed || remaining(in_) < size_of(T) {
 		in_.failed = true
 		return 0
 	}
 	v: u64
-	for i in 0 ..< bytes {
+	for i in 0 ..< size_of(T) {
 		v |= u64(in_.buf[in_.pos + i]) << (8 * uint(i))
 	}
-	in_.pos += bytes
-	return v
+	in_.pos += size_of(T)
+	return T(v)
 }
 
 @(private="file")
@@ -252,20 +271,18 @@ get_bytes :: proc "contextless" (in_: ^In, n: u64) -> []u8 {
 
 @(private="file")
 get_str :: proc "contextless" (in_: ^In) -> string {
-	p := get_bytes(in_, get(in_, 2))
-	for c in p {
-		if c == 0 {
-			in_.failed = true // 9P strings never hold NUL
-		}
+	s := string(get_bytes(in_, u64(get(in_, u16))))
+	if str.index_byte(s, 0) >= 0 {
+		in_.failed = true // 9P strings never hold NUL
 	}
-	return string(p)
+	return s
 }
 
 @(private="file")
 get_qid :: proc "contextless" (in_: ^In) -> (q: Qid) {
-	q.type = u8(get(in_, 1))
-	q.version = u32(get(in_, 4))
-	q.path = get(in_, 8)
+	q.type = transmute(Qid_Type)get(in_, u8)
+	q.version = get(in_, u32)
+	q.path = get(in_, u64)
 	return
 }
 
@@ -275,11 +292,11 @@ get_qid :: proc "contextless" (in_: ^In) -> (q: Qid) {
 decode :: proc "contextless" (buf: []u8, m: ^Msg) -> vx.Status {
 	m^ = {}
 	in_ := In{buf = buf}
-	if get(&in_, 4) != u64(len(buf)) || len(buf) < 7 {
+	if u64(get(&in_, u32)) != u64(len(buf)) || len(buf) < 7 {
 		return .Err_Invalid
 	}
-	m.type = Type(get(&in_, 1))
-	m.tag = u16(get(&in_, 2))
+	m.type = Type(get(&in_, u8))
+	m.tag = get(&in_, u16)
 	if !known(m.type) {
 		return .Err_Invalid
 	}
@@ -289,25 +306,25 @@ decode :: proc "contextless" (buf: []u8, m: ^Msg) -> vx.Status {
 		}
 		switch f {
 		case .Fid:
-			m.fid = u32(get(&in_, 4))
+			m.fid = get(&in_, Fid)
 		case .Newfid:
-			m.newfid = u32(get(&in_, 4))
+			m.newfid = get(&in_, Fid)
 		case .Afid:
-			m.afid = u32(get(&in_, 4))
+			m.afid = get(&in_, Fid)
 		case .Msize:
-			m.msize = u32(get(&in_, 4))
+			m.msize = get(&in_, u32)
 		case .Iounit:
-			m.iounit = u32(get(&in_, 4))
+			m.iounit = get(&in_, u32)
 		case .Perm:
-			m.perm = u32(get(&in_, 4))
+			m.perm = get(&in_, u32)
 		case .Count:
-			m.count = u32(get(&in_, 4))
+			m.count = get(&in_, u32)
 		case .Offset:
-			m.offset = get(&in_, 8)
+			m.offset = get(&in_, u64)
 		case .Mode:
-			m.mode = u8(get(&in_, 1))
+			m.mode = transmute(Open_Mode)get(&in_, u8)
 		case .Oldtag:
-			m.oldtag = u16(get(&in_, 2))
+			m.oldtag = get(&in_, u16)
 		case .Version:
 			m.version = get_str(&in_)
 		case .Uname:
@@ -321,32 +338,28 @@ decode :: proc "contextless" (buf: []u8, m: ^Msg) -> vx.Status {
 		case .Qid:
 			m.qid = get_qid(&in_)
 		case .Wnames:
-			m.nwname = u16(get(&in_, 2))
+			m.nwname = get(&in_, u16)
 			if m.nwname > MAXWELEM {
 				in_.failed = true
+				break
 			}
-			for i in 0 ..< int(m.nwname) {
-				if in_.failed {
-					break
-				}
-				m.wname[i] = get_str(&in_)
+			for &name in m.wname[:m.nwname] {
+				name = get_str(&in_)
 			}
 		case .Wqids:
-			m.nwqid = u16(get(&in_, 2))
+			m.nwqid = get(&in_, u16)
 			if m.nwqid > MAXWELEM {
 				in_.failed = true
+				break
 			}
-			for i in 0 ..< int(m.nwqid) {
-				if in_.failed {
-					break
-				}
-				m.wqid[i] = get_qid(&in_)
+			for &q in m.wqid[:m.nwqid] {
+				q = get_qid(&in_)
 			}
 		case .Data:
-			m.count = u32(get(&in_, 4))
+			m.count = get(&in_, u32)
 			m.data = get_bytes(&in_, u64(m.count))
 		case .Stat:
-			m.stat = get_bytes(&in_, get(&in_, 2))
+			m.stat = get_bytes(&in_, u64(get(&in_, u16)))
 		}
 	}
 	if in_.failed || in_.pos != len(buf) {
@@ -370,15 +383,15 @@ Stat :: struct {
 
 // Encodes one stat entry, its size[2] first. Returns its length, or 0.
 stat_encode :: proc "contextless" (s: ^Stat, buf: []u8) -> int {
-	o := Out{buf = buf}
-	put(&o, 0, 2)
-	put(&o, u64(s.type), 2)
-	put(&o, u64(s.dev), 4)
+	o := str.Buf{buf = buf}
+	put(&o, u16(0)) // the size, filled in below
+	put(&o, s.type)
+	put(&o, s.dev)
 	put_qid(&o, s.qid)
-	put(&o, u64(s.mode), 4)
-	put(&o, u64(s.atime), 4)
-	put(&o, u64(s.mtime), 4)
-	put(&o, s.length, 8)
+	put(&o, s.mode)
+	put(&o, s.atime)
+	put(&o, s.mtime)
+	put(&o, s.length)
 	put_str(&o, s.name)
 	put_str(&o, s.uid)
 	put_str(&o, s.gid)
@@ -386,8 +399,8 @@ stat_encode :: proc "contextless" (s: ^Stat, buf: []u8) -> int {
 	if o.failed || o.len - 2 > 0xffff {
 		return 0
 	}
-	buf[0] = u8(o.len - 2)
-	buf[1] = u8((o.len - 2) >> 8)
+	size := str.Buf{buf = buf[:2]} // the size field, written in place
+	put(&size, u16(o.len - 2))
 	return o.len
 }
 
@@ -396,22 +409,45 @@ stat_encode :: proc "contextless" (s: ^Stat, buf: []u8) -> int {
 stat_decode :: proc "contextless" (buf: []u8, s: ^Stat) -> vx.Status {
 	s^ = {}
 	in_ := In{buf = buf}
-	size, overflow := intrinsics.overflow_add(get(&in_, 2), 2)
-	if overflow || size != u64(len(buf)) {
+	if u64(get(&in_, u16)) + 2 != u64(len(buf)) {
 		return .Err_Invalid
 	}
-	s.type = u16(get(&in_, 2))
-	s.dev = u32(get(&in_, 4))
+	s.type = get(&in_, u16)
+	s.dev = get(&in_, u32)
 	s.qid = get_qid(&in_)
-	s.mode = u32(get(&in_, 4))
-	s.atime = u32(get(&in_, 4))
-	s.mtime = u32(get(&in_, 4))
-	s.length = get(&in_, 8)
+	s.mode = get(&in_, u32)
+	s.atime = get(&in_, u32)
+	s.mtime = get(&in_, u32)
+	s.length = get(&in_, u64)
 	s.name = get_str(&in_)
 	s.uid = get_str(&in_)
 	s.gid = get_str(&in_)
 	s.muid = get_str(&in_)
 	return in_.failed || in_.pos != len(buf) ? .Err_Invalid : .Ok
+}
+
+// The stat entries of a directory read, one at a time:
+//
+//	it := p9.Dir_Entries{buf = buf[:n]}
+//	for entry in p9.next_entry(&it) { ... }
+//	if it.off != n { ... } // a malformed entry stopped it
+//
+// Each entry's strings point into buf.
+Dir_Entries :: struct {
+	buf: []u8,
+	off: int, // where the next entry starts
+}
+
+next_entry :: proc "contextless" (it: ^Dir_Entries) -> (entry: Stat, ok: bool) {
+	if len(it.buf) - it.off < 2 {
+		return {}, false
+	}
+	end := it.off + 2 + (int(it.buf[it.off]) | int(it.buf[it.off + 1]) << 8)
+	if end > len(it.buf) || stat_decode(it.buf[it.off:end], &entry) != .Ok {
+		return {}, false
+	}
+	it.off = end
+	return entry, true
 }
 
 // --- Version negotiation (upstream 02 §3.1) ---
@@ -448,21 +484,10 @@ EXTENSION_WORDS := [Extension]string {
 // Reads a version string: its dialect and, for 9Px, the extensions it names.
 // Unknown extension words are ignored, so later clients still talk to us.
 version_parse :: proc "contextless" (v: string) -> (d: Dialect, ext: Extensions) {
-	i := 0
-	for i < len(v) && v[i] != ' ' {
-		i += 1
-	}
-	base := v[:i]
+	words := v
+	base, _ := str.split_iterator(&words, ' ')
 	if base == "9P2000.x/1" {
-		for i < len(v) {
-			for i < len(v) && v[i] == ' ' {
-				i += 1
-			}
-			start := i
-			for i < len(v) && v[i] != ' ' {
-				i += 1
-			}
-			word := v[start:i]
+		for word in str.split_iterator(&words, ' ') {
 			if len(word) < 2 || word[0] != '+' {
 				continue
 			}
@@ -475,7 +500,7 @@ version_parse :: proc "contextless" (v: string) -> (d: Dialect, ext: Extensions)
 		return .P9_2000X, ext
 	}
 	// 9P2000 itself, and any dialect of it (".L", ".u"), are answered with 9P2000.
-	if len(base) >= 6 && base[:6] == "9P2000" {
+	if str.has_prefix(base, "9P2000") {
 		return .P9_2000, {}
 	}
 	return .Unknown, {}
@@ -484,20 +509,20 @@ version_parse :: proc "contextless" (v: string) -> (d: Dialect, ext: Extensions)
 // Writes a version string for a dialect and its extensions into buf (96
 // bytes always suffice). Returns its length, or 0 if it does not fit.
 version_format :: proc "contextless" (d: Dialect, ext: Extensions, buf: []u8) -> int {
-	o := Out{buf = buf}
+	o := str.Buf{buf = buf}
 	switch d {
 	case .P9_2000X:
-		put_bytes(&o, transmute([]u8)string("9P2000.x/1"))
+		str.write_string(&o, "9P2000.x/1")
 		for w, e in EXTENSION_WORDS {
 			if e in ext {
-				put_bytes(&o, transmute([]u8)string(" +"))
-				put_bytes(&o, transmute([]u8)w)
+				str.write_string(&o, " +")
+				str.write_string(&o, w)
 			}
 		}
 	case .P9_2000:
-		put_bytes(&o, transmute([]u8)string("9P2000"))
+		str.write_string(&o, "9P2000")
 	case .Unknown:
-		put_bytes(&o, transmute([]u8)string("unknown"))
+		str.write_string(&o, "unknown")
 	}
 	return o.failed ? 0 : o.len
 }

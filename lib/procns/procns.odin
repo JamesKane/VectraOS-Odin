@@ -116,12 +116,12 @@ spawn_records :: proc "contextless" (
 ) {
 	count = first
 	for &e in space.entries {
-		if e.path_len == 0 {
+		path := ns.entry_path(&e)
+		if path == "" {
 			continue
 		}
-		path := string(e.path[:e.path_len])
-		for &m, k in e.members[:e.count] {
-			from := string(m.from[:m.from_len])
+		for &m, k in e.members {
+			from := string(m.from[:])
 			flags: [2]u8
 			nf := 0
 			if k > 0 {
@@ -150,7 +150,7 @@ spawn_records :: proc "contextless" (
 				if from != "" {
 					ndb.put(w, "aname", from)
 				}
-				ndb.put(w, "src", string(c.src[:c.src_len]))
+				ndb.put(w, "src", string(c.src[:]))
 				count += 1
 			} else {
 				ndb.put(w, "bind", path)

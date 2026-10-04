@@ -13,7 +13,7 @@ import "vx:ns"
 import "vx:p9"
 
 Tnode :: struct {
-	parent: u64,
+	parent: p9.Node,
 	name:   string,
 	dir:    bool,
 	data:   string,
@@ -32,33 +32,33 @@ BOOT := [?]Tnode {
 }
 DEV := [?]Tnode{{}, {0, "/", true, ""}, {1, "cons", false, "console"}, {1, "null", false, ""}}
 
-t_attach :: proc "contextless" (ctx: rawptr, aname: string) -> (root: u64, st: vx.Status) {
+t_attach :: proc "contextless" (ctx: rawptr, aname: string) -> (root: p9.Node, st: vx.Status) {
 	if len(aname) > 0 {
 		return 0, .Err_Not_Found
 	}
 	return 1, .Ok
 }
 
-t_walk :: proc "contextless" (ctx: rawptr, dir: u64, name: string) -> (child: u64, st: vx.Status) {
+t_walk :: proc "contextless" (ctx: rawptr, dir: p9.Node, name: string) -> (child: p9.Node, st: vx.Status) {
 	t := (^[]Tnode)(ctx)^
 	for i in 2 ..< len(t) {
 		if t[i].parent == dir && t[i].name == name {
-			return u64(i), .Ok
+			return p9.Node(i), .Ok
 		}
 	}
 	return 0, .Err_Not_Found
 }
 
-t_parent :: proc "contextless" (ctx: rawptr, node: u64) -> (parent: u64, st: vx.Status) {
+t_parent :: proc "contextless" (ctx: rawptr, node: p9.Node) -> (parent: p9.Node, st: vx.Status) {
 	t := (^[]Tnode)(ctx)^
 	return t[node].parent != 0 ? t[node].parent : 1, .Ok
 }
 
-t_stat :: proc "contextless" (ctx: rawptr, node: u64, out: ^p9.Stat) -> vx.Status {
+t_stat :: proc "contextless" (ctx: rawptr, node: p9.Node, out: ^p9.Stat) -> vx.Status {
 	t := (^[]Tnode)(ctx)^
 	n := &t[node]
 	out^ = {
-		qid = {n.dir ? p9.QTDIR : p9.QTFILE, 0, node},
+		qid = {n.dir ? p9.QTDIR : p9.QTFILE, 0, u64(node)},
 		mode = n.dir ? p9.DMDIR | 0o555 : 0o444,
 		length = u64(len(n.data)),
 		name = n.name,
@@ -66,11 +66,11 @@ t_stat :: proc "contextless" (ctx: rawptr, node: u64, out: ^p9.Stat) -> vx.Statu
 	return .Ok
 }
 
-t_open :: proc "contextless" (ctx: rawptr, node: u64, mode: u8) -> vx.Status {
-	return mode & 3 == p9.OREAD ? .Ok : .Err_Access
+t_open :: proc "contextless" (ctx: rawptr, node: p9.Node, mode: p9.Open_Mode) -> vx.Status {
+	return mode.access == .Read ? .Ok : .Err_Access
 }
 
-t_read :: proc "contextless" (ctx: rawptr, node: u64, offset: u64, buf: []u8) -> (count: u32, st: vx.Status) {
+t_read :: proc "contextless" (ctx: rawptr, node: p9.Node, offset: u64, buf: []u8) -> (count: u32, st: vx.Status) {
 	t := (^[]Tnode)(ctx)^
 	data := t[node].data
 	n := offset >= u64(len(data)) ? 0 : len(data) - int(offset)
@@ -79,13 +79,13 @@ t_read :: proc "contextless" (ctx: rawptr, node: u64, offset: u64, buf: []u8) ->
 	return u32(n), .Ok
 }
 
-t_readdir :: proc "contextless" (ctx: rawptr, dir: u64, index: u32) -> (child: u64, st: vx.Status) {
+t_readdir :: proc "contextless" (ctx: rawptr, dir: p9.Node, index: u32) -> (child: p9.Node, st: vx.Status) {
 	t := (^[]Tnode)(ctx)^
 	index := index
 	for i in 2 ..< len(t) {
 		if t[i].parent == dir {
 			if index == 0 {
-				return u64(i), .Ok
+				return p9.Node(i), .Ok
 			}
 			index -= 1
 		}
@@ -268,9 +268,7 @@ test_namespace :: proc(t: ^testing.T) {
 	}
 	members := 0
 	for &e in space.entries {
-		if e.path_len > 0 {
-			members += int(e.count)
-		}
+		members += len(e.members)
 	}
 	testing.expect(t, live == members)
 }

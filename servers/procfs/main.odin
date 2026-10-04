@@ -27,17 +27,17 @@ KILLED :: -9 // the exit status a kill through ctl gives, as Unix's SIGKILL read
 // Node numbers: 1 is /proc; a task's directory, status and ctl are its id
 // shifted left two, plus 0, 1 or 2.
 @(private="file")
-ROOT :: u64(1)
+ROOT :: p9.Node(1)
 @(private="file")
-DIR :: u64(0)
+DIR :: p9.Node(0)
 @(private="file")
-STATUS :: u64(1)
+STATUS :: p9.Node(1)
 @(private="file")
-CTL :: u64(2)
+CTL :: p9.Node(2)
 
 @(private="file")
-task_of :: proc "contextless" (node: u64) -> u64 {
-	return node >> 2
+task_of :: proc "contextless" (node: p9.Node) -> u64 {
+	return u64(node >> 2)
 }
 
 @(private="file")
@@ -48,7 +48,7 @@ task_exists :: proc "contextless" (id: u64) -> (info: vx.Task_Summary, ok: bool)
 }
 
 @(private="file")
-fs_attach :: proc "contextless" (ctx: rawptr, aname: string) -> (root: u64, st: vx.Status) {
+fs_attach :: proc "contextless" (ctx: rawptr, aname: string) -> (root: p9.Node, st: vx.Status) {
 	if len(aname) != 0 {
 		return 0, .Err_Not_Found
 	}
@@ -56,7 +56,7 @@ fs_attach :: proc "contextless" (ctx: rawptr, aname: string) -> (root: u64, st: 
 }
 
 @(private="file")
-fs_walk :: proc "contextless" (ctx: rawptr, dir: u64, name: string) -> (child: u64, st: vx.Status) {
+fs_walk :: proc "contextless" (ctx: rawptr, dir: p9.Node, name: string) -> (child: p9.Node, st: vx.Status) {
 	if dir == ROOT {
 		id: u64
 		if len(name) == 0 || len(name) > 19 || name[0] == '0' {
@@ -71,7 +71,7 @@ fs_walk :: proc "contextless" (ctx: rawptr, dir: u64, name: string) -> (child: u
 		if _, ok := task_exists(id); !ok {
 			return 0, .Err_Not_Found
 		}
-		return id << 2 | DIR, .Ok
+		return p9.Node(id << 2) | DIR, .Ok
 	}
 	if dir & 3 != DIR {
 		return 0, .Err_Not_Found
@@ -89,7 +89,7 @@ fs_walk :: proc "contextless" (ctx: rawptr, dir: u64, name: string) -> (child: u
 }
 
 @(private="file")
-fs_parent :: proc "contextless" (ctx: rawptr, node: u64) -> (parent: u64, st: vx.Status) {
+fs_parent :: proc "contextless" (ctx: rawptr, node: p9.Node) -> (parent: p9.Node, st: vx.Status) {
 	return node & 3 == DIR ? ROOT : node &~ 3, .Ok
 }
 
@@ -97,9 +97,9 @@ fs_parent :: proc "contextless" (ctx: rawptr, node: u64) -> (parent: u64, st: vx
 name_buf: [24]u8
 
 @(private="file")
-fs_stat :: proc "contextless" (ctx: rawptr, node: u64, out: ^p9.Stat) -> vx.Status {
+fs_stat :: proc "contextless" (ctx: rawptr, node: p9.Node, out: ^p9.Stat) -> vx.Status {
 	if node == ROOT {
-		out^ = {qid = {type = p9.QTDIR, path = ROOT}, mode = p9.DMDIR | 0o555, name = "/"}
+		out^ = {qid = {type = p9.QTDIR, path = u64(ROOT)}, mode = p9.DMDIR | 0o555, name = "/"}
 	} else {
 		switch node & 3 {
 		case DIR:
@@ -114,14 +114,14 @@ fs_stat :: proc "contextless" (ctx: rawptr, node: u64, out: ^p9.Stat) -> vx.Stat
 					break
 				}
 			}
-			out^ = {qid = {type = p9.QTDIR, path = node}, mode = p9.DMDIR | 0o555, name = string(name_buf[n:])}
+			out^ = {qid = {type = p9.QTDIR, path = u64(node)}, mode = p9.DMDIR | 0o555, name = string(name_buf[n:])}
 		case STATUS:
-			out^ = {qid = {type = p9.QTFILE, path = node}, mode = 0o444, name = "status"}
+			out^ = {qid = {type = p9.QTFILE, path = u64(node)}, mode = 0o444, name = "status"}
 		case CTL:
-			out^ = {qid = {type = p9.QTFILE, path = node}, mode = 0o222, name = "ctl"}
+			out^ = {qid = {type = p9.QTFILE, path = u64(node)}, mode = 0o222, name = "ctl"}
 		case:
 			// Never made: walk and readdir give only the three kinds above.
-			out^ = {qid = {type = p9.QTFILE, path = node}}
+			out^ = {qid = {type = p9.QTFILE, path = u64(node)}}
 		}
 	}
 	out.uid, out.gid, out.muid = "proc", "proc", "proc"
@@ -129,15 +129,14 @@ fs_stat :: proc "contextless" (ctx: rawptr, node: u64, out: ^p9.Stat) -> vx.Stat
 }
 
 @(private="file")
-fs_open :: proc "contextless" (ctx: rawptr, node: u64, mode: u8) -> vx.Status {
-	writes := mode & 3 == p9.OWRITE || mode & 3 == p9.ORDWR
-	if node & 3 == STATUS && writes {
+fs_open :: proc "contextless" (ctx: rawptr, node: p9.Node, mode: p9.Open_Mode) -> vx.Status {
+	if node & 3 == STATUS && p9.writes(mode) {
 		return .Err_Access
 	}
-	if node & 3 == CTL && mode & 3 != p9.OWRITE {
+	if node & 3 == CTL && mode.access != .Write {
 		return .Err_Access
 	}
-	return mode & (p9.OTRUNC | p9.ORCLOSE) != 0 ? .Err_Access : .Ok
+	return mode.trunc || mode.rclose ? .Err_Access : .Ok
 }
 
 // A task's status record, as it is now; empty if the task has gone or the
@@ -181,7 +180,7 @@ status_text :: proc "contextless" (id: u64, buf: []u8) -> int {
 }
 
 @(private="file")
-fs_read :: proc "contextless" (ctx: rawptr, node: u64, offset: u64, buf: []u8) -> (count: u32, st: vx.Status) {
+fs_read :: proc "contextless" (ctx: rawptr, node: p9.Node, offset: u64, buf: []u8) -> (count: u32, st: vx.Status) {
 	text: [256]u8
 	n := node & 3 == STATUS ? status_text(task_of(node), text[:]) : 0
 	left := offset < u64(n) ? u64(n) - offset : 0
@@ -193,7 +192,7 @@ fs_read :: proc "contextless" (ctx: rawptr, node: u64, offset: u64, buf: []u8) -
 }
 
 @(private="file")
-fs_write :: proc "contextless" (ctx: rawptr, node: u64, offset: u64, data: []u8) -> (count: u32, st: vx.Status) {
+fs_write :: proc "contextless" (ctx: rawptr, node: p9.Node, offset: u64, data: []u8) -> (count: u32, st: vx.Status) {
 	if node & 3 != CTL {
 		return 0, .Err_Access
 	}
@@ -215,7 +214,7 @@ fs_write :: proc "contextless" (ctx: rawptr, node: u64, offset: u64, data: []u8)
 
 // The root's entries are the tasks in id order; entry i is the i-th.
 @(private="file")
-fs_readdir :: proc "contextless" (ctx: rawptr, dir: u64, index: u32) -> (child: u64, st: vx.Status) {
+fs_readdir :: proc "contextless" (ctx: rawptr, dir: p9.Node, index: u32) -> (child: p9.Node, st: vx.Status) {
 	if dir != ROOT { // a task's directory: status, ctl
 		if index > 1 {
 			return 0, .Err_Not_Found
@@ -238,7 +237,7 @@ fs_readdir :: proc "contextless" (ctx: rawptr, dir: u64, index: u32) -> (child: 
 		}
 		seen += 1
 	}
-	return id << 2 | DIR, .Ok
+	return p9.Node(id << 2) | DIR, .Ok
 }
 
 // Not file-private: tests/host drives its Fs on the host.

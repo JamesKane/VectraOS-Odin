@@ -103,7 +103,7 @@ test_namespace :: proc "contextless" () {
 	ns.close(&f)
 	// bootfs is read-only.
 	check(ns.open(&space, "/boot/svc/bootfs.ndb", p9.OWRITE, &f) == .Err_Access)
-	check(ns.open(&space, "/boot/svc/bootfs.ndb", p9.OREAD | p9.OTRUNC, &f) == .Err_Access)
+	check(ns.open(&space, "/boot/svc/bootfs.ndb", p9.Open_Mode{access = .Read, trunc = true}, &f) == .Err_Access)
 	check(ns.open(&space, "/nothing", p9.OREAD, &f) == .Err_Not_Found)
 
 	out: [512]u8

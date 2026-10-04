@@ -102,7 +102,7 @@ loopback :: proc "contextless" (ctx: rawptr, req: []u8, resp: []u8) -> int {
 	return res == .Reply ? n : 0 // a loopback cannot hold a request: a deferral ends it too
 }
 
-read_file :: proc(c: ^p9.Client, root: u32, path: string, buf: []u8) -> (string, vx.Status) {
+read_file :: proc(c: ^p9.Client, root: p9.Fid, path: string, buf: []u8) -> (string, vx.Status) {
 	f, e := p9.client_walk(c, root, path)
 	if e != .Ok {
 		return "", e
@@ -116,7 +116,7 @@ read_file :: proc(c: ^p9.Client, root: u32, path: string, buf: []u8) -> (string,
 	return string(buf[:max(n, 0)]), e
 }
 
-write_file :: proc(c: ^p9.Client, root: u32, path: string, data: string) -> (int, vx.Status) {
+write_file :: proc(c: ^p9.Client, root: p9.Fid, path: string, data: string) -> (int, vx.Status) {
 	f, e := p9.client_walk(c, root, path)
 	if e != .Ok {
 		return 0, e
@@ -128,7 +128,7 @@ write_file :: proc(c: ^p9.Client, root: u32, path: string, data: string) -> (int
 	return p9.client_write(c, f, 0, transmute([]u8)data)
 }
 
-stat_of :: proc(c: ^p9.Client, root: u32, path: string, st: ^p9.Stat) -> vx.Status {
+stat_of :: proc(c: ^p9.Client, root: p9.Fid, path: string, st: ^p9.Stat) -> vx.Status {
 	f, e := p9.client_walk(c, root, path)
 	if e != .Ok {
 		return e
@@ -138,7 +138,7 @@ stat_of :: proc(c: ^p9.Client, root: u32, path: string, st: ^p9.Stat) -> vx.Stat
 }
 
 // The names a directory reads as, in order, joined by spaces.
-list :: proc(c: ^p9.Client, root: u32, path: string, out: []u8) -> string {
+list :: proc(c: ^p9.Client, root: p9.Fid, path: string, out: []u8) -> string {
 	f, e := p9.client_walk(c, root, path)
 	if e != .Ok {
 		return "(walk failed)"
@@ -249,18 +249,18 @@ test_procfs :: proc(t: ^testing.T) {
 	testing.expect(t, st.name == "ctl" && st.mode == 0o222 && st.qid == {type = p9.QTFILE, path = 7 << 2 | 2} && st.uid == "proc")
 
 	// Open modes: status is only read, ctl only written, nothing truncated.
-	open_mode :: proc(c: ^p9.Client, root: u32, path: string, mode: u8) -> vx.Status {
+	open_mode :: proc(c: ^p9.Client, root: p9.Fid, path: string, mode: p9.Open_Mode) -> vx.Status {
 		f, _ := p9.client_walk(c, root, path)
 		defer _ = p9.client_clunk(c, f)
 		return p9.client_open(c, f, mode)
 	}
 	testing.expect_value(t, open_mode(&c, root, "1/status", p9.OWRITE), vx.Status.Err_Access)
 	testing.expect_value(t, open_mode(&c, root, "1/status", p9.ORDWR), vx.Status.Err_Access)
-	testing.expect_value(t, open_mode(&c, root, "1/status", p9.OREAD | p9.ORCLOSE), vx.Status.Err_Access)
+	testing.expect_value(t, open_mode(&c, root, "1/status", p9.Open_Mode{access = .Read, rclose = true}), vx.Status.Err_Access)
 	testing.expect_value(t, open_mode(&c, root, "1/status", p9.OEXEC), vx.Status.Ok)
 	testing.expect_value(t, open_mode(&c, root, "1/ctl", p9.OREAD), vx.Status.Err_Access)
 	testing.expect_value(t, open_mode(&c, root, "1/ctl", p9.ORDWR), vx.Status.Err_Access)
-	testing.expect_value(t, open_mode(&c, root, "1/ctl", p9.OWRITE | p9.OTRUNC), vx.Status.Err_Access)
+	testing.expect_value(t, open_mode(&c, root, "1/ctl", p9.Open_Mode{access = .Write, trunc = true}), vx.Status.Err_Access)
 	testing.expect_value(t, open_mode(&c, root, "1/ctl", p9.OWRITE), vx.Status.Ok)
 	testing.expect_value(t, open_mode(&c, root, "1", p9.OREAD), vx.Status.Ok)
 

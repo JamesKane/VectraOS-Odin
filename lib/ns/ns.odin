@@ -24,6 +24,7 @@ package ns
 
 import "abi:vx"
 import "vx:p9"
+import "vx:str"
 
 MAX_PATH :: 256
 MAX_ENTRIES :: 32
@@ -45,24 +46,20 @@ REPLACE :: Flags{}
 Conn :: struct {
 	client:    ^p9.Client, // nil: the slot is free
 	connector: vx.Handle, // where it came from, to give children their own (or HANDLE_NONE)
-	src:       [MAX_SRC]u8, // "/srv/bootfs", for ns output
-	src_len:   u8,
+	src:       [dynamic; MAX_SRC]u8, // "/srv/bootfs", for ns output
 }
 
 Member :: struct {
-	conn:     u8,
-	flags:    Flags, // .Create only
-	mounted:  bool, // a mount (src and aname) rather than a bind (the path it came from)
-	fid:      u32,
-	from:     [MAX_PATH]u8, // bind: the path; mount: the aname
-	from_len: u16,
+	conn:    u8,
+	flags:   Flags, // .Create only
+	mounted: bool, // a mount (src and aname) rather than a bind (the path it came from)
+	fid:     p9.Fid,
+	from:    [dynamic; MAX_PATH]u8, // bind: the path; mount: the aname
 }
 
 Entry :: struct {
-	path:     [MAX_PATH]u8,
-	path_len: u16, // 0: the slot is free
-	count:    u32,
-	members:  [MAX_MEMBERS]Member,
+	path:    [dynamic; MAX_PATH]u8, // empty: the slot is free
+	members: [dynamic; MAX_MEMBERS]Member,
 }
 
 // All zeroes is an empty namespace.
@@ -81,16 +78,8 @@ clean :: proc "contextless" (path: string, out: []u8) -> string {
 	n := 0
 	out[n] = '/'
 	n += 1
-	i := 0
-	for i < len(path) {
-		for i < len(path) && path[i] == '/' {
-			i += 1
-		}
-		start := i
-		for i < len(path) && path[i] != '/' {
-			i += 1
-		}
-		name := path[start:i]
+	rest := path
+	for name in str.split_iterator(&rest, '/') {
 		if len(name) == 0 || name == "." {
 			continue
 		}
@@ -119,20 +108,18 @@ clean :: proc "contextless" (path: string, out: []u8) -> string {
 	return string(out[:n])
 }
 
-@(private="file")
+// The path an entry is for; "" for a free slot.
 entry_path :: proc "contextless" (e: ^Entry) -> string {
-	return string(e.path[:e.path_len])
+	return string(e.path[:])
 }
 
 // What a member came from, as ns output and unmount name it: a mount's
 // source, or a bind's path.
-@(private="file")
 member_source :: proc "contextless" (ns: ^Namespace, m: ^Member) -> string {
 	if m.mounted {
-		c := &ns.conns[m.conn]
-		return string(c.src[:c.src_len])
+		return string(ns.conns[m.conn].src[:])
 	}
-	return string(m.from[:m.from_len])
+	return string(m.from[:])
 }
 
 // The entry whose path is the longest prefix of path at a component boundary,
@@ -140,19 +127,19 @@ member_source :: proc "contextless" (ns: ^Namespace, m: ^Member) -> string {
 @(private="file")
 lookup :: proc "contextless" (ns: ^Namespace, path: string) -> (best: ^Entry, rest: string) {
 	for &e in ns.entries {
-		n := int(e.path_len)
+		n := len(e.path)
 		if n == 0 || n > len(path) || entry_path(&e) != path[:n] {
 			continue
 		}
 		if n > 1 && n < len(path) && path[n] != '/' {
 			continue // "/bin" is not a prefix of "/binary"
 		}
-		if best == nil || n > int(best.path_len) {
+		if best == nil || n > len(best.path) {
 			best = &e
 		}
 	}
 	if best != nil {
-		n := int(best.path_len)
+		n := len(best.path)
 		skip := n == 1 ? 1 : n + (len(path) > n ? 1 : 0)
 		rest = path[skip:]
 	}
@@ -162,18 +149,19 @@ lookup :: proc "contextless" (ns: ^Namespace, path: string) -> (best: ^Entry, re
 @(private="file")
 exact :: proc "contextless" (ns: ^Namespace, path: string) -> ^Entry {
 	for &e in ns.entries {
-		if int(e.path_len) == len(path) && entry_path(&e) == path {
+		if len(e.path) > 0 && entry_path(&e) == path {
 			return &e
 		}
 	}
 	return nil
 }
 
+// The slot of a connection that walk returned, so one the namespace holds.
 @(private="file")
 conn_index :: proc "contextless" (ns: ^Namespace, c: ^p9.Client) -> (slot: u8) {
-	for i in 0 ..< u8(MAX_CONNS) {
-		if ns.conns[i].client == c {
-			slot = i
+	for &conn, i in ns.conns {
+		if conn.client == c {
+			slot = u8(i)
 		}
 	}
 	return
@@ -182,7 +170,7 @@ conn_index :: proc "contextless" (ns: ^Namespace, c: ^p9.Client) -> (slot: u8) {
 // Resolves a path to a new fid on one of the namespace's connections: the
 // caller owns it and clunks it. Members of a union are tried in order.
 @(require_results)
-walk :: proc "contextless" (ns: ^Namespace, path: string) -> (c: ^p9.Client, fid: u32, e: vx.Status) {
+walk :: proc "contextless" (ns: ^Namespace, path: string) -> (c: ^p9.Client, fid: p9.Fid, e: vx.Status) {
 	buf: [MAX_PATH]u8
 	cleaned := clean(path, buf[:])
 	if len(cleaned) == 0 {
@@ -193,7 +181,7 @@ walk :: proc "contextless" (ns: ^Namespace, path: string) -> (c: ^p9.Client, fid
 		return nil, 0, .Err_Not_Found
 	}
 	e = .Err_Not_Found
-	for &m in entry.members[:entry.count] {
+	for &m in entry.members {
 		client := ns.conns[m.conn].client
 		fid, e = p9.client_walk(client, m.fid, rest)
 		if e == .Ok {
@@ -226,7 +214,7 @@ add :: proc "contextless" (ns: ^Namespace, old: string, m: Member, flags: Flags)
 			_ = p9.client_clunk(bc, base.fid) // it only had to exist
 		}
 		for &free in ns.entries {
-			if free.path_len == 0 {
+			if len(free.path) == 0 {
 				e = &free
 				break
 			}
@@ -237,35 +225,29 @@ add :: proc "contextless" (ns: ^Namespace, old: string, m: Member, flags: Flags)
 			}
 			return .Err_No_Memory
 		}
-		copy(e.path[:], old)
-		e.path_len = u16(len(old))
-		e.count = 0
+		_ = append(&e.path, old) // cleaned, so it fits
+		clear(&e.members)
 		if union_with_old {
 			// The union starts with what was there: a bind of the path onto itself.
 			base.conn = conn_index(ns, bc)
-			copy(base.from[:], old)
-			base.from_len = u16(len(old))
-			e.members[e.count] = base
-			e.count += 1
+			_ = append(&base.from, old)
+			_ = append(&e.members, base)
 		}
 	}
 	if flags & {.After, .Before} == {} {
-		for &member in e.members[:e.count] {
+		for &member in e.members {
 			drop_member(ns, &member)
 		}
-		e.count = 0
-	}
-	if e.count == MAX_MEMBERS {
-		return .Err_No_Memory
+		clear(&e.members)
 	}
 	m.flags = flags & {.Create}
-	if .Before in flags {
-		copy(e.members[1:e.count + 1], e.members[:e.count])
-		e.members[0] = m
-	} else {
-		e.members[e.count] = m
+	if append(&e.members, m) != 1 {
+		return .Err_No_Memory
 	}
-	e.count += 1
+	if .Before in flags {
+		copy(e.members[1:], e.members[:len(e.members) - 1])
+		e.members[0] = m
+	}
 	return .Ok
 }
 
@@ -298,11 +280,10 @@ mount :: proc "contextless" (
 		return .Err_No_Memory
 	}
 	m := Member {
-		conn     = slot,
-		mounted  = true,
-		from_len = u16(len(aname)),
+		conn    = slot,
+		mounted = true,
 	}
-	copy(m.from[:], aname)
+	_ = append(&m.from, aname)
 	st: vx.Status
 	m.fid, st = p9.client_attach(c, aname)
 	if st != .Ok {
@@ -313,9 +294,8 @@ mount :: proc "contextless" (
 		ns.conns[slot] = {
 			client    = c,
 			connector = connector,
-			src_len   = u8(len(src)),
 		}
-		copy(ns.conns[slot].src[:], src)
+		_ = append(&ns.conns[slot].src, src)
 	}
 	st = add(ns, cleaned, m, flags)
 	if st != .Ok {
@@ -335,10 +315,8 @@ bind :: proc "contextless" (ns: ^Namespace, new, old: string, flags: Flags) -> v
 	if len(from) == 0 || len(to) == 0 {
 		return .Err_Invalid
 	}
-	m := Member {
-		from_len = u16(len(from)),
-	}
-	copy(m.from[:], from)
+	m: Member
+	_ = append(&m.from, from)
 	c: ^p9.Client
 	st: vx.Status
 	c, m.fid, st = walk(ns, from)
@@ -367,75 +345,54 @@ unmount :: proc "contextless" (ns: ^Namespace, new, old: string) -> vx.Status {
 	if e == nil {
 		return .Err_Not_Found
 	}
-	kept: u32
+	kept := 0
 	removed := false
-	for i in 0 ..< e.count {
-		m := &e.members[i]
-		if len(new) == 0 || member_source(ns, m) == from {
-			drop_member(ns, m)
+	for &m in e.members {
+		if len(new) == 0 || member_source(ns, &m) == from {
+			drop_member(ns, &m)
 			removed = true
 		} else {
-			e.members[kept] = m^
+			e.members[kept] = m
 			kept += 1
 		}
 	}
-	e.count = kept
+	resize(&e.members, kept)
 	if kept == 0 {
-		e.path_len = 0
+		clear(&e.path)
 	}
 	return removed ? .Ok : .Err_Not_Found
 }
 
 // --- ns output ---
 
-@(private="file")
-Text :: struct {
-	buf:    []u8,
-	len:    int,
-	failed: bool,
-}
-
-@(private="file")
-put :: proc "contextless" (t: ^Text, s: string) {
-	if t.failed || len(s) > len(t.buf) - t.len {
-		t.failed = true
-		return
-	}
-	copy(t.buf[t.len:], s)
-	t.len += len(s)
-}
-
 // Writes the namespace as a script of mount and bind lines, entries in the
 // order they were made. Returns its length, or 0 if it does not fit.
 print :: proc "contextless" (ns: ^Namespace, buf: []u8) -> int {
-	t := Text {
-		buf = buf,
-	}
+	t := str.Buf{buf = buf}
 	for &e in ns.entries {
-		if e.path_len == 0 {
+		if len(e.path) == 0 {
 			continue
 		}
-		for k in 0 ..< e.count {
-			m := &e.members[k]
-			put(&t, m.mounted ? "mount " : "bind ")
+		for &m, k in e.members {
+			str.write_string(&t, m.mounted ? "mount " : "bind ")
 			if k > 0 || .Create in m.flags {
-				put(&t, "-")
+				str.write_byte(&t, '-')
 				if k > 0 {
-					put(&t, "a")
+					str.write_byte(&t, 'a')
 				}
 				if .Create in m.flags {
-					put(&t, "c")
+					str.write_byte(&t, 'c')
 				}
-				put(&t, " ")
+				str.write_byte(&t, ' ')
 			}
-			put(&t, member_source(ns, m))
-			put(&t, " ")
-			put(&t, entry_path(&e))
-			if m.mounted && m.from_len > 0 {
-				put(&t, " ")
-				put(&t, string(m.from[:m.from_len]))
+			str.write_string(&t, member_source(ns, &m))
+			str.write_byte(&t, ' ')
+			str.write_string(&t, entry_path(&e))
+			if m.mounted && len(m.from) > 0 {
+				str.write_byte(&t, ' ')
+				str.write_bytes(&t, m.from[:])
 			}
-			put(&t, "\n")
+			str.write_byte(&t, '\n')
 		}
 	}
 	return t.failed ? 0 : t.len
@@ -447,15 +404,15 @@ print :: proc "contextless" (ns: ^Namespace, buf: []u8) -> int {
 File :: struct {
 	ns:     ^Namespace,
 	c:      ^p9.Client,
-	fid:    u32,
+	fid:    p9.Fid,
 	offset: u64,
 	u:      ^Entry, // a union directory being read member by member, or nil
-	member: u32,
+	member: int,
 }
 
 // Opens a path. A directory that is a union reads as each member in turn.
 @(require_results)
-open :: proc "contextless" (ns: ^Namespace, path: string, mode: u8, f: ^File) -> vx.Status {
+open :: proc "contextless" (ns: ^Namespace, path: string, mode: p9.Open_Mode, f: ^File) -> vx.Status {
 	f^ = {
 		ns = ns,
 	}
@@ -466,13 +423,13 @@ open :: proc "contextless" (ns: ^Namespace, path: string, mode: u8, f: ^File) ->
 	}
 	e := exact(ns, cleaned)
 	st: vx.Status
-	if e != nil && e.count > 1 && mode & 3 == p9.OREAD {
+	if e != nil && len(e.members) > 1 && mode.access == .Read {
 		f.u = e
 		f.c = ns.conns[e.members[0].conn].client
 		f.fid, st = p9.client_walk(f.c, e.members[0].fid, "")
 	} else {
 		c: ^p9.Client
-		fid: u32
+		fid: p9.Fid
 		c, fid, st = walk(ns, cleaned)
 		if st == .Ok {
 			f.c, f.fid = c, fid
@@ -498,7 +455,7 @@ read :: proc "contextless" (f: ^File, buf: []u8) -> (n: int, e: vx.Status) {
 	}
 	for {
 		n, e = p9.client_read(f.c, f.fid, f.offset, buf)
-		if e != .Ok || n != 0 || f.u == nil || f.member + 1 >= f.u.count {
+		if e != .Ok || n != 0 || f.u == nil || f.member + 1 >= len(f.u.members) {
 			if e == .Ok && n > 0 {
 				f.offset += u64(n)
 			}
@@ -521,6 +478,20 @@ read :: proc "contextless" (f: ^File, buf: []u8) -> (n: int, e: vx.Status) {
 			return 0, e
 		}
 	}
+}
+
+// Reads until buf is full or the file ends; returns how much it read. A
+// failure ends the read, with what came before it.
+@(require_results)
+read_all :: proc "contextless" (f: ^File, buf: []u8) -> (n: int, e: vx.Status) {
+	for n < len(buf) {
+		got := read(f, buf[n:]) or_return
+		if got == 0 {
+			break
+		}
+		n += got
+	}
+	return n, .Ok
 }
 
 @(require_results)

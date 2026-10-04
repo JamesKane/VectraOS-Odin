@@ -15,7 +15,7 @@ import "vx:p9"
 console: struct {
 	connector: vx.Handle,
 	conn:      Conn,
-	fid:       u32,
+	fid:       p9.Fid,
 	open:      bool,
 	len:       int,
 	line:      [512]u8,

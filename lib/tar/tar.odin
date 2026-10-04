@@ -12,11 +12,12 @@
 // bytes (mtime, uid and gid are zero; names are as given), so images are
 // reproducible (upstream 04 §3.3).
 //
-// Imports nothing and allocates nothing, so the kernel's bootfs and the host
-// build tool share it.
+// Imports only the ABI and lib/str, and allocates nothing, so the kernel's
+// bootfs and the host build tool share it.
 package tar
 
 import vx "abi:vx"
+import "vx:str"
 
 BLOCK :: 512
 
@@ -46,14 +47,19 @@ Header :: struct {
 }
 #assert(size_of(Header) == BLOCK)
 
-// path points into buf, so it is valid only while this Entry is where next
-// or find filled it in.
+// An entry holds its path itself (entry_path gives it), so it may be copied
+// and returned by value.
 Entry :: struct {
-	path: string, // "boot/svc/bootfs.ndb", without a trailing '/'
-	dir:  bool,
-	mode: u32, // permission bits
-	data: []u8, // into the image; nil for a directory
-	buf:  [MAX_PATH]u8,
+	dir:      bool,
+	mode:     u32, // permission bits
+	data:     []u8, // into the image; nil for a directory
+	path_buf: [MAX_PATH]u8,
+	path_len: int,
+}
+
+// The entry's path: "boot/svc/bootfs.ndb", without a trailing '/'.
+entry_path :: proc "contextless" (e: ^Entry) -> string {
+	return string(e.path_buf[:e.path_len])
 }
 
 Reader :: struct {
@@ -81,8 +87,7 @@ next :: proc "contextless" (t: ^Reader, e: ^Entry) -> vx.Status {
 		return .Err_Not_Found
 	}
 	src := t.image[t.pos:]
-	h: Header
-	copy(header_bytes(&h), src[:BLOCK]) // one copy, then checked
+	h := (^Header)(raw_data(src))^ // one copy (Header is all bytes, so any address will do), then checked
 	t.failed = true // until the header passes
 
 	sum, size, mode: u64
@@ -90,7 +95,7 @@ next :: proc "contextless" (t: ^Reader, e: ^Entry) -> vx.Status {
 	if sum, ok = octal(h.chksum[:]); !ok || sum != u64(checksum(&h)) {
 		return .Err_Invalid
 	}
-	if h.magic[0] != 'u' || h.magic[1] != 's' || h.magic[2] != 't' || h.magic[3] != 'a' || h.magic[4] != 'r' {
+	if string(h.magic[:5]) != "ustar" {
 		return .Err_Invalid
 	}
 	if size, ok = octal(h.size[:]); !ok {
@@ -114,17 +119,17 @@ next :: proc "contextless" (t: ^Reader, e: ^Entry) -> vx.Status {
 	if !pok || !nok {
 		return .Err_Invalid
 	}
-	n := copy(e.buf[:], h.prefix[:plen])
+	n := copy(e.path_buf[:], h.prefix[:plen])
 	if plen > 0 {
-		e.buf[n] = '/'
+		e.path_buf[n] = '/'
 		n += 1
 	}
-	n += copy(e.buf[n:], h.name[:nlen])
-	if e.dir && n > 0 && e.buf[n - 1] == '/' {
+	n += copy(e.path_buf[n:], h.name[:nlen])
+	if e.dir && n > 0 && e.path_buf[n - 1] == '/' {
 		n -= 1
 	}
-	e.path = string(e.buf[:n])
-	if !path_ok(e.path) {
+	e.path_len = n
+	if !path_ok(entry_path(e)) {
 		return .Err_Invalid
 	}
 
@@ -147,11 +152,21 @@ find :: proc "contextless" (image: []u8, path: string, out: ^Entry) -> vx.Status
 	t := open(image)
 	st: vx.Status
 	for st = next(&t, out); st == .Ok; st = next(&t, out) {
-		if out.path == path {
+		if entry_path(out) == path {
 			return .Ok
 		}
 	}
 	return st == .Err_Invalid ? st : .Err_Not_Found
+}
+
+// The entries in order, as an iterator:
+//
+//	r := tar.open(image)
+//	for e in tar.entries(&r) { ... }
+//	if r.failed { ... } // a bad header ended the archive
+entries :: proc "contextless" (t: ^Reader) -> (e: Entry, ok: bool) {
+	ok = next(t, &e) == .Ok
+	return
 }
 
 // An octal field: digits, then NUL or space padding to its end. The field
@@ -182,11 +197,9 @@ octal :: proc "contextless" (f: []u8) -> (v: u64, ok: bool) {
 // bytes follow the terminator.
 @(private="file")
 field_len :: proc "contextless" (f: []u8) -> (n: int, ok: bool) {
-	for n < len(f) && f[n] != 0 {
-		n += 1
-	}
-	for i in n ..< len(f) {
-		if f[i] != 0 {
+	n = len(str.from_nul_padded(f))
+	for b in f[n:] {
+		if b != 0 {
 			return 0, false
 		}
 	}
@@ -197,35 +210,27 @@ field_len :: proc "contextless" (f: []u8) -> (n: int, ok: bool) {
 // unprintable. A directory's one trailing '/' is removed before this.
 @(private="file")
 path_ok :: proc "contextless" (p: string) -> bool {
-	if len(p) == 0 {
+	if p == "" || str.has_suffix(p, "/") { // an empty last component
 		return false
 	}
-	start := 0
-	for i in 0 ..= len(p) {
-		if i < len(p) && p[i] != '/' {
-			if p[i] < 0x20 || p[i] == 0x7f {
-				return false
-			}
-			continue
-		}
-		c := p[start:i]
-		if len(c) == 0 || c == "." || c == ".." {
+	rest := p
+	for c in str.split_iterator(&rest, '/') {
+		if c == "" || c == "." || c == ".." {
 			return false
 		}
-		start = i + 1
+	}
+	for b in transmute([]u8)p {
+		if b < 0x20 || b == 0x7f {
+			return false
+		}
 	}
 	return true
 }
 
 @(private="file")
-header_bytes :: proc "contextless" (h: ^Header) -> []u8 {
-	return ([^]u8)(h)[:BLOCK]
-}
-
-@(private="file")
 checksum :: proc "contextless" (h: ^Header) -> u32 {
 	sum: u32
-	for b, i in header_bytes(h) {
+	for b, i in transmute([BLOCK]u8)h^ {
 		sum += (i >= 148 && i < 156) ? ' ' : u32(b) // the checksum field counts as spaces
 	}
 	return sum
@@ -243,11 +248,10 @@ zero_block :: proc "contextless" (b: []u8) -> bool {
 
 // --- Writing ---
 
-// An archive being written into a caller's buffer.
+// An archive being written into a caller's buffer. A bad path, or running
+// out of room, sets failed, and every later call is ignored.
 Writer :: struct {
-	buf:    []u8,
-	len:    int,
-	failed: bool, // a bad path, or out of room; every later call is ignored
+	using out: str.Buf,
 }
 
 // Adds a file holding data or, with dir set (and data empty), a directory,
@@ -286,7 +290,8 @@ add :: proc "contextless" (w: ^Writer, path: string, dir: bool, mode: u32, data:
 	put_octal(h.chksum[:7], u64(checksum(&h))) // six digits, a NUL, and a space
 	h.chksum[7] = ' '
 	out := w.buf[w.len:][:int(1 + blocks) * BLOCK]
-	copy(out, header_bytes(&h))
+	header := transmute([BLOCK]u8)h
+	copy(out, header[:])
 	n := copy(out[BLOCK:], data)
 	for &b in out[BLOCK + n:] {
 		b = 0

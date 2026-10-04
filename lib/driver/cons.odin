@@ -22,65 +22,80 @@ Cons :: struct {
 	tx_room:   proc "contextless" (dev: rawptr) -> u32, // bytes the device can take now
 	tx_byte:   proc "contextless" (dev: rawptr, b: u8), // one of them
 	tx_wanted: proc "contextless" (dev: rawptr, on: bool), // interrupt when it can take more
-	out:       [8192]u8, // output not yet sent; free-running indices
-	out_head:  u32,
-	out_tail:  u32,
-	input:     [4096]u8, // finished lines, for reads
-	in_head:   u32,
-	in_tail:   u32,
+	out:       Byte_Queue(8192), // output not yet sent
+	input:     Byte_Queue(4096), // finished lines, for reads
 	line:      [256]u8, // the line being typed
 	line_len:  u32,
 	eofs:      u32, // ^D on an empty line: reads that return 0
 }
 
-@(private="file")
-ROOT :: u64(1)
-@(private="file")
-FILE :: u64(2)
-
-@(private="file")
-out_room :: proc "contextless" (c: ^Cons) -> u32 {
-	return len(c.out) - (c.out_tail - c.out_head)
+// A ring of bytes with free-running indices: N must be a power of two, so
+// the indices may wrap.
+Byte_Queue :: struct($N: u32) where N & (N - 1) == 0 {
+	data:       [N]u8,
+	head, tail: u32,
 }
 
 @(private="file")
-out :: proc "contextless" (c: ^Cons, b: u8) {
-	if out_room(c) > 0 {
-		c.out[c.out_tail % len(c.out)] = b
-		c.out_tail += 1
+room :: proc "contextless" (q: ^Byte_Queue($N)) -> u32 {
+	return N - (q.tail - q.head)
+}
+
+@(private="file")
+is_empty :: proc "contextless" (q: ^Byte_Queue($N)) -> bool {
+	return q.head == q.tail
+}
+
+// Adds b, or drops it if the queue is full.
+@(private="file")
+push :: proc "contextless" (q: ^Byte_Queue($N), b: u8) {
+	if room(q) > 0 {
+		q.data[q.tail % N] = b
+		q.tail += 1
 	}
 }
+
+// The oldest byte, which the queue must hold.
+@(private="file")
+pop :: proc "contextless" (q: ^Byte_Queue($N)) -> u8 {
+	b := q.data[q.head % N]
+	q.head += 1
+	return b
+}
+
+@(private="file")
+ROOT :: p9.Node(1)
+@(private="file")
+FILE :: p9.Node(2)
 
 // Sends what the device will take, and asks for an interrupt if more is waiting.
 cons_pump :: proc "contextless" (c: ^Cons) {
-	for room := c.tx_room(c.dev); room > 0 && c.out_head != c.out_tail; room -= 1 {
-		c.tx_byte(c.dev, c.out[c.out_head % len(c.out)])
-		c.out_head += 1
+	for n := c.tx_room(c.dev); n > 0 && !is_empty(&c.out); n -= 1 {
+		c.tx_byte(c.dev, pop(&c.out))
 	}
-	c.tx_wanted(c.dev, c.out_head != c.out_tail)
+	c.tx_wanted(c.dev, !is_empty(&c.out))
 }
 
 @(private="file")
 echo :: proc "contextless" (c: ^Cons, b: u8) {
 	if b == '\n' {
-		out(c, '\r')
+		push(&c.out, '\r')
 	}
-	out(c, b)
+	push(&c.out, b)
 }
 
 @(private="file")
 erase :: proc "contextless" (c: ^Cons) {
-	out(c, '\b')
-	out(c, ' ')
-	out(c, '\b')
+	push(&c.out, '\b')
+	push(&c.out, ' ')
+	push(&c.out, '\b')
 }
 
+// Moves the typed line to the input, as much of it as fits.
 @(private="file")
 finish_line :: proc "contextless" (c: ^Cons) {
-	room := len(c.input) - (c.in_tail - c.in_head)
-	for i in 0 ..< min(c.line_len, room) {
-		c.input[c.in_tail % len(c.input)] = c.line[i]
-		c.in_tail += 1
+	for b in c.line[:c.line_len] {
+		push(&c.input, b)
 	}
 	c.line_len = 0
 }
@@ -119,7 +134,7 @@ cons_input :: proc "contextless" (c: ^Cons, byte: u8) {
 // --- The file system ---
 
 @(private="file")
-attach :: proc "contextless" (ctx: rawptr, aname: string) -> (u64, vx.Status) {
+attach :: proc "contextless" (ctx: rawptr, aname: string) -> (p9.Node, vx.Status) {
 	if aname != "" {
 		return 0, .Err_Not_Found
 	}
@@ -127,7 +142,7 @@ attach :: proc "contextless" (ctx: rawptr, aname: string) -> (u64, vx.Status) {
 }
 
 @(private="file")
-walk :: proc "contextless" (ctx: rawptr, dir: u64, name: string) -> (u64, vx.Status) {
+walk :: proc "contextless" (ctx: rawptr, dir: p9.Node, name: string) -> (p9.Node, vx.Status) {
 	if dir != ROOT || name != "cons" {
 		return 0, .Err_Not_Found
 	}
@@ -135,15 +150,15 @@ walk :: proc "contextless" (ctx: rawptr, dir: u64, name: string) -> (u64, vx.Sta
 }
 
 @(private="file")
-parent :: proc "contextless" (ctx: rawptr, node: u64) -> (u64, vx.Status) {
+parent :: proc "contextless" (ctx: rawptr, node: p9.Node) -> (p9.Node, vx.Status) {
 	return ROOT, .Ok
 }
 
 @(private="file")
-stat :: proc "contextless" (ctx: rawptr, node: u64, s: ^p9.Stat) -> vx.Status {
+stat :: proc "contextless" (ctx: rawptr, node: p9.Node, s: ^p9.Stat) -> vx.Status {
 	dir := node == ROOT
 	s^ = {
-		qid  = {dir ? p9.QTDIR : p9.QTFILE, 0, node},
+		qid  = {dir ? p9.QTDIR : p9.QTFILE, 0, u64(node)},
 		mode = dir ? p9.DMDIR | 0o555 : 0o666,
 		name = dir ? "/" : "cons",
 		uid  = "cons",
@@ -154,14 +169,14 @@ stat :: proc "contextless" (ctx: rawptr, node: u64, s: ^p9.Stat) -> vx.Status {
 }
 
 @(private="file")
-open :: proc "contextless" (ctx: rawptr, node: u64, mode: u8) -> vx.Status {
-	return mode & (p9.OTRUNC | p9.ORCLOSE) != 0 ? .Err_Access : .Ok
+open :: proc "contextless" (ctx: rawptr, node: p9.Node, mode: p9.Open_Mode) -> vx.Status {
+	return mode.trunc || mode.rclose ? .Err_Access : .Ok
 }
 
 @(private="file")
-read :: proc "contextless" (ctx: rawptr, node: u64, offset: u64, buf: []u8) -> (u32, vx.Status) {
-	c := cast(^Cons)ctx // a stream: offsets mean nothing
-	if c.in_head == c.in_tail {
+read :: proc "contextless" (ctx: rawptr, node: p9.Node, offset: u64, buf: []u8) -> (u32, vx.Status) {
+	c := (^Cons)(ctx) // a stream: offsets mean nothing
+	if is_empty(&c.input) {
 		if c.eofs == 0 {
 			return 0, .Err_Should_Wait
 		}
@@ -169,9 +184,8 @@ read :: proc "contextless" (ctx: rawptr, node: u64, offset: u64, buf: []u8) -> (
 		return 0, .Ok
 	}
 	n := 0
-	for n < len(buf) && c.in_head != c.in_tail {
-		b := c.input[c.in_head % len(c.input)]
-		c.in_head += 1
+	for n < len(buf) && !is_empty(&c.input) {
+		b := pop(&c.input)
 		buf[n] = b
 		n += 1
 		if b == '\n' {
@@ -182,10 +196,10 @@ read :: proc "contextless" (ctx: rawptr, node: u64, offset: u64, buf: []u8) -> (
 }
 
 @(private="file")
-write :: proc "contextless" (ctx: rawptr, node: u64, offset: u64, data: []u8) -> (u32, vx.Status) {
-	c := cast(^Cons)ctx
+write :: proc "contextless" (ctx: rawptr, node: p9.Node, offset: u64, data: []u8) -> (u32, vx.Status) {
+	c := (^Cons)(ctx)
 	n := 0
-	for n < len(data) && out_room(c) >= 2 { // room for a newline's CR LF
+	for n < len(data) && room(&c.out) >= 2 { // room for a newline's CR LF
 		echo(c, data[n])
 		n += 1
 	}
@@ -197,7 +211,7 @@ write :: proc "contextless" (ctx: rawptr, node: u64, offset: u64, data: []u8) ->
 }
 
 @(private="file")
-readdir :: proc "contextless" (ctx: rawptr, dir: u64, index: u32) -> (u64, vx.Status) {
+readdir :: proc "contextless" (ctx: rawptr, dir: p9.Node, index: u32) -> (p9.Node, vx.Status) {
 	if index != 0 {
 		return 0, .Err_Not_Found
 	}
@@ -215,8 +229,8 @@ cons_self: ^Cons
 
 @(private="file")
 print_self :: proc "contextless" (s: string) {
-	for i in 0 ..< len(s) {
-		echo(cons_self, s[i])
+	for b in transmute([]u8)s {
+		echo(cons_self, b)
 	}
 	cons_pump(cons_self)
 }
