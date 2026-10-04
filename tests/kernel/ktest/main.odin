@@ -279,6 +279,8 @@ Child_Code :: enum {
 	Exit_7,
 	Spin,
 	Block,
+	Port_Block,
+	Use_Simd,
 }
 
 Child_Image :: [dynamic; 64]u8 // more than any of them needs
@@ -292,12 +294,30 @@ write_child :: proc "contextless" (what: Child_Code) -> (code: Child_Image) {
 		emit32 :: proc "contextless" (code: ^Child_Image, v: u32) {
 			emit(code, u8(v), u8(v >> 8), u8(v >> 16), u8(v >> 24))
 		}
+		what := what
+		if what == .Use_Simd {
+			emit(&code, 0x66, 0x0f, 0xef, 0xc0) // pxor %xmm0, %xmm0: user tasks have SIMD (ADR-0004)
+			what = .Exit_7
+		}
 		switch what {
-		case .Exit_7:
+		case .Exit_7, .Use_Simd:
 			emit(&code, 0xbf); emit32(&code, 7) // mov $7, %edi
 			emit(&code, 0xb8); emit32(&code, u32(vx.Syscall.Thread_Exit)) // mov $thread_exit, %eax
 			emit(&code, 0x0f, 0x05) // syscall
 		case .Spin:
+			emit(&code, 0xeb, 0xfe) // jmp .
+		case .Port_Block:
+			emit(&code, 0x48, 0x8d, 0x74, 0x24, 0xf0) // lea -16(%rsp), %rsi: the handle's place
+			emit(&code, 0x31, 0xff) // xor %edi, %edi: no options
+			emit(&code, 0xb8); emit32(&code, u32(vx.Syscall.Port_Create)) // mov $port_create, %eax
+			emit(&code, 0x0f, 0x05) // syscall
+			emit(&code, 0x8b, 0x7c, 0x24, 0xf0) // mov -16(%rsp), %edi: the port
+			emit(&code, 0x48, 0xbe); emit32(&code, 0xffffffff); emit32(&code, 0x7fffffff) // mov $INT64_MAX, %rsi: no deadline
+			emit(&code, 0x31, 0xd2) // xor %edx, %edx: no leeway
+			emit(&code, 0x4c, 0x8d, 0x54, 0x24, 0xc0) // lea -64(%rsp), %r10: a packet's place
+			emit(&code, 0x41, 0xb8); emit32(&code, 1) // mov $1, %r8d
+			emit(&code, 0xb8); emit32(&code, u32(vx.Syscall.Port_Wait)) // mov $port_wait, %eax
+			emit(&code, 0x0f, 0x05) // syscall
 			emit(&code, 0xeb, 0xfe) // jmp .
 		case .Block:
 			emit(&code, 0x48, 0x8d, 0x7c, 0x24, 0xf0) // lea -16(%rsp), %rdi: a zero word
@@ -313,12 +333,31 @@ write_child :: proc "contextless" (what: Child_Code) -> (code: Child_Image) {
 				_ = append(code, u8(w), u8(w >> 8), u8(w >> 16), u8(w >> 24))
 			}
 		}
+		what := what
+		if what == .Use_Simd {
+			emit(&code, 0x9e6703e0) // fmov d0, xzr: user tasks have FP/SIMD (ADR-0004)
+			what = .Exit_7
+		}
 		switch what {
-		case .Exit_7:
+		case .Exit_7, .Use_Simd:
 			emit(&code, 0xd2800000 | 7 << 5) // movz x0, #7
 			emit(&code, 0xd2800008 | u32(vx.Syscall.Thread_Exit) << 5) // movz x8, #thread_exit
 			emit(&code, 0xd4000001) // svc #0
 		case .Spin:
+			emit(&code, 0x14000000) // b .
+		case .Port_Block:
+			emit(&code, 0xd10043e1) // sub x1, sp, #16: the handle's place
+			emit(&code, 0xd2800000) // movz x0, #0: no options
+			emit(&code, 0xd2800008 | u32(vx.Syscall.Port_Create) << 5) // movz x8, #port_create
+			emit(&code, 0xd4000001) // svc #0
+			emit(&code, 0xb85f03e0) // ldur w0, [sp, #-16]: the port
+			emit(&code, 0x92800001) // movn x1, #0
+			emit(&code, 0xd341fc21) // lsr x1, x1, #1: INT64_MAX, no deadline
+			emit(&code, 0xd2800002) // movz x2, #0: no leeway
+			emit(&code, 0xd10103e3) // sub x3, sp, #64: a packet's place
+			emit(&code, 0xd2800024) // movz x4, #1
+			emit(&code, 0xd2800008 | u32(vx.Syscall.Port_Wait) << 5) // movz x8, #port_wait
+			emit(&code, 0xd4000001) // svc #0
 			emit(&code, 0x14000000) // b .
 		case .Block:
 			emit(&code, 0xd10043e0) // sub x0, sp, #16: a zero word
@@ -335,6 +374,20 @@ write_child :: proc "contextless" (what: Child_Code) -> (code: Child_Image) {
 
 CHILD_CODE :: u64(0x10_0000)
 CHILD_STACK_TOP :: u64(0x20_0000)
+
+// Waits until every thread of the task is blocked in the kernel (task_info
+// counts them). False if it has not happened within a second.
+wait_blocked :: proc "contextless" (task: vx.Handle) -> bool {
+	@(static) never: u32
+	for _ in 0 ..< 1000 {
+		info, st := rt.task_info(task)
+		if st == .Ok && info.threads != 0 && info.blocked == info.threads {
+			return true
+		}
+		_ = rt.futex_wait(&never, 0, after_ms(1)) // a millisecond's nap
+	}
+	return false
+}
 
 // A child task running `what`, started.
 start_child :: proc "contextless" (what: Child_Code) -> (task: vx.Handle, ok: bool) {
@@ -401,8 +454,7 @@ test_tasks :: proc "contextless" () {
 	// A child blocked in the kernel is killed too: its wait ends with KILLED.
 	child, ok = start_child(.Block)
 	check(ok)
-	pk: [1]vx.Packet
-	_, _ = rt.port_wait(port, after_ms(20), 0, pk[:]) // give it time to block
+	check(wait_blocked(child)) // in futex_wait, so the kill is of a blocked thread
 	check(rt.task_kill(child, 55) == .Ok)
 	check(wait_exit(port, child) == 55)
 	_ = rt.handle_close(child)
@@ -724,6 +776,8 @@ test_devices :: proc "contextless" () {
 	check(mst == .Ok)
 	value := intrinsics.volatile_load(cast(^u32)uintptr(at)) // HPET: capabilities and revision; PL031: the time
 	check(value != 0 && value != 0xffff_ffff)
+	// A futex in device memory: refused (the kernel has no direct mapping of it to read).
+	check(rt.futex_wait(cast(^u32)uintptr(at), value, after_ms(1)) == .Err_Invalid)
 	_ = rt.handle_close(h)
 
 	when ODIN_ARCH == .amd64 {
@@ -742,8 +796,159 @@ test_devices :: proc "contextless" () {
 		_, st = rt.iorange_create(res, 0x2f8, 8)
 		check(st == .Err_Unsupported)
 	}
-	_ = rt.handle_close(weak)
-	_ = rt.handle_close(res)
+
+	// MSIs: picked by the kernel, for a PCI function (00:03.0 here, by requester ID).
+	m1, m2: vx.Handle
+	msi, msi2: vx.Msi
+	_, _, st = rt.irq_create_msi(weak, 0x18)
+	check(st == .Err_Access)
+	m1, msi, st = rt.irq_create_msi(res, 0x18)
+	check(st == .Ok && msi.address != 0)
+	m2, msi2, st = rt.irq_create_msi(res, 0x18)
+	check(st == .Ok)
+	check(msi2.address == msi.address && msi2.data != msi.data) // one target; another vector or event
+	when ODIN_ARCH == .amd64 {
+		check(msi.address & 0xfff0_0000 == 0xfee0_0000)
+	}
+	port, _ = rt.port_create()
+	check(rt.port_bind(port, m1, .Irq, 1) == .Ok)
+	_, st = rt.port_wait(port, after_ms(2), 0, pk[:])
+	check(st == .Err_Timed_Out) // no device writes it
+	rt.close_all(port, m1, m2)
+	m1, msi2, st = rt.irq_create_msi(res, 0x18)
+	check(st == .Ok && msi2.data == msi.data) // freed, so given again
+	_ = rt.handle_close(m1)
+
+	// A DMA domain (pass-through): device addresses for a VMO's pages, held until unmapped.
+	addrs: [4]u64
+	_, st = rt.dma_domain_create(weak)
+	check(st == .Err_Access)
+	dom: vx.Handle
+	dom, st = rt.dma_domain_create(res)
+	check(st == .Ok)
+	mem, _ := rt.vmo_create(16 * 1024)
+	check(rt.dma_map(dom, mem, 4096, 16 * 1024, addrs[:]) == .Err_Range)
+	check(rt.dma_map(dom, mem, 0, 16 * 1024, addrs[:]) == .Ok)
+	check(addrs[0] != 0 && addrs[3] != 0 && addrs[0] & 4095 == 0 && addrs[0] != addrs[1])
+	h, st = rt.vmo_create_physical(res, DEVICE, 4096)
+	check(st == .Ok)
+	check(rt.dma_map(dom, h, 0, 4096, addrs[:]) == .Err_Unsupported) // not RAM: peer-to-peer comes later
+	_ = rt.handle_close(h)
+	check(rt.dma_unmap(dom, mem) == .Ok)
+	check(rt.dma_unmap(dom, mem) == .Err_Not_Found)
+	check(rt.dma_map(dom, mem, 0, 4096, addrs[:]) == .Ok) // held by the domain when it closes, and let go
+	rt.close_all(mem, dom, weak, res)
+}
+
+// Review fixes (M3): a killed task's freed tables are never used, and a
+// mapping that collides with another fails without taking a page from it.
+test_torn_down :: proc "contextless" () {
+	port, _ := rt.port_create()
+	child, st := rt.task_create("doomed")
+	check(st == .Ok)
+	th: vx.Handle
+	th, st = rt.thread_create(child) // made before the kill, started after
+	check(st == .Ok)
+	check(rt.task_kill(child, -5) == .Ok)
+	check(wait_exit(port, child) == -5) // torn down: no threads ever ran
+	vmo, _ := rt.vmo_create(4096)
+	_, st = rt.as_map(child, vmo, 0, 4096, {})
+	check(st == .Err_Bad_State) // its mapping table is gone
+	a, b, _ := rt.channel_create()
+	check(rt.thread_start(th, 0x40_0000, 0x50_0000, a, 0) != .Ok) // and its handle table
+	rt.close_all(b, th, child)
+
+	// A thread's entry and stack must be user addresses: a non-canonical entry
+	// would fault in the kernel on its way to user mode.
+	child, st = rt.task_create("bad entry")
+	check(st == .Ok)
+	th, st = rt.thread_create(child)
+	check(st == .Ok)
+	check(rt.thread_start(th, 0x8000_0000_0000_0000, 0x50_0000, 0, 0) == .Err_Invalid)
+	check(rt.thread_start(th, 0x40_0000, 0xffff_8000_0000_0000, 0, 0) == .Err_Invalid)
+	check(rt.thread_start(th, 0x0000_8000_0000_0000, 0x50_0000, 0, 0) == .Err_Invalid) // just past the top
+	_ = rt.task_kill(child, 0)
+	rt.close_all(th, child)
+
+	// vmo (one page) where the kernel puts it; then two pages ending on it:
+	// refused, and the first page is still there.
+	at, mst := rt.as_map(rt.self, vmo, 0, 4096, {.Write})
+	check(mst == .Ok)
+	spot := cast(^u64)uintptr(at)
+	intrinsics.volatile_store(spot, 0x1234)
+	two, _ := rt.vmo_create(8192)
+	_, st = rt.as_map(rt.self, two, 0, 8192, {.Write}, at - 4096) // free: the kernel leaves a guard page before what it places
+	check(st != .Ok)
+	check(intrinsics.volatile_load(spot) == 0x1234) // would fault if the failed map took the page
+	_, st = rt.as_map(rt.self, two, 0, 4096, {.Write}, at - 4096)
+	check(st == .Ok) // the page it did map was taken back
+	rt.close_all(two, vmo, port)
+}
+
+// Review fixes (M3): port waiters. A waiter that times out does not cut off
+// the waiter behind it, and a kill ends a task waiting on a port.
+Port_Pair :: struct {
+	port:  vx.Handle,
+	stage: u32,
+	got:   int, // how many packets the second waiter's port_wait returned
+	st:    vx.Status,
+}
+
+second_waiter :: proc "c" (unused: vx.Handle, arg: u64) -> ! {
+	pp := cast(^Port_Pair)uintptr(arg)
+	for intrinsics.atomic_load(&pp.stage) != 1 {
+		_ = rt.futex_wait(&pp.stage, 0, after_ms(100))
+	}
+	pk: [1]vx.Packet
+	pp.got, pp.st = rt.port_wait(pp.port, after_ms(2000), 0, pk[:]) // queued behind the first waiter
+	intrinsics.atomic_store(&pp.stage, 2)
+	_, _ = rt.futex_wake(&pp.stage, 1)
+	rt.thread_exit(0)
+}
+
+test_port_waiters :: proc "contextless" () {
+	@(static) pp: Port_Pair
+	pk: [1]vx.Packet
+	pp.port, _ = rt.port_create()
+	th, st := rt.thread_create(rt.self)
+	check(st == .Ok)
+	check(rt.thread_start(th, u64(uintptr(rawptr(second_waiter))), new_stack(), 0, u64(uintptr(&pp))) == .Ok)
+	intrinsics.atomic_store(&pp.stage, 1)
+	_, _ = rt.futex_wake(&pp.stage, 1)
+	_, st = rt.port_wait(pp.port, after_ms(30), 0, pk[:])
+	check(st == .Err_Timed_Out) // first in line, gives up
+	packet := vx.Packet{key = 5}
+	check(rt.port_post(pp.port, &packet) == .Ok)
+	for i := 0; i < 100 && intrinsics.atomic_load(&pp.stage) != 2; i += 1 {
+		_ = rt.futex_wait(&pp.stage, 1, after_ms(10))
+	}
+	check(pp.got == 1 && pp.st == .Ok) // woken by the post, not by its 2 s deadline
+	rt.close_all(th, pp.port)
+
+	// A port closed with fired bindings in it, many times over: the path that
+	// used to leak each port (its fired binding kept it alive). A leak itself
+	// does not show from here: ktest cannot see the kernel's free memory.
+	counter, _ := rt.counter_create(1)
+	all := true
+	for i := 0; i < 2000 && all; i += 1 {
+		p, pst := rt.port_create()
+		all = pst == .Ok && rt.port_bind(p, counter, .Counter_Ge, 1, 0) == .Ok && rt.handle_close(p) == .Ok
+	}
+	check(all)
+	_ = rt.handle_close(counter)
+
+	port, _ := rt.port_create()
+	// User tasks have FP/SIMD, saved at every entry (ADR-0004; upstream traps it at M3).
+	child, ok := start_child(.Use_Simd)
+	check(ok)
+	check(wait_exit(port, child) == 7)
+	_ = rt.handle_close(child)
+	child, ok = start_child(.Port_Block)
+	check(ok)
+	check(wait_blocked(child)) // in port_wait
+	check(rt.task_kill(child, -3) == .Ok)
+	check(wait_exit(port, child) == -3) // the kill ends the wait
+	rt.close_all(child, port)
 }
 
 @(export, link_name="vx_main")
@@ -755,6 +960,8 @@ vx_main :: proc() -> int {
 	test_bindings()
 	test_threads_and_calls()
 	test_tasks()
+	test_torn_down()
+	test_port_waiters()
 	test_nested_channels()
 	test_rings()
 	test_vmo_rw()
