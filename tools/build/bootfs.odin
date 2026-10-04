@@ -7,12 +7,13 @@ import "vx:tar"
 
 // The boot image, bootfs.tar, a Limine module: the namespace's mount
 // points, boot/bin with each program that lives in bootfs, boot/svc with the
-// service manifests from boot/svc/*.ndb, and boot/drv with the driver
-// manifests from boot/drv/*.ndb. The archive is deterministic:
+// service manifests from boot/svc/*.ndb, boot/drv with the driver
+// manifests from boot/drv/*.ndb, and lib/ns with the namespace templates
+// from boot/lib/ns. The archive is deterministic:
 // fixed order, no times or owners (lib/tar's writer).
 
 @(private="file")
-BOOTFS_DIRS := []string{"bin", "boot", "boot/bin", "boot/drv", "boot/svc", "dev", "n", "net", "proc", "srv", "tmp"}
+BOOTFS_DIRS := []string{"bin", "boot", "boot/bin", "boot/drv", "boot/svc", "dev", "lib", "lib/ns", "n", "net", "proc", "srv", "sys", "tmp"}
 
 // Whether `name` is in the comma-separated list `with`.
 listed :: proc(with, name: string) -> bool {
@@ -53,6 +54,14 @@ make_bootfs :: proc(a: ^Arch, mode: Mode, out: string, with := "") -> bool {
 			if strings.has_suffix(m, ".ndb") {
 				append(&entries, Bootfs_Entry{m, read_file(m) or_return, 0o644})
 			}
+		}
+	}
+	// The namespace templates, namespace(6) files, from boot/lib/ns as lib/ns
+	// (upstream ADR-0009): a manifest's ns=NAME reads /lib/ns/NAME.
+	if os.is_dir("boot/lib/ns") {
+		templates := tree_files("boot/lib/ns") or_return
+		for t in templates {
+			append(&entries, Bootfs_Entry{strings.trim_prefix(t, "boot/"), read_file(t) or_return, 0o644})
 		}
 	}
 	for p in PROGRAMS {
