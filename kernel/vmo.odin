@@ -19,6 +19,8 @@ Vmo :: struct {
 	physical:   bool, // device memory: its pages are not RAM, and are never freed
 }
 
+#assert(offset_of(Vmo, obj) == 0) // objects are cast from ^Object
+
 vmo_pool := Pool{size = (size_of(Vmo) + 15) &~ 15}
 
 VMO_MAX_SIZE :: u64(256) << 20 // the list fits one order-7 block

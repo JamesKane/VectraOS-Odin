@@ -91,13 +91,13 @@ find_root_module :: proc "contextless" () {
 	}
 }
 
-ALL_RIGHTS :: u32(1 << len(vx.Right) - 1)
-CHANNEL_END_RIGHTS :: u32(1 << u32(vx.Right.Read) | 1 << u32(vx.Right.Write) | 1 << u32(vx.Right.Wait) | 1 << u32(vx.Right.Signal) | 1 << u32(vx.Right.Duplicate) | 1 << u32(vx.Right.Transfer) | 1 << u32(vx.Right.Inspect))
+// A channel end's rights, and a ring end's.
+CHANNEL_END_RIGHTS :: vx.Rights{.Read, .Write, .Wait, .Signal, .Duplicate, .Transfer, .Inspect}
 
 @(private="file")
-ROOT_RESOURCE_RIGHTS :: u32(1 << u32(vx.Right.Manage) | 1 << u32(vx.Right.Duplicate) | 1 << u32(vx.Right.Transfer) | 1 << u32(vx.Right.Inspect))
+ROOT_RESOURCE_RIGHTS :: vx.Rights{.Manage, .Duplicate, .Transfer, .Inspect}
 @(private="file")
-BOOT_IMAGE_RIGHTS :: u32(1 << u32(vx.Right.Read) | 1 << u32(vx.Right.Map) | 1 << u32(vx.Right.Duplicate) | 1 << u32(vx.Right.Transfer) | 1 << u32(vx.Right.Inspect))
+BOOT_IMAGE_RIGHTS :: vx.Rights{.Read, .Map, .Duplicate, .Transfer, .Inspect}
 
 @(private="file")
 spawn_text: [1024]u8
@@ -146,7 +146,7 @@ root_spawn_message :: proc "contextless" (t: ^Task) -> ^Channel {
 	copy(msg_body(m)[size_of(vx.Msg_Header):], text)
 	handles := msg_handles(m)
 	object_ref(&t.obj)
-	handles[0] = {&t.obj, ALL_RIGHTS}
+	handles[0] = {&t.obj, vx.ALL_RIGHTS}
 	if image != nil {
 		handles[1] = {&image.obj, BOOT_IMAGE_RIGHTS} // the message takes our reference
 	}

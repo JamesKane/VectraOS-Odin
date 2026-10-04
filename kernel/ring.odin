@@ -32,6 +32,8 @@ Ring_End :: struct {
 	obs:       Observers, // PEER_CLOSED
 }
 
+#assert(offset_of(Ring_End, obj) == 0) // objects are cast from ^Object
+
 Ring_Pair :: struct {
 	lock:  Spinlock,
 	ends:  [2]^Ring_End, // nil once that end is destroyed

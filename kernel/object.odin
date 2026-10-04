@@ -105,7 +105,9 @@ object_release :: proc "contextless" (o: ^Object) {
 // The last reference is gone: the type's destructor.
 @(private="file")
 object_destroy :: proc "contextless" (o: ^Object) {
-	#partial switch o.type {
+	switch o.type {
+	case .None:
+		kpanic("destroying an untyped object")
 	case .Vmo:
 		vmo_destroy(cast(^Vmo)o)
 	case .Port:

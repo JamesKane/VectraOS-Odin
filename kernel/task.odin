@@ -31,7 +31,7 @@ Io_Range :: struct {
 
 Handle_Entry :: struct {
 	obj:        ^Object,
-	rights:     u32,
+	rights:     vx.Rights,
 	generation: u16,
 	reserved:   u16,
 }
@@ -74,6 +74,8 @@ Task :: struct {
 	io:              [dynamic; TASK_MAX_IO]Io_Range, // I/O ports it may use (x86_64, device.odin)
 }
 
+#assert(offset_of(Task, obj) == 0) // objects are cast from ^Object
+
 Thread_State :: enum u8 {
 	New, // created, never run
 	Ready,
@@ -109,6 +111,8 @@ Thread :: struct {
 	wait_result:  i64,
 }
 
+#assert(offset_of(Thread, obj) == 0) // objects are cast from ^Object
+
 handle_value :: proc "contextless" (index: u32, generation: u16) -> vx.Handle {
 	return vx.Handle(u32(generation) << 16 | index)
 }
@@ -137,7 +141,7 @@ free_slot :: proc "contextless" (e: ^Handle_Entry) {
 
 // Gives the task a handle to obj, taking a reference for it.
 @(require_results)
-handle_add :: proc "contextless" (t: ^Task, obj: ^Object, rights: u32) -> (vx.Handle, vx.Status) {
+handle_add :: proc "contextless" (t: ^Task, obj: ^Object, rights: vx.Rights) -> (vx.Handle, vx.Status) {
 	spin_lock(&t.lock)
 	defer spin_unlock(&t.lock)
 	if t.handles == nil {
@@ -162,18 +166,43 @@ handle_add :: proc "contextless" (t: ^Task, obj: ^Object, rights: u32) -> (vx.Ha
 // The object behind a handle, with a reference the caller releases, if it is
 // of the given type and the handle has every right asked for.
 @(require_results)
-handle_get :: proc "contextless" (t: ^Task, h: vx.Handle, type: Obj_Type, rights: u32) -> (^Object, vx.Status) {
+handle_get :: proc "contextless" (t: ^Task, h: vx.Handle, type: Obj_Type, rights: vx.Rights) -> (^Object, vx.Status) {
 	spin_lock(&t.lock)
 	defer spin_unlock(&t.lock)
 	e := entry_for(t, h)
 	if e == nil || e.obj.type != type {
 		return nil, .Err_Bad_Handle
 	}
-	if e.rights & rights != rights {
+	if rights - e.rights != {} {
 		return nil, .Err_Access
 	}
 	object_ref(e.obj)
 	return e.obj, .Ok
+}
+
+// A second handle to h's object, with h's rights or, if `rights` is given,
+// those, which may only be fewer. h needs DUPLICATE.
+@(require_results)
+handle_dup :: proc "contextless" (t: ^Task, h: vx.Handle, rights: Maybe(vx.Rights)) -> (dup: vx.Handle, st: vx.Status) {
+	obj, r := dup_source(t, h, rights) or_return
+	defer object_release(obj)
+	return handle_add(t, obj, r)
+}
+
+@(private="file", require_results)
+dup_source :: proc "contextless" (t: ^Task, h: vx.Handle, rights: Maybe(vx.Rights)) -> (obj: ^Object, r: vx.Rights, st: vx.Status) {
+	spin_lock(&t.lock)
+	defer spin_unlock(&t.lock)
+	e := entry_for(t, h)
+	if e == nil {
+		return nil, {}, .Err_Bad_Handle
+	}
+	r = rights.? or_else e.rights
+	if .Duplicate not_in e.rights || r - e.rights != {} {
+		return nil, {}, .Err_Access
+	}
+	object_ref(e.obj)
+	return e.obj, r, .Ok
 }
 
 @(require_results)
@@ -196,7 +225,7 @@ handle_close :: proc "contextless" (t: ^Task, h: vx.Handle) -> vx.Status {
 // A handle in flight: the reference the sender's handle held, and its rights.
 Moved_Handle :: struct {
 	obj:    ^Object,
-	rights: u32,
+	rights: vx.Rights,
 }
 
 // Takes handles out of the task's table, all or none: each must exist, carry
@@ -211,7 +240,7 @@ handles_take :: proc "contextless" (t: ^Task, values: []vx.Handle, forbidden: ^O
 		switch {
 		case e == nil:
 			return .Err_Bad_Handle
-		case e.rights & (1 << u32(vx.Right.Transfer)) == 0:
+		case .Transfer not_in e.rights:
 			return .Err_Access
 		case e.obj == forbidden:
 			return .Err_Invalid

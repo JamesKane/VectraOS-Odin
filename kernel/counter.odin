@@ -14,6 +14,8 @@ Counter :: struct {
 	obs:       Observers,
 }
 
+#assert(offset_of(Counter, obj) == 0) // objects are cast from ^Object
+
 counter_pool := Pool{size = (size_of(Counter) + 15) &~ 15}
 
 @(require_results)

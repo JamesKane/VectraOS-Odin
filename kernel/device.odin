@@ -25,6 +25,8 @@ Resource :: struct {
 	using obj: Object,
 }
 
+#assert(offset_of(Resource, obj) == 0) // objects are cast from ^Object
+
 Irq :: struct {
 	using obj: Object,
 	lock:      Spinlock,
@@ -36,10 +38,14 @@ Irq :: struct {
 	obs:       Observers, // IRQ bindings
 }
 
+#assert(offset_of(Irq, obj) == 0) // objects are cast from ^Object
+
 Iorange :: struct {
 	using obj: Object,
 	range:     Io_Range,
 }
+
+#assert(offset_of(Iorange, obj) == 0) // objects are cast from ^Object
 
 resource_pool := Pool{size = (size_of(Resource) + 15) &~ 15}
 irq_pool := Pool{size = (size_of(Irq) + 15) &~ 15}

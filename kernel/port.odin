@@ -30,6 +30,8 @@ Port :: struct {
 	queue:      [PORT_CAPACITY]vx.Packet,
 }
 
+#assert(offset_of(Port, obj) == 0) // objects are cast from ^Object
+
 Binding :: struct {
 	next:          ^Binding, // on its source's list, then on its port's ready list
 	port:          ^Port, // holds a reference

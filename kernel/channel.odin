@@ -69,6 +69,8 @@ Channel :: struct {
 	next_txid: u32,
 }
 
+#assert(offset_of(Channel, obj) == 0) // objects are cast from ^Object
+
 Channel_Pair :: struct {
 	lock: Spinlock,
 	ends: [2]^Channel, // nil once that end is destroyed
