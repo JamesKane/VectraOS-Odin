@@ -75,3 +75,13 @@ On macOS, every M3 scenario passes on x86_64 and aarch64: `pci`, `net`, `netd`, 
 | `f74978c`, `179bd69` | netd, ping, cs, tcptest; gsh's `mount` |
 
 Found along the way, and recorded in [UPSTREAM-FINDINGS.md](UPSTREAM-FINDINGS.md): an unmount that crashes while a bind still uses the connection (fixed here), and netd's query answers cut off at 256 bytes (kept, byte for byte).
+
+## P4: M4, POSIX and debugging — done 2026-10-04
+
+On macOS, every M4 scenario passes on x86_64 and aarch64 (54 runs): `posix` (ctest's 333 checks), `sbase`, `lua`, `rc`, `rcscript`, `proc`, `dbg`, `shell`, and M4's versions of every earlier scenario, which replace the `m3/` ones. `u9fs` needs Linux user namespaces and runs on Fedora. Scenarios and their C fixtures are upstream's as M4 left them (`tests/qemu/m4/`, ADR-0007).
+
+The POSIX personality is musl 1.2.6, vendored unchanged, with its back end in Odin (ADR-0007): a fd table, files and terminals over the namespace, fork/exec/wait over /proc, signals as notes, poll/select, and sockets over /net. Lua 5.5.1 and sbase run on it. Under it: the M4 kernel (exceptions and the debugger's calls, watchpoints, FORK, task_exec, notes and exit strings, as_unmap); procfs as the one process table, with the debug files and crash directories; nsd, tmpfs, nullfs, sysfs, ptyd; gsh remade on `vx:rc`; `dbg` on `vx:debug`, which reads Odin's DWARF 4 as well as clang's DWARF 5.
+
+Along the way: builds made byte-identical across runs and checkout paths (Odin's IR canonicalized; `/src` for the root), `--release` fixed, shrink-wrapping turned off so every function's frame record is set up at entry (ADR-0003), a ring server's closed connections unmapped. Upstream findings are in [UPSTREAM-FINDINGS.md](UPSTREAM-FINDINGS.md).
+
+Imports reviewed and accepted: musl, compiler-rt, Lua, sbase (ADR-0007 to ADR-0010).
