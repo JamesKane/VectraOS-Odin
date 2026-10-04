@@ -19,6 +19,9 @@ import "vx:ndb"
 // the CD image (image --iso) instead of the disk. After a pass, each host=
 // record's file, under the run's directory (share/ is what vx9pserve served,
 // u9fs/ what u9fs did), must hold its text= (with or without a final newline).
+// A scenario= record's rtc= starts QEMU's real-time clock at that time
+// (-rtc base=); its exits flag makes QEMU exiting by itself, once every
+// expect= has matched, the pass (power off).
 
 Expect_Kind :: enum {
 	Contains, // expect=: part of a line
@@ -46,6 +49,8 @@ Scenario :: struct {
 	only:    ^Arch, // arch=: run on this architecture only; nil for all
 	needs:   string, // a feature this tree's build cannot provide yet
 	iso:     bool, // boot the ISO, as a CD, with no disk
+	rtc:     string, // rtc=: the real-time clock's starting time; "" for the host's UTC
+	exits:   bool, // QEMU must then exit by itself
 	expects: [dynamic]Expect,
 	fails:   [dynamic]string,
 	hosts:   [dynamic]Host_Check,
@@ -84,6 +89,8 @@ load_scenario :: proc(name: string, a: ^Arch) -> (sc: Scenario, ok: bool) {
 				sc.only = only
 			}
 			sc.iso = ndb.has(rec, "iso")
+			sc.rtc = val(rec, "rtc")
+			sc.exits = ndb.has(rec, "exits")
 			for feature in ([]string{"disk", "volume", "iommu", "bus"}) {
 				if ndb.has(rec, feature) {
 					sc.needs = feature
@@ -211,7 +218,7 @@ run_scenario :: proc(a: ^Arch, mode: Mode, name: string) -> bool {
 		return false
 	}
 	defer os.close(keys_w)
-	cmd := qemu_cmd(a, image, {test = true, share = share, u9fs = u9fs, cdrom = cdrom})
+	cmd := qemu_cmd(a, image, {test = true, share = share, u9fs = u9fs, cdrom = cdrom, rtc = sc.rtc})
 	if verbose {
 		print_cmd(cmd, "")
 	}
@@ -269,9 +276,10 @@ match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File
 	buf: [4096]u8
 	n, pos := 0, 0
 	stale := 0 // bytes of buf, from pos, read before the last typing
+	all_seen := false // every expect= met; with exits, QEMU's exit is what is waited for now
 
 	for {
-		if typed < next && sc.expects[next].input != "" {
+		if !all_seen && typed < next && sc.expects[next].input != "" {
 			if _, err := os.write(keys, transmute([]u8)sc.expects[next].input); err != nil {
 				return "cannot type into QEMU (it has exited?)", false
 			}
@@ -283,11 +291,14 @@ match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File
 		if pos == n { // all looked at: read more
 			left := sc.timeout - time.duration_seconds(time.tick_since(start))
 			if left <= 0 {
+				if all_seen {
+					return "QEMU did not exit (exits)", false
+				}
 				return fmt.tprintf("timed out waiting for %q", sc.expects[next].text), false
 			}
 			has, herr := os.pipe_has_data(out)
 			if herr != nil {
-				return "QEMU exited", false
+				return all_seen ? "" : "QEMU exited", all_seen // with exits, the exit was the last thing waited for
 			}
 			if !has {
 				time.sleep(2 * time.Millisecond)
@@ -295,7 +306,7 @@ match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File
 			}
 			got, rerr := os.read(out, buf[:])
 			if rerr != nil || got <= 0 {
-				return "QEMU exited", false
+				return all_seen ? "" : "QEMU exited", all_seen
 			}
 			n, pos = got, 0
 			_, _ = os.write(log, buf[:n])
@@ -329,6 +340,10 @@ match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File
 					return fmt.tprintf("failure line: %s", text), false
 				}
 			}
+			strings.builder_reset(&line)
+			if all_seen {
+				continue
+			}
 			matched := false
 			switch e := sc.expects[next]; e.kind {
 			case .Contains:
@@ -337,11 +352,14 @@ match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File
 				matched = text == e.text
 			case .Prompt: // matched below, against all output since the last typing
 			}
-			strings.builder_reset(&line)
 			if matched {
 				next += 1
 				if next == len(sc.expects) {
-					return "", true
+					if !sc.exits {
+						return "", true
+					}
+					all_seen = true
+					continue
 				}
 				if sc.expects[next].input != "" && typed < next {
 					advanced = true
@@ -363,7 +381,10 @@ match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File
 				since_cut = false
 				next += 1
 				if next == len(sc.expects) {
-					return "", true
+					if !sc.exits {
+						return "", true
+					}
+					all_seen = true
 				}
 			}
 		}

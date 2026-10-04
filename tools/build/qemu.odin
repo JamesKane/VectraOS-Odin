@@ -7,6 +7,7 @@ Qemu_Opts :: struct {
 	share: string, // the directory vx9pserve serves at 10.0.2.100!5640
 	u9fs:  string, // the root u9fs serves at 10.0.2.101!564, and its log; "" for none
 	cdrom: string, // boot this ISO as a CD, with no disk
+	rtc:   string, // the real-time clock's starting time (-rtc base=); "" for the host's UTC
 }
 
 // QEMU's command line for booting an image. Devices arrive as the kernel
@@ -41,6 +42,9 @@ qemu_cmd :: proc(a: ^Arch, image: string, o: Qemu_Opts) -> []string {
 	}
 	append(&c, "-netdev", fmt.tprintf("user,id=net0,guestfwd=tcp:10.0.2.100:7-cmd:cat,guestfwd=tcp:10.0.2.100:5640-cmd:%s --stdio %s%s", VX9PSERVE, o.share, u9fs))
 	append(&c, "-device", "virtio-net-pci,netdev=net0,disable-legacy=on")
+	if o.rtc != "" {
+		append(&c, "-rtc", fmt.tprintf("base=%s", o.rtc))
+	}
 	if o.test {
 		append(&c, "-serial", "stdio", "-monitor", "none")
 	} else {

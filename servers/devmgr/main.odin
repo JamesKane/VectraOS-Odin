@@ -159,11 +159,15 @@ MAX_PROGRAM :: 63
 MAX_POST :: 25
 
 Driver :: struct {
-	f:       ^Function,
+	f:       ^Function, // a PCI function's; nil for an ACPI device's (acpi.odin)
+	acpi:    acpi.Device, // an ACPI device's: what bus-acpi reported, its resources the grants
+	clock:   bool, // it keeps time: given a channel to say it on
+	report:  vx.Handle, // devmgr's end of that channel
 	program: [dynamic; MAX_PROGRAM]u8,
 	post:    [dynamic; MAX_POST]u8,
 	msis:    u32,
 	listen:  vx.Handle, // the post's server end; each start gets a duplicate
+	bars:    [6]Range, // the memory BARs it was given: no one else's
 	task:    vx.Handle,
 	starts:  u32,
 }
@@ -235,33 +239,39 @@ start_driver :: proc "contextless" (index: int) -> vx.Status {
 		rt.close_all(..g.handles[:])
 	}
 	w := ndb.Writer{buf = records_buf[:]}
-	grant(&g, "config", rt.vmo_create_physical(resource, d.f.config_pa, 4096)) or_return
-	for i := u32(0); i < 6; i += 1 { // memory BARs, mapped whole
-		wide := bar_is_wide(&d.f.fn, i)
-		b := pci.bar_read(&d.f.fn, i)
-		n := i
-		if wide {
-			i += 1
+	if d.f != nil {
+		grant(&g, "config", rt.vmo_create_physical(resource, d.f.config_pa, 4096)) or_return
+		for i := u32(0); i < 6; i += 1 { // memory BARs, mapped whole
+			wide := bar_is_wide(&d.f.fn, i)
+			b := pci.bar_read(&d.f.fn, i)
+			n := i
+			if wide {
+				i += 1
+			}
+			if b.size == 0 || b.io || b.base & 4095 != 0 {
+				continue
+			}
+			size, _ := memory.page_round(b.size) // a BAR's size is a power of two in 64 bits
+			grant(&g, numbered(&g, "bar", n), rt.vmo_create_physical(resource, b.base, size)) or_return
+			d.bars[n] = {b.base, size}
+			ndb.put_u64(&w, "bar", u64(n))
+			ndb.put_u64(&w, "size", size)
+			_ = ndb.end(&w)
 		}
-		if b.size == 0 || b.io || b.base & 4095 != 0 {
-			continue
+		for i in 0 ..< min(d.msis, 8) {
+			h, msi, st := rt.irq_create_msi(resource, pci.rid(&d.f.fn))
+			grant(&g, numbered(&g, "msi", i), h, st) or_return
+			ndb.put_u64(&w, "msi", u64(i))
+			ndb.put_u64(&w, "address", msi.address)
+			ndb.put_u64(&w, "data", u64(msi.data))
+			_ = ndb.end(&w)
 		}
-		size, _ := memory.page_round(b.size) // a BAR's size is a power of two in 64 bits
-		grant(&g, numbered(&g, "bar", n), rt.vmo_create_physical(resource, b.base, size)) or_return
-		ndb.put_u64(&w, "bar", u64(n))
-		ndb.put_u64(&w, "size", size)
-		_ = ndb.end(&w)
+		grant(&g, "dma", rt.dma_domain_create(resource)) or_return
 	}
-	for i in 0 ..< min(d.msis, 8) {
-		h, msi, st := rt.irq_create_msi(resource, pci.rid(&d.f.fn))
-		grant(&g, numbered(&g, "msi", i), h, st) or_return
-		ndb.put_u64(&w, "msi", u64(i))
-		ndb.put_u64(&w, "address", msi.address)
-		ndb.put_u64(&w, "data", u64(msi.data))
-		_ = ndb.end(&w)
+	acpi_grants(index, &g, &w) or_return
+	if d.listen != vx.HANDLE_NONE {
+		grant(&g, "listen", rt.handle_dup(d.listen, vx.RIGHTS_SAME)) or_return
 	}
-	grant(&g, "dma", rt.dma_domain_create(resource)) or_return
-	grant(&g, "listen", rt.handle_dup(d.listen, vx.RIGHTS_SAME)) or_return
 	if c := rt.console_connector(); c != vx.HANDLE_NONE {
 		if h, st := rt.handle_dup(c, vx.RIGHTS_SAME); st == .Ok {
 			_ = grant(&g, "console", h, st) // without one, it says nothing
@@ -297,8 +307,10 @@ driver_exited :: proc "contextless" (index: int) {
 	// which the kernel has freed: stop it reaching memory at all. (Until the
 	// IOMMU, M5, it could write there between the driver's death and now.)
 	BUS_MASTER :: 1 << 2
-	command := pci.read16(&d.f.fn, 0x04)
-	pci.write16(&d.f.fn, 0x04, command &~ BUS_MASTER)
+	if d.f != nil {
+		command := pci.read16(&d.f.fn, 0x04)
+		pci.write16(&d.f.fn, 0x04, command &~ BUS_MASTER)
+	}
 	_ = rt.handle_close(d.task)
 	d.task = vx.HANDLE_NONE
 	say(program_of(d), " exited\n")
@@ -313,6 +325,10 @@ driver_exited :: proc "contextless" (index: int) {
 
 // Starts a driver for each function this manifest record matches.
 match_record :: proc "contextless" (rec: ^ndb.Record) {
+	if bus, _ := ndb.get(rec, "match"); bus == "acpi" {
+		keep_acpi_match(rec) // for bus-acpi's reports
+		return
+	}
 	vendor, vok := ndb.get_u64(rec, "vendor")
 	device, dok := ndb.get_u64(rec, "device")
 	program, _ := ndb.get(rec, "program")
@@ -398,11 +414,13 @@ vx_main :: proc() -> int {
 		rt.print("devmgr: FAILED: no Resource or ACPI tables\n")
 		return 1
 	}
-	mcfg, st := acpi.find((cast([^]u8)uintptr(at))[:size], "MCFG", 0)
+	blob := (cast([^]u8)uintptr(at))[:size]
+	mcfg, st := acpi.find(blob, "MCFG", 0)
 	if st != .Ok {
 		rt.print("devmgr: no MCFG, so no PCI\n")
 		return 0
 	}
+	find_taken(blob)
 	for n := 0; ; n += 1 {
 		e, est := acpi.mcfg(mcfg, n)
 		if est != .Ok {
@@ -411,6 +429,7 @@ vx_main :: proc() -> int {
 		if e.segment != 0 {
 			continue // other segments: when hardware has them
 		}
+		pci_window = e
 		clear(&pending)
 		seen_bus = {}
 		seen_bus[e.start_bus] = true
@@ -430,12 +449,24 @@ vx_main :: proc() -> int {
 		return 1
 	}
 	match_drivers()
+	start_bus_acpi(tables, size)
 	for { // drivers that exit are started again, up to a limit
 		pk: [8]vx.Packet
 		n, _ := rt.port_wait(port, vx.INFINITE, 0, pk[:])
 		for p in pk[:n] {
 			if p.trigger == .Exit && p.key < u64(len(drivers)) {
 				driver_exited(int(p.key))
+			}
+			if p.key == KEY_MINT { // bus-acpi asks, or reports
+				from_bus_acpi()
+				_ = rt.port_bind(port, mint_end, .Readable, KEY_MINT)
+			}
+			if p.key &~ 0xffff == KEY_REPORT && p.key & 0xffff < u64(len(drivers)) {
+				index := int(p.key & 0xffff)
+				clock_report(index)
+				if drivers[index].report != vx.HANDLE_NONE {
+					_ = rt.port_bind(port, drivers[index].report, .Readable, p.key)
+				}
 			}
 		}
 	}
