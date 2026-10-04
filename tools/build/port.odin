@@ -9,7 +9,8 @@ import "vx:ndb"
 
 // Vendored code built from ports/<name>/port.ndb (ADR-0002 upstream, kept
 // here): the source sets and flags its own build would use, captured once,
-// compiled by `build` with the pinned clang. Limine is the only port so far.
+// compiled by `build` with the pinned clang: Limine here, and musl,
+// compiler-rt, Lua and sbase in posix.odin.
 
 Port :: struct {
 	name:       string,
@@ -18,6 +19,7 @@ Port :: struct {
 	head:       ^ndb.Record,
 	targets:    [dynamic]^ndb.Record,
 	files:      [dynamic]^ndb.Record,
+	programs:   [dynamic]^ndb.Record, // program=: programs built from it (posix.odin)
 	input_hash: u64,
 }
 
@@ -28,6 +30,7 @@ port_load :: proc(name: string) -> (p: Port, ok: bool) {
 	f := read_ndb(path) or_return
 	p.targets = make([dynamic]^ndb.Record, context.temp_allocator)
 	p.files = make([dynamic]^ndb.Record, context.temp_allocator)
+	p.programs = make([dynamic]^ndb.Record, context.temp_allocator)
 	for rec in f.records {
 		switch {
 		case ndb.has(rec, "port"):
@@ -36,8 +39,10 @@ port_load :: proc(name: string) -> (p: Port, ok: bool) {
 			append(&p.targets, rec)
 		case ndb.has(rec, "file"):
 			append(&p.files, rec)
+		case ndb.has(rec, "program"):
+			append(&p.programs, rec)
 		case:
-			fmt.eprintfln("%s:%d: a record must start with port=, target= or file=", path, rec.line)
+			fmt.eprintfln("%s:%d: a record must start with port=, target=, file= or program=", path, rec.line)
 			return p, false
 		}
 	}
