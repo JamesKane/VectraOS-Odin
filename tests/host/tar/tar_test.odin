@@ -1,7 +1,8 @@
 // lib/tar, ported from upstream's tests/host/tar_test.c. Archives the writer
-// makes read back entry for entry; long paths split into prefix and name; and
-// the reader refuses bad checksums, bad octal, unsafe paths, links, and files
-// that run past the image.
+// makes read back entry for entry; long paths split into prefix and name;
+// hard links read as the file they name; and the reader refuses bad
+// checksums, bad octal, unsafe paths, symbolic links, links to nothing
+// earlier, and files that run past the image.
 package tar_test
 
 import "core:encoding/hex"
@@ -85,6 +86,55 @@ test_round_trip :: proc(t: ^testing.T) {
 	testing.expect_value(t, tar.end(&w), 0)
 }
 
+// A hard link reads as the regular file it names, which must come before it
+// and be no link itself.
+@(test)
+test_links :: proc(t: ^testing.T) {
+	image := make([]u8, IMAGE)
+	defer delete(image)
+	w := tar.Writer{buf = image}
+	tar.add(&w, "bin", true, 0o755, nil)
+	tar.add(&w, "bin/box", false, 0o755, transmute([]u8)string("#!box"))
+	tar.add_link(&w, "bin/ls", "bin/box", 0o755)
+	tar.add_link(&w, "bin/cat", "bin/box", 0o755)
+	n := tar.end(&w)
+	testing.expect_value(t, n, tar.BLOCK * (1 + 2 + 1 + 1 + 2))
+	e: tar.Entry
+	testing.expect_value(t, tar.find(image[:n], "bin/cat", &e), vx.Status.Ok)
+	testing.expect_value(t, string(e.data), "#!box")
+	testing.expect(t, !e.dir)
+	testing.expect_value(t, e.mode, 0o755)
+	testing.expect_value(t, tar.find(image[:n], "bin/ls", &e), vx.Status.Ok)
+	testing.expect_value(t, raw_data(e.data), &image[2 * tar.BLOCK])
+
+	w = tar.Writer{buf = image} // to a file that comes later: refused
+	tar.add_link(&w, "ls", "box", 0o755)
+	tar.add(&w, "box", false, 0o755, transmute([]u8)string("x"))
+	n = tar.end(&w)
+	testing.expect_value(t, first_entry(image, n), vx.Status.Err_Invalid)
+
+	w = tar.Writer{buf = image} // to a link, or a directory: refused
+	tar.add(&w, "box", false, 0o755, transmute([]u8)string("x"))
+	tar.add_link(&w, "a", "box", 0o755)
+	tar.add_link(&w, "b", "a", 0o755)
+	tar.add(&w, "d", true, 0o755, nil)
+	tar.add_link(&w, "c", "d", 0o755)
+	n = tar.end(&w)
+	testing.expect_value(t, tar.find(image[:n], "a", &e), vx.Status.Ok)
+	testing.expect_value(t, len(e.data), 1)
+	testing.expect_value(t, tar.find(image[:n], "b", &e), vx.Status.Err_Invalid)
+	r := tar.open(image[:n])
+	ok := 0
+	for _ in tar.entries(&r) {
+		ok += 1
+	}
+	testing.expect_value(t, ok, 2) // box and a, then b ends the archive
+
+	w = tar.Writer{buf = image} // a link with data, or an unsafe target
+	tar.add_link(&w, "x", "../etc/passwd", 0o644)
+	testing.expect(t, w.failed)
+}
+
 // Not upstream's: the writer's bytes are upstream's. The digest is of what
 // upstream's vx_tar_add and vx_tar_end write for these same calls (7680
 // bytes), so a change to any header field, padding or split shows here.
@@ -122,6 +172,27 @@ test_upstream_bytes :: proc(t: ^testing.T) {
 	got := hex.encode(d[:])
 	defer delete(got)
 	testing.expect_value(t, string(got), "de7642a9bb23e1c04a9734cab25218e3bfb3cb0c3e47e63acc4986ca502ebea8")
+}
+
+// Not upstream's: links are written as upstream's vx_tar_add_link writes
+// them, for these same calls (3584 bytes).
+@(test)
+test_upstream_link_bytes :: proc(t: ^testing.T) {
+	image := make([]u8, IMAGE)
+	defer delete(image)
+	w := tar.Writer{buf = image}
+	tar.add(&w, "bin", true, 0o755, nil)
+	tar.add(&w, "bin/box", false, 0o755, transmute([]u8)string("#!box"))
+	tar.add_link(&w, "bin/ls", "bin/box", 0o755)
+	tar.add_link(&w, "bin/cat", "bin/box", 0o644)
+	n := tar.end(&w)
+	testing.expect_value(t, n, 3584)
+	h := sha256.begin()
+	sha256.add(&h, image[:n])
+	d := sha256.end(&h)
+	got := hex.encode(d[:])
+	defer delete(got)
+	testing.expect_value(t, string(got), "4cd46bac7f836180bbdca719511fa442769d62526fdaa3243fa169062c1ff699")
 }
 
 // The longest path ustar holds: a full prefix, '/', a full name. (Upstream's
@@ -188,7 +259,7 @@ first_entry :: proc(image: []u8, n: int) -> vx.Status {
 test_hostile :: proc(t: ^testing.T) {
 	image := make([]u8, IMAGE)
 	defer delete(image)
-	bad_names := []string{"/abs", "a//b", "./a", "a/../b", "..", "a/.", "tab\there"}
+	bad_names := []string{"/abs", "a//b", "./a", "a/../b", "..", "a/.", "tab\there", "bad\xc3utf"}
 	for name in bad_names {
 		n := build(image)
 		h := header(image, 0)
