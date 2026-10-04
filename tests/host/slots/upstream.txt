@@ -1,0 +1,170 @@
+status=0
+print=1
+slot=a release=1 tree=b2:abababababababababababababababababababababababababababababababab kernel=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef svcd=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef ktest=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef bootfs=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+slot=b release=2 tree=b2:abababababababababababababababababababababababababababababababab kernel=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 svcd=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 ktest=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 bootfs=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+boot=b previous=a cmdline=vx.skip=gsh
+limine=1811
+# Written from \EFI\vectra\slots.ndb (install, distd: M5 step 9). One entry for each slot in use;
+# each path carries its file's BLAKE2b hash, which Limine checks. The default is the slot that boots.
+
+timeout: 0
+default_entry: 2
+
+/VectraOS (slot a, release 1)
+    protocol: limine
+    path: boot():/EFI/vectra/a/kernel.elf#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    module_path: boot():/EFI/vectra/a/svcd#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    module_path: boot():/EFI/vectra/a/ktest#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    module_path: boot():/EFI/vectra/a/bootfs.tar#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    cmdline: vx.system vx.slot=a vx.skip=gsh
+
+/VectraOS (slot b, release 2)
+    protocol: limine
+    path: boot():/EFI/vectra/b/kernel.elf#fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+    module_path: boot():/EFI/vectra/b/svcd#fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+    module_path: boot():/EFI/vectra/b/ktest#fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+    module_path: boot():/EFI/vectra/b/bootfs.tar#fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+    cmdline: vx.system vx.slot=b vx.skip=gsh
+limine cap n+1=0 n+2=1811
+free=2
+%%
+status=0
+print=1
+slot=a release=7 tree=b2:abababababababababababababababababababababababababababababababab kernel=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef svcd=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef ktest=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef bootfs=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+slot=b release=8 tree=b2:abababababababababababababababababababababababababababababababab kernel=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef svcd=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef ktest=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef bootfs=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+slot=c release=12345678901234 tree=b2:abababababababababababababababababababababababababababababababab kernel=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 svcd=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 ktest=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 bootfs=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+boot=c previous=- cmdline=""
+limine=2579
+# Written from \EFI\vectra\slots.ndb (install, distd: M5 step 9). One entry for each slot in use;
+# each path carries its file's BLAKE2b hash, which Limine checks. The default is the slot that boots.
+
+timeout: 0
+default_entry: 3
+
+/VectraOS (slot a, release 7)
+    protocol: limine
+    path: boot():/EFI/vectra/a/kernel.elf#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    module_path: boot():/EFI/vectra/a/svcd#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    module_path: boot():/EFI/vectra/a/ktest#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    module_path: boot():/EFI/vectra/a/bootfs.tar#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    cmdline: vx.system vx.slot=a
+
+/VectraOS (slot b, release 8)
+    protocol: limine
+    path: boot():/EFI/vectra/b/kernel.elf#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    module_path: boot():/EFI/vectra/b/svcd#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    module_path: boot():/EFI/vectra/b/ktest#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    module_path: boot():/EFI/vectra/b/bootfs.tar#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    cmdline: vx.system vx.slot=b
+
+/VectraOS (slot c, release 12345678901234)
+    protocol: limine
+    path: boot():/EFI/vectra/c/kernel.elf#fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+    module_path: boot():/EFI/vectra/c/svcd#fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+    module_path: boot():/EFI/vectra/c/ktest#fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+    module_path: boot():/EFI/vectra/c/bootfs.tar#fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+    cmdline: vx.system vx.slot=c
+limine cap n+1=0 n+2=2579
+free=0
+%%
+status=-4
+%%
+status=0
+print=1
+slot=a release=1 tree=b2:abababababababababababababababababababababababababababababababab kernel=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef svcd=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef ktest=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef bootfs=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+boot=a previous=- cmdline=x
+limine=1010
+# Written from \EFI\vectra\slots.ndb (install, distd: M5 step 9). One entry for each slot in use;
+# each path carries its file's BLAKE2b hash, which Limine checks. The default is the slot that boots.
+
+timeout: 0
+default_entry: 1
+
+/VectraOS (slot a, release 1)
+    protocol: limine
+    path: boot():/EFI/vectra/a/kernel.elf#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    module_path: boot():/EFI/vectra/a/svcd#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    module_path: boot():/EFI/vectra/a/ktest#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    module_path: boot():/EFI/vectra/a/bootfs.tar#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    cmdline: vx.system vx.slot=a x
+limine cap n+1=0 n+2=1010
+free=1
+%%
+status=0
+print=1
+slot=a release=1 tree=b2:abababababababababababababababababababababababababababababababab kernel=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef svcd=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef ktest=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef bootfs=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+boot=a previous=- cmdline=""
+limine=1008
+# Written from \EFI\vectra\slots.ndb (install, distd: M5 step 9). One entry for each slot in use;
+# each path carries its file's BLAKE2b hash, which Limine checks. The default is the slot that boots.
+
+timeout: 0
+default_entry: 1
+
+/VectraOS (slot a, release 1)
+    protocol: limine
+    path: boot():/EFI/vectra/a/kernel.elf#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    module_path: boot():/EFI/vectra/a/svcd#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    module_path: boot():/EFI/vectra/a/ktest#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    module_path: boot():/EFI/vectra/a/bootfs.tar#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    cmdline: vx.system vx.slot=a
+limine cap n+1=0 n+2=1008
+free=1
+%%
+status=0
+print=1
+slot=a release=3 tree=b2:abababababababababababababababababababababababababababababababab kernel=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef svcd=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef ktest=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef bootfs=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+boot=a previous=- cmdline=""
+limine=1008
+# Written from \EFI\vectra\slots.ndb (install, distd: M5 step 9). One entry for each slot in use;
+# each path carries its file's BLAKE2b hash, which Limine checks. The default is the slot that boots.
+
+timeout: 0
+default_entry: 1
+
+/VectraOS (slot a, release 3)
+    protocol: limine
+    path: boot():/EFI/vectra/a/kernel.elf#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    module_path: boot():/EFI/vectra/a/svcd#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    module_path: boot():/EFI/vectra/a/ktest#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    module_path: boot():/EFI/vectra/a/bootfs.tar#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    cmdline: vx.system vx.slot=a
+limine cap n+1=0 n+2=1008
+free=1
+%%
+status=-4
+%%
+status=0
+print=1
+slot=a release=9 tree=b2:abababababababababababababababababababababababababababababababab kernel=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 svcd=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 ktest=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 bootfs=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+slot=b release=4 tree=b2:abababababababababababababababababababababababababababababababab kernel=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef svcd=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef ktest=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef bootfs=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+boot=a previous=b cmdline=vx
+limine=1793
+# Written from \EFI\vectra\slots.ndb (install, distd: M5 step 9). One entry for each slot in use;
+# each path carries its file's BLAKE2b hash, which Limine checks. The default is the slot that boots.
+
+timeout: 0
+default_entry: 1
+
+/VectraOS (slot a, release 9)
+    protocol: limine
+    path: boot():/EFI/vectra/a/kernel.elf#fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+    module_path: boot():/EFI/vectra/a/svcd#fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+    module_path: boot():/EFI/vectra/a/ktest#fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+    module_path: boot():/EFI/vectra/a/bootfs.tar#fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+    cmdline: vx.system vx.slot=a vx
+
+/VectraOS (slot b, release 4)
+    protocol: limine
+    path: boot():/EFI/vectra/b/kernel.elf#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    module_path: boot():/EFI/vectra/b/svcd#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    module_path: boot():/EFI/vectra/b/ktest#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    module_path: boot():/EFI/vectra/b/bootfs.tar#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    cmdline: vx.system vx.slot=b vx
+limine cap n+1=0 n+2=1793
+free=2
+%%
+status=-4
+%%
+status=-4
+%%
