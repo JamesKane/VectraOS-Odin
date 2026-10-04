@@ -4,7 +4,7 @@
 //   ns | tail -1                        pipes
 //   echo kill > /proc/2/ctl             output into a file
 //   pid=2; echo $pid 'a b'              variables, and quoting ('' is a quote)
-//   bind -a /boot/bin /bin              builtins: bind, unmount, exit
+//   bind -a /boot/bin /bin              builtins: bind, mount, unmount, exit
 //
 // A command is a program found as given (a path) or in /bin, then
 // /boot/bin, through the shell's namespace. It is loaded by the shell and
@@ -204,22 +204,40 @@ report :: proc "contextless" (what: string, st: vx.Status) {
 	}
 }
 
+// A builtin's optional flags word, after its name: the flags, and where the
+// other words start.
+flags_word :: proc "contextless" (w: []Word) -> (flags: ns.Flags, first: int, ok: bool) {
+	if len(w) > 1 && str.has_prefix(w[1].text, "-") {
+		flags, ok = bind_flags(w[1].text)
+		return flags, 2, ok
+	}
+	return {}, 1, true
+}
+
 // True if words[0] was a builtin, which then ran.
 builtin :: proc "contextless" (w: []Word) -> bool {
 	n := len(w)
 	switch {
 	case word_is(w[0], "bind"):
-		has_flags := n > 1 && str.has_prefix(w[1].text, "-")
-		flags, ok := ns.Flags{}, true
-		if has_flags {
-			flags, ok = bind_flags(w[1].text)
-		}
-		first := has_flags ? 2 : 1
+		flags, first, ok := flags_word(w)
 		if !ok || n - first != 2 {
 			rt.print("usage: bind [-abc] new old\n")
 		} else {
 			report("bind", ns.bind(&space, w[first].text, w[first + 1].text, flags))
 		}
+		return true
+	case word_is(w[0], "mount"): // 9P servers over TCP, so far: tcp!HOST!PORT or 9p://HOST:PORT
+		flags, first, ok := flags_word(w)
+		if !ok || n - first < 2 || n - first > 3 {
+			rt.print("usage: mount [-abc] tcp!host!port old [aname]\n")
+			return true
+		}
+		c, src, st := ns.dial(&space, w[first].text)
+		if st == .Ok {
+			aname := n - first == 3 ? w[first + 2].text : ""
+			st = ns.mount(&space, c, vx.HANDLE_NONE, src, aname, w[first + 1].text, flags)
+		}
+		report("mount", st)
 		return true
 	case word_is(w[0], "unmount"):
 		switch n {
@@ -400,7 +418,12 @@ pipeline :: proc "contextless" (words: []Word) {
 
 	file: ns.File // closing it when it was never opened does nothing
 	if into != "" {
-		if st := ns.open(&space, into, p9.OWRITE, &file); st != .Ok {
+		// Truncated if it exists (devices ignore that), and made if it does not, as rc does.
+		st := ns.open(&space, into, p9.Open_Mode{access = .Write, trunc = true}, &file)
+		if st == .Err_Not_Found {
+			st = ns.create(&space, into, 0o644, p9.OWRITE, &file)
+		}
+		if st != .Ok {
 			report("cannot open the file", st)
 			return
 		}
@@ -459,7 +482,9 @@ pipeline :: proc "contextless" (words: []Word) {
 			switch {
 			case p.trigger == .Exit:
 				running -= 1
-				var_set("status", i64(p.value) != 0 ? "1" : "0")
+				if p.key == u64(stages - 1) { // the pipe's status is its last command's, as in rc
+					var_set("status", i64(p.value) != 0 ? "1" : "0")
+				}
 			case sink != vx.HANDLE_NONE && p.key == KEY_OUTPUT:
 				sink_armed = false
 				if !relay(sink, &file, &broken) {
