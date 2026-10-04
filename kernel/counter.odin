@@ -133,12 +133,7 @@ futex_wait :: proc "contextless" (word: Uva, expected: u32, deadline: Instant) -
 	woke := thread_block(deadline, 0)
 	if woke != .Ok { // timed out or killed: leave the bucket if a waker has not taken us
 		spin_lock(&b.lock)
-		for link := &b.head; link^ != nil; link = &link^.next {
-			if link^ == &w {
-				link^ = w.next
-				break
-			}
-		}
+		unlink(&b.head, &w, "next")
 		spin_unlock(&b.lock)
 	}
 	return woke

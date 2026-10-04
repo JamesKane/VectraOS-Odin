@@ -236,19 +236,27 @@ boot_read :: proc "contextless" () -> bool {
 	return true
 }
 
+// The next space-separated word of rest^, which moves past it:
+// `for w in cmdline_word(&rest)`.
+cmdline_word :: proc "contextless" (rest: ^string) -> (word: string, ok: bool) {
+	s := rest^
+	i := 0
+	for i < len(s) && s[i] == ' ' {
+		i += 1
+	}
+	start := i
+	for i < len(s) && s[i] != ' ' {
+		i += 1
+	}
+	rest^ = s[i:]
+	return s[start:i], start < i
+}
+
 // Whether the kernel command line holds this word.
 cmdline_has :: proc "contextless" (word: string) -> bool {
-	c := boot.cmdline
-	i := 0
-	for i < len(c) {
-		for i < len(c) && c[i] == ' ' {
-			i += 1
-		}
-		start := i
-		for i < len(c) && c[i] != ' ' {
-			i += 1
-		}
-		if c[start:i] == word {
+	rest := boot.cmdline
+	for w in cmdline_word(&rest) {
+		if w == word {
 			return true
 		}
 	}

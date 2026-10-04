@@ -604,15 +604,26 @@ arch_set_kernel_stack :: proc "contextless" (top: u64) {
 	xc.local.kernel_rsp = top
 }
 
-// A new thread's stack, as the context switch will pop it: six callee-saved
-// registers (r12 carrying the thread), then a return into thread_trampoline.
-// It starts a page below the top, clear of the trap frame and XSAVE area
-// vx_enter_user builds there.
+// What vx_context_switch (entry.S) pops, lowest address first: six
+// callee-saved registers, then its return address.
+@(private="file")
+Switch_Frame :: struct {
+	r15, r14, r13, r12, rbx, rbp: u64,
+	ret:                          u64,
+}
+
+#assert(size_of(Switch_Frame) == 7 * 8)
+
+// A new thread's stack, as the context switch will pop it: r12 carrying the
+// thread, and a return into thread_trampoline. It starts a page below the
+// top, clear of the trap frame and XSAVE area vx_enter_user builds there.
 arch_thread_initial_sp :: proc "contextless" (th: ^Thread) -> u64 {
-	sp := cast([^]u64)uintptr(thread_kstack_top(th) - 4096 - 7 * 8)
-	sp[3] = u64(uintptr(th)) // r12
-	sp[6] = u64(uintptr(rawptr(thread_trampoline))) // the return address
-	return u64(uintptr(sp))
+	f := cast(^Switch_Frame)uintptr(thread_kstack_top(th) - 4096 - size_of(Switch_Frame))
+	f^ = {
+		r12 = u64(uintptr(th)),
+		ret = u64(uintptr(rawptr(thread_trampoline))),
+	}
+	return u64(uintptr(f))
 }
 
 arch_context_switch :: proc "contextless" (save_sp: ^u64, load_sp: u64) {

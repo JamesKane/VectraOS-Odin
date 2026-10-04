@@ -98,8 +98,7 @@ Thread :: struct {
 	user_arg2:    u64,
 	intent:       vx.Intent,
 	last_of_task: bool, // its exit ended its task (reaped in sched.odin)
-	console_len:  int, // bytes of a debug_write line not yet ended,
-	console_buf:  [160]u8, // which go out whole, at its newline
+	console_line: User_Line, // debug_write output not yet ended, which goes out whole at its newline
 	state:        Thread_State,
 	next:         ^Thread, // in the ready queue, or in a list of waiters (under that list's lock)
 	sleep_next:   ^Thread, // in its CPU's sleep queue, ordered by wake_at
@@ -347,12 +346,7 @@ task_find :: proc "contextless" (root, id: u64, next: bool) -> ^Task {
 // The task is being destroyed: off the list, and its children to its parent.
 task_unlist :: proc "contextless" (t: ^Task) {
 	spin_lock(&all_tasks_lock)
-	for link := &all_tasks; link^ != nil; link = &link^.all_next {
-		if link^ == t {
-			link^ = t.all_next
-			break
-		}
-	}
+	unlink(&all_tasks, t, "all_next")
 	for c := all_tasks; c != nil; c = c.all_next {
 		if c.parent_id == t.id {
 			c.parent_id = t.parent_id

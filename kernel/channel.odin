@@ -60,8 +60,7 @@ Channel :: struct {
 	using obj: Object,
 	pair:      ^Channel_Pair,
 	side:      Side, // this end is pair.ends[side]
-	head:      ^Channel_Msg, // messages for this end's reader
-	tail:      ^Channel_Msg,
+	queue:     Fifo(Channel_Msg), // messages for this end's reader
 	count:     u32,
 	bytes:     u64,
 	obs:       Observers, // READABLE and PEER_CLOSED bindings on this end
@@ -168,13 +167,7 @@ channel_deliver :: proc "contextless" (to: ^Channel, m: ^Channel_Msg) -> vx.Stat
 	if to.count == CHANNEL_QUEUE_MESSAGES || to.bytes + u64(m.len) > CHANNEL_QUEUE_BYTES {
 		return .Err_Should_Wait
 	}
-	m.next = nil
-	if to.tail != nil {
-		to.tail.next = m
-	} else {
-		to.head = m
-	}
-	to.tail = m
+	fifo_push(&to.queue, m)
 	to.count += 1
 	to.bytes += u64(m.len)
 	observers_fire(&to.obs, .Readable, u64(to.count))
@@ -198,7 +191,7 @@ channel_write :: proc "contextless" (c: ^Channel, m: ^Channel_Msg) -> vx.Status 
 channel_read :: proc "contextless" (c: ^Channel, cap_bytes, count_cap: u32) -> (out: ^Channel_Msg, need: vx.Msg_Size, st: vx.Status) {
 	spin_lock(&c.pair.lock)
 	defer spin_unlock(&c.pair.lock)
-	m := c.head
+	m := c.queue.head
 	if m == nil {
 		return nil, {}, channel_peer(c) != nil ? .Err_Should_Wait : .Err_Peer_Closed
 	}
@@ -206,10 +199,7 @@ channel_read :: proc "contextless" (c: ^Channel, cap_bytes, count_cap: u32) -> (
 	if m.len > cap_bytes || m.count > count_cap {
 		return nil, need, .Err_Too_Small
 	}
-	c.head = m.next
-	if c.head == nil {
-		c.tail = nil
-	}
+	_ = fifo_pop(&c.queue)
 	c.count -= 1
 	c.bytes -= u64(m.len)
 	return m, need, .Ok
@@ -251,12 +241,7 @@ channel_call :: proc "contextless" (c: ^Channel, request: ^Channel_Msg, deadline
 
 	woke := thread_block(deadline, 0)
 	spin_lock(&c.pair.lock) // stop waiting, whatever woke us
-	for link := &c.calls; link^ != nil; link = &link^.next {
-		if link^ == &w {
-			link^ = w.next
-			break
-		}
-	}
+	unlink(&c.calls, &w, "next")
 	spin_unlock(&c.pair.lock)
 	if w.reply != nil {
 		return w.reply, true, .Ok
@@ -273,7 +258,7 @@ channel_bind :: proc "contextless" (c: ^Channel, b: ^Binding) -> vx.Status {
 	spin_lock(&c.pair.lock)
 	defer spin_unlock(&c.pair.lock)
 	switch {
-	case b.trigger == .Readable && c.head != nil:
+	case b.trigger == .Readable && c.queue.head != nil:
 		binding_fire(b, u64(c.count))
 	case b.trigger == .Peer_Closed && channel_peer(c) == nil:
 		binding_fire(b, 0)
@@ -288,7 +273,7 @@ channel_bind :: proc "contextless" (c: ^Channel, b: ^Binding) -> vx.Status {
 channel_destroy :: proc "contextless" (c: ^Channel) {
 	pair := c.pair
 	spin_lock(&pair.lock)
-	queued := c.head
+	queued := c.queue.head
 	bindings := c.obs.head
 	pair.ends[c.side] = nil
 	peer := channel_peer(c)

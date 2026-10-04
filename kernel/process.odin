@@ -113,12 +113,7 @@ thread_reap :: proc "contextless" (th: ^Thread) {
 	th.kstack = 0
 	t := th.task
 	spin_lock(&t.lock)
-	for link := &t.threads; link^ != nil; link = &link^.task_next {
-		if link^ == th {
-			link^ = th.task_next
-			break
-		}
-	}
+	unlink(&t.threads, th, "task_next")
 	spin_unlock(&t.lock)
 	if th.last_of_task {
 		task_teardown(t)

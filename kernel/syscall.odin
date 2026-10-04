@@ -115,7 +115,7 @@ sys_debug_write :: proc "contextless" (ptr: Uva, length: u64) -> vx.Status {
 		n := min(left, len(buf))
 		copy_in_slice(buf[:n], p) or_return
 		self := this_cpu().current
-		console_user_write(string(buf[:n]), self.console_buf[:], &self.console_len)
+		console_user_write(string(buf[:n]), &self.console_line)
 		p += Uva(n)
 		left -= n
 	}

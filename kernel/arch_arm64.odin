@@ -445,14 +445,26 @@ arch_send_resched :: proc "contextless" (c: ^Cpu) {
 // thread's kernel stack whenever it runs in user mode: nothing to set.
 arch_set_kernel_stack :: proc "contextless" (top: u64) {}
 
-// A new thread's stack, as the context switch will pop it: x19 to x30, then
-// d8 to d15, with x19 carrying the thread and x30 returning into
-// thread_trampoline. It starts below the frame vx_enter_user builds at the top.
+// What vx_context_switch (entry.S) pops, lowest address first.
+@(private="file")
+Switch_Frame :: struct {
+	x19, x20, x21, x22, x23, x24, x25, x26, x27, x28: u64,
+	x29, x30:                                         u64, // the frame pointer and the return address
+	d:                                                [8]u64, // d8 to d15
+}
+
+#assert(size_of(Switch_Frame) == 160)
+
+// A new thread's stack, as the context switch will pop it: x19 carrying the
+// thread, and x30 returning into thread_trampoline. It starts below the
+// frame vx_enter_user builds at the top.
 arch_thread_initial_sp :: proc "contextless" (th: ^Thread) -> u64 {
-	sp := cast([^]u64)uintptr(thread_kstack_top(th) - TRAP_FRAME_SIZE - 160)
-	sp[0] = u64(uintptr(th)) // x19
-	sp[11] = u64(uintptr(rawptr(thread_trampoline))) // x30
-	return u64(uintptr(sp))
+	f := cast(^Switch_Frame)uintptr(thread_kstack_top(th) - TRAP_FRAME_SIZE - size_of(Switch_Frame))
+	f^ = {
+		x19 = u64(uintptr(th)),
+		x30 = u64(uintptr(rawptr(thread_trampoline))),
+	}
+	return u64(uintptr(f))
 }
 
 arch_context_switch :: proc "contextless" (save_sp: ^u64, load_sp: u64) {

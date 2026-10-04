@@ -24,8 +24,7 @@ Port :: struct {
 	lock:       Spinlock,
 	head:       u32, // posted packets in queue
 	count:      u32,
-	ready_head: ^Binding, // fired bindings, oldest first
-	ready_tail: ^Binding,
+	ready:      Fifo(Binding), // fired bindings
 	waiters:    ^Thread, // first come, first served; may hold waiters that timed out
 	queue:      [PORT_CAPACITY]vx.Packet,
 }
@@ -97,12 +96,8 @@ port_take :: proc "contextless" (p: ^Port, out: []vx.Packet) -> int {
 	done: ^Binding
 	spin_lock(&p.lock)
 	n := 0
-	for n < len(out) && p.ready_head != nil {
-		b := p.ready_head
-		p.ready_head = b.next
-		if p.ready_head == nil {
-			p.ready_tail = nil
-		}
+	for n < len(out) && p.ready.head != nil {
+		b := fifo_pop(&p.ready)
 		out[n] = b.packet
 		n += 1
 		b.next = done
@@ -128,7 +123,7 @@ port_take :: proc "contextless" (p: ^Port, out: []vx.Packet) -> int {
 port_join_waiters :: proc "contextless" (p: ^Port, t: ^Thread) -> bool {
 	spin_lock(&p.lock)
 	defer spin_unlock(&p.lock)
-	if p.count != 0 || p.ready_head != nil {
+	if p.count != 0 || p.ready.head != nil {
 		return false
 	}
 	t.wait_token = p // set before t is on the list; wakers only find it there, under this lock
@@ -144,12 +139,7 @@ port_join_waiters :: proc "contextless" (p: ^Port, t: ^Thread) -> bool {
 port_remove_waiter :: proc "contextless" (p: ^Port, t: ^Thread) {
 	spin_lock(&p.lock)
 	defer spin_unlock(&p.lock)
-	for link := &p.waiters; link^ != nil; link = &link^.next {
-		if link^ == t {
-			link^ = t.next
-			break
-		}
-	}
+	unlink(&p.waiters, t, "next")
 }
 
 // --- Bindings ---
@@ -174,14 +164,8 @@ binding_fire :: proc "contextless" (b: ^Binding, value: u64) {
 		source    = b.source_handle,
 		trigger   = b.trigger,
 	}
-	b.next = nil
 	spin_lock(&p.lock)
-	if p.ready_tail != nil {
-		p.ready_tail.next = b
-	} else {
-		p.ready_head = b
-	}
-	p.ready_tail = b
+	fifo_push(&p.ready, b)
 	port_wake_one(p)
 	spin_unlock(&p.lock)
 }

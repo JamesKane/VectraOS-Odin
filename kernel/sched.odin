@@ -34,9 +34,8 @@ Cpu :: struct {
 @(private="file")
 sched: struct {
 	lock:      Spinlock,
-	run_head:  ^Thread,
-	run_tail:  ^Thread,
-	idle_mask: u64, // bit i: CPU i is running its idle thread
+	run_queue: Fifo(Thread),
+	idle:      bit_set[0 ..< MAX_CPUS; u64], // CPUs running their idle threads
 }
 
 this_cpu :: #force_inline proc "contextless" () -> ^Cpu {
@@ -59,26 +58,7 @@ reap_after_switch :: proc "contextless" () {
 @(private="file")
 run_enqueue :: proc "contextless" (t: ^Thread) {
 	t.state = .Ready
-	t.next = nil
-	if sched.run_tail != nil {
-		sched.run_tail.next = t
-	} else {
-		sched.run_head = t
-	}
-	sched.run_tail = t
-}
-
-@(private="file")
-run_dequeue :: proc "contextless" () -> ^Thread {
-	t := sched.run_head
-	if t != nil {
-		sched.run_head = t.next
-		if sched.run_head == nil {
-			sched.run_tail = nil
-		}
-		t.next = nil
-	}
-	return t
+	fifo_push(&sched.run_queue, t)
 }
 
 @(private="file")
@@ -86,12 +66,7 @@ sleep_remove :: proc "contextless" (t: ^Thread) {
 	if t.sleep_cpu == nil {
 		return
 	}
-	for link := &t.sleep_cpu.sleepers; link^ != nil; link = &link^.sleep_next {
-		if link^ == t {
-			link^ = t.sleep_next
-			break
-		}
-	}
+	unlink(&t.sleep_cpu.sleepers, t, "sleep_next")
 	t.sleep_next = nil
 	t.sleep_cpu = nil
 }
@@ -104,16 +79,14 @@ make_ready :: proc "contextless" (t: ^Thread) {
 	sleep_remove(t)
 	run_enqueue(t)
 	self := this_cpu()
-	if sched.idle_mask & (1 << self.index) != 0 {
+	if int(self.index) in sched.idle {
 		self.resched = true
 		return
 	}
-	for i in 0 ..< cpu_total {
-		if sched.idle_mask & (1 << i) != 0 {
-			sched.idle_mask &~= 1 << i // one interrupt per wake is enough
-			arch_send_resched(&cpus[i])
-			return
-		}
+	for i in sched.idle {
+		sched.idle -= {i} // one interrupt per wake is enough
+		arch_send_resched(&cpus[i])
+		return
 	}
 }
 
@@ -127,15 +100,15 @@ schedule_locked :: proc "contextless" () {
 	if prev.state == .Running && prev != &c.idle {
 		run_enqueue(prev)
 	}
-	next := run_dequeue()
+	next := fifo_pop(&sched.run_queue)
 	if next == nil {
 		next = &c.idle
 	}
 	c.resched = false
 	if next == &c.idle {
-		sched.idle_mask |= 1 << c.index
+		sched.idle += {int(c.index)}
 	} else {
-		sched.idle_mask &~= 1 << c.index
+		sched.idle -= {int(c.index)}
 		c.slice_end = clock_now() + TIME_SLICE
 	}
 	if next != prev {
@@ -257,7 +230,7 @@ sched_timer :: proc "contextless" () {
 		// running thread another one. (Re-arming the old, expired end would
 		// fire at once, for ever, and the thread would never get back to user
 		// mode.)
-		if sched.run_head != nil {
+		if sched.run_queue.head != nil {
 			c.resched = true
 		} else {
 			c.slice_end = now + TIME_SLICE
