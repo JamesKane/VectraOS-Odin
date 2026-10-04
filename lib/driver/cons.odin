@@ -7,8 +7,9 @@
 // The tree is one file, /cons. Reads are cooked, as Plan 9's cons is: typed
 // bytes are echoed and gathered into a line, with backspace (BS or DEL) and
 // kill-line (^U), and a read returns at most one line, once it is ended (by
-// return) or sent (^D). ^D on an empty line makes one read return 0, the end
-// of the file. Writes go out with each newline as CR LF. A read with nothing
+// return) or sent (^D), never part of the next. ^D on an empty line makes one
+// read return 0, the end of the file, in its place among the lines. Writes
+// go out with each newline as CR LF. A read with nothing
 // typed, or a write with no room, waits (p9.serve's .Defer) until the driver's next
 // interrupt makes progress.
 package driver
@@ -23,11 +24,19 @@ Cons :: struct {
 	tx_byte:   proc "contextless" (dev: rawptr, b: u8), // one of them
 	tx_wanted: proc "contextless" (dev: rawptr, on: bool), // interrupt when it can take more
 	out:       Byte_Queue(8192), // output not yet sent
-	input:     Byte_Queue(4096), // finished lines, for reads
+	input:     Byte_Queue(4096), // finished input, for reads
+	// Where each piece of finished input ends, in the order typed: a line (at
+	// its newline), a line sent with ^D, or an end of file (a piece with no
+	// bytes). A read returns at most one piece.
+	ends:      [MAX_PIECES]u32,
+	ends_head: u32,
+	ends_tail: u32,
 	line:      [256]u8, // the line being typed
 	line_len:  u32,
-	eofs:      u32, // ^D on an empty line: reads that return 0
 }
+
+@(private="file")
+MAX_PIECES :: 64
 
 // A ring of bytes with free-running indices: N must be a power of two, so
 // the indices may wrap.
@@ -91,11 +100,17 @@ erase :: proc "contextless" (c: ^Cons) {
 	push(&c.out, '\b')
 }
 
-// Moves the typed line to the input, as much of it as fits.
+// The line being typed becomes a piece of input (with no bytes: an end of
+// file). If the reader is so far behind that the line does not fit, it is
+// dropped whole, rather than ending up joined to another.
 @(private="file")
 finish_line :: proc "contextless" (c: ^Cons) {
-	for b in c.line[:c.line_len] {
-		push(&c.input, b)
+	if c.line_len <= room(&c.input) && c.ends_tail - c.ends_head < MAX_PIECES {
+		for b in c.line[:c.line_len] {
+			push(&c.input, b)
+		}
+		c.ends[c.ends_tail % MAX_PIECES] = c.input.tail
+		c.ends_tail += 1
 	}
 	c.line_len = 0
 }
@@ -113,12 +128,8 @@ cons_input :: proc "contextless" (c: ^Cons, byte: u8) {
 		for ; c.line_len > 0; c.line_len -= 1 {
 			erase(c)
 		}
-	case b == 0x04: // ^D: send the line, or end the file
-		if c.line_len > 0 {
-			finish_line(c)
-		} else {
-			c.eofs += 1
-		}
+	case b == 0x04: // ^D: send the line, or (on an empty one) end the file
+		finish_line(c)
 	case b == '\n' || b >= 0x20 || b == '\t':
 		if c.line_len < len(c.line) - 1 || b == '\n' { // a full line keeps room for its newline
 			c.line[c.line_len] = b
@@ -170,27 +181,23 @@ stat :: proc "contextless" (ctx: rawptr, node: p9.Node, s: ^p9.Stat) -> vx.Statu
 
 @(private="file")
 open :: proc "contextless" (ctx: rawptr, node: p9.Node, mode: p9.Open_Mode) -> vx.Status {
-	return mode.trunc || mode.rclose ? .Err_Access : .Ok
+	return mode.rclose ? .Err_Access : .Ok // trunc means nothing to a console
 }
 
 @(private="file")
 read :: proc "contextless" (ctx: rawptr, node: p9.Node, offset: u64, buf: []u8) -> (u32, vx.Status) {
 	c := (^Cons)(ctx) // a stream: offsets mean nothing
-	if is_empty(&c.input) {
-		if c.eofs == 0 {
-			return 0, .Err_Should_Wait
-		}
-		c.eofs -= 1
-		return 0, .Ok
+	if c.ends_head == c.ends_tail {
+		return 0, .Err_Should_Wait // nothing finished yet
 	}
+	end := c.ends[c.ends_head % MAX_PIECES]
 	n := 0
-	for n < len(buf) && !is_empty(&c.input) {
-		b := pop(&c.input)
-		buf[n] = b
+	for n < len(buf) && c.input.head != end {
+		buf[n] = pop(&c.input)
 		n += 1
-		if b == '\n' {
-			break // one line at a time
-		}
+	}
+	if c.input.head == end {
+		c.ends_head += 1 // the piece is all read (an end of file reads as 0 bytes)
 	}
 	return u32(n), .Ok
 }
