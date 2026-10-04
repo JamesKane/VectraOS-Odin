@@ -139,7 +139,7 @@ build_image :: proc(a: ^Arch, mode: Mode, image: string, cmdline := "", with := 
 				append(&files, Iso_File{path = fmt.tprintf("boot/vx/%s", p.name), from = program_path(a, mode, p.name)})
 			}
 		}
-		write_iso(iso, efiboot, files[:], u32(seed)) or_return
+		write_iso(iso, efiboot, files[:], u32(seed), source_date_epoch() or_return) or_return
 		_ = os.remove(efiboot)
 	}
 	_ = os.remove(esp)

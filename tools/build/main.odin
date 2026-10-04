@@ -189,7 +189,22 @@ cmd_test :: proc(arches: []^Arch, mode: Mode, names: []string) -> bool {
 	return ok
 }
 
-// Host tests: every package under tests/host, under ASan.
+// Whether a directory holds a suite: any *_test.odin.
+@(private="file")
+has_tests :: proc(dir: string) -> bool {
+	files, err := os.read_directory_by_path(dir, -1, context.temp_allocator)
+	if err != nil {
+		return true // let odin test say what is wrong
+	}
+	for f in files {
+		if strings.has_suffix(f.name, "_test.odin") {
+			return true
+		}
+	}
+	return false
+}
+
+// Host tests: every package under tests/host with a suite, under ASan.
 cmd_check :: proc() -> bool {
 	ok := true
 	dirs, err := os.read_directory_by_path("tests/host", -1, context.temp_allocator)
@@ -198,10 +213,17 @@ cmd_check :: proc() -> bool {
 		return false
 	}
 	slice.sort_by(dirs, proc(a, b: os.File_Info) -> bool {return a.name < b.name})
+	// write_iso's test image, at the date upstream's was written at:
+	// tests/host/iso checks it is upstream's image byte for byte.
+	make_dirs("out/host") or_return
+	if !make_test_iso("out/host/test.iso", TEST_ISO_EPOCH) {
+		fmt.eprintln("  HOST  cannot make out/host/test.iso")
+		ok = false
+	}
 	ran := 0
 	for d in dirs {
-		if d.type != .Directory {
-			continue
+		if d.type != .Directory || !has_tests(fmt.tprintf("tests/host/%s", d.name)) {
+			continue // a helper package the suites import (p9test, blkfake)
 		}
 		ran += 1
 		fmt.eprintfln("  HOST  %s", d.name)
