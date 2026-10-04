@@ -52,6 +52,9 @@ POSIX_LD_FLAGS :: []string{"-static", "-nostdlib", "--build-id=sha1", "-z", "max
 // The back end: an Odin package, with its assembly in arch/ARCH.
 BACKEND_PKG :: "ports/musl/vx"
 
+// It uses vx:rt, without vx:rt's _start: crt1.S is the entry.
+BACKEND_ODIN_FLAGS :: []string{"-define:VX_RT_START=false"}
+
 Posix_Ports :: struct {
 	musl, compiler_rt, lua, sbase: Port,
 }
@@ -398,7 +401,19 @@ build_backend :: proc(musl: ^Port, a: ^Arch, mode: Mode, override: string) -> (b
 	case has_backend():
 		out := fmt.tprintf("%s/musl-vx", out_dir(a, mode))
 		fmt.eprintfln("  VX    libc back end %s", a.name)
-		objs := compile_ir(a, mode, BACKEND_PKG, fmt.tprintf("%s/arch/%s", BACKEND_PKG, a.name), fmt.tprintf("%s/pkg", out), nil, nil) or_return
+		objs := compile_ir(a, mode, BACKEND_PKG, fmt.tprintf("%s/arch/%s", BACKEND_PKG, a.name), fmt.tprintf("%s/pkg", out), BACKEND_ODIN_FLAGS, nil) or_return
+		// vx:rt's assembly (its system call, its note entry), which the
+		// package's own programs get from build_program.
+		rt_asm := tree_files(fmt.tprintf("lib/rt/arch/%s", a.name)) or_return
+		cc := make([dynamic][]string, context.temp_allocator)
+		for s in rt_asm {
+			if strings.has_suffix(s, ".S") {
+				o := fmt.tprintf("%s/pkg/obj/rt_%s_S.o", out, filepath.stem(s))
+				append(&cc, cmd_make(CLANG, fmt.tprintf("--target=%s", a.clang_target), "-g", "-c", s, "-o", o)[:])
+				append(&objs, o)
+			}
+		}
+		run_parallel(cc[:]) or_return
 		rest := make([dynamic]string, context.temp_allocator)
 		for o in objs {
 			if filepath.base(o) == "crt1_S.o" {
