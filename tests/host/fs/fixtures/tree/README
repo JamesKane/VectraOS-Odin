@@ -1,0 +1,3 @@
+A tree for tests/host/fs's cross-format fixtures: upstream's host/vxfs puts it
+in a volume, and vx:fs reads it back. Files of every size class: empty, inline
+whole (up to 511 bytes), one block and more, and links.

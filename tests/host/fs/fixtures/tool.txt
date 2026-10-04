@@ -1,0 +1,856 @@
+$ vxfs info vol
+commit 9, 1 arenas, next generation 25
+used 176 of 1984 KiB
+branch adm: snapshot 14
+branch cfg: snapshot 20
+branch home: snapshot 17
+label home@fix: snapshot 17
+branch store: snapshot 7
+branch work: snapshot 22
+
+-- stderr
+-- exit 0
+$ vxfs check vol
+5 snapshots, 6 labels, 0 deadlists; 11 blocks in use: 9 in trees, 2 else
+
+-- stderr
+-- exit 0
+$ vxfs ls vol home
+-0644 1000        214 README
+-0644 1000      40000 big
+d0755 1000          0 bin
+-0644 1000        512 block-512
+d0755 1000          0 docs
+-0644 1000          0 empty
+-0644 1000        511 inline-511
+L0777 1000          6 link
+
+-- stderr
+-- exit 0
+$ vxfs ls vol home /docs
+d0755 1000          0 a
+L0777 1000          9 up
+
+-- stderr
+-- exit 0
+$ vxfs ls vol home /docs/a/b
+-0644 1000         23 deep.txt
+
+-- stderr
+-- exit 0
+$ vxfs ls vol home@fix
+-0644 1000        214 README
+-0644 1000      40000 big
+d0755 1000          0 bin
+-0644 1000        512 block-512
+d0755 1000          0 docs
+-0644 1000          0 empty
+-0644 1000        511 inline-511
+L0777 1000          6 link
+
+-- stderr
+-- exit 0
+$ vxfs ls vol work
+-0644 1000        214 README
+-0644 1000      40000 big
+d0755 1000          0 bin
+-0644 1000        512 block-512
+d0755 1000          0 docs
+-0644 1000          0 empty
+-0644 1000        511 inline-511
+L0777 1000          6 link
+
+-- stderr
+-- exit 0
+$ vxfs ls vol cfg
+-0644    0         62 net.ndb
+
+-- stderr
+-- exit 0
+$ vxfs ls vol adm
+-0664    0         46 users
+
+-- stderr
+-- exit 0
+$ vxfs cat vol adm /users
+0:adm:adm:vectra
+1:none::
+1000:vectra:vectra:
+
+-- stderr
+-- exit 0
+$ vxfs cat vol home /README
+A tree for tests/host/fs's cross-format fixtures: upstream's host/vxfs puts it
+in a volume, and vx:fs reads it back. Files of every size class: empty, inline
+whole (up to 511 bytes), one block and more, and links.
+
+-- stderr
+-- exit 0
+$ vxfs cat vol home /empty
+
+-- stderr
+-- exit 0
+$ vxfs cat vol home /inline-511
+inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inline whole inl
+
+-- stderr
+-- exit 0
+$ vxfs cat vol home /block-512
+in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a block in a 
+
+-- stderr
+-- exit 0
+$ vxfs cat vol home /big
+line 00000: the quick brown fox jumps over the lazy dog
+line 00001: the quick brown fox jumps over the lazy dog
+line 00002: the quick brown fox jumps over the lazy dog
+line 00003: the quick brown fox jumps over the lazy dog
+line 00004: the quick brown fox jumps over the lazy dog
+line 00005: the quick brown fox jumps over the lazy dog
+line 00006: the quick brown fox jumps over the lazy dog
+line 00007: the quick brown fox jumps over the lazy dog
+line 00008: the quick brown fox jumps over the lazy dog
+line 00009: the quick brown fox jumps over the lazy dog
+line 00010: the quick brown fox jumps over the lazy dog
+line 00011: the quick brown fox jumps over the lazy dog
+line 00012: the quick brown fox jumps over the lazy dog
+line 00013: the quick brown fox jumps over the lazy dog
+line 00014: the quick brown fox jumps over the lazy dog
+line 00015: the quick brown fox jumps over the lazy dog
+line 00016: the quick brown fox jumps over the lazy dog
+line 00017: the quick brown fox jumps over the lazy dog
+line 00018: the quick brown fox jumps over the lazy dog
+line 00019: the quick brown fox jumps over the lazy dog
+line 00020: the quick brown fox jumps over the lazy dog
+line 00021: the quick brown fox jumps over the lazy dog
+line 00022: the quick brown fox jumps over the lazy dog
+line 00023: the quick brown fox jumps over the lazy dog
+line 00024: the quick brown fox jumps over the lazy dog
+line 00025: the quick brown fox jumps over the lazy dog
+line 00026: the quick brown fox jumps over the lazy dog
+line 00027: the quick brown fox jumps over the lazy dog
+line 00028: the quick brown fox jumps over the lazy dog
+line 00029: the quick brown fox jumps over the lazy dog
+line 00030: the quick brown fox jumps over the lazy dog
+line 00031: the quick brown fox jumps over the lazy dog
+line 00032: the quick brown fox jumps over the lazy dog
+line 00033: the quick brown fox jumps over the lazy dog
+line 00034: the quick brown fox jumps over the lazy dog
+line 00035: the quick brown fox jumps over the lazy dog
+line 00036: the quick brown fox jumps over the lazy dog
+line 00037: the quick brown fox jumps over the lazy dog
+line 00038: the quick brown fox jumps over the lazy dog
+line 00039: the quick brown fox jumps over the lazy dog
+line 00040: the quick brown fox jumps over the lazy dog
+line 00041: the quick brown fox jumps over the lazy dog
+line 00042: the quick brown fox jumps over the lazy dog
+line 00043: the quick brown fox jumps over the lazy dog
+line 00044: the quick brown fox jumps over the lazy dog
+line 00045: the quick brown fox jumps over the lazy dog
+line 00046: the quick brown fox jumps over the lazy dog
+line 00047: the quick brown fox jumps over the lazy dog
+line 00048: the quick brown fox jumps over the lazy dog
+line 00049: the quick brown fox jumps over the lazy dog
+line 00050: the quick brown fox jumps over the lazy dog
+line 00051: the quick brown fox jumps over the lazy dog
+line 00052: the quick brown fox jumps over the lazy dog
+line 00053: the quick brown fox jumps over the lazy dog
+line 00054: the quick brown fox jumps over the lazy dog
+line 00055: the quick brown fox jumps over the lazy dog
+line 00056: the quick brown fox jumps over the lazy dog
+line 00057: the quick brown fox jumps over the lazy dog
+line 00058: the quick brown fox jumps over the lazy dog
+line 00059: the quick brown fox jumps over the lazy dog
+line 00060: the quick brown fox jumps over the lazy dog
+line 00061: the quick brown fox jumps over the lazy dog
+line 00062: the quick brown fox jumps over the lazy dog
+line 00063: the quick brown fox jumps over the lazy dog
+line 00064: the quick brown fox jumps over the lazy dog
+line 00065: the quick brown fox jumps over the lazy dog
+line 00066: the quick brown fox jumps over the lazy dog
+line 00067: the quick brown fox jumps over the lazy dog
+line 00068: the quick brown fox jumps over the lazy dog
+line 00069: the quick brown fox jumps over the lazy dog
+line 00070: the quick brown fox jumps over the lazy dog
+line 00071: the quick brown fox jumps over the lazy dog
+line 00072: the quick brown fox jumps over the lazy dog
+line 00073: the quick brown fox jumps over the lazy dog
+line 00074: the quick brown fox jumps over the lazy dog
+line 00075: the quick brown fox jumps over the lazy dog
+line 00076: the quick brown fox jumps over the lazy dog
+line 00077: the quick brown fox jumps over the lazy dog
+line 00078: the quick brown fox jumps over the lazy dog
+line 00079: the quick brown fox jumps over the lazy dog
+line 00080: the quick brown fox jumps over the lazy dog
+line 00081: the quick brown fox jumps over the lazy dog
+line 00082: the quick brown fox jumps over the lazy dog
+line 00083: the quick brown fox jumps over the lazy dog
+line 00084: the quick brown fox jumps over the lazy dog
+line 00085: the quick brown fox jumps over the lazy dog
+line 00086: the quick brown fox jumps over the lazy dog
+line 00087: the quick brown fox jumps over the lazy dog
+line 00088: the quick brown fox jumps over the lazy dog
+line 00089: the quick brown fox jumps over the lazy dog
+line 00090: the quick brown fox jumps over the lazy dog
+line 00091: the quick brown fox jumps over the lazy dog
+line 00092: the quick brown fox jumps over the lazy dog
+line 00093: the quick brown fox jumps over the lazy dog
+line 00094: the quick brown fox jumps over the lazy dog
+line 00095: the quick brown fox jumps over the lazy dog
+line 00096: the quick brown fox jumps over the lazy dog
+line 00097: the quick brown fox jumps over the lazy dog
+line 00098: the quick brown fox jumps over the lazy dog
+line 00099: the quick brown fox jumps over the lazy dog
+line 00100: the quick brown fox jumps over the lazy dog
+line 00101: the quick brown fox jumps over the lazy dog
+line 00102: the quick brown fox jumps over the lazy dog
+line 00103: the quick brown fox jumps over the lazy dog
+line 00104: the quick brown fox jumps over the lazy dog
+line 00105: the quick brown fox jumps over the lazy dog
+line 00106: the quick brown fox jumps over the lazy dog
+line 00107: the quick brown fox jumps over the lazy dog
+line 00108: the quick brown fox jumps over the lazy dog
+line 00109: the quick brown fox jumps over the lazy dog
+line 00110: the quick brown fox jumps over the lazy dog
+line 00111: the quick brown fox jumps over the lazy dog
+line 00112: the quick brown fox jumps over the lazy dog
+line 00113: the quick brown fox jumps over the lazy dog
+line 00114: the quick brown fox jumps over the lazy dog
+line 00115: the quick brown fox jumps over the lazy dog
+line 00116: the quick brown fox jumps over the lazy dog
+line 00117: the quick brown fox jumps over the lazy dog
+line 00118: the quick brown fox jumps over the lazy dog
+line 00119: the quick brown fox jumps over the lazy dog
+line 00120: the quick brown fox jumps over the lazy dog
+line 00121: the quick brown fox jumps over the lazy dog
+line 00122: the quick brown fox jumps over the lazy dog
+line 00123: the quick brown fox jumps over the lazy dog
+line 00124: the quick brown fox jumps over the lazy dog
+line 00125: the quick brown fox jumps over the lazy dog
+line 00126: the quick brown fox jumps over the lazy dog
+line 00127: the quick brown fox jumps over the lazy dog
+line 00128: the quick brown fox jumps over the lazy dog
+line 00129: the quick brown fox jumps over the lazy dog
+line 00130: the quick brown fox jumps over the lazy dog
+line 00131: the quick brown fox jumps over the lazy dog
+line 00132: the quick brown fox jumps over the lazy dog
+line 00133: the quick brown fox jumps over the lazy dog
+line 00134: the quick brown fox jumps over the lazy dog
+line 00135: the quick brown fox jumps over the lazy dog
+line 00136: the quick brown fox jumps over the lazy dog
+line 00137: the quick brown fox jumps over the lazy dog
+line 00138: the quick brown fox jumps over the lazy dog
+line 00139: the quick brown fox jumps over the lazy dog
+line 00140: the quick brown fox jumps over the lazy dog
+line 00141: the quick brown fox jumps over the lazy dog
+line 00142: the quick brown fox jumps over the lazy dog
+line 00143: the quick brown fox jumps over the lazy dog
+line 00144: the quick brown fox jumps over the lazy dog
+line 00145: the quick brown fox jumps over the lazy dog
+line 00146: the quick brown fox jumps over the lazy dog
+line 00147: the quick brown fox jumps over the lazy dog
+line 00148: the quick brown fox jumps over the lazy dog
+line 00149: the quick brown fox jumps over the lazy dog
+line 00150: the quick brown fox jumps over the lazy dog
+line 00151: the quick brown fox jumps over the lazy dog
+line 00152: the quick brown fox jumps over the lazy dog
+line 00153: the quick brown fox jumps over the lazy dog
+line 00154: the quick brown fox jumps over the lazy dog
+line 00155: the quick brown fox jumps over the lazy dog
+line 00156: the quick brown fox jumps over the lazy dog
+line 00157: the quick brown fox jumps over the lazy dog
+line 00158: the quick brown fox jumps over the lazy dog
+line 00159: the quick brown fox jumps over the lazy dog
+line 00160: the quick brown fox jumps over the lazy dog
+line 00161: the quick brown fox jumps over the lazy dog
+line 00162: the quick brown fox jumps over the lazy dog
+line 00163: the quick brown fox jumps over the lazy dog
+line 00164: the quick brown fox jumps over the lazy dog
+line 00165: the quick brown fox jumps over the lazy dog
+line 00166: the quick brown fox jumps over the lazy dog
+line 00167: the quick brown fox jumps over the lazy dog
+line 00168: the quick brown fox jumps over the lazy dog
+line 00169: the quick brown fox jumps over the lazy dog
+line 00170: the quick brown fox jumps over the lazy dog
+line 00171: the quick brown fox jumps over the lazy dog
+line 00172: the quick brown fox jumps over the lazy dog
+line 00173: the quick brown fox jumps over the lazy dog
+line 00174: the quick brown fox jumps over the lazy dog
+line 00175: the quick brown fox jumps over the lazy dog
+line 00176: the quick brown fox jumps over the lazy dog
+line 00177: the quick brown fox jumps over the lazy dog
+line 00178: the quick brown fox jumps over the lazy dog
+line 00179: the quick brown fox jumps over the lazy dog
+line 00180: the quick brown fox jumps over the lazy dog
+line 00181: the quick brown fox jumps over the lazy dog
+line 00182: the quick brown fox jumps over the lazy dog
+line 00183: the quick brown fox jumps over the lazy dog
+line 00184: the quick brown fox jumps over the lazy dog
+line 00185: the quick brown fox jumps over the lazy dog
+line 00186: the quick brown fox jumps over the lazy dog
+line 00187: the quick brown fox jumps over the lazy dog
+line 00188: the quick brown fox jumps over the lazy dog
+line 00189: the quick brown fox jumps over the lazy dog
+line 00190: the quick brown fox jumps over the lazy dog
+line 00191: the quick brown fox jumps over the lazy dog
+line 00192: the quick brown fox jumps over the lazy dog
+line 00193: the quick brown fox jumps over the lazy dog
+line 00194: the quick brown fox jumps over the lazy dog
+line 00195: the quick brown fox jumps over the lazy dog
+line 00196: the quick brown fox jumps over the lazy dog
+line 00197: the quick brown fox jumps over the lazy dog
+line 00198: the quick brown fox jumps over the lazy dog
+line 00199: the quick brown fox jumps over the lazy dog
+line 00200: the quick brown fox jumps over the lazy dog
+line 00201: the quick brown fox jumps over the lazy dog
+line 00202: the quick brown fox jumps over the lazy dog
+line 00203: the quick brown fox jumps over the lazy dog
+line 00204: the quick brown fox jumps over the lazy dog
+line 00205: the quick brown fox jumps over the lazy dog
+line 00206: the quick brown fox jumps over the lazy dog
+line 00207: the quick brown fox jumps over the lazy dog
+line 00208: the quick brown fox jumps over the lazy dog
+line 00209: the quick brown fox jumps over the lazy dog
+line 00210: the quick brown fox jumps over the lazy dog
+line 00211: the quick brown fox jumps over the lazy dog
+line 00212: the quick brown fox jumps over the lazy dog
+line 00213: the quick brown fox jumps over the lazy dog
+line 00214: the quick brown fox jumps over the lazy dog
+line 00215: the quick brown fox jumps over the lazy dog
+line 00216: the quick brown fox jumps over the lazy dog
+line 00217: the quick brown fox jumps over the lazy dog
+line 00218: the quick brown fox jumps over the lazy dog
+line 00219: the quick brown fox jumps over the lazy dog
+line 00220: the quick brown fox jumps over the lazy dog
+line 00221: the quick brown fox jumps over the lazy dog
+line 00222: the quick brown fox jumps over the lazy dog
+line 00223: the quick brown fox jumps over the lazy dog
+line 00224: the quick brown fox jumps over the lazy dog
+line 00225: the quick brown fox jumps over the lazy dog
+line 00226: the quick brown fox jumps over the lazy dog
+line 00227: the quick brown fox jumps over the lazy dog
+line 00228: the quick brown fox jumps over the lazy dog
+line 00229: the quick brown fox jumps over the lazy dog
+line 00230: the quick brown fox jumps over the lazy dog
+line 00231: the quick brown fox jumps over the lazy dog
+line 00232: the quick brown fox jumps over the lazy dog
+line 00233: the quick brown fox jumps over the lazy dog
+line 00234: the quick brown fox jumps over the lazy dog
+line 00235: the quick brown fox jumps over the lazy dog
+line 00236: the quick brown fox jumps over the lazy dog
+line 00237: the quick brown fox jumps over the lazy dog
+line 00238: the quick brown fox jumps over the lazy dog
+line 00239: the quick brown fox jumps over the lazy dog
+line 00240: the quick brown fox jumps over the lazy dog
+line 00241: the quick brown fox jumps over the lazy dog
+line 00242: the quick brown fox jumps over the lazy dog
+line 00243: the quick brown fox jumps over the lazy dog
+line 00244: the quick brown fox jumps over the lazy dog
+line 00245: the quick brown fox jumps over the lazy dog
+line 00246: the quick brown fox jumps over the lazy dog
+line 00247: the quick brown fox jumps over the lazy dog
+line 00248: the quick brown fox jumps over the lazy dog
+line 00249: the quick brown fox jumps over the lazy dog
+line 00250: the quick brown fox jumps over the lazy dog
+line 00251: the quick brown fox jumps over the lazy dog
+line 00252: the quick brown fox jumps over the lazy dog
+line 00253: the quick brown fox jumps over the lazy dog
+line 00254: the quick brown fox jumps over the lazy dog
+line 00255: the quick brown fox jumps over the lazy dog
+line 00256: the quick brown fox jumps over the lazy dog
+line 00257: the quick brown fox jumps over the lazy dog
+line 00258: the quick brown fox jumps over the lazy dog
+line 00259: the quick brown fox jumps over the lazy dog
+line 00260: the quick brown fox jumps over the lazy dog
+line 00261: the quick brown fox jumps over the lazy dog
+line 00262: the quick brown fox jumps over the lazy dog
+line 00263: the quick brown fox jumps over the lazy dog
+line 00264: the quick brown fox jumps over the lazy dog
+line 00265: the quick brown fox jumps over the lazy dog
+line 00266: the quick brown fox jumps over the lazy dog
+line 00267: the quick brown fox jumps over the lazy dog
+line 00268: the quick brown fox jumps over the lazy dog
+line 00269: the quick brown fox jumps over the lazy dog
+line 00270: the quick brown fox jumps over the lazy dog
+line 00271: the quick brown fox jumps over the lazy dog
+line 00272: the quick brown fox jumps over the lazy dog
+line 00273: the quick brown fox jumps over the lazy dog
+line 00274: the quick brown fox jumps over the lazy dog
+line 00275: the quick brown fox jumps over the lazy dog
+line 00276: the quick brown fox jumps over the lazy dog
+line 00277: the quick brown fox jumps over the lazy dog
+line 00278: the quick brown fox jumps over the lazy dog
+line 00279: the quick brown fox jumps over the lazy dog
+line 00280: the quick brown fox jumps over the lazy dog
+line 00281: the quick brown fox jumps over the lazy dog
+line 00282: the quick brown fox jumps over the lazy dog
+line 00283: the quick brown fox jumps over the lazy dog
+line 00284: the quick brown fox jumps over the lazy dog
+line 00285: the quick brown fox jumps over the lazy dog
+line 00286: the quick brown fox jumps over the lazy dog
+line 00287: the quick brown fox jumps over the lazy dog
+line 00288: the quick brown fox jumps over the lazy dog
+line 00289: the quick brown fox jumps over the lazy dog
+line 00290: the quick brown fox jumps over the lazy dog
+line 00291: the quick brown fox jumps over the lazy dog
+line 00292: the quick brown fox jumps over the lazy dog
+line 00293: the quick brown fox jumps over the lazy dog
+line 00294: the quick brown fox jumps over the lazy dog
+line 00295: the quick brown fox jumps over the lazy dog
+line 00296: the quick brown fox jumps over the lazy dog
+line 00297: the quick brown fox jumps over the lazy dog
+line 00298: the quick brown fox jumps over the lazy dog
+line 00299: the quick brown fox jumps over the lazy dog
+line 00300: the quick brown fox jumps over the lazy dog
+line 00301: the quick brown fox jumps over the lazy dog
+line 00302: the quick brown fox jumps over the lazy dog
+line 00303: the quick brown fox jumps over the lazy dog
+line 00304: the quick brown fox jumps over the lazy dog
+line 00305: the quick brown fox jumps over the lazy dog
+line 00306: the quick brown fox jumps over the lazy dog
+line 00307: the quick brown fox jumps over the lazy dog
+line 00308: the quick brown fox jumps over the lazy dog
+line 00309: the quick brown fox jumps over the lazy dog
+line 00310: the quick brown fox jumps over the lazy dog
+line 00311: the quick brown fox jumps over the lazy dog
+line 00312: the quick brown fox jumps over the lazy dog
+line 00313: the quick brown fox jumps over the lazy dog
+line 00314: the quick brown fox jumps over the lazy dog
+line 00315: the quick brown fox jumps over the lazy dog
+line 00316: the quick brown fox jumps over the lazy dog
+line 00317: the quick brown fox jumps over the lazy dog
+line 00318: the quick brown fox jumps over the lazy dog
+line 00319: the quick brown fox jumps over the lazy dog
+line 00320: the quick brown fox jumps over the lazy dog
+line 00321: the quick brown fox jumps over the lazy dog
+line 00322: the quick brown fox jumps over the lazy dog
+line 00323: the quick brown fox jumps over the lazy dog
+line 00324: the quick brown fox jumps over the lazy dog
+line 00325: the quick brown fox jumps over the lazy dog
+line 00326: the quick brown fox jumps over the lazy dog
+line 00327: the quick brown fox jumps over the lazy dog
+line 00328: the quick brown fox jumps over the lazy dog
+line 00329: the quick brown fox jumps over the lazy dog
+line 00330: the quick brown fox jumps over the lazy dog
+line 00331: the quick brown fox jumps over the lazy dog
+line 00332: the quick brown fox jumps over the lazy dog
+line 00333: the quick brown fox jumps over the lazy dog
+line 00334: the quick brown fox jumps over the lazy dog
+line 00335: the quick brown fox jumps over the lazy dog
+line 00336: the quick brown fox jumps over the lazy dog
+line 00337: the quick brown fox jumps over the lazy dog
+line 00338: the quick brown fox jumps over the lazy dog
+line 00339: the quick brown fox jumps over the lazy dog
+line 00340: the quick brown fox jumps over the lazy dog
+line 00341: the quick brown fox jumps over the lazy dog
+line 00342: the quick brown fox jumps over the lazy dog
+line 00343: the quick brown fox jumps over the lazy dog
+line 00344: the quick brown fox jumps over the lazy dog
+line 00345: the quick brown fox jumps over the lazy dog
+line 00346: the quick brown fox jumps over the lazy dog
+line 00347: the quick brown fox jumps over the lazy dog
+line 00348: the quick brown fox jumps over the lazy dog
+line 00349: the quick brown fox jumps over the lazy dog
+line 00350: the quick brown fox jumps over the lazy dog
+line 00351: the quick brown fox jumps over the lazy dog
+line 00352: the quick brown fox jumps over the lazy dog
+line 00353: the quick brown fox jumps over the lazy dog
+line 00354: the quick brown fox jumps over the lazy dog
+line 00355: the quick brown fox jumps over the lazy dog
+line 00356: the quick brown fox jumps over the lazy dog
+line 00357: the quick brown fox jumps over the lazy dog
+line 00358: the quick brown fox jumps over the lazy dog
+line 00359: the quick brown fox jumps over the lazy dog
+line 00360: the quick brown fox jumps over the lazy dog
+line 00361: the quick brown fox jumps over the lazy dog
+line 00362: the quick brown fox jumps over the lazy dog
+line 00363: the quick brown fox jumps over the lazy dog
+line 00364: the quick brown fox jumps over the lazy dog
+line 00365: the quick brown fox jumps over the lazy dog
+line 00366: the quick brown fox jumps over the lazy dog
+line 00367: the quick brown fox jumps over the lazy dog
+line 00368: the quick brown fox jumps over the lazy dog
+line 00369: the quick brown fox jumps over the lazy dog
+line 00370: the quick brown fox jumps over the lazy dog
+line 00371: the quick brown fox jumps over the lazy dog
+line 00372: the quick brown fox jumps over the lazy dog
+line 00373: the quick brown fox jumps over the lazy dog
+line 00374: the quick brown fox jumps over the lazy dog
+line 00375: the quick brown fox jumps over the lazy dog
+line 00376: the quick brown fox jumps over the lazy dog
+line 00377: the quick brown fox jumps over the lazy dog
+line 00378: the quick brown fox jumps over the lazy dog
+line 00379: the quick brown fox jumps over the lazy dog
+line 00380: the quick brown fox jumps over the lazy dog
+line 00381: the quick brown fox jumps over the lazy dog
+line 00382: the quick brown fox jumps over the lazy dog
+line 00383: the quick brown fox jumps over the lazy dog
+line 00384: the quick brown fox jumps over the lazy dog
+line 00385: the quick brown fox jumps over the lazy dog
+line 00386: the quick brown fox jumps over the lazy dog
+line 00387: the quick brown fox jumps over the lazy dog
+line 00388: the quick brown fox jumps over the lazy dog
+line 00389: the quick brown fox jumps over the lazy dog
+line 00390: the quick brown fox jumps over the lazy dog
+line 00391: the quick brown fox jumps over the lazy dog
+line 00392: the quick brown fox jumps over the lazy dog
+line 00393: the quick brown fox jumps over the lazy dog
+line 00394: the quick brown fox jumps over the lazy dog
+line 00395: the quick brown fox jumps over the lazy dog
+line 00396: the quick brown fox jumps over the lazy dog
+line 00397: the quick brown fox jumps over the lazy dog
+line 00398: the quick brown fox jumps over the lazy dog
+line 00399: the quick brown fox jumps over the lazy dog
+line 00400: the quick brown fox jumps over the lazy dog
+line 00401: the quick brown fox jumps over the lazy dog
+line 00402: the quick brown fox jumps over the lazy dog
+line 00403: the quick brown fox jumps over the lazy dog
+line 00404: the quick brown fox jumps over the lazy dog
+line 00405: the quick brown fox jumps over the lazy dog
+line 00406: the quick brown fox jumps over the lazy dog
+line 00407: the quick brown fox jumps over the lazy dog
+line 00408: the quick brown fox jumps over the lazy dog
+line 00409: the quick brown fox jumps over the lazy dog
+line 00410: the quick brown fox jumps over the lazy dog
+line 00411: the quick brown fox jumps over the lazy dog
+line 00412: the quick brown fox jumps over the lazy dog
+line 00413: the quick brown fox jumps over the lazy dog
+line 00414: the quick brown fox jumps over the lazy dog
+line 00415: the quick brown fox jumps over the lazy dog
+line 00416: the quick brown fox jumps over the lazy dog
+line 00417: the quick brown fox jumps over the lazy dog
+line 00418: the quick brown fox jumps over the lazy dog
+line 00419: the quick brown fox jumps over the lazy dog
+line 00420: the quick brown fox jumps over the lazy dog
+line 00421: the quick brown fox jumps over the lazy dog
+line 00422: the quick brown fox jumps over the lazy dog
+line 00423: the quick brown fox jumps over the lazy dog
+line 00424: the quick brown fox jumps over the lazy dog
+line 00425: the quick brown fox jumps over the lazy dog
+line 00426: the quick brown fox jumps over the lazy dog
+line 00427: the quick brown fox jumps over the lazy dog
+line 00428: the quick brown fox jumps over the lazy dog
+line 00429: the quick brown fox jumps over the lazy dog
+line 00430: the quick brown fox jumps over the lazy dog
+line 00431: the quick brown fox jumps over the lazy dog
+line 00432: the quick brown fox jumps over the lazy dog
+line 00433: the quick brown fox jumps over the lazy dog
+line 00434: the quick brown fox jumps over the lazy dog
+line 00435: the quick brown fox jumps over the lazy dog
+line 00436: the quick brown fox jumps over the lazy dog
+line 00437: the quick brown fox jumps over the lazy dog
+line 00438: the quick brown fox jumps over the lazy dog
+line 00439: the quick brown fox jumps over the lazy dog
+line 00440: the quick brown fox jumps over the lazy dog
+line 00441: the quick brown fox jumps over the lazy dog
+line 00442: the quick brown fox jumps over the lazy dog
+line 00443: the quick brown fox jumps over the lazy dog
+line 00444: the quick brown fox jumps over the lazy dog
+line 00445: the quick brown fox jumps over the lazy dog
+line 00446: the quick brown fox jumps over the lazy dog
+line 00447: the quick brown fox jumps over the lazy dog
+line 00448: the quick brown fox jumps over the lazy dog
+line 00449: the quick brown fox jumps over the lazy dog
+line 00450: the quick brown fox jumps over the lazy dog
+line 00451: the quick brown fox jumps over the lazy dog
+line 00452: the quick brown fox jumps over the lazy dog
+line 00453: the quick brown fox jumps over the lazy dog
+line 00454: the quick brown fox jumps over the lazy dog
+line 00455: the quick brown fox jumps over the lazy dog
+line 00456: the quick brown fox jumps over the lazy dog
+line 00457: the quick brown fox jumps over the lazy dog
+line 00458: the quick brown fox jumps over the lazy dog
+line 00459: the quick brown fox jumps over the lazy dog
+line 00460: the quick brown fox jumps over the lazy dog
+line 00461: the quick brown fox jumps over the lazy dog
+line 00462: the quick brown fox jumps over the lazy dog
+line 00463: the quick brown fox jumps over the lazy dog
+line 00464: the quick brown fox jumps over the lazy dog
+line 00465: the quick brown fox jumps over the lazy dog
+line 00466: the quick brown fox jumps over the lazy dog
+line 00467: the quick brown fox jumps over the lazy dog
+line 00468: the quick brown fox jumps over the lazy dog
+line 00469: the quick brown fox jumps over the lazy dog
+line 00470: the quick brown fox jumps over the lazy dog
+line 00471: the quick brown fox jumps over the lazy dog
+line 00472: the quick brown fox jumps over the lazy dog
+line 00473: the quick brown fox jumps over the lazy dog
+line 00474: the quick brown fox jumps over the lazy dog
+line 00475: the quick brown fox jumps over the lazy dog
+line 00476: the quick brown fox jumps over the lazy dog
+line 00477: the quick brown fox jumps over the lazy dog
+line 00478: the quick brown fox jumps over the lazy dog
+line 00479: the quick brown fox jumps over the lazy dog
+line 00480: the quick brown fox jumps over the lazy dog
+line 00481: the quick brown fox jumps over the lazy dog
+line 00482: the quick brown fox jumps over the lazy dog
+line 00483: the quick brown fox jumps over the lazy dog
+line 00484: the quick brown fox jumps over the lazy dog
+line 00485: the quick brown fox jumps over the lazy dog
+line 00486: the quick brown fox jumps over the lazy dog
+line 00487: the quick brown fox jumps over the lazy dog
+line 00488: the quick brown fox jumps over the lazy dog
+line 00489: the quick brown fox jumps over the lazy dog
+line 00490: the quick brown fox jumps over the lazy dog
+line 00491: the quick brown fox jumps over the lazy dog
+line 00492: the quick brown fox jumps over the lazy dog
+line 00493: the quick brown fox jumps over the lazy dog
+line 00494: the quick brown fox jumps over the lazy dog
+line 00495: the quick brown fox jumps over the lazy dog
+line 00496: the quick brown fox jumps over the lazy dog
+line 00497: the quick brown fox jumps over the lazy dog
+line 00498: the quick brown fox jumps over the lazy dog
+line 00499: the quick brown fox jumps over the lazy dog
+line 00500: the quick brown fox jumps over the lazy dog
+line 00501: the quick brown fox jumps over the lazy dog
+line 00502: the quick brown fox jumps over the lazy dog
+line 00503: the quick brown fox jumps over the lazy dog
+line 00504: the quick brown fox jumps over the lazy dog
+line 00505: the quick brown fox jumps over the lazy dog
+line 00506: the quick brown fox jumps over the lazy dog
+line 00507: the quick brown fox jumps over the lazy dog
+line 00508: the quick brown fox jumps over the lazy dog
+line 00509: the quick brown fox jumps over the lazy dog
+line 00510: the quick brown fox jumps over the lazy dog
+line 00511: the quick brown fox jumps over the lazy dog
+line 00512: the quick brown fox jumps over the lazy dog
+line 00513: the quick brown fox jumps over the lazy dog
+line 00514: the quick brown fox jumps over the lazy dog
+line 00515: the quick brown fox jumps over the lazy dog
+line 00516: the quick brown fox jumps over the lazy dog
+line 00517: the quick brown fox jumps over the lazy dog
+line 00518: the quick brown fox jumps over the lazy dog
+line 00519: the quick brown fox jumps over the lazy dog
+line 00520: the quick brown fox jumps over the lazy dog
+line 00521: the quick brown fox jumps over the lazy dog
+line 00522: the quick brown fox jumps over the lazy dog
+line 00523: the quick brown fox jumps over the lazy dog
+line 00524: the quick brown fox jumps over the lazy dog
+line 00525: the quick brown fox jumps over the lazy dog
+line 00526: the quick brown fox jumps over the lazy dog
+line 00527: the quick brown fox jumps over the lazy dog
+line 00528: the quick brown fox jumps over the lazy dog
+line 00529: the quick brown fox jumps over the lazy dog
+line 00530: the quick brown fox jumps over the lazy dog
+line 00531: the quick brown fox jumps over the lazy dog
+line 00532: the quick brown fox jumps over the lazy dog
+line 00533: the quick brown fox jumps over the lazy dog
+line 00534: the quick brown fox jumps over the lazy dog
+line 00535: the quick brown fox jumps over the lazy dog
+line 00536: the quick brown fox jumps over the lazy dog
+line 00537: the quick brown fox jumps over the lazy dog
+line 00538: the quick brown fox jumps over the lazy dog
+line 00539: the quick brown fox jumps over the lazy dog
+line 00540: the quick brown fox jumps over the lazy dog
+line 00541: the quick brown fox jumps over the lazy dog
+line 00542: the quick brown fox jumps over the lazy dog
+line 00543: the quick brown fox jumps over the lazy dog
+line 00544: the quick brown fox jumps over the lazy dog
+line 00545: the quick brown fox jumps over the lazy dog
+line 00546: the quick brown fox jumps over the lazy dog
+line 00547: the quick brown fox jumps over the lazy dog
+line 00548: the quick brown fox jumps over the lazy dog
+line 00549: the quick brown fox jumps over the lazy dog
+line 00550: the quick brown fox jumps over the lazy dog
+line 00551: the quick brown fox jumps over the lazy dog
+line 00552: the quick brown fox jumps over the lazy dog
+line 00553: the quick brown fox jumps over the lazy dog
+line 00554: the quick brown fox jumps over the lazy dog
+line 00555: the quick brown fox jumps over the lazy dog
+line 00556: the quick brown fox jumps over the lazy dog
+line 00557: the quick brown fox jumps over the lazy dog
+line 00558: the quick brown fox jumps over the lazy dog
+line 00559: the quick brown fox jumps over the lazy dog
+line 00560: the quick brown fox jumps over the lazy dog
+line 00561: the quick brown fox jumps over the lazy dog
+line 00562: the quick brown fox jumps over the lazy dog
+line 00563: the quick brown fox jumps over the lazy dog
+line 00564: the quick brown fox jumps over the lazy dog
+line 00565: the quick brown fox jumps over the lazy dog
+line 00566: the quick brown fox jumps over the lazy dog
+line 00567: the quick brown fox jumps over the lazy dog
+line 00568: the quick brown fox jumps over the lazy dog
+line 00569: the quick brown fox jumps over the lazy dog
+line 00570: the quick brown fox jumps over the lazy dog
+line 00571: the quick brown fox jumps over the lazy dog
+line 00572: the quick brown fox jumps over the lazy dog
+line 00573: the quick brown fox jumps over the lazy dog
+line 00574: the quick brown fox jumps over the lazy dog
+line 00575: the quick brown fox jumps over the lazy dog
+line 00576: the quick brown fox jumps over the lazy dog
+line 00577: the quick brown fox jumps over the lazy dog
+line 00578: the quick brown fox jumps over the lazy dog
+line 00579: the quick brown fox jumps over the lazy dog
+line 00580: the quick brown fox jumps over the lazy dog
+line 00581: the quick brown fox jumps over the lazy dog
+line 00582: the quick brown fox jumps over the lazy dog
+line 00583: the quick brown fox jumps over the lazy dog
+line 00584: the quick brown fox jumps over the lazy dog
+line 00585: the quick brown fox jumps over the lazy dog
+line 00586: the quick brown fox jumps over the lazy dog
+line 00587: the quick brown fox jumps over the lazy dog
+line 00588: the quick brown fox jumps over the lazy dog
+line 00589: the quick brown fox jumps over the lazy dog
+line 00590: the quick brown fox jumps over the lazy dog
+line 00591: the quick brown fox jumps over the lazy dog
+line 00592: the quick brown fox jumps over the lazy dog
+line 00593: the quick brown fox jumps over the lazy dog
+line 00594: the quick brown fox jumps over the lazy dog
+line 00595: the quick brown fox jumps over the lazy dog
+line 00596: the quick brown fox jumps over the lazy dog
+line 00597: the quick brown fox jumps over the lazy dog
+line 00598: the quick brown fox jumps over the lazy dog
+line 00599: the quick brown fox jumps over the lazy dog
+line 00600: the quick brown fox jumps over the lazy dog
+line 00601: the quick brown fox jumps over the lazy dog
+line 00602: the quick brown fox jumps over the lazy dog
+line 00603: the quick brown fox jumps over the lazy dog
+line 00604: the quick brown fox jumps over the lazy dog
+line 00605: the quick brown fox jumps over the lazy dog
+line 00606: the quick brown fox jumps over the lazy dog
+line 00607: the quick brown fox jumps over the lazy dog
+line 00608: the quick brown fox jumps over the lazy dog
+line 00609: the quick brown fox jumps over the lazy dog
+line 00610: the quick brown fox jumps over the lazy dog
+line 00611: the quick brown fox jumps over the lazy dog
+line 00612: the quick brown fox jumps over the lazy dog
+line 00613: the quick brown fox jumps over the lazy dog
+line 00614: the quick brown fox jumps over the lazy dog
+line 00615: the quick brown fox jumps over the lazy dog
+line 00616: the quick brown fox jumps over the lazy dog
+line 00617: the quick brown fox jumps over the lazy dog
+line 00618: the quick brown fox jumps over the lazy dog
+line 00619: the quick brown fox jumps over the lazy dog
+line 00620: the quick brown fox jumps over the lazy dog
+line 00621: the quick brown fox jumps over the lazy dog
+line 00622: the quick brown fox jumps over the lazy dog
+line 00623: the quick brown fox jumps over the lazy dog
+line 00624: the quick brown fox jumps over the lazy dog
+line 00625: the quick brown fox jumps over the lazy dog
+line 00626: the quick brown fox jumps over the lazy dog
+line 00627: the quick brown fox jumps over the lazy dog
+line 00628: the quick brown fox jumps over the lazy dog
+line 00629: the quick brown fox jumps over the lazy dog
+line 00630: the quick brown fox jumps over the lazy dog
+line 00631: the quick brown fox jumps over the lazy dog
+line 00632: the quick brown fox jumps over the lazy dog
+line 00633: the quick brown fox jumps over the lazy dog
+line 00634: the quick brown fox jumps over the lazy dog
+line 00635: the quick brown fox jumps over the lazy dog
+line 00636: the quick brown fox jumps over the lazy dog
+line 00637: the quick brown fox jumps over the lazy dog
+line 00638: the quick brown fox jumps over the lazy dog
+line 00639: the quick brown fox jumps over the lazy dog
+line 00640: the quick brown fox jumps over the lazy dog
+line 00641: the quick brown fox jumps over the lazy dog
+line 00642: the quick brown fox jumps over the lazy dog
+line 00643: the quick brown fox jumps over the lazy dog
+line 00644: the quick brown fox jumps over the lazy dog
+line 00645: the quick brown fox jumps over the lazy dog
+line 00646: the quick brown fox jumps over the lazy dog
+line 00647: the quick brown fox jumps over the lazy dog
+line 00648: the quick brown fox jumps over the lazy dog
+line 00649: the quick brown fox jumps over the lazy dog
+line 00650: the quick brown fox jumps over the lazy dog
+line 00651: the quick brown fox jumps over the lazy dog
+line 00652: the quick brown fox jumps over the lazy dog
+line 00653: the quick brown fox jumps over the lazy dog
+line 00654: the quick brown fox jumps over the lazy dog
+line 00655: the quick brown fox jumps over the lazy dog
+line 00656: the quick brown fox jumps over the lazy dog
+line 00657: the quick brown fox jumps over the lazy dog
+line 00658: the quick brown fox jumps over the lazy dog
+line 00659: the quick brown fox jumps over the lazy dog
+line 00660: the quick brown fox jumps over the lazy dog
+line 00661: the quick brown fox jumps over the lazy dog
+line 00662: the quick brown fox jumps over the lazy dog
+line 00663: the quick brown fox jumps over the lazy dog
+line 00664: the quick brown fox jumps over the lazy dog
+line 00665: the quick brown fox jumps over the lazy dog
+line 00666: the quick brown fox jumps over the lazy dog
+line 00667: the quick brown fox jumps over the lazy dog
+line 00668: the quick brown fox jumps over the lazy dog
+line 00669: the quick brown fox jumps over the lazy dog
+line 00670: the quick brown fox jumps over the lazy dog
+line 00671: the quick brown fox jumps over the lazy dog
+line 00672: the quick brown fox jumps over the lazy dog
+line 00673: the quick brown fox jumps over the lazy dog
+line 00674: the quick brown fox jumps over the lazy dog
+line 00675: the quick brown fox jumps over the lazy dog
+line 00676: the quick brown fox jumps over the lazy dog
+line 00677: the quick brown fox jumps over the lazy dog
+line 00678: the quick brown fox jumps over the lazy dog
+line 00679: the quick brown fox jumps over the lazy dog
+line 00680: the quick brown fox jumps over the lazy dog
+line 00681: the quick brown fox jumps over the lazy dog
+line 00682: the quick brown fox jumps over the lazy dog
+line 00683: the quick brown fox jumps over the lazy dog
+line 00684: the quick brown fox jumps over the lazy dog
+line 00685: the quick brown fox jumps over the lazy dog
+line 00686: the quick brown fox jumps over the lazy dog
+line 00687: the quick brown fox jumps over the lazy dog
+line 00688: the quick brown fox jumps over the lazy dog
+line 00689: the quick brown fox jumps over the lazy dog
+line 00690: the quick brown fox jumps over the lazy dog
+line 00691: the quick brown fox jumps over the lazy dog
+line 00692: the quick brown fox jumps over the lazy dog
+line 00693: the quick brown fox jumps over the lazy dog
+line 00694: the quick brown fox jumps over the lazy dog
+line 00695: the quick brown fox jumps over the lazy dog
+line 00696: the quick brown fox jumps over the lazy dog
+line 00697: the quick brown fox jumps over the lazy dog
+line 00698: the quick brown fox jumps over the lazy dog
+line 00699: the quick brown fox jumps over the lazy dog
+line 00700: the quick brown fox jumps over the lazy dog
+line 00701: the quick brown fox jumps over the lazy dog
+line 00702: the quick brown fox jumps over the lazy dog
+line 00703: the quick brown fox jumps over the lazy dog
+line 00704: the quick brown fox jumps over the lazy dog
+line 00705: the quick brown fox jumps over the lazy dog
+line 00706: the quick brown fox jumps over the lazy dog
+line 00707: the quick brown fox jumps over the lazy dog
+line 00708: the quick brown fox jumps over the lazy dog
+line 00709: the quick brown fox jumps over the lazy dog
+line 00710: the quick brown fox jumps over the lazy dog
+line 00711: the quick brown fox jumps over the lazy dog
+line 00712: the quick brown fox jumps over the lazy dog
+line 00713: the quick brown fox jumps over the lazy dog
+line 00714: the 
+-- stderr
+-- exit 0
+$ vxfs cat vol home /link
+README
+-- stderr
+-- exit 0
+$ vxfs cat vol home /bin/run
+#!/bin/rc
+echo run
+
+-- stderr
+-- exit 0
+$ vxfs cat vol work /docs/a/b/deep.txt
+three directories down
+
+-- stderr
+-- exit 0
+$ vxfs cat vol cfg /net.ndb
+ip=10.0.2.15 ipmask=255.255.255.0 ipgw=10.0.2.2
+	dns=10.0.2.3
+
+-- stderr
+-- exit 0
+$ vxfs ls vol nolabel
+
+-- stderr
+vxfs: no label nolabel: status -15
+-- exit 1
+$ vxfs cat vol home /nothing
+
+-- stderr
+vxfs: no /nothing: status -15
+-- exit 1
+$ vxfs ls vol home /README
+
+-- stderr
+vxfs: cannot list /README: status -4
+-- exit 1
