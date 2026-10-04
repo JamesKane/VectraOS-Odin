@@ -26,6 +26,7 @@ BOOTFS_DIRS := []string {
 	"boot/svc",
 	"boot/tests",
 	"dev",
+	"dist",
 	"lib",
 	"lib/ns",
 	"n",

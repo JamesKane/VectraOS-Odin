@@ -1,0 +1,29 @@
+# boot/svc/system.ndb: the installed system's disk (docs/06 §7, M5 step 9c),
+# started only when the kernel command line has vx.system, as an installed
+# slot's Limine configuration gives it (install): partd serves disk0's ESP
+# and system partition, fsd the system volume on /srv/fsd, dosfs the ESP on
+# /srv/esp, distd the store on /srv/dist and, as adm, the boot slots (with
+# the ESP at its /tmp, fsd's adm branch at /adm, and vx.slot= from the
+# command line). A live or test boot has no vx.system, and none of them.
+
+service=sys-partd program=/boot/bin/partd console when=vx.system
+connect=disk0
+claim=disk0.esp
+part=disk0.esp type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+claim=disk0.system
+part=disk0.system type=7C6D3E1A-2B4F-4E0A-9C1D-56F2A8B90E35
+
+service=sys-fsd program=/boot/bin/fsd post=fsd console entropy pager when=vx.system
+connect=disk0.system
+
+service=sys-dosfs program=/boot/bin/dosfs post=esp console when=vx.system
+connect=disk0.esp
+arg=-u
+arg=adm
+
+service=sys-distd program=/boot/bin/distd post=dist console cmdline when=vx.system
+user=adm
+mount=/ srv=bootfs
+mount=/n srv=fsd aname=store
+mount=/adm srv=fsd aname=adm
+mount=/tmp srv=esp

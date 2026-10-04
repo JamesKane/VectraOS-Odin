@@ -51,6 +51,7 @@ PROGRAMS := []Program {
 	{name = "netd", dir = "servers/netd", place = .Bootfs},
 	{name = "gsh", dir = "cmd/gsh", place = .Bootfs},
 	{name = "poweroff", dir = "cmd/poweroff", place = .Bootfs},
+	{name = "install", dir = "cmd/install", place = .Bootfs, cports = {"monocypher"}},
 	{name = "ls", dir = "cmd/ls", place = .Bootfs},
 	{name = "cat", dir = "cmd/cat", place = .Bootfs},
 	{name = "echo", dir = "cmd/echo", place = .Bootfs},
@@ -67,6 +68,7 @@ PROGRAMS := []Program {
 	{name = "fsd", dir = "servers/fsd", place = .Bootfs},
 	{name = "dosfs", dir = "servers/dosfs", place = .Bootfs},
 	{name = "isofs", dir = "servers/isofs", place = .Bootfs},
+	{name = "distd", dir = "servers/distd", place = .Bootfs, cports = {"monocypher"}},
 	{name = "ctest", source = "tests/posix/ctest.c", place = .Tests, kind = .C},
 	{name = "ctestfsd", source = "tests/posix/ctest.c", place = .Tests, kind = .C}, // ctest again, with /tmp on fsd
 	{name = "sbasetest", source = "tests/posix/sbasetest.c", place = .Tests, kind = .C},
