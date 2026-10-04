@@ -22,7 +22,6 @@
 // for a file system that keeps them (upstream docs/milestones.md).
 package procfs
 
-import "base:intrinsics"
 import vx "abi:vx"
 import "vx:p9"
 import "vx:rt"
@@ -69,11 +68,7 @@ crash_fs :: proc "contextless" () -> ^p9.Client {
 	if tmpfs == vx.HANDLE_NONE || rt.p9_connect(tmpfs, &crash_conn) != .Ok {
 		return nil
 	}
-	// vx:rt's Conn has no timeout until the P4 back end's port of upstream's
-	// ring.c lands; until then a call to tmpfs has no time limit.
-	when intrinsics.type_has_field(rt.Conn, "timeout") {
-		crash_conn.timeout = CRASH_WAIT
-	}
+	crash_conn.timeout = CRASH_WAIT
 	c := &crash_conn.c
 	root, st := p9.client_attach(c, "")
 	if st != .Ok {
