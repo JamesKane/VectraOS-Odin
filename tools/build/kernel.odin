@@ -57,7 +57,7 @@ compile_ir :: proc(a: ^Arch, mode: Mode, pkg, asm_dir, out: string, odin_flags, 
 			continue
 		}
 		o := fmt.tprintf("%s/%s.o", obj, filepath.stem(ll))
-		l := cmd_make(LLC, "--frame-pointer=all", MODES[mode].llc_opt, "-relocation-model=static", "-filetype=obj")
+		l := cmd_make(LLC, "--frame-pointer=all", "--enable-shrink-wrap=false", MODES[mode].llc_opt, "-relocation-model=static", "-filetype=obj")
 		append(&l, ..llc_flags)
 		append(&l, ll, "-o", o)
 		append(&cmds, l[:])

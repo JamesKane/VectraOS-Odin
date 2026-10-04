@@ -17,7 +17,7 @@ Upstream's house subset (its 04 §1.1) gets its safety from a small kernel and f
 - **No `foreign` variables.** Odin emits them as `weak dllimport` globals without an initializer, which `llc` rejects for ELF. Data the assembly shares is defined in Odin with `@(export)`. A linker-script or assembly symbol whose address is all that is needed is declared as a foreign procedure and taken as `rawptr`.
 - **The linker scripts place `.got` in `.data`.** Odin's IR leaves globals preemptible (not `dso_local`), so on aarch64 some accesses go through a GOT, even with `-relocation-model=static`.
 - **Bounds checks stay on** in every build, kernel included. A failure ends in Odin's `trap()` (`ud2` or `brk #1`) after a message that freestanding builds drop. The kernel's trap handler recognises that instruction and panics with "Odin runtime trap (a bounds check or assertion failed)" and a backtrace to the failing procedure.
-- **Frame pointers in every function**, leaf functions included, from `llc --frame-pointer=all` in the pipeline above (spike S2).
+- **Frame pointers in every function**, leaf functions included, from `llc --frame-pointer=all` in the pipeline above (spike S2), set up at entry: `--enable-shrink-wrap=false`, since a shrink-wrapped prologue leaves a function's first instructions without its frame record, and a breakpoint there would unwind past its caller (found by vx:debug, P4).
 
 ## Lost, and accepted
 
