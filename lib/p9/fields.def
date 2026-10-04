@@ -1,0 +1,23 @@
+// The fields 9P2000 messages are made of: name, wire kind, and the p9_msg
+// member that holds it (messages.def says which message has which).
+
+P9_FIELD(FID,     U32,    fid)
+P9_FIELD(NEWFID,  U32,    newfid)
+P9_FIELD(AFID,    U32,    afid)
+P9_FIELD(MSIZE,   U32,    msize)
+P9_FIELD(IOUNIT,  U32,    iounit)
+P9_FIELD(PERM,    U32,    perm)
+P9_FIELD(COUNT,   U32,    count)
+P9_FIELD(OFFSET,  U64,    offset)
+P9_FIELD(MODE,    U8,     mode)
+P9_FIELD(OLDTAG,  U16,    oldtag)
+P9_FIELD(VERSION, STR,    version)
+P9_FIELD(UNAME,   STR,    uname)
+P9_FIELD(ANAME,   STR,    aname)
+P9_FIELD(ENAME,   STR,    ename)
+P9_FIELD(NAME,    STR,    name)
+P9_FIELD(QID,     QID,    qid)
+P9_FIELD(WNAMES,  WNAMES, wname)   // nwname[2], then nwname strings
+P9_FIELD(WQIDS,   WQIDS,  wqid)    // nwqid[2], then nwqid qids
+P9_FIELD(DATA,    DATA,   data)    // count[4], then count bytes (count is set too)
+P9_FIELD(STAT,    STAT,   stat)    // n[2], then n bytes of stat

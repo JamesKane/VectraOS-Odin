@@ -1,0 +1,32 @@
+// The 9P2000 messages (docs/02 §3): name, type number, and fields in wire
+// order. The codec, the message names and the server's dispatch all expand
+// from this table. 9Px's extensions add rows when their first user lands
+// (02 §3.3). Terror (106) does not exist.
+
+P9_MSG(Tversion, 100, P9F_MSIZE, P9F_VERSION)
+P9_MSG(Rversion, 101, P9F_MSIZE, P9F_VERSION)
+P9_MSG(Tauth,    102, P9F_AFID, P9F_UNAME, P9F_ANAME)
+P9_MSG(Rauth,    103, P9F_QID)
+P9_MSG(Tattach,  104, P9F_FID, P9F_AFID, P9F_UNAME, P9F_ANAME)
+P9_MSG(Rattach,  105, P9F_QID)
+P9_MSG(Rerror,   107, P9F_ENAME)
+P9_MSG(Tflush,   108, P9F_OLDTAG)
+P9_MSG(Rflush,   109)
+P9_MSG(Twalk,    110, P9F_FID, P9F_NEWFID, P9F_WNAMES)
+P9_MSG(Rwalk,    111, P9F_WQIDS)
+P9_MSG(Topen,    112, P9F_FID, P9F_MODE)
+P9_MSG(Ropen,    113, P9F_QID, P9F_IOUNIT)
+P9_MSG(Tcreate,  114, P9F_FID, P9F_NAME, P9F_PERM, P9F_MODE)
+P9_MSG(Rcreate,  115, P9F_QID, P9F_IOUNIT)
+P9_MSG(Tread,    116, P9F_FID, P9F_OFFSET, P9F_COUNT)
+P9_MSG(Rread,    117, P9F_DATA)
+P9_MSG(Twrite,   118, P9F_FID, P9F_OFFSET, P9F_DATA)
+P9_MSG(Rwrite,   119, P9F_COUNT)
+P9_MSG(Tclunk,   120, P9F_FID)
+P9_MSG(Rclunk,   121)
+P9_MSG(Tremove,  122, P9F_FID)
+P9_MSG(Rremove,  123)
+P9_MSG(Tstat,    124, P9F_FID)
+P9_MSG(Rstat,    125, P9F_STAT)
+P9_MSG(Twstat,   126, P9F_FID, P9F_STAT)
+P9_MSG(Rwstat,   127)
