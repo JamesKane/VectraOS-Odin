@@ -1,0 +1,17 @@
+# ports/monocypher/port.ndb: how tools/build builds Monocypher into
+# libmonocypher.a (ADR-0011): BLAKE2b for the content store's hashes
+# (lib/store, through lib/crypto), and Ed25519 (the optional SHA-512 one, as
+# upstream's doc 06 has its keys) for signatures once records are signed
+# (upstream's M10).
+#
+# A native port (tools/build/cobj.odin): compiled with the freestanding flags
+# Odin programs link with, not against vectra-musl, once per architecture,
+# cached, into an archive the Odin programs that name it link; and once for
+# this machine, for the host tests that say `// host-links: monocypher` and
+# for tools/vxstore. Monocypher needs only <stddef.h> and <stdint.h>.
+# Warnings are its own: not linted, as musl and Lua are not. The flags are
+# upstream's (its ports/monocypher/port.ndb).
+
+port=monocypher src=third_party/monocypher native=yes archive=yes
+    cflags="-std=c99 -O2 -fno-strict-aliasing -fno-omit-frame-pointer -Ithird_party/monocypher/src -w"
+    sources="src/monocypher.c src/optional/monocypher-ed25519.c"

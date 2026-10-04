@@ -17,6 +17,7 @@ package driver
 
 import vx "abi:vx"
 import "vx:p9"
+import "vx:p9ring"
 import "vx:rt"
 import "vx:utf"
 
@@ -250,6 +251,20 @@ readdir :: proc "contextless" (ctx: rawptr, dir: p9.Node, index: u32) -> (p9.Nod
 		return 0, .Err_Not_Found
 	}
 	return FILE, .Ok
+}
+
+// The console's connections: one for each program with console output, held
+// for as long as it runs, so many more than a server's default 16 (every
+// service has one, and a test's children too).
+CONS_CONNS :: 128
+#assert(CONS_CONNS <= p9ring.MAX_CONNS_LIMIT)
+
+@(private="file")
+cons_conns: [CONS_CONNS]p9ring.Server_Conn
+
+// Gives a console's server room for CONS_CONNS connections, before it serves.
+cons_conns_for :: proc "contextless" (s: ^p9ring.Server) {
+	s.conns = cons_conns[:]
 }
 
 // The file server for a console, to put in a p9ring.Server.

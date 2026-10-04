@@ -53,15 +53,17 @@ Virtio_Status_Bit :: enum u8 {
 Virtio_Status :: bit_set[Virtio_Status_Bit; u8]
 
 VIRTIO_F_VERSION_1 :: u64(1) << 32
-// The device's DMA goes through the platform's IOMMU: accepted whenever
-// offered, since the addresses a DMA domain gives are the IOMMU's.
+// The device's DMA goes through the platform's IOMMU (§6.1): accepted
+// whenever offered, since the addresses a DMA domain gives are the IOMMU's.
 VIRTIO_F_ACCESS_PLATFORM :: u64(1) << 33
+VIRTIO_RING_F_INDIRECT_DESC :: u64(1) << 28
 VIRTIO_NO_VECTOR :: u16(0xffff)
 VIRTQ_MAX :: 256 // entries a queue may have here: each part of it fits a page
 
 Virtq_Desc_Flag :: enum u16 {
 	Next,
 	Write, // the device writes the buffer
+	Indirect, // the buffer is a table of descriptors (§2.7.5.3)
 }
 
 Virtq_Desc :: struct {
@@ -298,6 +300,19 @@ virtq_offer :: proc "contextless" (q: ^Virtq, d: u16, addr: u64, length: u32, de
 	intrinsics.volatile_store(&q.desc[d], desc)
 	intrinsics.volatile_store(&q.avail.ring[q.avail_idx % q.size], d)
 	intrinsics.atomic_thread_fence(.Release) // the descriptor and ring entry, before the index
+	q.avail_idx += 1
+	intrinsics.volatile_store(&q.avail.idx, q.avail_idx)
+}
+
+// Makes descriptor d available as an indirect one (§2.7.5.3): a table of n
+// descriptors at device address table, which the driver has filled and
+// chained, and which the device reads once the descriptor is available.
+// Needs VIRTIO_RING_F_INDIRECT_DESC.
+virtq_offer_indirect :: proc "contextless" (q: ^Virtq, d: u16, table: u64, n: u16) {
+	desc := Virtq_Desc{addr = table, len = u32(n) * size_of(Virtq_Desc), flags = {.Indirect}}
+	intrinsics.volatile_store(&q.desc[d], desc)
+	intrinsics.volatile_store(&q.avail.ring[q.avail_idx % q.size], d)
+	intrinsics.atomic_thread_fence(.Release) // the table, the descriptor and ring entry, before the index
 	q.avail_idx += 1
 	intrinsics.volatile_store(&q.avail.idx, q.avail_idx)
 }

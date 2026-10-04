@@ -460,6 +460,7 @@ group_make :: proc "contextless" (space: ^ns.Namespace) -> vx.Status {
 // names, or the mount= and bind= records.
 @(require_results)
 from_spawn :: proc "contextless" (space: ^ns.Namespace) -> vx.Status {
+	p9.client_user = rt.spawn.user // its attaches name its user (upstream docs/11 §9)
 	group.srv = rt.spawn_take("srv:nsd")
 	if chan := rt.spawn_take("nsgroup"); chan != vx.HANDLE_NONE {
 		return group_join(space, chan)

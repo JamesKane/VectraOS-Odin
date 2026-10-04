@@ -30,7 +30,10 @@ package p9
 //
 // With the posix extension, open files and locks are the server's, shared
 // by all its connections (Shared, below), and with xattr, Tgetattr and
-// Tsetattr (upstream docs/proto/posix.md).
+// Tsetattr (upstream docs/proto/posix.md). With map, Tmap answers a VMO,
+// and with dref, Treadref and Twriteref move data through the client's VMO
+// (upstream docs/proto/map.md, dref.md); the handles go by the transport,
+// through Server's reply_handle and request_handle.
 
 import "base:intrinsics"
 import "abi:vx"
@@ -47,6 +50,10 @@ Node :: distinct u64
 Fs :: struct {
 	ctx:     rawptr,
 	attach:  proc "contextless" (ctx: rawptr, aname: string) -> (root: Node, st: vx.Status),
+	// Optional: attach, told who attaches (Tattach's uname); used instead of
+	// attach when set. Advisory until keyd (upstream's M10): a client can
+	// name anyone.
+	attach_as: proc "contextless" (ctx: rawptr, aname, uname: string) -> (root: Node, st: vx.Status),
 	// Never ".", "..", or a name with '/'.
 	walk:    proc "contextless" (ctx: rawptr, dir: Node, name: string) -> (child: Node, st: vx.Status),
 	// Only asked below an attach root.
@@ -78,6 +85,20 @@ Fs :: struct {
 	symlink:  proc "contextless" (ctx: rawptr, dir: Node, name, target: string) -> (node: Node, st: vx.Status),
 	// The target's bytes last until the next call.
 	readlink: proc "contextless" (ctx: rawptr, node: Node) -> (target: string, st: vx.Status),
+	// Optional: Tfsync, answered when it returns. A server that writes
+	// before Rwrite has none; one that commits later (fsd) commits here.
+	fsync:    proc "contextless" (ctx: rawptr, node: Node) -> vx.Status,
+	// The map extension, optional: a VMO for the file's [offset, offset +
+	// length), with rights for prot and no more, where in it the range
+	// starts, and how many bytes it has from there (the rest of the range is
+	// past the file). The handle becomes the framework's, which the
+	// transport hands to the client.
+	map_range: proc "contextless" (ctx: rawptr, node: Node, offset, length: u64, prot: Prot) -> (m: Mapped, st: vx.Status),
+	// The dref extension, optional: a file's bytes copied into, or from, the
+	// client's VMO at roffset, at most count of them; how many, as Tread's
+	// and Twrite's. The VMO stays the framework's.
+	read_ref:  proc "contextless" (ctx: rawptr, node: Node, offset: u64, vmo: vx.Handle, roffset: u64, count: u32) -> (done: u32, st: vx.Status),
+	write_ref: proc "contextless" (ctx: rawptr, node: Node, offset: u64, vmo: vx.Handle, roffset: u64, count: u32) -> (done: u32, st: vx.Status),
 }
 
 MAX_FIDS :: 256 // per connection, for now
@@ -149,6 +170,12 @@ Server :: struct {
 	shared:     ^Shared, // the server's open files and locks, for posix; may be nil
 	version:    [96]u8, // Rversion's string
 	stat:       [1024]u8, // Rstat's entry
+	// The handle the last reply carries (Rmap's VMO), for the transport to
+	// pass on; HANDLE_NONE when it carries none. The transport's to close.
+	reply_handle:   vx.Handle,
+	// The handle the request carried (dref's VMO), set by the transport;
+	// HANDLE_NONE when it carried none. The transport's to close.
+	request_handle: vx.Handle,
 }
 
 // What serve made of a request.
@@ -719,9 +746,92 @@ serve_posix :: proc "contextless" (s: ^Server, t: ^Msg, r: ^Msg) -> vx.Status {
 		r.name2 = target
 		return e
 	case .Tfsync:
-		return .Ok // every server's writes are done when Rwrite is sent
+		return s.fs.fsync != nil ? s.fs.fsync(s.fs.ctx, f.node) : .Ok
 	}
 	return .Err_Unsupported // Tlink: no server has hard links
+}
+
+// The file server's attach, told who attaches if it asks to be.
+@(private="file", require_results)
+attach :: proc "contextless" (s: ^Server, aname, uname: string) -> (root: Node, st: vx.Status) {
+	if s.fs.attach_as != nil {
+		return s.fs.attach_as(s.fs.ctx, aname, uname)
+	}
+	return s.fs.attach(s.fs.ctx, aname)
+}
+
+// Tmap: only on a fid open for reading, and for writing too if the mapping
+// writes, as POSIX's mmap asks of a descriptor.
+@(private="file", require_results)
+serve_map :: proc "contextless" (s: ^Server, t: ^Msg, r: ^Msg) -> vx.Status {
+	if .Map not_in s.extensions || s.fs.map_range == nil {
+		return .Err_Unsupported
+	}
+	f := fid_find(s, t.fid)
+	if f == nil {
+		return .Err_Bad_Handle
+	}
+	if !f.open || .Dir in f.qid.type || f.mode.access == .Write {
+		return .Err_Access
+	}
+	if .Write in t.prot && f.mode.access != .Rdwr {
+		return .Err_Access
+	}
+	known := Prot{.Read, .Write, .Exec}
+	write_exec := Prot{.Write, .Exec}
+	if t.length == 0 || transmute(u32)t.prot &~ transmute(u32)known != 0 || t.prot >= write_exec {
+		return .Err_Invalid // W^X (upstream 01 §11)
+	}
+	if _, overflow := intrinsics.overflow_add(t.offset, t.length); overflow {
+		return .Err_Range
+	}
+	m := s.fs.map_range(s.fs.ctx, f.node, t.offset, t.length, t.prot) or_return
+	s.reply_handle = m.vmo
+	r.offset, r.length = m.vmo_offset, m.avail
+	return .Ok
+}
+
+// Treadref and Twriteref: Tread and Twrite, open files' offsets and
+// appending too, with the data in the request's VMO.
+@(private="file", require_results)
+serve_dref :: proc "contextless" (s: ^Server, t: ^Msg, r: ^Msg) -> vx.Status {
+	read := t.type == .Treadref
+	op := read ? s.fs.read_ref : s.fs.write_ref
+	if .Dref not_in s.extensions || op == nil {
+		return .Err_Unsupported
+	}
+	f := fid_find(s, t.fid)
+	if f == nil {
+		return .Err_Bad_Handle
+	}
+	if !f.open || .Dir in f.qid.type {
+		return .Err_Access
+	}
+	if read ? f.mode.access == .Write : !writes(f.mode) {
+		return .Err_Access
+	}
+	if s.request_handle == vx.HANDLE_NONE {
+		return .Err_Invalid // no VMO came with it
+	}
+	o := s.shared != nil ? f.file : nil
+	offset := t.offset
+	if offset == OFFSET_CURRENT {
+		if o == nil {
+			return .Err_Invalid
+		}
+		offset = o.offset
+		if !read && o.append {
+			st: Stat
+			s.fs.stat(s.fs.ctx, f.node, &st) or_return
+			offset = st.length
+		}
+	}
+	count := op(s.fs.ctx, f.node, offset, s.request_handle, t.roffset, t.count) or_return
+	if o != nil && t.offset == OFFSET_CURRENT {
+		o.offset = offset + u64(count)
+	}
+	r.count = count
+	return .Ok
 }
 
 // Handles one request (one whole message) and writes the reply into resp.
@@ -766,7 +876,7 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 				e = .Err_Unsupported
 			} else if f = fid_new(s, t.fid); f == nil {
 				e = .Err_Bad_State
-			} else if f.node, e = s.fs.attach(s.fs.ctx, t.aname); e == .Ok {
+			} else if f.node, e = attach(s, t.aname, t.uname); e == .Ok {
 				r.qid, e = qid_of(s, f.node)
 			}
 			if e == .Ok {
@@ -940,6 +1050,10 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 			e = .Err_Unsupported // renames and chmod: Trenameat and Tsetattr
 		case .Tgetattr, .Tsetattr, .Trenameat, .Tsymlink, .Treadlink, .Tfsync, .Tlink, .Tlock, .Tgetlock, .Tshare, .Tjoin, .Tseek, .Tdesc:
 			e = serve_posix(s, &t, &r)
+		case .Tmap:
+			e = serve_map(s, &t, &r)
+		case .Treadref, .Twriteref:
+			e = serve_dref(s, &t, &r)
 		case:
 			return 0, .Hang_Up
 		}

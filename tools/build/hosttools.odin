@@ -14,6 +14,11 @@ import "core:time"
 VX9PSERVE :: "out/host/vx9pserve"
 VX9PSERVE_SRC :: "tools/vx9pserve"
 
+// vxstore, from tools/vxstore: makes and reads content stores (upstream's
+// host/vxstore), with Monocypher's host archive (cobj.odin, ADR-0011).
+VXSTORE :: "out/host/vxstore"
+VXSTORE_SRC :: "tools/vxstore"
+
 // third_party/u9fs (ADR-0006), built for this machine: the stock 9P2000
 // server the u9fs scenario tests against. As upstream left it, but for two
 // constants its rune.c uses and nothing defines.
@@ -61,6 +66,8 @@ Tool_State :: enum {
 
 @(private="file")
 vx9pserve_state: Tool_State
+@(private="file")
+vxstore_state: Tool_State
 @(private="file")
 u9fs_state: Tool_State
 @(private="file")
@@ -117,6 +124,24 @@ build_vx9pserve :: proc() -> bool {
 		run({ODIN, "build", VX9PSERVE_SRC, "-collection:vx=lib", "-collection:abi=abi", "-vet", "-strict-style", "-warnings-as-errors", "-out:" + VX9PSERVE}) or_return
 	}
 	vx9pserve_state = .Built
+	return true
+}
+
+// Builds out/host/vxstore if it is stale.
+build_vxstore :: proc() -> bool {
+	if vxstore_state != .Untried {
+		return vxstore_state == .Built
+	}
+	vxstore_state = .Failed
+	links := cobj_host_link_flags({"monocypher"}) or_return
+	if s := stale(VXSTORE, {VXSTORE_SRC, "lib", "abi", "third_party/monocypher"}, "") or_return; s {
+		make_dirs("out/host") or_return
+		fmt.eprintln("  HOST  vxstore")
+		c := cmd_make(ODIN, "build", VXSTORE_SRC, "-collection:vx=lib", "-collection:abi=abi", "-vet", "-strict-style", "-warnings-as-errors", "-out:" + VXSTORE)
+		append(&c, ..links[:])
+		run(c[:]) or_return
+	}
+	vxstore_state = .Built
 	return true
 }
 
