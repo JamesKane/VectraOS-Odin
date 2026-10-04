@@ -1,0 +1,4 @@
+# boot/svc/nullfs.ndb: null, zero, random and urandom, posted as /srv/null
+# and mounted on /dev by the POSIX template (/lib/ns/posix).
+
+service=nullfs program=/boot/bin/nullfs post=null console restart entropy
