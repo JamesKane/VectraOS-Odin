@@ -34,22 +34,13 @@ free_ring :: proc(memory: []u8) {
 }
 
 // The entry produce_slot gave, as the type it holds.
-sqe_slot :: proc(r: ^ring.Ring) -> ^vx.Sqe {
+slot :: proc(r: ^ring.Ring, $T: typeid) -> ^T {
 	e, ok := ring.produce_slot(r)
 	if !ok {
 		return nil
 	}
-	assert(len(e) >= size_of(vx.Sqe))
-	return (^vx.Sqe)(raw_data(e))
-}
-
-cqe_slot :: proc(r: ^ring.Ring) -> ^vx.Cqe {
-	e, ok := ring.produce_slot(r)
-	if !ok {
-		return nil
-	}
-	assert(len(e) >= size_of(vx.Cqe))
-	return (^vx.Cqe)(raw_data(e))
+	assert(len(e) >= size_of(T))
+	return (^T)(raw_data(e))
 }
 
 header :: proc(memory: []u8) -> ^vx.Ring_Header {
@@ -62,17 +53,23 @@ lines :: proc(memory: []u8) -> ^[vx.Ring_Line]vx.Ring_Index {
 
 @(test)
 test_layout :: proc(t: ^testing.T) {
-	h, status := ring.layout({3, 4, 64, 32, 0, 0})
-	testing.expect(t, status == .Err_Invalid) // not a power of two
-	h, status = ring.layout({8192, 4, 64, 32, 0, 0})
-	testing.expect(t, status == .Err_Invalid)
-	h, status = ring.layout({4, 4, 40, 32, 0, 0})
-	testing.expect(t, status == .Err_Invalid) // not a multiple of 16
-	h, status = ring.layout({64, 64, 64, 32, 5000, 1})
-	testing.expect(t, status == .Ok)
-	testing.expect(t, h.sq_offset == 8192 && h.cq_offset == 8192 + 64 * 64)
-	testing.expect(t, h.client_arena_offset % 4096 == 0 && h.client_arena_size == 8192 && h.server_arena_size == 4096)
-	testing.expect(t, h.size == h.server_arena_offset + 4096)
+	refused := []vx.Ring_Params {
+		{3, 4, 64, 32, 0, 0}, // not a power of two
+		{8192, 4, 64, 32, 0, 0},
+		{4, 4, 40, 32, 0, 0}, // not a multiple of 16
+	}
+	for p in refused {
+		_, status := ring.layout(p)
+		testing.expectf(t, status == .Err_Invalid, "layout(%v) is %v", p, status)
+	}
+	h, status := ring.layout({64, 64, 64, 32, 5000, 1})
+	testing.expect_value(t, status, vx.Status.Ok)
+	testing.expect_value(t, h.sq_offset, 8192)
+	testing.expect_value(t, h.cq_offset, 8192 + 64 * 64)
+	testing.expect_value(t, h.client_arena_offset % 4096, 0)
+	testing.expect_value(t, h.client_arena_size, 8192)
+	testing.expect_value(t, h.server_arena_size, 4096)
+	testing.expect_value(t, h.size, h.server_arena_offset + 4096)
 }
 
 @(test)
@@ -83,58 +80,63 @@ test_queues :: proc(t: ^testing.T) {
 	}
 	defer free_ring(memory)
 	client, server: ring.Ring
-	testing.expect(t, ring.attach(&client, memory[:h.size], .Client) == .Ok)
-	testing.expect(t, ring.attach(&server, memory[:h.size], .Server) == .Ok)
+	testing.expect_value(t, ring.attach(&client, memory[:h.size], .Client), vx.Status.Ok)
+	testing.expect_value(t, ring.attach(&server, memory[:h.size], .Server), vx.Status.Ok)
 
 	// Three laps of the queue, filling it each time.
-	next, expect: u64
+	produced, consumed: u64
 	for _ in 0 ..< 3 {
 		for _ in 0 ..< 8 {
-			e := sqe_slot(&client)
+			e := slot(&client, vx.Sqe)
 			if !testing.expect(t, e != nil) {
 				return
 			}
-			e^ = {opcode = 1, user_data = next}
-			next += 1
+			e^ = {opcode = 1, user_data = produced}
+			produced += 1
 			ring.produce(&client)
 		}
-		testing.expect(t, sqe_slot(&client) == nil) // full
+		testing.expect(t, slot(&client, vx.Sqe) == nil) // full
 		got: vx.Sqe
 		for ring.consume(&server, mem.ptr_to_bytes(&got)) == .Ok {
-			testing.expect(t, got.user_data == expect)
-			expect += 1
+			testing.expect_value(t, got.user_data, consumed)
+			consumed += 1
 		}
-		testing.expect(t, expect == next)
+		testing.expect_value(t, consumed, produced)
 	}
 
 	// Completions flow the other way.
-	c := cqe_slot(&server)
+	c := slot(&server, vx.Cqe)
 	c^ = {user_data = 77, result = -2}
 	ring.produce(&server)
 	done: vx.Cqe
-	testing.expect(t, ring.consume(&client, mem.ptr_to_bytes(&done)) == .Ok && done.user_data == 77 && done.result == -2)
-	testing.expect(t, ring.consume(&client, mem.ptr_to_bytes(&done)) == .Err_Should_Wait)
+	testing.expect_value(t, ring.consume(&client, mem.ptr_to_bytes(&done)), vx.Status.Ok)
+	testing.expect_value(t, done.user_data, 77)
+	testing.expect_value(t, done.result, -2)
+	testing.expect_value(t, ring.consume(&client, mem.ptr_to_bytes(&done)), vx.Status.Err_Should_Wait)
 
 	// The sleep handshake: the producer learns the consumer is asleep.
 	testing.expect(t, ring.prepare_sleep(&server)) // empty: may sleep
-	e := sqe_slot(&client)
+	e := slot(&client, vx.Sqe)
 	e^ = {user_data = 5}
 	testing.expect(t, ring.produce(&client)) // asleep: ring the doorbell
 	ring.end_sleep(&server)
 	testing.expect(t, !ring.prepare_sleep(&server)) // an entry is waiting: do not sleep
 	got: vx.Sqe
-	testing.expect(t, ring.consume(&server, mem.ptr_to_bytes(&got)) == .Ok && got.user_data == 5)
-	e = sqe_slot(&client)
+	testing.expect_value(t, ring.consume(&server, mem.ptr_to_bytes(&got)), vx.Status.Ok)
+	testing.expect_value(t, got.user_data, 5)
+	e = slot(&client, vx.Sqe)
 	e^ = {user_data = 6}
 	testing.expect(t, !ring.produce(&client)) // awake: no doorbell
-	testing.expect(t, ring.consume(&server, mem.ptr_to_bytes(&got)) == .Ok)
+	testing.expect_value(t, ring.consume(&server, mem.ptr_to_bytes(&got)), vx.Status.Ok)
 
 	// Arenas: each side writes its own; the peer's ranges are checked.
 	mine := ring.arena(&client)
-	testing.expect(t, len(mine) == 4096)
+	testing.expect_value(t, len(mine), 4096)
 	mine[100] = 42
 	b, bok := ring.peer_bytes(&server, 100, 1)
-	testing.expect(t, bok && b[0] == 42)
+	if testing.expect(t, bok) {
+		testing.expect_value(t, b[0], 42)
+	}
 	_, bok = ring.peer_bytes(&server, 4000, 97)
 	testing.expect(t, !bok)
 	_, bok = ring.peer_bytes(&server, max(u64), 2)
@@ -149,19 +151,19 @@ test_hostile_peer :: proc(t: ^testing.T) {
 	}
 	defer free_ring(memory)
 	client, server: ring.Ring
-	testing.expect(t, ring.attach(&server, memory[:h.size], .Server) == .Ok)
-	testing.expect(t, ring.attach(&server, memory[:h.size - 1], .Server) == .Err_Invalid) // mapping too small
+	testing.expect_value(t, ring.attach(&server, memory[:h.size], .Server), vx.Status.Ok)
+	testing.expect_value(t, ring.attach(&server, memory[:h.size - 1], .Server), vx.Status.Err_Invalid) // mapping too small
 	header(memory).cq_offset += 64 // a rewritten header
-	testing.expect(t, ring.attach(&client, memory[:h.size], .Client) == .Err_Invalid)
+	testing.expect_value(t, ring.attach(&client, memory[:h.size], .Client), vx.Status.Err_Invalid)
 	header(memory).cq_offset -= 64
 
 	// A client whose tail runs past what fits: the server marks the ring broken.
 	lines(memory)[.Sq_Tail].index = 9
 	got: vx.Sqe
-	testing.expect(t, ring.consume(&server, mem.ptr_to_bytes(&got)) == .Err_Bad_State)
+	testing.expect_value(t, ring.consume(&server, mem.ptr_to_bytes(&got)), vx.Status.Err_Bad_State)
 	lines(memory)[.Sq_Tail].index = 1 // putting it back does not mend it
-	testing.expect(t, ring.consume(&server, mem.ptr_to_bytes(&got)) == .Err_Bad_State)
-	testing.expect(t, sqe_slot(&server) == nil)
+	testing.expect_value(t, ring.consume(&server, mem.ptr_to_bytes(&got)), vx.Status.Err_Bad_State)
+	testing.expect(t, slot(&server, vx.Sqe) == nil)
 }
 
 // --- Two threads and a doorbell ---
@@ -173,25 +175,21 @@ Doorbell :: struct { // what ring_notify and a port_wait do, in host terms
 }
 
 ring_bell :: proc(d: ^Doorbell) {
-	sync.mutex_lock(&d.lock)
+	sync.guard(&d.lock)
 	d.count += 1
 	sync.cond_broadcast(&d.rung)
-	sync.mutex_unlock(&d.lock)
 }
 
 bell_count :: proc(d: ^Doorbell) -> u64 {
-	sync.mutex_lock(&d.lock)
-	c := d.count
-	sync.mutex_unlock(&d.lock)
-	return c
+	sync.guard(&d.lock)
+	return d.count
 }
 
 wait_bell :: proc(d: ^Doorbell, seen: u64) {
-	sync.mutex_lock(&d.lock)
+	sync.guard(&d.lock)
 	for d.count == seen {
 		sync.cond_wait(&d.rung, &d.lock)
 	}
-	sync.mutex_unlock(&d.lock)
 }
 
 STRESS_ENTRIES :: 2_000_000
@@ -203,10 +201,10 @@ Stress :: struct {
 
 producer :: proc(s: ^Stress) {
 	for i in u64(0) ..< STRESS_ENTRIES {
-		e := sqe_slot(&s.client)
+		e := slot(&s.client, vx.Sqe)
 		for e == nil {
 			thread.yield() // full: let the consumer run
-			e = sqe_slot(&s.client)
+			e = slot(&s.client, vx.Sqe)
 		}
 		e^ = {user_data = i}
 		if ring.produce(&s.client) {
@@ -215,6 +213,11 @@ producer :: proc(s: ^Stress) {
 	}
 }
 
+// The watchdog is a process-wide alarm, not testing.set_fail_timeout: on a
+// timeout the runner cancels the test's thread with pthread_cancel and joins
+// it, and a thread asleep in sync.cond_wait (a futex wait on macOS, not a
+// cancellation point) never sees the cancel, so the runner would hang in the
+// join instead of reporting. The producer thread would run on regardless.
 alarm_fired :: proc "c" (sig: posix.Signal) {
 	msg := "ring_test: the consumer slept through a doorbell (lost wake-up)\n"
 	posix.write(posix.STDERR_FILENO, raw_data(msg), len(msg))
@@ -230,19 +233,21 @@ test_threads :: proc(t: ^testing.T) {
 	defer free_ring(memory)
 	s := new(Stress)
 	defer free(s)
-	testing.expect(t, ring.attach(&s.client, memory[:h.size], .Client) == .Ok)
-	testing.expect(t, ring.attach(&s.server, memory[:h.size], .Server) == .Ok)
+	testing.expect_value(t, ring.attach(&s.client, memory[:h.size], .Client), vx.Status.Ok)
+	testing.expect_value(t, ring.attach(&s.server, memory[:h.size], .Server), vx.Status.Ok)
 	posix.signal(.SIGALRM, alarm_fired)
 	posix.alarm(60)
 
 	th := thread.create_and_start_with_poly_data(s, producer)
-	expect, sleeps: u64
-	in_order := true
-	for expect < STRESS_ENTRIES {
+	consumed, sleeps: u64
+	out_of_order := 0
+	for consumed < STRESS_ENTRIES {
 		got: vx.Sqe
 		if ring.consume(&s.server, mem.ptr_to_bytes(&got)) == .Ok {
-			in_order = in_order && got.user_data == expect
-			expect += 1
+			if got.user_data != consumed {
+				out_of_order += 1
+			}
+			consumed += 1
 			continue
 		}
 		seen := bell_count(&s.server_bell) // before announcing: a ring after this is not missed
@@ -255,6 +260,6 @@ test_threads :: proc(t: ^testing.T) {
 	thread.join(th)
 	thread.destroy(th)
 	posix.alarm(0)
-	testing.expect(t, in_order)
+	testing.expect_value(t, out_of_order, 0)
 	testing.expect(t, sleeps > 0) // the handshake was exercised, not just the busy path
 }
