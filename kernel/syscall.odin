@@ -34,7 +34,7 @@ user_range_ok :: proc "contextless" (addr: Uva, length: u64, write: bool) -> boo
 	if overflow || end > USER_TOP {
 		return false
 	}
-	for page := addr &~ 4095; page < end; page += 4096 {
+	for page := addr &~ (PAGE_SIZE - 1); page < end; page += PAGE_SIZE {
 		if !user_page_ok(current_task().root, page, write) {
 			return false
 		}

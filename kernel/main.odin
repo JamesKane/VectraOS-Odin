@@ -82,7 +82,7 @@ selftest_phys :: proc "contextless" () {
 	pa: [PHYS_MAX_ORDER + 1]Paddr
 	for o in uint(0) ..= PHYS_MAX_ORDER {
 		pa[o] = phys_alloc(o)
-		if pa[o] == 0 || pa[o] & ((4096 << o) - 1) != 0 {
+		if pa[o] == 0 || pa[o] & ((PAGE_SIZE << o) - 1) != 0 {
 			kpanic("selftest phys: bad block")
 		}
 		taken += 1 << o

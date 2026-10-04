@@ -85,7 +85,7 @@ phys_alloc :: proc "contextless" (order: uint) -> Paddr {
 	phys.frame_state[pa >> 12] = 0
 	for k > order { // return the upper halves
 		k -= 1
-		upper := pa + Paddr(4096 << k)
+		upper := pa + Paddr(PAGE_SIZE << k)
 		phys.frame_state[upper >> 12] = u8(FRAME_FREE_HEAD | k)
 		list_push(k, upper)
 	}
@@ -97,7 +97,7 @@ phys_alloc :: proc "contextless" (order: uint) -> Paddr {
 phys_alloc_zeroed :: proc "contextless" (order: uint) -> Paddr {
 	pa := phys_alloc(order)
 	if pa != 0 {
-		intrinsics.mem_zero(phys_to_virt(pa), int(4096 << order))
+		intrinsics.mem_zero(phys_to_virt(pa), int(PAGE_SIZE << order))
 	}
 	return pa
 }
@@ -114,14 +114,14 @@ order_for :: proc "contextless" (bytes: u64) -> uint {
 // Frees [start, end) in the largest aligned blocks that fit. Frame 0 is never
 // added: 0 is phys_alloc's "no memory", and Limine may report page 0 usable.
 phys_add_range :: proc "contextless" (lo, end: Paddr) {
-	start := lo == 0 ? 4096 : lo
+	start := lo == 0 ? PAGE_SIZE : lo
 	for start < end {
 		order := uint(PHYS_MAX_ORDER)
-		for order > 0 && ((start >> 12) & ((1 << order) - 1) != 0 || start + Paddr(4096 << order) > end) {
+		for order > 0 && ((start >> 12) & ((1 << order) - 1) != 0 || start + Paddr(PAGE_SIZE << order) > end) {
 			order -= 1
 		}
 		phys_free(start, order)
-		start += Paddr(4096 << order)
+		start += Paddr(PAGE_SIZE << order)
 	}
 }
 
@@ -138,7 +138,7 @@ phys_init :: proc "contextless" () {
 		}
 	}
 	frames := top >> 12
-	state_pa := early_alloc((frames + 4095) / 4096)
+	state_pa := early_alloc((frames + PAGE_SIZE - 1) / PAGE_SIZE)
 	if state_pa == 0 {
 		kpanic("no memory for the page allocator")
 	}

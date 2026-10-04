@@ -49,7 +49,7 @@ map_range :: proc "contextless" (root: Paddr, va_start: u64, pa_start: Paddr, le
 	va, pa, size := va_start, pa_start, length
 	for size > 0 {
 		level := 3
-		step := u64(4096)
+		step := u64(PAGE_SIZE)
 		if (va | u64(pa)) & (1 << 30 - 1) == 0 && size >= 1 << 30 {
 			level, step = 1, 1 << 30
 		} else if (va | u64(pa)) & (1 << 21 - 1) == 0 && size >= 1 << 21 {
@@ -97,7 +97,7 @@ foreign _ {
 }
 
 page_up :: #force_inline proc "contextless" (v: u64) -> u64 {
-	return (v + 4095) &~ 4095
+	return (v + PAGE_SIZE - 1) &~ (PAGE_SIZE - 1)
 }
 
 @(private="file")
@@ -143,7 +143,7 @@ paging_init :: proc "contextless" () {
 			case:
 				continue
 			}
-			lo = e.base &~ 4095
+			lo = e.base &~ (PAGE_SIZE - 1)
 			hi = page_up(e.base + e.length)
 			if run_hi != 0 && lo <= run_hi && flags == run_flags { // the map is sorted: extend the run
 				if hi > run_hi {

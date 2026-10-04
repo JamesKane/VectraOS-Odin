@@ -658,7 +658,7 @@ Switch_Frame :: struct {
 // thread, and a return into thread_trampoline. It starts a page below the
 // top, clear of the trap frame and XSAVE area vx_enter_user builds there.
 arch_thread_initial_sp :: proc "contextless" (th: ^Thread) -> u64 {
-	f := cast(^Switch_Frame)uintptr(thread_kstack_top(th) - 4096 - size_of(Switch_Frame))
+	f := cast(^Switch_Frame)uintptr(thread_kstack_top(th) - PAGE_SIZE - size_of(Switch_Frame))
 	f^ = {
 		r12 = u64(uintptr(th)),
 		ret = u64(uintptr(rawptr(thread_trampoline))),
@@ -843,7 +843,7 @@ arch_devices_init :: proc "contextless" () {
 		e := madt[off:][:madt[off + 1]]
 		if e[0] == 1 && e[1] >= 12 && ioapic_count < len(ioapics) {
 			pa := Paddr(read32(e[4:]))
-			if !map_range(kernel_root, boot.hhdm + u64(pa), pa, 4096, {.Write, .Device}) {
+			if !map_range(kernel_root, boot.hhdm + u64(pa), pa, PAGE_SIZE, {.Write, .Device}) {
 				kpanic("cannot map an IOAPIC")
 			}
 			a := &ioapics[ioapic_count]
@@ -875,6 +875,7 @@ ioapic_for :: proc "contextless" (gsi: u32) -> ^Ioapic {
 
 // An ISA IRQ (below 16) becomes its GSI through the MADT's overrides; any
 // other number is a GSI already.
+@(require_results)
 arch_irq_canonical :: proc "contextless" (line: u32) -> (u32, vx.Status) {
 	gsi := line < 16 && isa_overrides[line].present ? isa_overrides[line].gsi : line
 	if gsi >= MAX_GSI || ioapic_for(gsi) == nil {
@@ -885,6 +886,7 @@ arch_irq_canonical :: proc "contextless" (line: u32) -> (u32, vx.Status) {
 
 // ISA lines are edge-triggered and active high unless an override says
 // otherwise; the rest (PCI) are level-triggered and active low.
+@(require_results)
 arch_irq_route :: proc "contextless" (line: u32) -> (level: bool, st: vx.Status) {
 	isa := false
 	flags: u16

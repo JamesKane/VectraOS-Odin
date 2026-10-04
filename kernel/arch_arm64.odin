@@ -235,7 +235,7 @@ pl011: ^Pl011
 
 arch_kernel_mappings :: proc "contextless" (root: Paddr) {
 	gicr_size := GICR_FRAME_SIZE * max(boot.cpu_count, 1)
-	if !map_range(root, boot.hhdm + PL011_PHYS, PL011_PHYS, 4096, {.Write, .Device}) ||
+	if !map_range(root, boot.hhdm + PL011_PHYS, PL011_PHYS, PAGE_SIZE, {.Write, .Device}) ||
 	   !map_range(root, boot.hhdm + GICD_PHYS, GICD_PHYS, GICD_SIZE, {.Write, .Device}) ||
 	   !map_range(root, boot.hhdm + GICR_PHYS, GICR_PHYS, gicr_size, {.Write, .Device}) {
 		kpanic("cannot map the UART and the GIC")
@@ -286,7 +286,7 @@ arch_console_init :: proc "contextless" () {
 	}
 	vx_write_mair(vx_read_mair() &~ (0xff << 16)) // attribute 2 = 0x00: Device-nGnRnE
 	va := boot.hhdm + PL011_PHYS
-	if map_range(Paddr(vx_read_ttbr1() & u64(PTE_ADDR)), va, PL011_PHYS, 4096, {.Write, .Device}) {
+	if map_range(Paddr(vx_read_ttbr1() & u64(PTE_ADDR)), va, PL011_PHYS, PAGE_SIZE, {.Write, .Device}) {
 		pl011 = cast(^Pl011)uintptr(va)
 	}
 }
@@ -622,12 +622,13 @@ arch_has_io_ports :: proc "contextless" () -> bool {
 }
 
 arch_console_device :: proc "contextless" (io: bool, base, size: u64) -> bool {
-	return !io && base < PL011_PHYS + 4096 && PL011_PHYS < base + size
+	return !io && base < PL011_PHYS + PAGE_SIZE && PL011_PHYS < base + size
 }
 
 arch_io_switch :: proc "contextless" (t: ^Task) {}
 
 // SPIs only: SGIs and PPIs are the kernel's.
+@(require_results)
 arch_irq_canonical :: proc "contextless" (line: u32) -> (u32, vx.Status) {
 	if line < 32 || line >= gic_lines {
 		return 0, .Err_Range
@@ -635,6 +636,7 @@ arch_irq_canonical :: proc "contextless" (line: u32) -> (u32, vx.Status) {
 	return line, .Ok
 }
 
+@(require_results)
 arch_irq_route :: proc "contextless" (line: u32) -> (level: bool, st: vx.Status) {
 	d := gicd()
 	bit := u32(1) << (line % 32)

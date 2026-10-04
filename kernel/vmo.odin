@@ -13,7 +13,7 @@ import vx "abi:vx"
 
 Vmo :: struct {
 	using obj:  Object,
-	size:       u64, // bytes, a multiple of 4096
+	size:       u64, // bytes, a multiple of PAGE_SIZE
 	pages:      []Paddr, // each page, in a block of its own through the direct map
 	list_order: uint, // the page list's allocation order
 	physical:   bool, // device memory: its pages are not RAM, and are never freed

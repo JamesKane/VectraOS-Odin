@@ -60,7 +60,7 @@ elf_load :: proc "contextless" (t: ^Task, image: []u8) -> (entry: Uva, st: vx.St
 		if p.filesz > p.memsz || o3 || file_end > size || o4 || Uva(mem_end) > USER_TOP || (p.flags & PF_W != 0 && p.flags & PF_X != 0) {
 			return 0, .Err_Invalid
 		}
-		base := p.vaddr &~ 4095
+		base := p.vaddr &~ (PAGE_SIZE - 1)
 		v := vmo_create(mem_end - base) or_return
 		vmo_write(v, p.vaddr - base, image[p.offset:file_end])
 		flags: vx.Map_Options

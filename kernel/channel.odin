@@ -149,7 +149,7 @@ msg_alloc :: proc "contextless" (body_len, count: u32) -> ^Channel_Msg {
 // Queues m for the reader of `to`, or hands it to the channel_call waiting
 // for it there. Called with the pair's lock held. Fails with SHOULD_WAIT when
 // the queue is full.
-@(private="file")
+@(private="file", require_results)
 channel_deliver :: proc "contextless" (to: ^Channel, m: ^Channel_Msg) -> vx.Status {
 	txid := msg_header(m).txid
 	if txid != 0 {

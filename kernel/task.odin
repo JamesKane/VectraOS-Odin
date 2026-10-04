@@ -36,7 +36,7 @@ Handle_Entry :: struct {
 	reserved:   u16,
 }
 
-HANDLE_SLOTS :: 4096 / size_of(Handle_Entry)
+HANDLE_SLOTS :: PAGE_SIZE / size_of(Handle_Entry)
 
 // A mapping in a task's address space: [va, va + size) shows the VMO from
 // `offset`. It holds a reference on the VMO.
@@ -46,7 +46,7 @@ Mapping :: struct {
 	vmo:          ^Vmo,
 }
 
-TASK_MAX_MAPPINGS :: 4096 / size_of(Mapping)
+TASK_MAX_MAPPINGS :: PAGE_SIZE / size_of(Mapping)
 
 // A task's lock covers its handle table, its address space, its threads and
 // its life (state, exit status, bindings on its exit).
@@ -415,7 +415,7 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 		return 0, .Err_Access
 	}
 	vmo_end, overflow := intrinsics.overflow_add(offset, size)
-	if size == 0 || (offset | size) & 4095 != 0 || overflow || vmo_end > v.size {
+	if size == 0 || (offset | size) & (PAGE_SIZE - 1) != 0 || overflow || vmo_end > v.size {
 		return 0, .Err_Range
 	}
 	mf := Map_Flags{.User}
@@ -445,19 +445,19 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 	switch {
 	case t.root == 0 || t.ending:
 		st = .Err_Bad_State
-	case at & 4095 != 0 || end_overflow || end > USER_TOP:
+	case at & (PAGE_SIZE - 1) != 0 || end_overflow || end > USER_TOP:
 		st = .Err_Range
 	case slot == nil:
 		st = .Err_No_Memory
 	}
 	done: u64
-	for ; st == .Ok && done < size; done += 4096 {
-		if !map_range(t.root, u64(at) + done, v.pages[(offset + done) / 4096], 4096, mf) {
+	for ; st == .Ok && done < size; done += PAGE_SIZE {
+		if !map_range(t.root, u64(at) + done, v.pages[(offset + done) / PAGE_SIZE], PAGE_SIZE, mf) {
 			st = .Err_No_Memory
 		}
 	}
 	if st != .Ok {
-		for off := u64(0); off + 4096 <= done; off += 4096 {
+		for off := u64(0); off + PAGE_SIZE <= done; off += PAGE_SIZE {
 			unmap_page(t.root, u64(at) + off)
 		}
 		return 0, st
@@ -466,7 +466,7 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 	slot^ = {va = at, size = size, offset = offset, vmo = v}
 	t.mapped += size
 	if want_va == 0 {
-		t.map_next = end + 4096 // leave a guard page between placed mappings
+		t.map_next = end + PAGE_SIZE // leave a guard page between placed mappings
 	}
 	return at, .Ok
 }

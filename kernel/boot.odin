@@ -166,11 +166,11 @@ early_next, early_limit, early_top: Paddr
 
 // The physical address of `pages` zeroed, contiguous 4 KiB pages, or 0.
 early_alloc :: proc "contextless" (pages: u64) -> Paddr {
-	if early_next == 0 || u64(early_next - early_limit) < pages * 4096 {
+	if early_next == 0 || u64(early_next - early_limit) < pages * PAGE_SIZE {
 		return 0
 	}
-	early_next -= Paddr(pages * 4096)
-	intrinsics.mem_zero(phys_to_virt(early_next), int(pages * 4096))
+	early_next -= Paddr(pages * PAGE_SIZE)
+	intrinsics.mem_zero(phys_to_virt(early_next), int(pages * PAGE_SIZE))
 	return early_next
 }
 

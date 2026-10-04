@@ -83,7 +83,7 @@ root_resource :: proc "contextless" () -> ^Resource {
 @(require_results)
 vmo_create_physical :: proc "contextless" (pa: Paddr, size: u64) -> (vmo: ^Vmo, st: vx.Status) {
 	end, overflow := intrinsics.overflow_add(pa, Paddr(size))
-	if size == 0 || size > VMO_MAX_SIZE || (u64(pa) | size) & 4095 != 0 || overflow {
+	if size == 0 || size > VMO_MAX_SIZE || (u64(pa) | size) & (PAGE_SIZE - 1) != 0 || overflow {
 		return nil, .Err_Range
 	}
 	if boot.ram_incomplete {
