@@ -131,7 +131,7 @@ cmd_test :: proc(arches: []^Arch, mode: Mode, names: []string) -> bool {
 		}
 		for f in files {
 			if f.type == .Regular && strings.has_suffix(f.name, ".ndb") {
-				append(&all, strings.clone(filepath.stem(f.name), context.temp_allocator))
+				append(&all, filepath.stem(f.name))
 			}
 		}
 		if len(all) == 0 {

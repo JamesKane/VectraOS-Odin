@@ -145,8 +145,7 @@ file_cflags :: proc(p: ^Port, rel: string) -> string {
 }
 
 object_for :: proc(objdir, rel: string) -> string {
-	dot := strings.last_index_byte(rel, '.')
-	return fmt.tprintf("%s/%s.o", objdir, rel[:dot])
+	return fmt.tprintf("%s/%s.o", objdir, strings.trim_suffix(rel, filepath.ext(rel)))
 }
 
 // The loader for one target, built if the cache does not hold it already.
@@ -212,7 +211,7 @@ build_port_target :: proc(p: ^Port, target: string) -> (result: string, ok: bool
 		append(&objs, o)
 	}
 	for o in objs {
-		make_dirs(dir_of(o)) or_return
+		make_dirs(filepath.dir(o)) or_return
 	}
 	fmt.eprintfln("  PORT  %s  %s (%d files)", p.name, target, len(cmds))
 	run_parallel(cmds[:], src) or_return

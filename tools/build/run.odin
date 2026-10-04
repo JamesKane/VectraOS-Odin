@@ -126,11 +126,6 @@ make_dirs :: proc(path: string) -> bool {
 	return true
 }
 
-dir_of :: proc(path: string) -> string {
-	i := strings.last_index_byte(path, '/')
-	return i < 0 ? "." : path[:i]
-}
-
 // FNV-1a, chained from h, over a file's text or a name: the cache keys and
 // the image's derived GUIDs. Chains start from the offset basis, which is
 // also hash.fnv64a's default seed.

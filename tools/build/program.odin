@@ -1,6 +1,7 @@
 package build
 
 import "core:fmt"
+import "core:path/filepath"
 
 // User programs: Odin packages built as static, non-PIE ELF files against
 // lib/rt, through the same IR pipeline as the kernel (frame pointers in
@@ -44,7 +45,7 @@ program_path :: proc(a: ^Arch, mode: Mode, name: string) -> string {
 
 build_program :: proc(a: ^Arch, mode: Mode, p: Program) -> (elf: string, ok: bool) {
 	elf = program_path(a, mode, p.name)
-	make_dirs(dir_of(elf)) or_return
+	make_dirs(filepath.dir(elf)) or_return
 	fmt.eprintfln("  PROG  %s %s", p.name, a.name)
 	out := fmt.tprintf("%s/prog/%s", out_dir(a, mode), p.name)
 	objs := compile_ir(a, mode, p.dir, fmt.tprintf("lib/rt/arch/%s", a.name), out, nil, nil) or_return
