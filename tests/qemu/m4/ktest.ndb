@@ -1,0 +1,11 @@
+# tests/qemu/ktest.ndb: the kernel's own tests, from user space (M2, step 1):
+# channels and handle transfer, port bindings, counters, futexes, threads,
+# channel_call, child tasks that exit or are killed, and vmo_rw. Some children
+# are killed by faults on purpose, so a "killed" line is no failure here: ktest
+# checks each child's exit status itself, and if ktest were killed its last
+# line would never come.
+
+scenario=ktest timeout=15 cmdline=vx.root=ktest
+expect=" 0 failed"
+fail="vx: panic"
+fail="FAILED"

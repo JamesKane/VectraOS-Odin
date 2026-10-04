@@ -1,0 +1,12 @@
+# tests/user/luatest.ndb: Lua's test (tests/qemu/lua.ndb), a script test:
+# /boot/bin/lua runs tests/user/luatest.lua, which build puts at
+# /boot/tests/luatest.lua, in the POSIX namespace.
+
+service=luatest program=/boot/bin/lua console entropy
+arg=/boot/tests/luatest.lua
+arg=one
+arg="two words"
+ns=posix
+connect=nsd
+env=GREETING=hello
+env=HOME=/tmp

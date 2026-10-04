@@ -1,0 +1,9 @@
+# tests/user/sbasetest.ndb: sbase's test's manifest (tests/qemu/sbase.ndb). It
+# runs sbase's commands from /bin, as the POSIX template binds them.
+
+service=sbasetest program=/boot/bin/sbasetest console entropy
+ns=posix
+connect=nsd
+env=PATH=/bin
+env=HOME=/tmp
+env=GREETING=hello

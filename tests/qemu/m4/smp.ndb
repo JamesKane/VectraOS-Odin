@@ -1,0 +1,8 @@
+# tests/qemu/smp.ndb: every CPU comes online, and all four hammer the page
+# allocator at once without a block going to two of them or the free count
+# drifting (M1's stretch goal). The boot test then runs svcd on four CPUs.
+
+scenario=smp timeout=15 cmdline=vx.selftest=smp
+expect=" MiB free, 4 cpus"
+expect="vx: selftest smp ok: 4 cpus, 16000 allocations"
+fail="vx: panic"

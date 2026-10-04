@@ -1,0 +1,37 @@
+# tests/qemu/cons.ndb: the user-space console (M2, step 5). Typed lines reach
+# constest through the UART driver's IRQ and cooked line discipline, with
+# erase (BS and DEL) and kill-line (^U), each taking back whole runes; 300 lines of output overflow the
+# driver's queue, so writes wait for the UART; ^D on an empty line is the end
+# of the file. The shell is left out, as it would read the console too.
+
+scenario=cons timeout=20 with=constest cmdline=vx.skip=gsh
+expect="constest: ready"
+send="hello world"
+expect="constest: got [hello world]"
+# "typoo", BS, DEL, "e", return
+type=x"7479706f6f087f650d"
+expect="constest: got [type]"
+# "junk", ^U, "good", return
+type=x"6a756e6b15676f6f640d"
+expect="constest: got [good]"
+# "café", DEL, "e", return: the erase takes back é's two bytes (ADR-0013)
+type=x"636166c3a97f650d"
+expect="constest: got [cafe]"
+# "é€", ^U, "ok", return: the kill takes back whole runes
+type=x"c3a9e282ac156f6b0d"
+expect="constest: got [ok]"
+send="flood"
+expect="constest: line 0 "
+expect="constest: line 299 "
+expect="constest: flood done"
+# "abc", ^D (sent without a newline), then "def", return, all before constest
+# reads: two reads, not one "abcdef"
+type=x"616263046465660d"
+expect="constest: got [abc]"
+expect="constest: got [def]"
+type=x"04"
+expect="constest: end of file"
+line="svcd: constest exited"
+fail="vx: panic"
+fail="FAILED"
+fail=") killed: "

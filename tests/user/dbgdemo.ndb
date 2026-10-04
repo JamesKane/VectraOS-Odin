@@ -1,0 +1,15 @@
+# tests/user/dbgdemo.ndb: M4's exit test of the debugger (tests/qemu/dbg.ndb):
+# svcd runs dbg -c, which launches /boot/bin/dbgdemo under its script,
+# /boot/tests/dbgdemo.cmds. dbg reads /proc, the boot image's programs, and
+# /tmp/crash, where procfs saves the demo's crash.
+
+service=dbgdemo program=/boot/bin/dbg console
+arg=-c
+arg=-x
+arg=/boot/tests/dbgdemo.cmds
+arg=/boot/bin/dbgdemo
+arg=crash
+mount=/ srv=bootfs
+mount=/proc srv=proc
+mount=/tmp srv=tmpfs
+connect=nsd

@@ -8,3 +8,4 @@
 | [0004](0004-kernel-vector-state.md) | Vector state in the kernel | proposed |
 | [0005](0005-limine.md) | Limine | proposed |
 | [0006](0006-u9fs.md) | u9fs, vendored as a host test tool | proposed (import review pending) |
+| [0007](0007-musl-odin-backend.md) | musl, vendored unchanged, with a back end in Odin | proposed (import review pending) |

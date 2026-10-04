@@ -1,0 +1,103 @@
+# tests/user/rctest.rc: M4's exit test, the shell's part (tests/qemu/rcscript.ndb).
+# gsh runs it in the POSIX userland: sbase's commands from /bin, files in /tmp.
+# Each check compares a command's output with what it should be; the last line
+# counts them; the script's exit status is empty, rc's success, or says how
+# many failed.
+
+checks=0
+failed=0
+
+# check NAME WANT GOT...: GOT's words, joined, should be WANT.
+fn check {
+  checks=`{expr $checks + 1}
+  name=$1
+  want=$2
+  shift 2
+  if(! ~ $"* $want) {
+    failed=`{expr $failed + 1}
+    echo 'rctest: FAILED' $name: wanted $want, got $"*
+  }
+}
+
+echo 'rctest: rc in the POSIX userland, args' $*
+
+# Arguments and the environment.
+check args 'one two words' $*
+check argc 2 $#*
+check env /tmp $HOME
+check exported 'a b' `{env | grep '^LIST=' | sed 's/^LIST=//' | tr '\001' ' '}
+
+# Pipelines through sbase's text tools.
+check pipe 3 `{printf 'c\nb\na\n' | sort | wc -l}
+check sort 'a b c' `{printf 'c\nb\na\n' | sort}
+check uniq 'a b' `{printf 'a\na\nb\n' | uniq}
+check tr HELLO `{echo hello | tr a-z A-Z}
+check sed 'hi there' `{echo hello there | sed 's/hello/hi/'}
+check cut b `{echo a:b:c | cut -d: -f2}
+check head '1 2' `{seq 1 10 | head -n 2}
+check tail '9 10' `{seq 1 10 | tail -n 2}
+check grep 'apple apricot' `{printf 'apple\nbanana\napricot\n' | grep '^ap'}
+check long 5 `{seq 1 2000 | grep 7 | sort -n | tail -n 1 | wc -c}
+
+# Redirections: into files in /tmp, appended, read back, errors aside.
+dir=/tmp/rctest
+mkdir -p $dir
+echo first > $dir/f
+echo second >> $dir/f
+check redirect 'first second' `{cat < $dir/f}
+check count 2 `{wc -l < $dir/f}
+ls /nonexistent >[2] $dir/err
+check stderr-status false `{if(~ $status '') echo true; if not echo false}
+check stderr-file 1 `{wc -l < $dir/err}
+{ echo one; echo two } > $dir/g
+check block 'one two' `{cat $dir/g}
+echo both >[2=1] > $dir/h
+check dup both `{cat $dir/h}
+
+# Globbing, in sorted order, and a pattern that matches nothing kept.
+for(n in c a b) touch $dir/$n.x
+check glob 'a.x b.x c.x' `{for(f in $dir/*.x) basename $f}
+check noglob $dir/'*.y' $dir/*.y
+
+# Control flow: loops, conditions, switch, functions with $*.
+total=0
+for(i in `{seq 1 5}) total=`{expr $total + $i}
+check for 15 $total
+n=0
+while(test $n -lt 3) n=`{expr $n + 1}
+check while 3 $n
+fn kind {
+  switch($1){
+  case *.c *.h
+    echo source
+  case *.rc
+    echo script
+  case *
+    echo other
+  }
+}
+check switch 'source script other' `{kind a.c} `{kind t.rc} `{kind x}
+fn count { echo $#* }
+check fn-args 3 `{count a 'b c' d}
+check and-or 'yes no' `{test -d $dir && echo yes} `{test -f $dir/none || echo no}
+check not ok `{if(! test -f $dir/none) echo ok}
+check status 'not found' `{nosuchcommand >[2] /dev/null; echo $status}
+check pipe-status '1|' `{false | true; echo $status}
+check pipe-true yes `{if(true | true) echo yes; if not echo no}
+printf 'c\nb\na\n' > $dir/unsorted
+sort < $dir/unsorted | uniq > $dir/sorted
+check pipe-files 'a b c' `{cat $dir/sorted}
+check pipe-dup 1 `{ls $dir/none >[2=1] | wc -l}
+check big-args 300 `{count `{seq 1 300}}
+check big-spawn 300 `{echo `{seq 1 300} | wc -w}
+
+# A script calling a script: gsh itself, with arguments.
+echo 'echo $#* $2' > $dir/inner.rc
+check nested '2 b' `{gsh $dir/inner.rc a b}
+
+rm -r $dir
+check cleaned no `{if(test -d $dir) echo yes; if not echo no}
+
+echo rctest: $checks checks, $failed failed
+if(~ $failed 0) exit # an empty status: success, as rc's
+exit $failed^' failed'

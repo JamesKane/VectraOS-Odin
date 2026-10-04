@@ -1,0 +1,11 @@
+# tests/user/proctest.ndb: the process table test's manifest (tests/qemu/proc.ndb).
+# The boot image at /, and /proc, where it registers the copies of itself it
+# spawns and reads its wait records; /tmp, where procfs saves its crashed
+# children (05 §5).
+
+service=proctest program=/boot/bin/proctest console
+mount=/ srv=bootfs
+mount=/proc srv=proc
+mount=/tmp srv=tmpfs
+mount=/sys srv=sys
+connect=nsd

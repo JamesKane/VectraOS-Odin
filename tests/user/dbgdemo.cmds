@@ -1,0 +1,20 @@
+# What dbg -c does to dbgdemo (tests/qemu/dbg.ndb): a breakpoint, the call
+# stack, variables, then its crash, examined from the crash directory.
+break leaf
+run
+bt
+print n
+print tally
+print tally.label
+cont
+cont
+print tally.calls
+frame 1
+print n * 10
+cont
+bt
+cont
+bt
+print tally.calls
+print tally.total
+quit

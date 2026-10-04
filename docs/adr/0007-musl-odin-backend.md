@@ -1,0 +1,22 @@
+# ADR-0007: musl, vendored unchanged, with a back end in Odin
+
+Status: proposed, 2026-10-04. Decided with the user at the start of P4; the musl import awaits review (`third_party/VENDOR.ndb`).
+
+## Context
+
+M4's POSIX personality is musl with a VectraOS back end: programs see musl's API unchanged, and the back end turns what musl asks the kernel for into VectraOS's own calls and servers (the namespace over 9P rings, `/net`, `/proc`, notes). Upstream writes its back end in C (its ADR-0007) on its C runtime, 9P and namespace libraries. This tree has those libraries only in Odin (ADR-0002, ADR-0003: Odin for all first-party code).
+
+## Decision
+
+- **musl 1.2.6**, as upstream vendors it, unchanged under `third_party/musl`, with the generated headers (`bits/alltypes.h`, `bits/syscall.h`, `internal/version.h`) committed under `ports/musl/generated/`, and built by `./build` from `ports/musl/port.ndb` with musl's source set and per-file flags, frame pointers kept on.
+- **One C shim**: `ports/musl/vx/arch/generic/syscall_arch.h`, first on musl's include path, makes musl's `__syscall0`…`__syscall6` calls to `__vx_syscall`. It is compiled as part of musl, in musl's C99, and holds no logic. The assembly files musl uses to make system calls itself (`clone`, `syscall_cp`, `__unmapself`, `vfork`, the signal `restore`, x86_64's `__set_thread_area`) are left out of the build, so musl's generic C versions are used.
+- **The back end is Odin** (`ports/musl/vx/`, one package): an object with C-ABI exports linked into `libc.a`: `__vx_syscall`, `__syscall_cp_asm` and its `__cp_begin`/`__cp_end` labels (in a `.S` stub), and the start code (`_start` and what builds the Linux-style argument, environment and auxiliary vectors `__libc_start_main` reads). It calls `vx:rt`, `vx:ns`, `vx:p9` and the rest directly. It keeps the file-descriptor table in the process and answers what VectraOS does not do yet with `-ENOSYS`, reported once per number to the kernel log.
+- **Linux's types** (the system-call numbers, `struct stat`, `dirent64`, `sockaddr*`, `termios`, `sigaction`, `rlimit` and the rest the back end reads or writes) are declared in Odin per architecture, with `#assert` on every size and offset against musl's headers; a host test checks them against the C layouts.
+- **Hygiene**, since the object shares a link with C: every procedure is `proc "contextless"` or `proc "c"`; no Odin runtime, allocator, thread-locals or init/fini (the kernel's flags); no exported symbol but the entry points above; musl's thread pointer is musl's.
+- **Test fixtures that are C by nature** (`tests/posix/*.c`, `tests/user/dbgdemo.c`, whose source path `dbg` prints) and the rc, Lua and debugger scripts the M4 scenarios run are contracts, copied once like the scenarios (ADR-0002). They test the POSIX personality and the debugger; they are not ported.
+
+## Consequences
+
+- Only the back end is first-party in a POSIX program; musl, compiler-rt, Lua and sbase are vendored C, each with its own ADR and review.
+- The back end gets bounds checks and the house types on the riskiest code in M4: descriptor tables, socket address parsing, `/proc` and spawn records.
+- An Odin object in a C link is new here; the kernel's freestanding flags already give the guarantees it needs, and the symbol list of `libc.a` is checked by `./build check` for anything the back end exports by accident.

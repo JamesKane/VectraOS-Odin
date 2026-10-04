@@ -1,0 +1,7 @@
+# tests/qemu/phys.ndb: the page allocator hands out and takes back a block of
+# every order, and its free count balances (M1).
+
+scenario=phys timeout=10 cmdline=vx.selftest=phys
+expect="vx: kernel 0.1.0 $arch, "
+expect="vx: selftest phys ok"
+fail="vx: panic"
