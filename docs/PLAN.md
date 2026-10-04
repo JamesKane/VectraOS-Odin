@@ -86,7 +86,7 @@ Each phase is gated by upstream's scenarios for the milestone it reaches.
 - **S3:** SIMD enable, eager save and restore across a trap, and a test that corrupts vector registers across traps (§4).
 - **S4:** `build` generates the ABI enums from `abi/vx/*.def`.
 - **S5:** kernel build time against upstream's 1 s budget.
-- Foundation: `build.odin` (`all`, `image`, `qemu`, `test`, `check`, `loc`, `vendor-check`), Limine vendored and built by `build` (spikes use Homebrew's Limine meanwhile), the scenario runner over the serial console.
+- Foundation: `build.odin` (`all`, `image`, `qemu`, `test`, `check`, `loc`, `vendor-check`), Limine vendored and built by `build` (spikes use Homebrew's Limine meanwhile), the scenario runner over the serial console. **Done 2026-10-04:** `tools/build` with all seven commands and `abi`; Limine 12.9.1 vendored (ADR-0005) and built from source; `lib/ndb` and `lib/utf` with upstream's host tests; reproducible images; `kernel/` seeded from S1, passing this tree's `first-light` scenario on both architectures.
 
 **P1. M1, first light.** Limine requests, early serial, GDT/IDT and vectors, the physical allocator, paging and HHDM, object pools, LAPIC/TSC and GICv3/generic timer, panic with backtraces, SMP. Task, Thread, Vmo, `as_map`, Port, `handle_close`, `debug_write`; the ELF loader and an `svcd` stub. Gate: `boot` (M1 form), `panic`, `phys`, `timer`, `smp`, `lower-half`, `stack-overflow`.
 

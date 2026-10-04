@@ -1,0 +1,38 @@
+# ports/limine/port.ndb: how build builds Limine's UEFI loaders (ADR-0002).
+#
+# The flags are the ones Limine 12.9.1's configure chose for the pinned clang
+# (ADR-0001). They were captured once, when Limine was vendored, by running
+# configure with --enable-uefi-x86-64 --enable-uefi-aarch64; config.h beside
+# this file is its other output. Capture both again whenever Limine or the
+# toolchain changes, and compare with common/common.mk.
+#
+# Paths are relative to src. Source sets follow common.mk: every file with a
+# listed extension under the listed directories, in byte order. Extensions
+# listed together form one group each, linked in the order given, as in
+# common.mk; the order changes the image.
+
+port=limine src=third_party/limine
+    cppflags="-nostdinc -I common -I common/libc-compat -I limine-protocol/include -I flanterm/src -I libfdt/src -I picoefi/inc -isystem freestanding-c-hdrs/include -DCOM_OUTPUT=false -DE9_OUTPUT=false -DFLANTERM_IN_FLANTERM -DUEFI"
+
+target=uefi-x86_64 arch=x86_64 output=BOOTX64.EFI
+    cflags="-target x86_64-unknown-none-elf -g -O2 -pipe -Wall -Wextra -Wshadow -Wvla -Wno-error -std=gnu11 -ffreestanding -fno-common -ffunction-sections -fdata-sections -fstack-protector-strong -fno-stack-check -fno-omit-frame-pointer -fno-strict-aliasing -fno-lto -fPIE -fshort-wchar -m64 -march=x86-64 -mno-mmx -mno-sse -mno-red-zone -fcf-protection=none -mno-80387"
+    ldflags="-nostdlib -z max-page-size=0x1000 -z noexecstack --gc-sections -m elf_x86_64 -pie -z text --hash-style=gnu"
+    ldscript=common/linker_uefi_x86_64.ld.in
+    c.dirs=common,picoefi/x86_64,flanterm/src,libfdt/src
+    S.dirs=common,picoefi/x86_64
+    nasm.dirs=common
+    nasm.ext=.asm_x86_64,.asm_uefi_x86_64,.asm_x86
+    nasmflags="-f elf64 -g -F dwarf -Wall -w-unknown-warning -w-reloc -Wno-error -DX86_64_TARGET -DUEFI"
+
+target=uefi-aarch64 arch=aarch64 output=BOOTAA64.EFI
+    cflags="-target aarch64-unknown-none-elf -g -O2 -pipe -Wall -Wextra -Wshadow -Wvla -Wno-error -std=gnu11 -ffreestanding -fno-common -ffunction-sections -fdata-sections -fstack-protector-strong -fno-stack-check -fno-omit-frame-pointer -fno-strict-aliasing -fno-lto -fPIE -fshort-wchar -mcpu=generic -march=armv8-a+nofp+nosimd -mcmodel=small -mno-outline-atomics -mbranch-protection=none"
+    ldflags="-nostdlib -z max-page-size=0x1000 -z noexecstack --gc-sections -m aarch64elf -pie -z text --hash-style=gnu --fix-cortex-a53-843419"
+    ldscript=common/linker_uefi_aarch64.ld.in
+    c.dirs=common,picoefi/aarch64,flanterm/src,libfdt/src
+    S.dirs=common,picoefi/aarch64
+    cppasm.dirs=common
+    cppasm.ext=.asm_aarch64,.asm_uefi_aarch64
+
+# Per-file additions, from common.mk.
+file=flanterm/src/flanterm_backends/fb.c cflags=-DFLANTERM_FB_DISABLE_BUMP_ALLOC
+file=libfdt/src/fdt_overlay.c cflags=-Wno-unused-parameter

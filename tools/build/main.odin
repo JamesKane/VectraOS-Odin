@@ -1,0 +1,209 @@
+package build
+
+import "core:fmt"
+import "core:os"
+import "core:path/filepath"
+import "core:slice"
+import "core:strings"
+
+// build: the one build tool. The ./build wrapper at the root compiles it
+// when its sources change, then runs it from the repository root.
+
+USAGE :: `usage: ./build <command> [--arch x86_64|aarch64] [--release] [-v]
+  all            the kernel and the Limine loaders
+  image          GPT disk images: out/<arch>/<mode>/vectra-<arch>.img
+  qemu           boot an image on the serial console (Ctrl-A X quits)
+  test [name...] boot headless and check tests/qemu/*.ndb
+  check          host tests under ASan, vendor-check
+  vendor-check   check third_party/ against VENDOR.ndb
+  loc            the line-count ledger
+  abi            generate abi/vx/abi_gen.odin from abi/vx/*.def`
+
+main :: proc() {
+	if len(os.args) < 2 {
+		fmt.eprintln(USAGE)
+		os.exit(2)
+	}
+	command := os.args[1]
+	arches := make([dynamic]^Arch, context.temp_allocator)
+	names := make([dynamic]string, context.temp_allocator)
+	mode := Mode.Debug
+	for i := 2; i < len(os.args); i += 1 {
+		switch arg := os.args[i]; arg {
+		case "--arch":
+			i += 1
+			a: ^Arch
+			ok := false
+			if i < len(os.args) {
+				a, ok = arch_by_name(os.args[i])
+			}
+			if !ok {
+				fmt.eprintln("build: --arch takes x86_64 or aarch64")
+				os.exit(2)
+			}
+			append(&arches, a)
+		case "--release":
+			mode = .Release
+		case "-v":
+			verbose = true
+		case:
+			if strings.has_prefix(arg, "-") {
+				fmt.eprintln(USAGE)
+				os.exit(2)
+			}
+			append(&names, arg)
+		}
+	}
+	if len(arches) == 0 {
+		for &a in ARCHES {
+			append(&arches, &a)
+		}
+	}
+	set_source_date_epoch()
+
+	ok := false
+	switch command {
+	case "abi":
+		ok = gen_abi(".")
+	case "vendor-check":
+		ok = cmd_vendor_check()
+	case "loc":
+		ok = cmd_loc()
+	case "check":
+		ok = cmd_check()
+	case "all", "image", "qemu", "test":
+		if !check_pins() {
+			os.exit(1)
+		}
+		ok = true
+		switch command {
+		case "all":
+			limine := port_load("limine") or_else Port{}
+			for a in arches {
+				_, lok := build_port_target(&limine, a.limine)
+				_, kok := build_kernel(a, mode)
+				ok = ok && lok && kok
+			}
+		case "image":
+			for a in arches {
+				ok = build_image(a, mode, image_path(a, mode)) && ok
+			}
+		case "qemu":
+			a := arches[0]
+			if len(arches) > 1 {
+				fmt.eprintln("build: qemu boots one architecture: give --arch")
+				os.exit(2)
+			}
+			ok = cmd_qemu(a, mode)
+		case "test":
+			ok = cmd_test(arches[:], mode, names[:])
+		}
+	case:
+		fmt.eprintln(USAGE)
+		os.exit(2)
+	}
+	os.exit(ok ? 0 : 1)
+}
+
+cmd_qemu :: proc(a: ^Arch, mode: Mode) -> bool {
+	image := image_path(a, mode)
+	build_image(a, mode, image) or_return
+	fmt.eprintln("build: starting QEMU; Ctrl-A X quits")
+	return run(qemu_cmd(a, image, {}))
+}
+
+cmd_test :: proc(arches: []^Arch, mode: Mode, names: []string) -> bool {
+	names := names
+	if len(names) == 0 {
+		all := make([dynamic]string, context.temp_allocator)
+		files, _ := tree_files("tests/qemu")
+		for f in files {
+			if strings.has_suffix(f, ".ndb") {
+				append(&all, filepath.stem(f))
+			}
+		}
+		slice.sort(all[:])
+		names = all[:]
+	}
+	ok := true
+	for a in arches {
+		for name in names {
+			ok = run_scenario(a, mode, name) && ok
+		}
+	}
+	return ok
+}
+
+// Host tests: every package under tests/host, under ASan.
+cmd_check :: proc() -> bool {
+	ok := true
+	dirs, err := os.read_directory_by_path("tests/host", -1, context.temp_allocator)
+	if err != nil {
+		fmt.eprintln("build: cannot read tests/host")
+		return false
+	}
+	slice.sort_by(dirs, proc(a, b: os.File_Info) -> bool {return a.name < b.name})
+	for d in dirs {
+		if d.type != .Directory {
+			continue
+		}
+		fmt.eprintfln("  HOST  %s", d.name)
+		c := cmd_make(ODIN, "test", fmt.tprintf("tests/host/%s", d.name), "-collection:vx=lib", "-vet", "-strict-style", "-warnings-as-errors", "-sanitize:address", fmt.tprintf("-out:out/host/%s", d.name))
+		make_dirs("out/host") or_return
+		ok = run(c[:]) && ok
+	}
+	ok = cmd_vendor_check() && ok
+	return ok
+}
+
+// Reproducible builds: every timestamp written into an output, such as the
+// FAT entries mtools writes, is SOURCE_DATE_EPOCH. If the environment does
+// not set it, it is the time of the last commit.
+set_source_date_epoch :: proc() {
+	_ = os.set_env("MTOOLS_SKIP_CHECK", "1")
+	if os.get_env("SOURCE_DATE_EPOCH", context.temp_allocator) != "" {
+		return
+	}
+	epoch := "315532800" // 1980-01-01, FAT's epoch
+	if out, ok := run_capture({GIT, "log", "-1", "--format=%ct"}); ok {
+		if t := strings.trim_space(out); t != "" {
+			epoch = t
+		}
+	}
+	_ = os.set_env("SOURCE_DATE_EPOCH", epoch)
+}
+
+// The line-count ledger: first-party lines per top-level directory, then
+// vendored lines.
+cmd_loc :: proc() -> bool {
+	count :: proc(dir: string, exts: []string) -> (lines: int) {
+		files, _ := tree_files(dir)
+		for f in files {
+			if strings.has_suffix(f, "_gen.odin") {
+				continue // generated by build
+			}
+			for e in exts {
+				if strings.has_suffix(f, e) {
+					data, _ := read_file(f)
+					lines += strings.count(data, "\n")
+					break
+				}
+			}
+		}
+		return
+	}
+	FIRST_PARTY :: []string{".odin", ".S", ".ld"}
+	total := 0
+	for dir in ([]string{"kernel", "lib", "tools", "abi", "tests", "spikes"}) {
+		if !os.exists(dir) {
+			continue
+		}
+		n := count(dir, FIRST_PARTY)
+		total += n
+		fmt.printfln("  %-14s %7s", dir, fmt.tprint(n))
+	}
+	fmt.printfln("  %-14s %7s", "first-party", fmt.tprint(total))
+	vendored := count("third_party", []string{".c", ".h", ".S", ".asm_x86_64", ".asm_uefi_x86_64", ".asm_x86", ".asm_aarch64", ".asm_uefi_aarch64"})
+	fmt.printfln("  %-14s %7s", "vendored", fmt.tprint(vendored))
+	return true
+}

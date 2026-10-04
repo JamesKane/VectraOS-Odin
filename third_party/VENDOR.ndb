@@ -1,0 +1,13 @@
+# third_party/VENDOR.ndb: every vendored tree, checked by ./build vendor-check
+# (ADR-0001, and upstream's ADR-0003 rules: pinned, reviewed source only).
+
+name=limine
+    version=12.9.1
+    upstream=https://github.com/Limine-Bootloader/Limine/releases/download/v12.9.1/limine-12.9.1.tar.xz
+    sha256=c1096fdd506487fbd92c113baa9e153a9973cf766483cc3928e13fd29b976b32
+    tree.sha256=d682c822cd432546e00a8ac136ddff84526ca6f0f06e0b7605e64f423477482d
+    signed.by=05D29860D0A0668AAEFB9D691F3C021BECA23821
+    license="BSD-2-Clause; bundled parts as listed in 3RDPARTY.md"
+    adr=docs/adr/0005-limine.md
+    port=ports/limine/port.ndb
+    reviewed.by=pending

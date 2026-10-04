@@ -1,0 +1,13 @@
+#!/bin/sh
+# ./build: compiles the build tool (tools/build) when it or the libraries it
+# uses change, then runs it from the repository root. See tools/build/main.odin.
+set -eu
+cd "$(dirname "$0")"
+ODIN=/opt/homebrew/bin/odin
+[ -x "$ODIN" ] || ODIN=/opt/odin/odin
+tool=out/bin/build
+if [ ! -x "$tool" ] || [ -n "$(find tools/build lib -newer "$tool" -name '*.odin' 2>/dev/null | head -1)" ]; then
+  mkdir -p out/bin
+  "$ODIN" build tools/build -collection:vx=lib -vet -strict-style -warnings-as-errors -out:"$tool"
+fi
+exec "$tool" "$@"

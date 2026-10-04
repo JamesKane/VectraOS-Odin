@@ -6,3 +6,4 @@
 | [0002](0002-clean-room.md) | A clean-room rewrite, judged by behaviour | proposed |
 | [0003](0003-odin-house-subset.md) | Odin and the house subset | proposed |
 | [0004](0004-kernel-vector-state.md) | Vector state in the kernel | proposed |
+| [0005](0005-limine.md) | Limine | proposed |

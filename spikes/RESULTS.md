@@ -24,7 +24,12 @@ _2026-10-03, macOS host (Apple M4 Max), Odin `dev-2026-09:a2fb372b7`, LLVM 22.1.
 
 - **Inline assembly.** Odin's new `asm { … }` blocks parse instructions natively and validate them against `core:rexcode`'s encoding tables. On aarch64, `mrs x0, mair_el1` is rejected ("operands matched none of the expected encoding forms"), and the feature is undocumented. The kernel uses clang-assembled `.S` stubs (ADR-0003). Revisit when Odin documents it; small `msr`/`mrs` stubs cost a call each.
 - **`core:rexcode`** ships an AArch64 and x86 decoder in Odin's core library. That matters for `vx-debug`'s disassembler in P4: upstream wrote its own aarch64 disassembler.
-- **Limine.** The spikes use Homebrew's 12.9.0 binaries. Upstream vendors 12.9.1 and builds it from source; P0's foundation does the same here.
+- **Limine.** The spikes used Homebrew's 12.9.0 binaries; `build` now builds the vendored 12.9.1 from source (ADR-0005).
+
+## Found during P0's foundation
+
+- **Odin's IR is not reproducible by default.** The threaded checker numbers entities and orders debug metadata differently from run to run, and the debug info records the wall-clock time as `ODIN_COMPILE_TIMESTAMP` (ignoring `SOURCE_DATE_EPOCH`). `build` passes `-no-threaded-checker -thread-count:1` and rewrites that one constant to `SOURCE_DATE_EPOCH` in the IR before `llc`. Kernels and disk images are then byte-identical between builds.
+- **`core:os` process API:** a `nil` `stdin` in `Process_Desc` closes the child's input rather than inheriting it; pass `os.stdin` to inherit. Slice literals appended inside a loop alias one stack array: build command lines with an allocated `[dynamic]string`.
 
 ## Not yet covered
 

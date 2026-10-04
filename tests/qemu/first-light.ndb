@@ -1,0 +1,13 @@
+# tests/qemu/first-light.ndb: this tree's own P0 scenario (not upstream's).
+# The kernel boots through Limine, reports itself in upstream's words, runs
+# with vector registers enabled, and keeps vector state across a trap whose
+# handler wipes it (ADR-0004).
+
+scenario=first-light timeout=30
+expect="vx: kernel 0.1.0 $arch, "
+expect="vx: simd lanes ok"
+expect="vx: vector state preserved across a trap"
+expect="vx: first light"
+fail="vx: panic"
+fail="CORRUPTED"
+fail="WRONG"
