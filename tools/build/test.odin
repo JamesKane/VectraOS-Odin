@@ -15,7 +15,10 @@ import "vx:ndb"
 // which fails the test when a line contains it. "$arch" in a pattern stands
 // for the architecture's name. send= and type= records between the expect=
 // records are typed into the serial port once every expect= before them has
-// matched; send= then presses return.
+// matched; send= then presses return. A scenario= record's iso flag boots
+// the CD image (image --iso) instead of the disk. After a pass, each host=
+// record's file, under the run's directory (share/ is what vx9pserve served,
+// u9fs/ what u9fs did), must hold its text= (with or without a final newline).
 
 Expect_Kind :: enum {
 	Contains, // expect=: part of a line
@@ -29,6 +32,12 @@ Expect :: struct {
 	input: string, // typed once every expect before this one has matched
 }
 
+// host=FILE text=...: what the guest was to leave on the host.
+Host_Check :: struct {
+	file: string, // under the run's directory
+	text: string,
+}
+
 Scenario :: struct {
 	name:    string,
 	timeout: f64,
@@ -36,8 +45,10 @@ Scenario :: struct {
 	with:    string, // test programs for bootfs, comma-separated (tests/user/)
 	only:    ^Arch, // arch=: run on this architecture only; nil for all
 	needs:   string, // a feature this tree's build cannot provide yet
+	iso:     bool, // boot the ISO, as a CD, with no disk
 	expects: [dynamic]Expect,
 	fails:   [dynamic]string,
+	hosts:   [dynamic]Host_Check,
 }
 
 substitute_arch :: proc(pattern: string, a: ^Arch) -> string {
@@ -51,6 +62,7 @@ load_scenario :: proc(name: string, a: ^Arch) -> (sc: Scenario, ok: bool) {
 	sc.name = name
 	sc.expects = make([dynamic]Expect, context.temp_allocator)
 	sc.fails = make([dynamic]string, context.temp_allocator)
+	sc.hosts = make([dynamic]Host_Check, context.temp_allocator)
 	pending := "" // input waiting for the next expect
 	for rec in f.records {
 		switch {
@@ -71,13 +83,19 @@ load_scenario :: proc(name: string, a: ^Arch) -> (sc: Scenario, ok: bool) {
 				}
 				sc.only = only
 			}
-			for feature in ([]string{"iso", "disk", "volume", "iommu", "bus"}) {
+			sc.iso = ndb.has(rec, "iso")
+			for feature in ([]string{"disk", "volume", "iommu", "bus"}) {
 				if ndb.has(rec, feature) {
 					sc.needs = feature
 				}
 			}
 		case ndb.has(rec, "host"):
-			sc.needs = "host"
+			file := val(rec, "host")
+			if file == "" || file[0] == '/' || strings.has_prefix(file, "..") || strings.contains(file, "/..") {
+				fmt.eprintfln("%s:%d: host= names a file inside the run directory", path, rec.line)
+				return sc, false
+			}
+			append(&sc.hosts, Host_Check{file, val(rec, "text")})
 		case ndb.has(rec, "expect") || ndb.has(rec, "line") || ndb.has(rec, "prompt"):
 			e := Expect{input = pending}
 			pending = ""
@@ -109,6 +127,18 @@ load_scenario :: proc(name: string, a: ^Arch) -> (sc: Scenario, ok: bool) {
 	return sc, true
 }
 
+// Whether the scenario types something that dials addr: what decides which
+// host servers it needs.
+@(private="file")
+dials :: proc(sc: ^Scenario, addr: string) -> bool {
+	for e in sc.expects {
+		if strings.contains(e.input, addr) {
+			return true
+		}
+	}
+	return false
+}
+
 run_scenario :: proc(a: ^Arch, mode: Mode, name: string) -> bool {
 	sc := load_scenario(name, a) or_return
 	label := fmt.tprintf("  TEST  %-16s %-8s", name, a.name)
@@ -120,13 +150,45 @@ run_scenario :: proc(a: ^Arch, mode: Mode, name: string) -> bool {
 		fmt.eprintfln("%s skipped (needs %s=, which this tree cannot provide yet)", label, sc.needs)
 		return true
 	}
+	// u9fs at 10.0.2.101!564 only where it can chroot; vx9pserve at
+	// 10.0.2.100!5640 is built when a scenario first needs it.
+	with_u9fs := false
+	if dials(&sc, "10.0.2.101!564") || dials(&sc, "10.0.2.101:564") {
+		if why, usable := user_namespaces(); !usable {
+			fmt.eprintfln("%s skipped (%s)", label, why)
+			return true
+		}
+		if !build_u9fs() {
+			fmt.eprintfln("%s FAILED: %s did not build", label, U9FS)
+			return false
+		}
+		with_u9fs = true
+	}
+	if (dials(&sc, "10.0.2.100!5640") || dials(&sc, "10.0.2.100:5640")) && !build_vx9pserve() {
+		fmt.eprintfln("%s FAILED: it dials 10.0.2.100!5640, and %s did not build", label, VX9PSERVE)
+		return false
+	}
 
 	file_name, _ := strings.replace_all(name, "/", "-", context.temp_allocator) // m2/shell -> m2-shell
-	image := image_path(a, mode)
-	if sc.cmdline != "" || sc.with != "" {
+	image, cdrom := image_path(a, mode), ""
+	if sc.cmdline != "" || sc.with != "" || sc.iso {
 		image = fmt.tprintf("%s/test-%s.img", out_dir(a, mode), file_name)
 	}
-	build_image(a, mode, image, sc.cmdline, sc.with) or_return
+	if sc.iso {
+		cdrom = fmt.tprintf("%s/test-%s.iso", out_dir(a, mode), file_name)
+	}
+	build_image(a, mode, image, sc.cmdline, sc.with, cdrom) or_return
+
+	// What the run's servers serve, fresh: run-NAME/share for vx9pserve,
+	// run-NAME/u9fs for u9fs.
+	run_dir := fmt.tprintf("%s/run-%s", out_dir(a, mode), file_name)
+	share := fmt.tprintf("%s/share", run_dir)
+	fresh_share(share) or_return
+	u9fs := ""
+	if with_u9fs {
+		u9fs = fmt.tprintf("%s/u9fs", run_dir)
+		fresh_u9fs_root(u9fs) or_return
+	}
 
 	log_path := fmt.tprintf("%s/test-%s.log", out_dir(a, mode), file_name)
 	log, lerr := os.create(log_path)
@@ -149,7 +211,7 @@ run_scenario :: proc(a: ^Arch, mode: Mode, name: string) -> bool {
 		return false
 	}
 	defer os.close(keys_w)
-	cmd := qemu_cmd(a, image, {test = true})
+	cmd := qemu_cmd(a, image, {test = true, share = share, u9fs = u9fs, cdrom = cdrom})
 	if verbose {
 		print_cmd(cmd, "")
 	}
@@ -165,6 +227,9 @@ run_scenario :: proc(a: ^Arch, mode: Mode, name: string) -> bool {
 	why, passed := match_output(&sc, out_r, keys_w, log)
 	_ = os.process_kill(qemu)
 	_, _ = os.process_wait(qemu)
+	if passed {
+		why, passed = check_hosts(&sc, run_dir)
+	}
 
 	if passed {
 		fmt.eprintfln("%s ok", label)
@@ -172,6 +237,21 @@ run_scenario :: proc(a: ^Arch, mode: Mode, name: string) -> bool {
 	}
 	fmt.eprintfln("%s FAILED: %s (log: %s)", label, why, log_path)
 	return false
+}
+
+// What the guest was to leave on the host, in the run's directory.
+@(private="file")
+check_hosts :: proc(sc: ^Scenario, run_dir: string) -> (why: string, ok: bool) {
+	for h in sc.hosts {
+		data, err := os.read_entire_file(fmt.tprintf("%s/%s", run_dir, h.file), context.temp_allocator)
+		if err != nil {
+			return fmt.tprintf("the host's %s cannot be read (%v); it should say %q", h.file, err, h.text), false
+		}
+		if got := strings.trim_suffix(string(data), "\n"); got != h.text {
+			return fmt.tprintf("the host's %s is %q, not %q", h.file, got, h.text), false
+		}
+	}
+	return "", true
 }
 
 // Reads QEMU's serial output, typing and matching as the scenario says.
