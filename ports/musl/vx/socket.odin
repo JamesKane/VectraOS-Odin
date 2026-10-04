@@ -774,7 +774,7 @@ sock_send :: proc "contextless" (o: ^Ofd, buf: []u8, flags: linux.Msg_Flags, sa:
 		o.sock.bound = true
 	}
 	h := dgram[:HEADER]
-	h = {}
+	intrinsics.mem_zero(raw_data(h), HEADER)
 	h[10], h[11] = 0xff, 0xff // IPv4, mapped into IPv6
 	h[12], h[13], h[14], h[15] = u8(addr >> 24), u8(addr >> 16), u8(addr >> 8), u8(addr)
 	h[48], h[49] = u8(port >> 8), u8(port)
