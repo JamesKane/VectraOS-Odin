@@ -1099,7 +1099,17 @@ test_devices :: proc "contextless" () {
 	check(st == .Ok) // the domain goes on
 	rt.close_all(user, mem)
 	_ = rt.handle_close(dom) // the mapping keeps it, and is kept until .Quiesced: a leak no one can see but this
-	rt.close_all(map1, weak, res)
+	_ = rt.handle_close(map1)
+
+	// This tree's check of system_power (upstream's M5 step 7c), short of
+	// powering off: the root Resource's MANAGE, and the one op. x86_64
+	// leaves powering off to bus-acpi's AML.
+	check(rt.system_power(weak, .Off) == .Err_Access)
+	check(rt.vx_syscall(.System_Power, u64(res), 2) == i64(vx.Status.Err_Invalid))
+	when ODIN_ARCH == .amd64 {
+		check(rt.system_power(res, .Off) == .Err_Unsupported)
+	}
+	rt.close_all(weak, res)
 }
 
 // Review fixes (M3): a killed task's freed tables are never used, and a

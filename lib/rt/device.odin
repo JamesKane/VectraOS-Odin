@@ -41,6 +41,12 @@ iorange_create :: proc "contextless" (resource: vx.Handle, base: u16, count: u32
 	return h, st
 }
 
+// The machine off (.Off), with the root Resource: returns only if it did not happen.
+@(require_results)
+system_power :: proc "contextless" (resource: vx.Handle, op: vx.Power_Op) -> vx.Status {
+	return status(vx_syscall(.System_Power, u64(resource), u64(op)))
+}
+
 // A DmaDomain for the PCI function whose requester ID is source (devmgr's).
 @(require_results)
 dma_domain_create :: proc "contextless" (resource: vx.Handle, source: u32) -> (vx.Handle, vx.Status) {

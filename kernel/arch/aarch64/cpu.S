@@ -392,3 +392,23 @@ vx_dc_ivac:
 vx_dsb_sy:
     dsb sy
     ret
+
+// (function: u64) -> u64: a PSCI call (DEN 0022) through the hypervisor's
+// conduit, or the secure monitor's; x1-x3 are 0.
+    .globl vx_psci_hvc
+    .type vx_psci_hvc, %function
+vx_psci_hvc:
+    mov x1, xzr
+    mov x2, xzr
+    mov x3, xzr
+    hvc #0
+    ret
+
+    .globl vx_psci_smc
+    .type vx_psci_smc, %function
+vx_psci_smc:
+    mov x1, xzr
+    mov x2, xzr
+    mov x3, xzr
+    smc #0
+    ret

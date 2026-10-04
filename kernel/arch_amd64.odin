@@ -1058,6 +1058,12 @@ arch_clobber_vregs :: proc "contextless" () {
 
 // --- Devices: I/O ports, the IOAPICs and the MADT (device.odin) ---
 
+// x86_64 powers off through ACPI's S5, which takes AML: bus-acpi's.
+@(require_results)
+arch_system_off :: proc "contextless" () -> vx.Status {
+	return .Err_Unsupported
+}
+
 arch_has_io_ports :: proc "contextless" () -> bool {
 	return true
 }

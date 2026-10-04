@@ -13,7 +13,7 @@ USER_TOP :: Uva(0x0000_8000_0000_0000) // first address past the lower half
 USER_MAP_BASE :: Uva(0x0000_1000_0000_0000) // where as_map puts mappings it places
 USER_STACK_TOP :: Uva(0x0000_7fff_ffff_0000)
 USER_STACK_SIZE :: 256 * 1024
-TASK_MAX_IO :: 4 // I/O port ranges per task
+TASK_MAX_IO :: 32 // I/O port ranges per task (bus-acpi: one for each its AML touches)
 
 // I/O ports [base, base + count). The count is a u32 because one range may
 // hold all 65,536 ports.

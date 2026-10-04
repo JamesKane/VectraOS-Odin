@@ -359,6 +359,13 @@ Dma_Options :: bit_set[Dma_Option; u32]
 
 #assert(u32(Dma_Option.Read) == 0 && u32(Dma_Option.Write) == 1)
 
+// system_power(resource, op): the whole machine (the root Resource, .Manage).
+// .Off: through PSCI where the firmware has it (aarch64); returns,
+// .Err_Unsupported, where powering off is ACPI's (x86_64: bus-acpi enters S5).
+Power_Op :: enum u32 {
+	Off = 1,
+}
+
 Dma_Op :: enum u32 { // dma_domain_op
 	Revoke = 1,
 	Quiesced,

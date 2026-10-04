@@ -867,6 +867,34 @@ arch_devices_init :: proc "contextless" () {
 	gic_lines = min(n, 1020)
 }
 
+foreign _ {
+	vx_psci_hvc :: proc "c" (function: u64) -> u64 ---
+	vx_psci_smc :: proc "c" (function: u64) -> u64 ---
+}
+
+// PSCI SYSTEM_OFF (DEN 0022), by the conduit the FADT's ARM boot flags name
+// (hvc or smc); unsupported if they say there is no PSCI. Returns only if the
+// firmware did not power off.
+@(require_results)
+arch_system_off :: proc "contextless" () -> vx.Status {
+	PSCI_SYSTEM_OFF :: 0x8400_0008
+	PSCI_COMPLIANT :: 1
+	PSCI_USE_HVC :: 2
+	flags: u16
+	if fadt := acpi_table("FACP"); len(fadt) >= 131 {
+		flags = u16(fadt[129]) | u16(fadt[130]) << 8
+	}
+	if flags & PSCI_COMPLIANT == 0 {
+		return .Err_Unsupported
+	}
+	if flags & PSCI_USE_HVC != 0 {
+		_ = vx_psci_hvc(PSCI_SYSTEM_OFF)
+	} else {
+		_ = vx_psci_smc(PSCI_SYSTEM_OFF)
+	}
+	return .Err_Io
+}
+
 arch_has_io_ports :: proc "contextless" () -> bool {
 	return false
 }

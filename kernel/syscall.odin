@@ -387,6 +387,17 @@ sys_vmo_op :: proc "contextless" (h: vx.Handle, op, arg: u64) -> vx.Status {
 	return vmo_resize(v, arg)
 }
 
+// system_power(resource, op): the machine off, with the root Resource's .Manage.
+@(private="file", require_results)
+sys_system_power :: proc "contextless" (rh: vx.Handle, op: u64) -> vx.Status {
+	if op != u64(vx.Power_Op.Off) {
+		return .Err_Invalid
+	}
+	r := handle_get_as(current_task(), rh, Resource, {.Manage}) or_return
+	object_release(&r.obj)
+	return arch_system_off()
+}
+
 // --- Devices (device.odin) ---
 
 // irq_create(resource, line, options, &out, &msi): a line, or with {.Msi}
@@ -1252,6 +1263,8 @@ syscall_dispatch :: proc "contextless" (nr: u64, a: [6]u64) -> i64 {
 		return result(sys_pager_op(vx.Handle(a[0]), vx.Handle(a[1]), a[2], a[3], a[4], Uva(a[5])))
 	case .Vmo_Op:
 		return i64(sys_vmo_op(vx.Handle(a[0]), a[1], a[2]))
+	case .System_Power:
+		return i64(sys_system_power(vx.Handle(a[0]), a[1]))
 	case .Iorange_Create:
 		return i64(sys_iorange_create(vx.Handle(a[0]), a[1], a[2], Uva(a[3])))
 	case .Vmo_Rw:
