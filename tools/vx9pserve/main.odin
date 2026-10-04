@@ -16,7 +16,6 @@ package main
 import "core:c"
 import "core:fmt"
 import "core:os"
-import "core:strconv"
 import "core:strings"
 import "core:sys/posix"
 import "vx:p9"
@@ -100,7 +99,14 @@ listen_on :: proc(where_, dir: string) -> int {
 		return 2
 	}
 	host := strings.clone_to_cstring(where_[:colon], context.temp_allocator)
-	port, _ := strconv.parse_int(where_[colon + 1:]) // atoi's leniency: a bad port is 0
+	// As atoi reads it: the leading digits, so a bad port is 0.
+	port := 0
+	for ch in transmute([]u8)where_[colon + 1:] {
+		if ch < '0' || ch > '9' {
+			break
+		}
+		port = port * 10 + int(ch - '0')
+	}
 	a := posix.sockaddr_in {
 		sin_family = .INET,
 		sin_port   = posix.in_port_t(u16(port)),
