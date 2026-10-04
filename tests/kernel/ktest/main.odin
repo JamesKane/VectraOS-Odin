@@ -266,6 +266,20 @@ test_threads_and_calls :: proc "contextless" () {
 	wait_for_stage(&shared, 3)
 	check(intrinsics.atomic_load(&shared.stage) == 3)
 	_ = rt.handle_close(th)
+
+	// A call that times out takes back the request nobody read: the server
+	// never sees it.
+	rq := Request{n = 5}
+	reply: Request
+	call := vx.Call {
+		wr_bytes = &rq,
+		wr_len   = size_of(rq),
+		rd_bytes = &reply,
+		rd_cap   = size_of(reply),
+	}
+	check(rt.channel_call(a, &call, after_ms(5)) == .Err_Timed_Out)
+	_, st = rt.channel_read(b, memory.ptr_to_bytes(&rq))
+	check(st == .Err_Should_Wait)
 	_ = rt.handle_close(a)
 	_ = rt.handle_close(b)
 }

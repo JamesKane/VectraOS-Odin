@@ -84,7 +84,13 @@ Msg_Size :: struct { // what channel_read and channel_call report
 //   bind=OLD new=NEW [flags=F]                           vx-ns replays it
 SPAWN :: u32(0x6e77_7073) // "spwn"
 
-// channel_call's buffers: what to send, and where the reply goes.
+// channel_call's buffers: what to send, and where the reply goes. A call
+// that ends without its reply (interrupted, or past its deadline) takes back
+// its request if the server has not read it yet: it is never answered, and
+// its handles are closed. An interrupted call whose request the server has
+// read waits on for the reply, so no answer is lost; the interrupt comes when
+// the call returns. A server that holds calls answers one before
+// interrupting its caller.
 Call :: struct {
 	wr_bytes:     rawptr,
 	wr_handles:   [^]Handle,
