@@ -1,0 +1,5 @@
+# boot/svc/netd.ndb: the network service (docs/00 §3, 02 §5): TCP/IP over
+# the network driver's frames, /srv/ether0, serving /net as /srv/net.
+
+service=netd program=/boot/bin/netd post=net console restart
+connect=ether0

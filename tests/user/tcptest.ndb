@@ -1,0 +1,5 @@
+# tests/user/tcptest.ndb: the TCP test's manifest (tests/qemu/tcp.ndb).
+
+service=tcptest program=/boot/bin/tcptest console
+mount=/ srv=bootfs
+mount=/net srv=net

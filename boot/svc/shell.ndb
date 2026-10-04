@@ -1,6 +1,8 @@
 # boot/svc/shell.ndb: the console shell (docs/01 §10), in a namespace of the
-# boot image at / and the tasks at /proc. svcd starts it again when it exits.
+# boot image at /, the tasks at /proc and the network at /net. svcd starts it
+# again when it exits.
 
 service=gsh program=/boot/bin/gsh console restart
 mount=/ srv=bootfs
 mount=/proc srv=proc
+mount=/net srv=net
