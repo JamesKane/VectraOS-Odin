@@ -1,6 +1,6 @@
 # ADR-0008: compiler-rt's builtins, vendored from LLVM 22.1.8
 
-Status: proposed, 2026-10-04. The import awaits review (`reviewed.by=pending` in `third_party/VENDOR.ndb`).
+Status: accepted, 2026-10-04. The import was reviewed by James Kane, 2026-10-04 (`third_party/VENDOR.ndb`).
 
 ## Context
 

@@ -1,6 +1,6 @@
 # ADR-0007: musl, vendored unchanged, with a back end in Odin
 
-Status: proposed, 2026-10-04. Decided with the user at the start of P4; the musl import awaits review (`third_party/VENDOR.ndb`).
+Status: accepted, 2026-10-04. Decided with the user at the start of P4; the musl import was reviewed by James Kane, 2026-10-04 (`third_party/VENDOR.ndb`).
 
 ## Context
 
