@@ -208,6 +208,33 @@ MSR_FMASK :: 0xc0000084
 MSR_GS_BASE :: 0xc0000101
 MSR_KERNEL_GS_BASE :: 0xc0000102
 
+@(private="file")
+EFER_SCE :: 1 << 0 // SYSCALL and SYSRET
+@(private="file")
+EFER_NXE :: 1 << 11 // the NX bit is honoured
+@(private="file")
+CR4_TSD :: 1 << 2 // RDTSC only in ring 0
+@(private="file")
+CR4_FSGSBASE :: 1 << 16 // RDFSBASE and friends in user mode
+@(private="file")
+CPUID1_ECX_X2APIC :: 1 << 21
+@(private="file")
+CPUID1_ECX_TSC_DEADLINE :: 1 << 24
+@(private="file")
+CPUID1_ECX_XSAVE :: 1 << 26
+
+// The TSS's descriptor: the low half of a 16-byte system descriptor (the
+// high half is the base's upper 32 bits).
+@(private="file")
+Tss_Descriptor :: bit_field u64 {
+	limit_lo: u64 | 16,
+	base_lo:  u64 | 24,
+	type:     u8  | 8, // 0x89: present, a 64-bit TSS, available
+	limit_hi: u64 | 4,
+	flags:    u8  | 4,
+	base_hi:  u64 | 8,
+}
+
 arch_cpu_index :: proc "contextless" () -> u32 {
 	return percpu_ready ? u32(vx_cpu_index()) : 0
 }
@@ -255,7 +282,7 @@ build_idt :: proc "contextless" () {
 // gives for the state XCR0 enables, which entry.S's ENABLE_SIMD chose.
 @(private="file")
 simd_init :: proc "contextless" () {
-	if cpuid(1)[2] & (1 << 26) == 0 {
+	if cpuid(1)[2] & CPUID1_ECX_XSAVE == 0 {
 		kpanic("the CPU has no XSAVE, which the kernel needs for vector state (ADR-0004)")
 	}
 	size := u64(cpuid(0xd, 0)[1])
@@ -266,8 +293,7 @@ simd_init :: proc "contextless" () {
 // the shared IDT (built by the boot CPU).
 arch_cpu_init :: proc "contextless" (index: u32) {
 	xc := &x86_cpus[index]
-	// NXE: the NX bit is honoured. SCE: SYSCALL and SYSRET are enabled.
-	vx_wrmsr(MSR_EFER, vx_rdmsr(MSR_EFER) | 1 << 11 | 1 << 0)
+	vx_wrmsr(MSR_EFER, vx_rdmsr(MSR_EFER) | EFER_NXE | EFER_SCE)
 	// SYSCALL loads CS 0x08 and SS 0x10; returns go through IRETQ.
 	vx_wrmsr(MSR_STAR, u64(0x10) << 48 | u64(SEL_KERNEL_CODE) << 32)
 	vx_wrmsr(MSR_LSTAR, u64(uintptr(rawptr(syscall_entry))))
@@ -277,7 +303,7 @@ arch_cpu_init :: proc "contextless" (index: u32) {
 	vx_wrmsr(MSR_KERNEL_GS_BASE, 0)
 	// TSD off: user code may always read the cycle counter. FSGSBASE off:
 	// user code changes its FS base only through thread_state.
-	vx_write_cr4(vx_read_cr4() &~ (1 << 2 | 1 << 16))
+	vx_write_cr4(vx_read_cr4() &~ (CR4_TSD | CR4_FSGSBASE))
 	if index == 0 {
 		simd_init()
 	}
@@ -303,7 +329,7 @@ arch_cpu_init :: proc "contextless" (index: u32) {
 
 	xc.gdt = GDT_TEMPLATE
 	base, limit := u64(uintptr(&xc.tss)), u64(size_of(Tss) + size_of(xc.iomap) - 1)
-	xc.gdt[5] = limit & 0xffff | (base & 0xffffff) << 16 | 0x89 << 40 | ((limit >> 16) & 0xf) << 48 | ((base >> 24) & 0xff) << 56
+	xc.gdt[5] = transmute(u64)Tss_Descriptor{limit_lo = limit, base_lo = base, type = 0x89, limit_hi = limit >> 16, base_hi = base >> 24}
 	xc.gdt[6] = base >> 32
 	gp := Descriptor_Ptr{limit = size_of(xc.gdt) - 1, base = u64(uintptr(&xc.gdt))}
 	vx_load_gdt(&gp, SEL_TSS)
@@ -468,10 +494,10 @@ arch_counter_hz :: proc "contextless" () -> u64 {
 // legacy PICs and, without TSC-deadline mode, measures the APIC timer once.
 arch_timer_init :: proc "contextless" () {
 	features := cpuid(1)
-	if features[2] & (1 << 21) == 0 {
+	if features[2] & CPUID1_ECX_X2APIC == 0 {
 		kpanic("the CPU has no x2APIC")
 	}
-	tsc_deadline = features[2] & (1 << 24) != 0
+	tsc_deadline = features[2] & CPUID1_ECX_TSC_DEADLINE != 0
 
 	if arch_cpu_index() == 0 {
 		vx_outb(0x21, 0xff) // mask both legacy PICs: interrupts come through the APICs only
@@ -553,23 +579,37 @@ EXCEPTION_NAMES := [22]string {
 	"control protection fault",
 }
 
+// A page fault's error code.
+@(private="file")
+Pf_Cause :: enum u64 {
+	Present, // a protection violation, not a missing page
+	Write,
+	User,
+	Reserved, // a reserved bit was set in an entry
+	Fetch,
+}
+
+@(private="file")
+Pf_Error :: bit_set[Pf_Cause; u64]
+
 // Describes an exception: "page fault at 0x... (read, not present, user)", say.
 @(private="file")
 kput_exception :: proc "contextless" (f: ^Trap_Frame) {
 	switch {
 	case f.vector == 14:
+		pf := transmute(Pf_Error)f.error
 		kput("page fault at ")
 		kput_hex(vx_read_cr2())
 		access := " (read, "
-		if f.error & 2 != 0 {
+		if .Write in pf {
 			access = " (write, "
 		}
-		if f.error & 16 != 0 {
+		if .Fetch in pf {
 			access = " (execute, "
 		}
 		kput(access)
-		kput(f.error & 1 != 0 ? "protection" : "not present")
-		kput(f.error & 4 != 0 ? ", user)" : ", kernel)")
+		kput(.Present in pf ? "protection" : "not present")
+		kput(.User in pf ? ", user)" : ", kernel)")
 	case f.vector == 6 && f.cs & 3 == 0 && (cast([^]u8)uintptr(f.rip))[0] == 0x0f && (cast([^]u8)uintptr(f.rip))[1] == 0x0b:
 		// ud2: Odin's runtime trap. A bounds check or an assertion failed;
 		// its message went to a stderr that freestanding builds do not have.
@@ -742,9 +782,20 @@ arch_io_switch :: proc "contextless" (t: ^Task) {
 	xc.open = t.io
 }
 
+// An IOAPIC's two registers: a register is selected, then read or written
+// through the window.
+@(private="file")
+Ioapic_Regs :: struct {
+	sel: u32,
+	_:   [3]u32,
+	win: u32,
+}
+
+#assert(offset_of(Ioapic_Regs, win) == 0x10)
+
 @(private="file")
 Ioapic :: struct {
-	regs:     [^]u32, // IOREGSEL at 0, IOWIN at 0x10
+	regs:     ^Ioapic_Regs,
 	gsi_base: u32,
 	count:    u32,
 }
@@ -771,14 +822,14 @@ MAX_GSI :: 0x50 // up to vector 0x7f
 
 @(private="file")
 ioapic_read :: proc "contextless" (a: ^Ioapic, reg: u32) -> u32 {
-	intrinsics.volatile_store(&a.regs[0], reg)
-	return intrinsics.volatile_load(&a.regs[4])
+	intrinsics.volatile_store(&a.regs.sel, reg)
+	return intrinsics.volatile_load(&a.regs.win)
 }
 
 @(private="file")
 ioapic_write :: proc "contextless" (a: ^Ioapic, reg, v: u32) {
-	intrinsics.volatile_store(&a.regs[0], reg)
-	intrinsics.volatile_store(&a.regs[4], v)
+	intrinsics.volatile_store(&a.regs.sel, reg)
+	intrinsics.volatile_store(&a.regs.win, v)
 }
 
 // Finds the IOAPICs and the ISA overrides in the MADT, maps the IOAPICs and
@@ -797,7 +848,7 @@ arch_devices_init :: proc "contextless" () {
 			}
 			a := &ioapics[ioapic_count]
 			ioapic_count += 1
-			a.regs = cast([^]u32)phys_to_virt(pa)
+			a.regs = cast(^Ioapic_Regs)phys_to_virt(pa)
 			a.gsi_base = read32(e[8:])
 			a.count = (ioapic_read(a, 1) >> 16 & 0xff) + 1
 			for i in 0 ..< a.count {

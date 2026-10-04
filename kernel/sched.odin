@@ -18,6 +18,7 @@ import vx "abi:vx"
 // before its registers are saved.
 
 TIME_SLICE :: Instant(10_000_000)
+INFINITE :: Instant(vx.INFINITE) // a deadline that never comes
 
 Cpu :: struct {
 	index:      u32, // 0 is the boot CPU
@@ -179,9 +180,9 @@ thread_block :: proc "contextless" (deadline: Instant, leeway: Instant) -> vx.St
 		return t.wait_result
 	}
 	t.state = .Blocked
-	if deadline != Instant(vx.INFINITE) {
+	if deadline != INFINITE {
 		t.wake_at = deadline
-		t.wake_late = leeway > 0 && deadline <= Instant(vx.INFINITE) - leeway ? deadline + leeway : deadline
+		t.wake_late = leeway > 0 && deadline <= INFINITE - leeway ? deadline + leeway : deadline
 		t.sleep_cpu = c
 		link := &c.sleepers
 		for link^ != nil && link^.wake_at <= deadline {
@@ -198,14 +199,14 @@ thread_block :: proc "contextless" (deadline: Instant, leeway: Instant) -> vx.St
 // sleeper's latest acceptable wake-up, or the end of the running thread's slice.
 @(private="file")
 sched_arm_timer :: proc "contextless" (c: ^Cpu) {
-	next := Instant(vx.INFINITE)
+	next := INFINITE
 	for t := c.sleepers; t != nil; t = t.sleep_next {
 		next = min(next, t.wake_late)
 	}
 	if c.current != &c.idle {
 		next = min(next, c.slice_end)
 	}
-	if next != Instant(vx.INFINITE) {
+	if next != INFINITE {
 		timer_arm(next)
 	}
 }

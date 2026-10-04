@@ -160,17 +160,78 @@ GICR_PHYS :: 0x080a_0000
 @(private="file")
 GICR_FRAME_SIZE :: u64(0x2_0000)
 
+// The distributor's registers that the kernel uses.
+@(private="file")
+Gicd :: struct {
+	ctlr:       u32,
+	typer:      u32,
+	_:          [30]u32,
+	igroupr:    [32]u32,
+	isenabler:  [32]u32,
+	icenabler:  [32]u32,
+	_:          [128]u32, // pending and active
+	ipriorityr: [1024]u8,
+	_:          [1024]u8, // targets, unused with affinity routing
+	icfgr:      [64]u32,
+	_:          [(0x6000 - 0xd00) / 4]u32,
+	irouter:    [1020]u64, // from INTID 32; the first 32 are reserved
+}
+
+#assert(offset_of(Gicd, igroupr) == 0x080)
+#assert(offset_of(Gicd, isenabler) == 0x100)
+#assert(offset_of(Gicd, icenabler) == 0x180)
+#assert(offset_of(Gicd, ipriorityr) == 0x400)
+#assert(offset_of(Gicd, icfgr) == 0xc00)
+#assert(offset_of(Gicd, irouter) == 0x6000)
+#assert(size_of(Gicd) <= GICD_SIZE)
+
+// A redistributor's registers that the kernel uses: its RD frame, then its
+// SGI and PPI frame.
+@(private="file")
+Gicr :: struct {
+	ctlr:       u32,
+	iidr:       u32,
+	typer:      u64,
+	statusr:    u32,
+	waker:      u32,
+	_:          [(0x1_0000 - 0x18) / 4]u32,
+	_:          [32]u32,
+	igroupr0:   u32,
+	_:          [31]u32,
+	isenabler0: u32,
+	_:          [191]u32,
+	ipriorityr: [32]u8, // SGIs and PPIs
+}
+
+#assert(offset_of(Gicr, typer) == 0x08)
+#assert(offset_of(Gicr, waker) == 0x14)
+#assert(offset_of(Gicr, igroupr0) == 0x1_0080)
+#assert(offset_of(Gicr, isenabler0) == 0x1_0100)
+#assert(offset_of(Gicr, ipriorityr) == 0x1_0400)
+#assert(size_of(Gicr) <= GICR_FRAME_SIZE)
+
+@(private="file")
+gicd :: #force_inline proc "contextless" () -> ^Gicd {
+	return cast(^Gicd)uintptr(boot.hhdm + GICD_PHYS)
+}
+
 @(private="file")
 PL011_PHYS :: 0x0900_0000
+
 @(private="file")
-PL011_DR :: 0x00 / 4 // data register, as a u32 index
-@(private="file")
-PL011_FR :: 0x18 / 4 // flag register
+Pl011 :: struct {
+	dr: u32, // data
+	_:  [5]u32,
+	fr: u32, // flags
+}
+
+#assert(offset_of(Pl011, fr) == 0x18)
+
 @(private="file")
 PL011_FR_TXFF :: 1 << 5 // transmit FIFO full
 
 @(private="file")
-pl011: [^]u32
+pl011: ^Pl011
 
 arch_kernel_mappings :: proc "contextless" (root: Paddr) {
 	gicr_size := GICR_FRAME_SIZE * max(boot.cpu_count, 1)
@@ -226,7 +287,7 @@ arch_console_init :: proc "contextless" () {
 	vx_write_mair(vx_read_mair() &~ (0xff << 16)) // attribute 2 = 0x00: Device-nGnRnE
 	va := boot.hhdm + PL011_PHYS
 	if map_range(Paddr(vx_read_ttbr1() & u64(PTE_ADDR)), va, PL011_PHYS, 4096, {.Write, .Device}) {
-		pl011 = cast([^]u32)uintptr(va)
+		pl011 = cast(^Pl011)uintptr(va)
 	}
 }
 
@@ -244,8 +305,8 @@ arch_console_write :: proc "contextless" (s: string) {
 
 @(private="file")
 uart_putc :: proc "contextless" (c: u8) {
-	for intrinsics.volatile_load(&pl011[PL011_FR]) & PL011_FR_TXFF != 0 {}
-	intrinsics.volatile_store(&pl011[PL011_DR], u32(c))
+	for intrinsics.volatile_load(&pl011.fr) & PL011_FR_TXFF != 0 {}
+	intrinsics.volatile_store(&pl011.dr, u32(c))
 }
 
 // --- CPUs ---
@@ -310,17 +371,16 @@ arch_counter_hz :: proc "contextless" () -> u64 {
 // this CPU's redistributor with the timer's PPI enabled, then its interface.
 arch_timer_init :: proc "contextless" () {
 	if arch_cpu_index() == 0 {
-		gicd := cast(^u32)uintptr(boot.hhdm + GICD_PHYS)
-		intrinsics.volatile_store(gicd, 1 << 4 | 1 << 1 | 1 << 0) // GICD_CTLR: affinity routing, both groups
+		intrinsics.volatile_store(&gicd().ctlr, 1 << 4 | 1 << 1 | 1 << 0) // affinity routing, both groups
 	}
 
 	// Find this CPU's redistributor by its affinity.
 	mpidr := vx_read_mpidr()
 	aff := u32((mpidr >> 32 & 0xff) << 24 | (mpidr & 0xffffff))
-	rd: u64
+	rd: ^Gicr
 	for i in 0 ..< max(boot.cpu_count, 1) {
-		frame := boot.hhdm + GICR_PHYS + i * GICR_FRAME_SIZE
-		typer := intrinsics.volatile_load(cast(^u64)uintptr(frame + 0x08))
+		frame := cast(^Gicr)uintptr(boot.hhdm + GICR_PHYS + i * GICR_FRAME_SIZE)
+		typer := intrinsics.volatile_load(&frame.typer)
 		if u32(typer >> 32) == aff {
 			rd = frame
 			break
@@ -329,22 +389,19 @@ arch_timer_init :: proc "contextless" () {
 			break // the last redistributor
 		}
 	}
-	if rd == 0 {
+	if rd == nil {
 		kpanic("no GIC redistributor for this CPU")
 	}
 
-	waker := cast(^u32)uintptr(rd + 0x14)
-	intrinsics.volatile_store(waker, intrinsics.volatile_load(waker) &~ (1 << 1)) // clear ProcessorSleep
-	for intrinsics.volatile_load(waker) & (1 << 2) != 0 {} // wait for ChildrenAsleep to clear
+	intrinsics.volatile_store(&rd.waker, intrinsics.volatile_load(&rd.waker) &~ (1 << 1)) // clear ProcessorSleep
+	for intrinsics.volatile_load(&rd.waker) & (1 << 2) != 0 {} // wait for ChildrenAsleep to clear
 
-	sgi := rd + 0x1_0000 // the SGI and PPI frame
 	ppi := timer_ppi()
-	group := cast(^u32)uintptr(sgi + 0x080) // GICR_IGROUPR0: group 1
 	lines := u32(1) << ppi | 1 << INTID_RESCHED
-	intrinsics.volatile_store(group, intrinsics.volatile_load(group) | lines)
-	intrinsics.volatile_store(cast(^u8)uintptr(sgi + 0x400 + u64(ppi)), 0x80) // priorities
-	intrinsics.volatile_store(cast(^u8)uintptr(sgi + 0x400 + INTID_RESCHED), 0x80)
-	intrinsics.volatile_store(cast(^u32)uintptr(sgi + 0x100), lines) // GICR_ISENABLER0
+	intrinsics.volatile_store(&rd.igroupr0, intrinsics.volatile_load(&rd.igroupr0) | lines) // group 1
+	intrinsics.volatile_store(&rd.ipriorityr[ppi], 0x80)
+	intrinsics.volatile_store(&rd.ipriorityr[INTID_RESCHED], 0x80)
+	intrinsics.volatile_store(&rd.isenabler0, lines)
 	vx_gic_cpu_init()
 }
 
@@ -387,23 +444,51 @@ Trap_Frame :: struct { // the layout entry.S builds, below the vector state
 @(private="file")
 VECTOR_KINDS := [4]string{"synchronous exception", "IRQ", "FIQ", "SError"}
 
+// The exception syndrome register, and the exception classes the kernel
+// tells apart.
+@(private="file")
+Exception_Class :: enum u8 {
+	Svc64      = 0x15,
+	Iabt_Lower = 0x20, // an instruction abort from EL0
+	Iabt_Same  = 0x21,
+	Dabt_Lower = 0x24, // a data abort from EL0
+	Dabt_Same  = 0x25,
+	Brk        = 0x3c,
+}
+
+@(private="file")
+Esr :: bit_field u64 {
+	iss: u32             | 25, // the syndrome, which the class defines
+	il:  bool            | 1,
+	ec:  Exception_Class | 6,
+}
+
+// A data abort's ISS: write, not read (WnR), and the fault status code,
+// which is a translation fault at some level when its bits 5-2 are 0b0001.
+@(private="file")
+DABT_WNR :: 1 << 6
+@(private="file")
+DABT_FSC_LEVEL_MASK :: 0x3c
+@(private="file")
+DABT_FSC_TRANSLATION :: 0x04
+
 // Describes an exception: "page fault at 0x... (read, not present, user)", say.
 @(private="file")
 kput_exception :: proc "contextless" (f: ^Trap_Frame, index: u64) {
-	ec := u32(f.esr >> 26) & 0x3f
-	iss := u32(f.esr) & 0x1ffffff
+	esr := transmute(Esr)f.esr
+	sync := index & 3 == 0
 	switch {
-	case index & 3 == 0 && (ec == 0x24 || ec == 0x25): // data abort
+	case sync && (esr.ec == .Dabt_Lower || esr.ec == .Dabt_Same):
 		kput("page fault at ")
 		kput_hex(f.far)
-		kput(iss & (1 << 6) != 0 ? " (write, " : " (read, ")
-		kput(iss & 0x3c == 0x04 ? "not present" : "protection")
-		kput(ec == 0x24 ? ", user)" : ", kernel)")
-	case index & 3 == 0 && (ec == 0x20 || ec == 0x21):
+		kput(esr.iss & DABT_WNR != 0 ? " (write, " : " (read, ")
+		kput(esr.iss & DABT_FSC_LEVEL_MASK == DABT_FSC_TRANSLATION ? "not present" : "protection")
+		kput(esr.ec == .Dabt_Lower ? ", user)" : ", kernel)")
+	case sync && (esr.ec == .Iabt_Lower || esr.ec == .Iabt_Same):
 		kput("page fault at ")
 		kput_hex(f.far)
 		kput(" (execute)")
-	case index & 3 == 0 && ec == 0x3c && iss & 0xffff == 1:
+	case sync && esr.ec == .Brk && esr.iss & 0xffff == 1:
 		// brk #1: Odin's runtime trap. A bounds check or an assertion failed;
 		// its message went to a stderr that freestanding builds do not have.
 		kput("Odin runtime trap (a bounds check or assertion failed)")
@@ -478,17 +563,14 @@ arch_enter_user :: proc "contextless" (entry, sp: Uva, arg, arg2, kstack_top: u6
 // The frame entry.S builds: Trap_Frame, then q0-q31, FPCR and FPSR.
 TRAP_FRAME_SIZE :: size_of(Trap_Frame) + 32 * 16 + 16
 
-@(private="file")
-EC_SVC64 :: 0x15
-
 @(export, link_name="aarch64_trap")
 aarch64_trap :: proc "c" (f: ^Trap_Frame, index: u64) {
 	from_user := index >= 8
-	ec := u32(f.esr >> 26) & 0x3f
+	esr := transmute(Esr)f.esr
 	switch {
 	case index & 3 == 1: // IRQ
 		aarch64_irq()
-	case from_user && index & 3 == 0 && ec == EC_SVC64:
+	case from_user && index & 3 == 0 && esr.ec == .Svc64:
 		f.x[0] = u64(syscall_dispatch(f.x[8], {f.x[0], f.x[1], f.x[2], f.x[3], f.x[4], f.x[5]}))
 	case from_user:
 		task_fault_start()
@@ -530,13 +612,8 @@ arch_clobber_vregs :: proc "contextless" () {
 @(private="file")
 gic_lines: u32 // INTIDs below this exist
 
-@(private="file")
-gicd_reg :: proc "contextless" (off: u64) -> ^u32 {
-	return cast(^u32)uintptr(boot.hhdm + GICD_PHYS + off)
-}
-
 arch_devices_init :: proc "contextless" () {
-	n := 32 * ((intrinsics.volatile_load(gicd_reg(0x004)) & 0x1f) + 1) // GICD_TYPER.ITLinesNumber
+	n := 32 * ((intrinsics.volatile_load(&gicd().typer) & 0x1f) + 1) // ITLinesNumber
 	gic_lines = min(n, 1020)
 }
 
@@ -559,15 +636,15 @@ arch_irq_canonical :: proc "contextless" (line: u32) -> (u32, vx.Status) {
 }
 
 arch_irq_route :: proc "contextless" (line: u32) -> (level: bool, st: vx.Status) {
+	d := gicd()
 	bit := u32(1) << (line % 32)
-	g := gicd_reg(0x080 + 4 * u64(line / 32)) // GICD_IGROUPR: group 1
+	g := &d.igroupr[line / 32] // group 1
 	intrinsics.volatile_store(g, intrinsics.volatile_load(g) | bit)
-	intrinsics.volatile_store(cast(^u8)uintptr(boot.hhdm + GICD_PHYS + 0x400 + u64(line)), 0x80) // GICD_IPRIORITYR
-	c := gicd_reg(0xc00 + 4 * u64(line / 16)) // GICD_ICFGR: level-triggered
+	intrinsics.volatile_store(&d.ipriorityr[line], 0x80)
+	c := &d.icfgr[line / 16] // level-triggered
 	intrinsics.volatile_store(c, intrinsics.volatile_load(c) &~ (2 << (line % 16 * 2)))
-	route := cast(^u64)uintptr(boot.hhdm + GICD_PHYS + 0x6000 + 8 * u64(line)) // GICD_IROUTER
-	intrinsics.volatile_store(route, cpus[0].arch_id & 0xff_00ff_ffff)
-	intrinsics.volatile_store(gicd_reg(0x100 + 4 * u64(line / 32)), bit) // GICD_ISENABLER
+	intrinsics.volatile_store(&d.irouter[line], cpus[0].arch_id & 0xff_00ff_ffff)
+	intrinsics.volatile_store(&d.isenabler[line / 32], bit)
 	return true, .Ok
 }
 
@@ -575,6 +652,7 @@ arch_irq_mask :: proc "contextless" (line: u32, masked: bool) {
 	if line < 32 || line >= gic_lines {
 		return
 	}
-	off: u64 = masked ? 0x180 : 0x100 // GICD_ICENABLER or GICD_ISENABLER
-	intrinsics.volatile_store(gicd_reg(off + 4 * u64(line / 32)), u32(1) << (line % 32))
+	d := gicd()
+	reg := masked ? &d.icenabler[line / 32] : &d.isenabler[line / 32]
+	intrinsics.volatile_store(reg, u32(1) << (line % 32))
 }

@@ -114,9 +114,11 @@ smp_init :: proc "contextless" () {
 		cpus[index].index = index
 		cpus[index].arch_id = id
 		cpus[index].idle_stack = stack
-		top := cast([^]u64)uintptr(stack + KSTACK_SIZE)
-		(top[-1:])[0] = u64(index)
-		info.extra_argument = u64(uintptr(rawptr(&(top[-2:])[0]))) // ap_start: sp = this, and its index just above
+		// ap_start sets sp to the stack's last 16 bytes, and finds its index in
+		// the upper eight.
+		top := cast(^[2]u64)uintptr(stack + KSTACK_SIZE - 16)
+		top[1] = u64(index)
+		info.extra_argument = u64(uintptr(top))
 		intrinsics.atomic_store_explicit(&info.goto_address, rawptr(ap_start), .Release)
 	}
 	give_up := clock_now() + 1_000_000_000

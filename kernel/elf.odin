@@ -50,7 +50,7 @@ elf_load :: proc "contextless" (t: ^Task, image: []u8) -> (entry: Uva, st: vx.St
 	   eh.machine != ELF_MACHINE || eh.phentsize != size_of(Elf64_Phdr) || o1 || o2 || table_end > size {
 		return 0, .Err_Invalid
 	}
-	ph := (cast([^]Elf64_Phdr)&image[eh.phoff])[:eh.phnum]
+	ph := (cast([^]Elf64_Phdr)raw_data(image[eh.phoff:table_end]))[:eh.phnum]
 	for p in ph {
 		if p.type != PT_LOAD || p.memsz == 0 {
 			continue
