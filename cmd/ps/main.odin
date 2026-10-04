@@ -5,6 +5,7 @@ import "vx:ns"
 import "vx:p9"
 import "vx:procns"
 import "vx:rt"
+import "vx:str"
 
 space: ns.Namespace
 buf: [4096]u8
@@ -31,17 +32,15 @@ main :: proc() -> int {
 				break
 			}
 			off += size + 2
-			path: [64]u8
-			if len(entry.name) > len(path) - 14 {
+			path_buf: [64]u8
+			path, fits := str.join(path_buf[:], "/proc/", entry.name, "/status")
+			if !fits {
 				continue
 			}
-			copy(path[:], "/proc/")
-			copy(path[6:], entry.name)
-			copy(path[6 + len(entry.name):], "/status")
 			f: ns.File
 			status: [256]u8
 			got := 0
-			if ns.open(&space, string(path[:13 + len(entry.name)]), p9.OREAD, &f) == .Ok {
+			if ns.open(&space, path, p9.OREAD, &f) == .Ok {
 				got, _ = ns.read(&f, status[:])
 				ns.close(&f)
 			}
