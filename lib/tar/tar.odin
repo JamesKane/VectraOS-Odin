@@ -16,6 +16,8 @@
 // build tool share it.
 package tar
 
+import vx "abi:vx"
+
 BLOCK :: 512
 
 // prefix (155), '/', name (100). Upstream says 255 and keeps a NUL after the
@@ -44,14 +46,6 @@ Header :: struct {
 }
 #assert(size_of(Header) == BLOCK)
 
-// The subset of the ABI's status codes this package returns, with the same
-// values, so a caller converts with vx.Status(s).
-Status :: enum i32 {
-	Ok            = 0,
-	Err_Invalid   = -4,
-	Err_Not_Found = -15,
-}
-
 // path points into buf, so it is valid only while this Entry is where next
 // or find filled it in.
 Entry :: struct {
@@ -77,7 +71,7 @@ open :: proc "contextless" (image: []u8) -> Reader {
 // the end of the image); Err_Invalid at a bad header, and for every call
 // after it.
 @(require_results)
-next :: proc "contextless" (t: ^Reader, e: ^Entry) -> Status {
+next :: proc "contextless" (t: ^Reader, e: ^Entry) -> vx.Status {
 	e^ = {}
 	if t.failed {
 		return .Err_Invalid
@@ -149,9 +143,9 @@ next :: proc "contextless" (t: ^Reader, e: ^Entry) -> Status {
 // Finds a file or directory by path. Err_Not_Found if the archive (up to any
 // bad header) has none.
 @(require_results)
-find :: proc "contextless" (image: []u8, path: string, out: ^Entry) -> Status {
+find :: proc "contextless" (image: []u8, path: string, out: ^Entry) -> vx.Status {
 	t := open(image)
-	st: Status
+	st: vx.Status
 	for st = next(&t, out); st == .Ok; st = next(&t, out) {
 		if out.path == path {
 			return .Ok

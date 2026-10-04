@@ -7,6 +7,7 @@ package tar_test
 import "core:encoding/hex"
 import "core:testing"
 import "vx:sha256"
+import vx "abi:vx"
 import "vx:tar"
 
 IMAGE :: 64 * 1024
@@ -168,7 +169,7 @@ put_octal :: proc(f: []u8, v: u64) {
 	}
 }
 
-first_entry :: proc(image: []u8, n: int) -> tar.Status {
+first_entry :: proc(image: []u8, n: int) -> vx.Status {
 	r := tar.open(image[:n])
 	e: tar.Entry
 	return tar.next(&r, &e)
