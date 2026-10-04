@@ -25,15 +25,22 @@ MCR :: 4
 LSR :: 5
 MSR :: 6
 
-IER_RX :: 0x01 // data received
-IER_TX :: 0x02 // transmitter empty
+// The interrupts the IER enables.
+Ier_Bit :: enum u8 {
+	Rx, // data received
+	Tx, // transmitter empty
+}
+Ier :: bit_set[Ier_Bit;u8]
+
 LSR_DATA :: 0x01
 LSR_THRE :: 0x20
 IIR_NONE :: 0x01 // no interrupt pending
 FIFO_SIZE :: 16
 
+// The driver serves one port, so its state is here rather than behind
+// driver.Cons's dev pointer, which the callbacks ignore.
 base: u16
-ier: u8 = IER_RX
+ier := Ier{.Rx}
 irq: vx.Handle
 cons: driver.Cons
 server: p9ring.Server
@@ -47,16 +54,19 @@ tx_byte :: proc "contextless" (dev: rawptr, b: u8) {
 }
 
 tx_wanted :: proc "contextless" (dev: rawptr, on: bool) {
-	want := u8(on ? IER_RX | IER_TX : IER_RX)
+	want := on ? Ier{.Rx, .Tx} : Ier{.Rx}
 	if want != ier {
 		ier = want
-		rt.outb(base + IER, ier)
+		rt.outb(base + IER, transmute(u8)ier)
 	}
 }
 
 // Everything the port has pending, until the IIR says there is nothing left.
 service :: proc "contextless" () {
-	for rounds := 0; rounds < 64 && rt.inb(base + IIR) & IIR_NONE == 0; rounds += 1 {
+	for _ in 0 ..< 64 {
+		if rt.inb(base + IIR) & IIR_NONE != 0 {
+			break
+		}
 		for rt.inb(base + LSR) & LSR_DATA != 0 {
 			driver.cons_input(&cons, rt.inb(base + RBR))
 		}
@@ -78,31 +88,37 @@ event :: proc "contextless" (ctx: rawptr, pk: ^vx.Packet) {
 	_ = rt.port_bind(server.port, irq, .Irq, p9ring.KEY_USER)
 }
 
+// Maps io, the port's I/O range, whose first port the spawn message's
+// ioport= record gives, and sets base to it.
+@(require_results)
+map_ports :: proc "contextless" (io: vx.Handle) -> bool {
+	rec: ndb.Record
+	rt.spawn_record("ioport", &rec) or_return
+	port := ndb.get_u64(&rec, "ioport") or_return
+	if port > 0xfff8 {
+		return false
+	}
+	if _, st := rt.as_map(rt.self, io, 0, 0, {}); st != .Ok {
+		return false
+	}
+	base = u16(port)
+	return true
+}
+
 @(export, link_name="vx_main")
 main :: proc() -> int {
 	io := rt.spawn_take("ioport")
 	irq = rt.spawn_take("irq")
 	server.listen = rt.spawn_take("listen")
-	rec: ndb.Record
-	port: u64
-	ok := io != 0 && irq != 0 && server.listen != 0 && rt.spawn_record("ioport", &rec)
-	if ok {
-		port, ok = ndb.get_u64(&rec, "ioport")
-	}
-	if ok {
-		_, st := rt.as_map(rt.self, io, 0, 0, {})
-		ok = port <= 0xfff8 && st == .Ok
-	}
-	if !ok {
+	if io == vx.HANDLE_NONE || irq == vx.HANDLE_NONE || server.listen == vx.HANDLE_NONE || !map_ports(io) {
 		rt.print("drv-uart-16550: no port, IRQ or listen channel\n")
 		return 1
 	}
-	base = u16(port)
 
 	rt.outb(base + IER, 0)
 	rt.outb(base + FCR, 0xc7) // FIFOs on and cleared, interrupt at 14 bytes
 	rt.outb(base + MCR, 0x0b) // DTR, RTS, and OUT2, which gates the IRQ on a PC
-	rt.outb(base + IER, ier)
+	rt.outb(base + IER, transmute(u8)ier)
 	cons = {tx_room = tx_room, tx_byte = tx_byte, tx_wanted = tx_wanted}
 	driver.cons_print_here(&cons)
 	server.fs = driver.cons_fs(&cons)
