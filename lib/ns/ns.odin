@@ -392,7 +392,7 @@ unmount :: proc "contextless" (ns: ^Namespace, new, old: string) -> vx.Status {
 		clear(&e.path)
 	}
 	for &c, slot in ns.conns { // a connection no member uses any more is let go
-		if c.client == nil || conn_mounted(ns, u8(slot)) {
+		if c.client == nil || conn_used(ns, u8(slot)) {
 			continue
 		}
 		if ns.release != nil {
@@ -403,16 +403,18 @@ unmount :: proc "contextless" (ns: ^Namespace, new, old: string) -> vx.Status {
 	return removed ? .Ok : .Err_Not_Found
 }
 
-// Whether any member is a mount of the connection in slot. (A bind into it
-// does not keep it: upstream lets it go all the same.)
+// Whether any member, mounted or bound, holds a fid on the connection in
+// slot. (Upstream's M3 counts only mounts, so it lets a connection go that a
+// bind still uses, and the next walk through that bind follows a null
+// client; tests/host/ns has the case.)
 @(private="file")
-conn_mounted :: proc "contextless" (ns: ^Namespace, slot: u8) -> bool {
+conn_used :: proc "contextless" (ns: ^Namespace, slot: u8) -> bool {
 	for &e in ns.entries {
 		if len(e.path) == 0 {
 			continue
 		}
 		for &m in e.members {
-			if m.mounted && m.conn == slot {
+			if m.conn == slot {
 				return true
 			}
 		}

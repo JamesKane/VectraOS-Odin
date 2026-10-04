@@ -383,3 +383,29 @@ test_replay_and_release :: proc(t: ^testing.T) {
 	testing.expect_value(t, ns.create(parent, "/", 0o644, p9.OWRITE, &f), vx.Status.Err_Invalid)
 	testing.expect_value(t, used_fids(&fx.dev_srv), before) // the failed creates clunked what they walked to
 }
+
+// Not upstream's: a connection that only a bind still uses is kept when its
+// mount goes. (Upstream's M3 lets it go, and the walk below follows a null
+// client.)
+@(test)
+test_release_keeps_bound :: proc(t: ^testing.T) {
+	space := new(ns.Namespace)
+	defer free(space)
+	fx := fixture(t)
+	defer free(fx)
+	space.release = count_bound_release
+	testing.expect_value(t, ns.mount(space, &fx.boot_c, vx.HANDLE_NONE, "/srv/bootfs", "", "/", {}), vx.Status.Ok)
+	testing.expect_value(t, ns.mount(space, &fx.dev_c, vx.HANDLE_NONE, "/srv/cons", "", "/dev", {}), vx.Status.Ok)
+	testing.expect_value(t, ns.bind(space, "/dev", "/bin", {}), vx.Status.Ok)
+	testing.expect_value(t, ns.unmount(space, "", "/dev"), vx.Status.Ok)
+	testing.expect_value(t, sync.atomic_load(&bound_released), 0) // /bin still holds a fid on the cons connection
+	testing.expect_value(t, list(space, "/bin"), "cons null")
+	testing.expect_value(t, ns.unmount(space, "", "/bin"), vx.Status.Ok)
+	testing.expect_value(t, sync.atomic_load(&bound_released), 1)
+}
+
+bound_released: int // how many times count_bound_release ran: test_release_keeps_bound's alone
+
+count_bound_release :: proc "contextless" (c: ^p9.Client, connector: vx.Handle) {
+	sync.atomic_add(&bound_released, 1)
+}
