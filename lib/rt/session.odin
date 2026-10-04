@@ -17,13 +17,33 @@ import "vx:ring"
 // The reply flag that says a session was refused.
 SESSION_REFUSED :: u32(1)
 
-// Maps a ring's memory into this task and attaches to it as one side.
+// Maps a ring's memory into this task and attaches to it as one side. A ring
+// it will not attach to is unmapped again.
 @(require_results)
-session_map :: proc "contextless" (mem: vx.Handle, side: ring.Side, params: vx.Ring_Params, r: ^ring.Ring) -> vx.Status {
+session_map :: proc "contextless" (mem: vx.Handle, side: ring.Side, params: vx.Ring_Params, r: ^ring.Ring) -> (st: vx.Status) {
 	layout := ring.layout(params) or_return
 	base := as_map(self, mem, 0, layout.size, {.Write}) or_return
-	// The mapping stays for the life of the task until as_unmap lands.
+	defer if st != .Ok {
+		unmap_memory(base, layout.size)
+	}
 	return ring.attach(r, (cast([^]u8)uintptr(base))[:layout.size], side, params)
+}
+
+// A session is over: its ring's memory leaves this task's address space, and
+// the ring is left detached, so every operation on it fails.
+session_unmap :: proc "contextless" (r: ^ring.Ring) {
+	if r.memory != nil {
+		unmap_memory(u64(uintptr(raw_data(r.memory))), u64(len(r.memory)))
+	}
+	r^ = {}
+}
+
+// vx:rt's as_unmap wrapper comes with the kernel's M4 port; until then, the
+// call itself, as lib/procns makes it. What the kernel says is ignored: there
+// is nothing a caller letting memory go could do about a failure.
+@(private)
+unmap_memory :: proc "contextless" (base, size: u64) {
+	_ = vx_syscall(.As_Unmap, u64(self), base, size)
 }
 
 // Opens a session through `connector` (a post's client end, which stays the
