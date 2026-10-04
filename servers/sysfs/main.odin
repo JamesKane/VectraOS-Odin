@@ -46,30 +46,12 @@ PARENT := [File]File {
 	.Now   = .Clock,
 }
 
-// clock_read(&info)'s answer (upstream abi.h's vx_clock_info), which abi:vx
-// does not declare yet: the counter's frequency, and what kind it is.
-@(private="file")
-Clock_Flag :: enum u32 {
-	Invariant, // one rate in every power state
-	User, // readable in user mode
-	Tsc, // x86_64's TSC
-	Cntvct, // aarch64's virtual counter
-}
-
-@(private="file")
-Clock_Info :: struct {
-	counter_hz: u64,
-	flags:      bit_set[Clock_Flag;u32],
-	reserved:   u32,
-}
-#assert(size_of(Clock_Info) == 16)
-
-// clock_read with an argument fills it in; vx:rt does not wrap that half yet,
-// so the call itself, as vx:prof makes it.
+// clock_read(&info)'s answer: the counter's frequency, what kind it is, and
+// the wall clock's offset.
 @(private="file", require_results)
-clock_info_read :: proc "contextless" (info: ^Clock_Info) -> vx.Status {
-	r := rt.vx_syscall(.Clock_Read, u64(uintptr(info)))
-	return r < 0 ? vx.Status(r) : .Ok
+clock_info_read :: proc "contextless" (info: ^vx.Clock_Info) -> (st: vx.Status) {
+	info^, st = rt.clock_info()
+	return
 }
 
 @(private="file")
@@ -133,7 +115,7 @@ fs_read :: proc "contextless" (ctx: rawptr, n: p9.Node, offset: u64, buf: []u8) 
 	text: [256]u8
 	w := ndb.Writer{buf = text[:]}
 	f := file_of(n)
-	info: Clock_Info
+	info: vx.Clock_Info
 	now := rt.clock_read()
 	if f == .Info && clock_info_read(&info) == .Ok {
 		tsc := .Tsc in info.flags

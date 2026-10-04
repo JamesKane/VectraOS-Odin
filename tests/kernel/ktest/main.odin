@@ -1109,6 +1109,19 @@ test_devices :: proc "contextless" () {
 	when ODIN_ARCH == .amd64 {
 		check(rt.system_power(res, .Off) == .Err_Unsupported)
 	}
+
+	// And of clock_set (upstream's M5 step 7d): no wall clock until it is
+	// set, with the root Resource's MANAGE; then UTC from clock_read.
+	before, _ := rt.clock_info()
+	check(.Utc not_in before.flags && before.utc_offset == 0)
+	UTC :: i64(1_759_500_000) * 1_000_000_000 // 2025-10-03
+	check(rt.clock_set(res, 0) == .Err_Invalid)
+	check(rt.clock_set(weak, UTC) == .Err_Access)
+	check(rt.clock_set(res, UTC) == .Ok)
+	after, _ := rt.clock_info()
+	check(.Utc in after.flags && after.utc_offset != 0)
+	utc := rt.clock_utc()
+	check(utc >= UTC && utc < UTC + 10_000_000_000)
 	rt.close_all(weak, res)
 }
 

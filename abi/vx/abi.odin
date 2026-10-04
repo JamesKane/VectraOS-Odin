@@ -11,13 +11,19 @@ HANDLE_NONE :: Handle(0)
 
 // clock_read(): the time on the monotonic clock. clock_read(&info): the same,
 // and the cycle counter it is made from, for /sys/clock/info: its frequency
-// (the clock is counter * 10^9 / counter_hz, exactly), and flags. User code
-// may always read the counter: rdtsc, or mrs cntvct_el0.
+// (the clock is counter * 10^9 / counter_hz, exactly), and flags; and the
+// wall clock, as UTC's offset from the monotonic clock (UTC in ns since 1970
+// = monotonic + utc_offset), with .Utc once something has set it (upstream's
+// ADR-0031). User code may always read the counter: rdtsc, or mrs cntvct_el0.
+//
+// clock_set(resource, utc): the wall clock set to utc (ns since 1970, now),
+// with the root Resource's .Manage: devmgr, from a clock driver.
 Clock_Flag :: enum u32 {
 	Invariant, // one rate in every power state
 	User, // readable in user mode
 	Tsc, // x86_64's TSC
 	Cntvct, // aarch64's virtual counter
+	Utc, // utc_offset has been set: there is a wall clock
 }
 Clock_Flags :: bit_set[Clock_Flag; u32]
 
@@ -25,9 +31,10 @@ Clock_Info :: struct {
 	counter_hz: u64,
 	flags:      Clock_Flags,
 	reserved:   u32,
+	utc_offset: i64, // 0 until .Utc
 }
 
-#assert(size_of(Clock_Info) == 16)
+#assert(size_of(Clock_Info) == 24)
 INFINITE :: Instant(max(i64)) // a deadline that never comes
 
 // Every right, and handle_dup's "the rights the handle has": bit 31, which

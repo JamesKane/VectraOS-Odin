@@ -387,6 +387,18 @@ sys_vmo_op :: proc "contextless" (h: vx.Handle, op, arg: u64) -> vx.Status {
 	return vmo_resize(v, arg)
 }
 
+// clock_set(resource, utc): the wall clock, with the root Resource's .Manage.
+@(private="file", require_results)
+sys_clock_set :: proc "contextless" (rh: vx.Handle, utc: i64) -> vx.Status {
+	if utc <= 0 {
+		return .Err_Invalid
+	}
+	r := handle_get_as(current_task(), rh, Resource, {.Manage}) or_return
+	object_release(&r.obj)
+	clock_set_utc(utc)
+	return .Ok
+}
+
 // system_power(resource, op): the machine off, with the root Resource's .Manage.
 @(private="file", require_results)
 sys_system_power :: proc "contextless" (rh: vx.Handle, op: u64) -> vx.Status {
@@ -1079,6 +1091,10 @@ sys_task_exec :: proc "contextless" (sh, bootstrap: vx.Handle, entry, sp: Uva) -
 @(private="file", require_results)
 sys_clock_info :: proc "contextless" (out: Uva) -> (now: Instant, st: vx.Status) {
 	info := vx.Clock_Info{counter_hz = clock.hz, flags = arch_counter_flags()}
+	if intrinsics.atomic_load(&wall_clock.utc_set) {
+		info.flags += {.Utc}
+		info.utc_offset = intrinsics.atomic_load(&wall_clock.utc_offset)
+	}
 	copy_out(out, &info) or_return
 	return clock_now(), .Ok
 }
@@ -1263,6 +1279,8 @@ syscall_dispatch :: proc "contextless" (nr: u64, a: [6]u64) -> i64 {
 		return result(sys_pager_op(vx.Handle(a[0]), vx.Handle(a[1]), a[2], a[3], a[4], Uva(a[5])))
 	case .Vmo_Op:
 		return i64(sys_vmo_op(vx.Handle(a[0]), a[1], a[2]))
+	case .Clock_Set:
+		return i64(sys_clock_set(vx.Handle(a[0]), i64(a[1])))
 	case .System_Power:
 		return i64(sys_system_power(vx.Handle(a[0]), a[1]))
 	case .Iorange_Create:
