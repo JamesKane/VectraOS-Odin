@@ -1,0 +1,26 @@
+# tests/qemu/cons.ndb: the user-space console (M2, step 5). Typed lines reach
+# constest through the UART driver's IRQ and cooked line discipline, with
+# erase (BS and DEL) and kill-line (^U); 300 lines of output overflow the
+# driver's queue, so writes wait for the UART; ^D on an empty line is the end
+# of the file. The shell is left out, as it would read the console too.
+
+scenario=cons timeout=20 with=constest cmdline=vx.skip=gsh
+expect="constest: ready"
+send="hello world"
+expect="constest: got [hello world]"
+# "typoo", BS, DEL, "e", return
+type=x"7479706f6f087f650d"
+expect="constest: got [type]"
+# "junk", ^U, "good", return
+type=x"6a756e6b15676f6f640d"
+expect="constest: got [good]"
+send="flood"
+expect="constest: line 0 "
+expect="constest: line 299 "
+expect="constest: flood done"
+type=x"04"
+expect="constest: end of file"
+expect="svcd: constest exited with status 0"
+fail="vx: panic"
+fail="FAILED"
+fail="killed"

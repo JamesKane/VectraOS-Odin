@@ -107,13 +107,14 @@ run_scenario :: proc(a: ^Arch, mode: Mode, name: string) -> bool {
 		return true
 	}
 
+	file_name, _ := strings.replace_all(name, "/", "-", context.temp_allocator) // m2/shell -> m2-shell
 	image := image_path(a, mode)
 	if sc.cmdline != "" {
-		image = fmt.tprintf("%s/test-%s.img", out_dir(a, mode), name)
+		image = fmt.tprintf("%s/test-%s.img", out_dir(a, mode), file_name)
 	}
 	build_image(a, mode, image, sc.cmdline) or_return
 
-	log_path := fmt.tprintf("%s/test-%s.log", out_dir(a, mode), name)
+	log_path := fmt.tprintf("%s/test-%s.log", out_dir(a, mode), file_name)
 	log, lerr := os.create(log_path)
 	if lerr != nil {
 		fmt.eprintfln("build: cannot write %s", log_path)

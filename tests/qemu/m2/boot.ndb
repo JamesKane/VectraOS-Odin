@@ -1,0 +1,15 @@
+# tests/qemu/boot.ndb: M1's exit test (docs/04 §5), as M2 left it. The kernel
+# boots and reports itself; then svcd, the first user task, starts the console
+# driver, after which everything here comes through it, and then bootfs.
+# (svcd's M1 checks of ports and VMOs are in ktest now.)
+
+scenario=boot timeout=10
+expect="vx: kernel 0.1.0 $arch, "
+expect="svcd: hello from user space (task 1)"
+expect=": serving /srv/cons"
+expect="svcd: started uart (task 2)"
+expect="svcd: started bootfs (task 3)"
+expect="bootfs: serving "
+fail="vx: panic"
+fail="killed"
+fail="FAILED"

@@ -60,6 +60,11 @@ main :: proc() {
 		}
 	}
 	set_source_date_epoch()
+	// abi_gen.odin is build's output, not the repository's: make it before
+	// anything compiles against abi:vx.
+	if command != "abi" && command != "loc" && command != "vendor-check" && !gen_abi(".") {
+		os.exit(1)
+	}
 
 	ok := false
 	switch command {
@@ -116,10 +121,11 @@ cmd_test :: proc(arches: []^Arch, mode: Mode, names: []string) -> bool {
 	names := names
 	if len(names) == 0 {
 		all := make([dynamic]string, context.temp_allocator)
-		files, _ := tree_files("tests/qemu")
+		// The top level only: tests/qemu/m2 and the like are run by name.
+		files, _ := os.read_directory_by_path("tests/qemu", -1, context.temp_allocator)
 		for f in files {
-			if strings.has_suffix(f, ".ndb") {
-				append(&all, filepath.stem(f))
+			if f.type == .Regular && strings.has_suffix(f.name, ".ndb") {
+				append(&all, strings.clone(filepath.stem(f.name), context.temp_allocator))
 			}
 		}
 		slice.sort(all[:])
@@ -148,7 +154,7 @@ cmd_check :: proc() -> bool {
 			continue
 		}
 		fmt.eprintfln("  HOST  %s", d.name)
-		c := cmd_make(ODIN, "test", fmt.tprintf("tests/host/%s", d.name), "-collection:vx=lib", "-vet", "-strict-style", "-warnings-as-errors", "-sanitize:address", fmt.tprintf("-out:out/host/%s", d.name))
+		c := cmd_make(ODIN, "test", fmt.tprintf("tests/host/%s", d.name), "-collection:vx=lib", "-collection:abi=abi", "-vet", "-strict-style", "-warnings-as-errors", "-sanitize:address", fmt.tprintf("-out:out/host/%s", d.name))
 		make_dirs("out/host") or_return
 		ok = run(c[:]) && ok
 	}

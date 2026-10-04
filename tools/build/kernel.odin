@@ -23,6 +23,7 @@ KERNEL_ODIN_FLAGS := []string {
 	"-strict-style",
 	"-warnings-as-errors",
 	"-collection:vx=lib",
+	"-collection:abi=abi",
 	// Reproducible IR: the threaded checker numbers entities and orders debug
 	// metadata differently from one run to the next.
 	"-no-threaded-checker",

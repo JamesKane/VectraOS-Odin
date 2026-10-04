@@ -1,0 +1,18 @@
+# tests/qemu/ns.ndb: M2's namespace path (step 4). svcd starts bootfs and
+# nstest from their manifests; nstest builds its namespace from its spawn
+# message, over ring connections to bootfs, and checks what it sees. svcd
+# restarts it each time it exits, until its restart limit.
+
+scenario=ns timeout=15 with=nstest cmdline=vx.skip=gsh
+# Expected in this order, which nothing races: bootfs announces itself before
+# it serves, and nstest's checks need it served.
+expect="svcd: started bootfs (task "
+expect="bootfs: serving "
+expect="bind -a /boot/bin /bin"
+expect=" checks, 0 failed"
+expect="svcd: nstest exited with status 0"
+expect="svcd: nstest keeps exiting; it is not restarted again"
+fail="vx: panic"
+fail="FAILED"
+fail="killed"
+fail="malformed"
