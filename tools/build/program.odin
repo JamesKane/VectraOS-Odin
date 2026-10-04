@@ -57,6 +57,8 @@ PROGRAMS := []Program {
 	{name = "drv-uart-16550", dir = "drivers/drv-uart-16550", place = .Bootfs, only = {.X86_64}},
 	{name = "drv-uart-pl011", dir = "drivers/drv-uart-pl011", place = .Bootfs, only = {.AArch64}},
 	{name = "drv-virtio-net", dir = "drivers/drv-virtio-net", place = .Bootfs},
+	{name = "ctest", source = "tests/posix/ctest.c", place = .Tests, kind = .C},
+	{name = "sbasetest", source = "tests/posix/sbasetest.c", place = .Tests, kind = .C},
 }
 
 program_path :: proc(a: ^Arch, mode: Mode, name: string) -> string {
@@ -80,27 +82,15 @@ program_for :: proc(p: Program, a: ^Arch) -> bool {
 	return p.only == {} || a.kind in p.only
 }
 
-build_programs :: proc(a: ^Arch, mode: Mode) -> bool {
-	sysroot: Maybe(Sysroot) // built for the first C program
+// Every program for an architecture: the Odin ones, then the POSIX ones
+// (build_posix: the C programs here, and the ports' programs), linked against
+// the back end, or with backend_override the objects in it.
+build_programs :: proc(a: ^Arch, mode: Mode, backend_override := "") -> bool {
 	for p in PROGRAMS {
-		if !program_for(p, a) {
-			continue
-		}
-		switch p.kind {
-		case .Odin:
+		if p.kind == .Odin && program_for(p, a) {
 			build_program(a, mode, p) or_return
-		case .C:
-			if sysroot == nil {
-				ps := posix_load() or_return
-				sysroot = build_sysroot(&ps, a, mode) or_return
-			}
-			s := sysroot.?
-			if !s.linkable {
-				fmt.eprintfln("build: %s is a C program, and there is no musl back end to link it (%s)", p.name, BACKEND_PKG)
-				return false
-			}
-			build_c_program(s, a, mode, p) or_return
 		}
 	}
-	return true
+	ps := posix_load() or_return
+	return build_posix(&ps, a, mode, backend_override)
 }

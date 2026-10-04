@@ -675,23 +675,18 @@ box_main :: proc(p: ^Port, box: string) -> string {
 	return strings.to_string(b)
 }
 
-// The C programs that are built but not yet in PROGRAMS: they need the back
-// end to link, and no image holds them until it exists (ADR-0007).
-C_PROGRAMS := []Program {
-	{name = "ctest", source = "tests/posix/ctest.c", place = .Tests, kind = .C},
-	{name = "sbasetest", source = "tests/posix/sbasetest.c", place = .Tests, kind = .C},
-}
-
-// Everything POSIX for one architecture and mode: the sysroot, the C test
-// fixtures, and the ports' programs. Without a back end the C is compiled,
-// and nothing is linked.
+// Everything POSIX for one architecture and mode: the sysroot, the C
+// programs in PROGRAMS (the test fixtures), and the ports' programs (Lua and
+// sbase). Without a back end the C is compiled, and nothing is linked.
 build_posix :: proc(ps: ^Posix_Ports, a: ^Arch, mode: Mode, backend_override := "") -> bool {
 	s := build_sysroot(ps, a, mode, backend_override) or_return
 	if !s.linkable {
 		fmt.eprintfln("  NOTE  %s: no musl back end (%s): C programs compiled, not linked", a.name, BACKEND_PKG)
 	}
-	for p in C_PROGRAMS {
-		build_c_program(s, a, mode, p) or_return
+	for p in PROGRAMS {
+		if p.kind == .C && program_for(p, a) {
+			build_c_program(s, a, mode, p) or_return
+		}
 	}
 	build_port_programs(&ps.lua, s, a, mode) or_return
 	build_port_programs(&ps.sbase, s, a, mode) or_return

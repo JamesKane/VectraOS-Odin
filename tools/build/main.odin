@@ -104,7 +104,6 @@ main :: proc() {
 		case "all":
 			// A port that does not load has said why; the kernels still build.
 			limine, loaded := port_load("limine")
-			posix, posix_loaded := posix_load()
 			for a in arches {
 				runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 				lok := loaded
@@ -112,9 +111,8 @@ main :: proc() {
 					_, lok = build_port_target(&limine, a.limine)
 				}
 				_, kok := build_kernel(a, mode)
-				pok := kok && build_programs(a, mode)
-				cok := posix_loaded && build_posix(&posix, a, mode, backend_override)
-				ok = ok && lok && kok && pok && cok
+				pok := kok && build_programs(a, mode, backend_override)
+				ok = ok && lok && kok && pok
 			}
 			// The host tools' sources compile with the rest, once they are there.
 			if os.is_dir(VX9PSERVE_SRC) {
