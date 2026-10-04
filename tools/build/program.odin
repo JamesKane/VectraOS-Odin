@@ -35,6 +35,7 @@ PROGRAMS := []Program {
 	{name = "ktest", dir = "tests/kernel/ktest", place = .Module},
 	{name = "bootfs", dir = "servers/bootfs", place = .Bootfs},
 	{name = "nstest", dir = "tests/user/nstest", place = .Tests},
+	{name = "dreftest", dir = "tests/user/dreftest", place = .Tests},
 	{name = "constest", dir = "tests/user/constest", place = .Tests},
 	{name = "nettest", dir = "tests/user/nettest", place = .Tests},
 	{name = "tcptest", dir = "tests/user/tcptest", place = .Tests},
@@ -60,8 +61,11 @@ PROGRAMS := []Program {
 	{name = "drv-uart-16550", dir = "drivers/drv-uart-16550", place = .Bootfs, only = {.X86_64}},
 	{name = "drv-uart-pl011", dir = "drivers/drv-uart-pl011", place = .Bootfs, only = {.AArch64}},
 	{name = "drv-virtio-net", dir = "drivers/drv-virtio-net", place = .Bootfs},
+	{name = "fsd", dir = "servers/fsd", place = .Bootfs},
 	{name = "ctest", source = "tests/posix/ctest.c", place = .Tests, kind = .C},
+	{name = "ctestfsd", source = "tests/posix/ctest.c", place = .Tests, kind = .C}, // ctest again, with /tmp on fsd
 	{name = "sbasetest", source = "tests/posix/sbasetest.c", place = .Tests, kind = .C},
+	{name = "maptest", source = "tests/posix/maptest.c", place = .Tests, kind = .C},
 	// dbg's fixture, as upstream builds it but against musl: its own
 	// functions are optnone, and the house flags give -g and frame pointers.
 	// Its lib/vx-rt/rt.c is this tree's stand-in for upstream's runtime.
