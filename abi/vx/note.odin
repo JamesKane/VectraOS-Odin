@@ -30,6 +30,9 @@ trap_note :: proc "contextless" (kind: Exception_Kind, code: u32, address, pc: u
 		note_put(&b, "sys: trap: fp disabled")
 	case .Step:
 		note_put(&b, "sys: trap: step")
+	case .Pager_Timeout: // its pager did not supply the page in time
+		note_put(&b, "sys: trap: page not supplied")
+		has_address = true
 	case:
 		note_put(&b, "sys: trap: general fault")
 	}

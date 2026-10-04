@@ -85,7 +85,7 @@ find_root_module :: proc "contextless" () {
 CHANNEL_END_RIGHTS :: vx.Rights{.Read, .Write, .Wait, .Signal, .Duplicate, .Transfer, .Inspect}
 
 @(private="file")
-ROOT_RESOURCE_RIGHTS :: vx.Rights{.Manage, .Duplicate, .Transfer, .Inspect}
+ROOT_RESOURCE_RIGHTS :: vx.Rights{.Manage, .Pager, .Duplicate, .Transfer, .Inspect}
 @(private="file")
 READ_ONLY_RIGHTS :: vx.Rights{.Read, .Map, .Duplicate, .Transfer, .Inspect} // the boot image and the ACPI tables
 

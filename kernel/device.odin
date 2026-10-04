@@ -100,7 +100,7 @@ vmo_create_physical :: proc "contextless" (pa: Paddr, size: u64) -> (vmo: ^Vmo, 
 	v := vmo_alloc(size / PAGE_SIZE) or_return
 	v.physical = true
 	for &page, i in v.pages {
-		page = pa + Paddr(i * PAGE_SIZE)
+		page = page_of(pa + Paddr(i * PAGE_SIZE))
 	}
 	if arch_console_device(false, u64(pa), size) {
 		console_hand_off()
@@ -314,7 +314,9 @@ dma_map :: proc "contextless" (d: ^Dma_Domain, v: ^Vmo, offset, size: u64, addre
 		return 0, .Err_No_Memory
 	}
 	first := offset / PAGE_SIZE
-	copy(addresses, v.pages[first:][:size / PAGE_SIZE])
+	for &a, i in addresses[:size / PAGE_SIZE] {
+		a = vmo_page(v, first + u64(i))
+	}
 	return slot, .Ok
 }
 

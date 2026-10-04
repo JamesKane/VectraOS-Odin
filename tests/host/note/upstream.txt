@@ -42,10 +42,10 @@ trap 10 0 sys: trap: general fault pc=0x280a000
 trap 10 1 sys: trap: general fault pc=0x280a000
 trap 10 2 sys: trap: general fault pc=0x280a000
 trap 10 3 sys: trap: general fault pc=0x280a000
-trap 11 0 sys: trap: general fault pc=0x2c0b000
-trap 11 1 sys: trap: general fault pc=0x2c0b000
-trap 11 2 sys: trap: general fault pc=0x2c0b000
-trap 11 3 sys: trap: general fault pc=0x2c0b000
+trap 11 0 sys: trap: page not supplied addr=0xdeadbeef000 pc=0x2c0b000
+trap 11 1 sys: trap: page not supplied addr=0xdeadbeef001 pc=0x2c0b000
+trap 11 2 sys: trap: page not supplied addr=0xdeadbeef002 pc=0x2c0b000
+trap 11 3 sys: trap: page not supplied addr=0xdeadbeef003 pc=0x2c0b000
 cut 0 0 []
 cut 1 1 [a]
 cut 2 2 [ab]

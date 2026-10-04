@@ -1306,6 +1306,8 @@ handler :: proc "c" (e: ^vx.Exception) -> ! {
 		intrinsics.atomic_add(&in_task.handled[e.kind], 1)
 	}
 	#partial switch e.kind {
+	case .Pager_Timeout: // the page, late: supplied now, and the access made again
+		_ = rt.pager_supply(late.pager, late.vmo, 0, 4096, late.src, 0)
 	case .Page_Fault:
 		_, _ = rt.as_map(rt.self, in_task.missing, 0, 4096, {}, e.address &~ 4095) // then the load is retried
 	case .Breakpoint:
@@ -1393,6 +1395,235 @@ note_handler :: proc "contextless" (e: ^vx.Exception, note: string) -> rt.Noted 
 	_ = append(&noted, note)
 	rt.fp_probe_put(0, FP_CTL_DEFAULT) // the entry gives back the thread's own
 	return .Cont
+}
+
+// --- Pagers ---
+
+Toucher :: struct {
+	at:   ^u64,
+	seen: u64,
+	done: bool,
+}
+
+touch_page :: proc "c" (unused: vx.Handle, arg: u64) -> ! {
+	t := cast(^Toucher)uintptr(arg)
+	intrinsics.atomic_store(&t.seen, intrinsics.volatile_load(t.at)) // waits for the pager
+	intrinsics.atomic_store(&t.done, true)
+	rt.thread_exit()
+}
+
+// Starts a thread that reads the word at `at`, which waits for the pager.
+start_toucher :: proc "contextless" (t: ^Toucher, at: u64) -> (th: vx.Handle) {
+	t^ = {at = cast(^u64)uintptr(at)}
+	st: vx.Status
+	th, st = rt.thread_create(rt.self)
+	check(st == .Ok)
+	check(rt.thread_start(th, u64(uintptr(rawptr(touch_page))), new_stack(), 0, u64(uintptr(t))) == .Ok)
+	return
+}
+
+// Waits up to a second for the toucher to finish.
+toucher_done :: proc "contextless" (t: ^Toucher) -> bool {
+	for i := 0; i < 1000 && !intrinsics.atomic_load(&t.done); i += 1 {
+		_ = rt.futex_wait(&never, 0, after_ms(1))
+	}
+	return intrinsics.atomic_load(&t.done)
+}
+
+// The root Resource, looked at but left in the spawn message for test_devices.
+root_resource :: proc "contextless" () -> vx.Handle {
+	for name, i in rt.spawn.handle_names[:rt.spawn.handle_count] {
+		if name == "resource" {
+			return rt.spawn.handles[i]
+		}
+	}
+	return vx.HANDLE_NONE
+}
+
+word_at :: proc "contextless" (at: u64) -> u64 {
+	return intrinsics.volatile_load(cast(^u64)uintptr(at))
+}
+
+set_word :: proc "contextless" (at, value: u64) {
+	intrinsics.volatile_store(cast(^u64)uintptr(at), value)
+}
+
+// A word of a VMO, through vmo_rw.
+vmo_word :: proc "contextless" (vmo: vx.Handle, offset: u64) -> (got: u64, st: vx.Status) {
+	st = rt.vmo_read(vmo, offset, memory.ptr_to_bytes(&got))
+	return
+}
+
+Late :: struct {
+	pager, vmo, src: vx.Handle, // what the handler supplies a late page from
+}
+
+late: Late
+
+test_pager :: proc "contextless" () {
+	res := root_resource()
+	port, pst := rt.port_create()
+	check(res != vx.HANDLE_NONE && pst == .Ok)
+	// Only a Resource handle with PAGER (or the root one) makes a pager.
+	weak, _ := rt.handle_dup(res, {.Inspect})
+	_, st := rt.pager_create(weak, port, 1, 1_000_000_000)
+	check(st == .Err_Access)
+	_ = rt.handle_close(weak)
+	weak, _ = rt.handle_dup(res, {.Pager, .Duplicate})
+	pager: vx.Handle
+	pager, st = rt.pager_create(weak, port, 42, 2_000_000_000)
+	check(st == .Ok)
+	_ = rt.handle_close(weak)
+	vmo: vx.Handle
+	vmo, st = rt.vmo_create_pager(pager, 77, 16384)
+	check(st == .Ok)
+	src, sst := rt.vmo_create(16384)
+	check(sst == .Ok)
+	pattern := [4]u64{0x1111, 0x2222, 0x3333, 0x4444}
+	for &p, i in pattern {
+		check(rt.vmo_write(src, u64(i) * 4096, memory.ptr_to_bytes(&p)) == .Ok)
+	}
+	got: u64
+	_, st = vmo_word(vmo, 0)
+	check(st == .Err_Should_Wait) // nothing supplied yet
+	// Page 0 supplied before it is mapped: there at once.
+	check(rt.pager_supply(pager, vmo, 0, 4096, src, 0) == .Ok)
+	at, mst := rt.as_map(rt.self, vmo, 0, 16384, {.Write})
+	check(mst == .Ok)
+	check(word_at(at) == 0x1111)
+	// Page 1, touched by a thread: the pager is asked, once, and the thread waits until it supplies.
+	@(static) t: Toucher
+	th := start_toucher(&t, at + 4096)
+	pk: [1]vx.Packet
+	n: int
+	n, _ = rt.port_wait(port, after_ms(2000), 0, pk[:])
+	check(n == 1)
+	check(pk[0].key == 42 && pk[0].trigger == .Pager && pk[0].source == 77)
+	check(vx.pager_offset(pk[0].value) == 4096 && vx.pager_pages(pk[0].value) == 1)
+	_ = rt.futex_wait(&never, 0, after_ms(20))
+	check(!intrinsics.atomic_load(&t.done)) // waiting, not failed
+	check(rt.pager_supply(pager, vmo, 4096, 4096, src, 4096) == .Ok)
+	check(toucher_done(&t) && intrinsics.atomic_load(&t.seen) == 0x2222)
+	_ = rt.handle_close(th)
+	// A page supplied twice keeps the first; a write goes to the page and stays.
+	check(rt.pager_supply(pager, vmo, 0, 4096, src, 4096) == .Ok && word_at(at) == 0x1111)
+	set_word(at + 8, 0x5555)
+	got, st = vmo_word(vmo, 8)
+	check(st == .Ok && got == 0x5555)
+	// Refusals: a range past the end, a supply from another pager's VMO, a clone.
+	check(rt.pager_supply(pager, vmo, 16384, 4096, src, 0) == .Err_Range)
+	check(rt.pager_supply(pager, vmo, 8192, 4096, vmo, 0) == .Err_Unsupported)
+	_, st = rt.vmo_clone(vmo, 0, 4096)
+	check(st == .Err_Unsupported)
+	// Dirty pages: a write marks one, CLEAN clears it (and the next write
+	// marks it again), and what was written stays.
+	ranges: [vx.PAGER_RANGES]vx.Pager_Range
+	dirty :: proc "contextless" (pager, vmo: vx.Handle, offset, size: u64, ranges: ^[vx.PAGER_RANGES]vx.Pager_Range) -> int {
+		count, dst := rt.pager_dirty(pager, vmo, offset, size, ranges)
+		return dst == .Ok ? count : -1
+	}
+	check(rt.pager_op(pager, vmo, .Clean, 0, 16384) == .Ok)
+	check(dirty(pager, vmo, 0, 16384, &ranges) == 0)
+	check(word_at(at + 4096) == 0x2222) // a read dirties nothing
+	check(dirty(pager, vmo, 0, 16384, &ranges) == 0)
+	set_word(at + 4096 + 16, 0x6666)
+	check(dirty(pager, vmo, 0, 16384, &ranges) == 1 && ranges[0] == {offset = 4096, size = 4096})
+	set_word(at + 24, 0x7777) // page 0 too: two pages, one range
+	check(dirty(pager, vmo, 0, 16384, &ranges) == 1 && ranges[0] == {offset = 0, size = 8192})
+	check(rt.pager_op(pager, vmo, .Clean, 4096, 4096) == .Ok)
+	check(dirty(pager, vmo, 0, 16384, &ranges) == 1 && ranges[0] == {offset = 0, size = 4096})
+	check(word_at(at + 4096 + 16) == 0x6666) // cleaned, not lost
+	set_word(at + 4096 + 32, 0x8888) // and written again: dirty again
+	check(dirty(pager, vmo, 4096, 4096, &ranges) == 1)
+	// EVICT frees clean pages, never dirty ones: page 1 cleaned and evicted
+	// is asked for again when touched; page 0, dirty, stays.
+	check(rt.pager_op(pager, vmo, .Clean, 4096, 4096) == .Ok)
+	check(rt.pager_op(pager, vmo, .Evict, 0, 16384) == .Ok)
+	_, st = vmo_word(vmo, 4096)
+	check(st == .Err_Should_Wait)
+	got, st = vmo_word(vmo, 24)
+	check(st == .Ok && got == 0x7777)
+	th = start_toucher(&t, at + 4096)
+	n, _ = rt.port_wait(port, after_ms(2000), 0, pk[:])
+	check(n == 1 && vx.pager_offset(pk[0].value) == 4096)
+	check(rt.pager_supply(pager, vmo, 4096, 4096, src, 4096) == .Ok)
+	check(toucher_done(&t) && intrinsics.atomic_load(&t.seen) == 0x2222) // as supplied again
+	_ = rt.handle_close(th)
+	// Resizing: grown, the new pages absent; shrunk, the pages past the end gone.
+	check(rt.vmo_resize(vmo, 32768) == .Err_Access) // the pager's to resize, not a writer's
+	check(rt.pager_resize(pager, vmo, 32768) == .Ok)
+	_, st = vmo_word(vmo, 20480)
+	check(st == .Err_Should_Wait)
+	check(rt.pager_supply(pager, vmo, 20480, 4096, src, 0) == .Ok)
+	got, st = vmo_word(vmo, 20480)
+	check(st == .Ok && got == 0x1111)
+	check(rt.pager_resize(pager, vmo, 8192) == .Ok)
+	_, st = vmo_word(vmo, 8192)
+	check(st == .Err_Range)
+	_, st = rt.as_map(rt.self, vmo, 8192, 4096, {}) // a mapping past the new end is refused
+	check(st == .Err_Range)
+	got, st = vmo_word(vmo, 24)
+	check(st == .Ok && got == 0x7777) // what is kept, kept
+	check(rt.vmo_resize(src, 8192) == .Err_Unsupported) // anonymous: not yet
+	_, st = rt.pager_dirty(pager, src, 0, 4096, &ranges)
+	check(st == .Err_Invalid) // not its VMO
+	// A request the port has no room for is not lost: asked again once there is.
+	check(rt.pager_op(pager, vmo, .Clean, 4096, 4096) == .Ok)
+	check(rt.pager_op(pager, vmo, .Evict, 4096, 4096) == .Ok)
+	filled := 0
+	for filler := (vx.Packet{key = 999}); filled < 1000 && rt.port_post(port, &filler) == .Ok; filled += 1 {}
+	check(filled > 0 && filled < 1000)
+	th = start_toucher(&t, at + 4096)
+	_ = rt.futex_wait(&never, 0, after_ms(20)) // its request refused, and tried again
+	drained := 0
+	for drained < filled {
+		if k, _ := rt.port_wait(port, after_ms(100), 0, pk[:]); k != 1 || pk[0].key != 999 {
+			break
+		}
+		drained += 1
+	}
+	check(drained == filled)
+	n, _ = rt.port_wait(port, after_ms(2000), 0, pk[:])
+	check(n == 1 && pk[0].key == 42 && vx.pager_offset(pk[0].value) == 4096)
+	check(rt.pager_supply(pager, vmo, 4096, 4096, src, 4096) == .Ok)
+	check(toucher_done(&t) && intrinsics.atomic_load(&t.seen) == 0x2222)
+	_ = rt.handle_close(th)
+	// vmo_rw writes dirty a page as a store does.
+	check(rt.pager_op(pager, vmo, .Clean, 0, 8192) == .Ok)
+	got = 0x9999
+	check(rt.vmo_write(vmo, 4096 + 40, memory.ptr_to_bytes(&got)) == .Ok)
+	check(dirty(pager, vmo, 0, 8192, &ranges) == 1 && ranges[0].offset == 4096)
+	// IDLE: not while it is mapped, nor while another handle has it; then yes.
+	idle :: proc "contextless" (pager, vmo: vx.Handle) -> bool {
+		yes, ist := rt.pager_idle(pager, vmo)
+		return ist == .Ok && yes
+	}
+	check(!idle(pager, vmo))
+	check(rt.as_unmap(rt.self, at, 16384) == .Ok)
+	other, _ := rt.handle_dup(vmo, vx.RIGHTS_SAME)
+	check(!idle(pager, vmo))
+	_ = rt.handle_close(other)
+	check(idle(pager, vmo))
+	_ = rt.handle_close(vmo)
+
+	// A deadline missed: the thread takes PAGER_TIMEOUT, its handler supplies
+	// the page late, and the access is made again.
+	quick: vx.Handle
+	quick, st = rt.pager_create(res, port, 43, 30_000_000) // 30 ms
+	check(st == .Ok)
+	late.vmo, st = rt.vmo_create_pager(quick, 78, 4096)
+	check(st == .Ok)
+	late.pager, late.src = quick, src
+	at, mst = rt.as_map(rt.self, late.vmo, 0, 4096, {})
+	check(mst == .Ok)
+	check(rt.exception_bind(rt.self, vx.HANDLE_NONE, u64(uintptr(rawptr(handler))), {.In_Task}) == .Ok)
+	check(word_at(at) == 0x1111) // after the timeout, from the handler's supply
+	check(rt.exception_bind(rt.self, vx.HANDLE_NONE, 0, {.In_Task}) == .Ok)
+	check(intrinsics.atomic_load(&in_task.handled[.Pager_Timeout]) == 1)
+	n, _ = rt.port_wait(port, after_ms(100), 0, pk[:])
+	check(n == 1 && pk[0].key == 43 && pk[0].source == 78)
+	check(rt.as_unmap(rt.self, at, 4096) == .Ok)
+	rt.close_all(late.vmo, quick, pager, src, port)
 }
 
 test_vmo_clone :: proc "contextless" () {
@@ -1918,6 +2149,7 @@ vx_main :: proc() -> int {
 	test_nested_channels()
 	test_rings()
 	test_vmo_rw()
+	test_pager()
 	test_devices()
 	rt.print("ktest: ", u64(checks), " checks, ", u64(failures), failures != 0 ? " FAILED\n" : " failed\n")
 	port, _ := rt.port_create()

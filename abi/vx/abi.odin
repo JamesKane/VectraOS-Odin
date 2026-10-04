@@ -59,6 +59,7 @@ Trigger :: enum u32 {
 	Exit, // a task has ended; value: its exit string's length (0: success)
 	Irq, // an Irq has fired since it was last bound; value: how many times in all
 	Exception, // a thread stopped at an exception (exception_bind); value: its thread id
+	Pager, // a page request (pager_create): source the VMO's key, value its range (pager_offset, pager_pages)
 }
 
 // The intents a thread declares. Until scheduling contexts land, every thread
@@ -259,10 +260,81 @@ Cqe :: struct #align (32) { // the generic completion entry, 32 bytes
 //   iorange_create(resource, base, count, &out)
 //       x86_64 only: I/O ports, which a task may use once as_map has been
 //       called with the IoRange in place of a VMO (offset, size and flags 0)
+//
+// Pagers: a trusted task's supply of pages for VMOs, as fsd backs mmap of
+// files. Only a task svcd marked a pager has a Resource handle with .Pager
+// (or the root one), which pager_create needs.
+//
+//   pager_create(resource, port, key, deadline_ns, &out)
+//       a Pager: page requests go to port as packets (key, trigger .Pager,
+//       source the VMO's key, value a range: pager_offset, pager_pages),
+//       and a fault waits deadline_ns for its page before the thread takes
+//       a .Pager_Timeout exception
+//   vmo_create(size, {.Pager}, &out, pager, key)
+//       a VMO whose pages the pager supplies, none yet; key (32 bits) names
+//       it in requests. A fault on a page it has not supplied asks for it
+//       (once, however many fault) and waits. vmo_rw on one is
+//       .Err_Should_Wait; vmo_clone and dma_map refuse such a VMO
+//       (.Err_Unsupported). A forked task shares its mappings of it, rather
+//       than copying them.
+//   pager_supply(pager, vmo, offset, size, source, source_offset)
+//       the VMO's pages [offset, offset + size) from an anonymous VMO's:
+//       copied in where the VMO has none (a supplied page stays as it is),
+//       and the threads that wait on them woken
+//   pager_op(pager, vmo, op, offset, size, ranges)
+//       .Dirty: the range's written pages, as at most PAGER_RANGES
+//       Pager_Range into ranges; returns how many. A page is mapped
+//       read-only until it is written, and dirty from then on.
+//       .Clean: the range's pages clean, and write-protected in every
+//       mapping. Clean, then read, then write back: a write before the
+//       clean is in what is read, one after it is dirty again.
+//       .Evict: the range's clean pages freed; a touch asks again.
+//       .Idle: 1 if the caller's handle is the VMO's only reference (no
+//       other handle, no mapping), else 0: the pager may let it go.
+//       .Resize (offset 0, size the new size): the VMO's new size; pages
+//       past it leave every mapping and are freed (a touch there is an
+//       ordinary fault), pages added absent. The pager's alone.
+//   vmo_op(vmo, .Resize, size)
+//       an anonymous VMO's new size: not yet (.Err_Unsupported). A
+//       pager-backed one is its pager's to resize (pager_op .Resize):
+//       .Err_Access
 Vmo_Option :: enum u32 { // vmo_create
 	Physical,
+	Pager,
 }
 Vmo_Options :: bit_set[Vmo_Option; u32]
+
+#assert(u32(Vmo_Option.Physical) == 0 && u32(Vmo_Option.Pager) == 1)
+
+Pager_Op :: enum u32 { // pager_op
+	Dirty = 1,
+	Clean,
+	Evict,
+	Idle,
+	Resize,
+}
+
+Vmo_Resize_Op :: enum u32 { // vmo_op
+	Resize = 1,
+}
+
+PAGER_RANGES :: 64 // pager_op(.Dirty)'s most
+
+Pager_Range :: struct {
+	offset, size: u64,
+}
+
+#assert(size_of(Pager_Range) == 16)
+
+// A page request's range, in its packet's value: the first byte's offset
+// (page-aligned) and how many pages, less one, in the low 12 bits.
+pager_offset :: #force_inline proc "contextless" (value: u64) -> u64 {
+	return value &~ 4095
+}
+
+pager_pages :: #force_inline proc "contextless" (value: u64) -> u64 {
+	return (value & 4095) + 1
+}
 
 Irq_Option :: enum u32 { // irq_create
 	Msi,
@@ -463,6 +535,9 @@ Exception_Kind :: enum u32 {
 	// it watches. x86_64 stops after the access, aarch64 before it (resuming
 	// touches it again: step it with the watchpoint off).
 	Watchpoint,
+	// A pager-backed page not supplied by its pager's deadline; address: the
+	// page, code: read 0, write 1, execute 2 (POSIX's SIGBUS).
+	Pager_Timeout,
 }
 
 Exception :: struct {

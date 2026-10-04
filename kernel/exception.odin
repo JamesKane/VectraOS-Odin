@@ -121,13 +121,23 @@ exception_port :: proc "contextless" (t: ^Task, first: bool) -> (p: ^Port, key: 
 exception_raise :: proc "contextless" (f: ^Trap_Frame, kind: vx.Exception_Kind, code: u32, address: u64) -> bool {
 	th := this_cpu().current
 	t := th.task
+	e_kind, e_address := kind, address
+	if kind == .Page_Fault { // a pager's page, perhaps: taken in before anyone sees a fault
+		switch pager_fault(address, code) {
+		case .Mapped, .Killed:
+			return true // made again; or user_return ends it
+		case .Timeout:
+			e_kind, e_address = .Pager_Timeout, address &~ (PAGE_SIZE - 1)
+		case .Not_Mine:
+		}
+	}
 	if kind == .Step {
 		arch_frame_step(f, false) // one instruction, done
 	}
 	e := vx.Exception {
-		kind    = kind,
+		kind    = e_kind,
 		code    = code,
-		address = address,
+		address = e_address,
 		thread  = th.id,
 		regs    = arch_frame_regs(f),
 	}
@@ -687,9 +697,9 @@ mapping_privatize :: proc "contextless" (t: ^Task, m: ^Mapping) -> (old: ^Vmo, s
 	dup := vmo_create(m.size) or_return
 	mf := user_map_flags(m.flags, false)
 	for off := u64(0); off < m.size; off += PAGE_SIZE {
-		copy(page_bytes(dup.pages[off / PAGE_SIZE]), page_bytes(m.vmo.pages[(m.offset + off) / PAGE_SIZE]))
+		copy(page_bytes(vmo_page(dup, off / PAGE_SIZE)), page_bytes(vmo_page(m.vmo, (m.offset + off) / PAGE_SIZE)))
 		unmap_page(t.root, u64(m.va) + off)
-		if !map_range(t.root, u64(m.va) + off, dup.pages[off / PAGE_SIZE], PAGE_SIZE, mf) {
+		if !map_range(t.root, u64(m.va) + off, vmo_page(dup, off / PAGE_SIZE), PAGE_SIZE, mf) {
 			st = .Err_No_Memory
 		}
 	}
@@ -729,6 +739,10 @@ mem_op :: proc "contextless" (t: ^Task, op: ^vx.Mem_Op, shoot: ^bool, released: 
 			return .Err_Invalid // nothing there
 		case m.vmo.physical:
 			return .Err_Unsupported // device memory
+		case m.vmo.pager != nil && bool(op.write):
+			return .Err_Unsupported // a pager's pages: read only those it supplied
+		case m.vmo.pager != nil && vmo_page(m.vmo, (m.offset + u64(Uva(at) - m.va)) / PAGE_SIZE) == 0:
+			return .Err_Should_Wait
 		case bool(op.write) && .Write not_in m.flags && !m.privatized:
 			if len(released) == MEM_OPS_MAX {
 				return .Err_No_Memory // too many copies at once: the caller may try again
@@ -737,7 +751,7 @@ mem_op :: proc "contextless" (t: ^Task, op: ^vx.Mem_Op, shoot: ^bool, released: 
 			_ = append(released, old)
 			shoot^ = true
 		}
-		page := page_bytes(m.vmo.pages[(m.offset + u64(Uva(at) - m.va)) / PAGE_SIZE])[at % PAGE_SIZE:][:n]
+		page := page_bytes(vmo_page(m.vmo, (m.offset + u64(Uva(at) - m.va)) / PAGE_SIZE))[at % PAGE_SIZE:][:n]
 		user := Uva(op.buffer + done)
 		if op.write {
 			copy_from_user(raw_data(page), user, n) or_return
@@ -788,14 +802,14 @@ sys_vmo_clone :: proc "contextless" (h: vx.Handle, offset, size, options: u64, o
 	defer object_release(&src.obj)
 	end, overflow := intrinsics.overflow_add(offset, size)
 	switch {
-	case src.physical:
+	case src.physical || src.pager != nil: // device memory, or pages a pager has not all supplied
 		return .Err_Unsupported
 	case size == 0 || (offset | size) & (PAGE_SIZE - 1) != 0 || overflow || end > src.size:
 		return .Err_Range
 	}
 	dup := vmo_create(size) or_return
-	for &pa, i in dup.pages {
-		copy(page_bytes(pa), page_bytes(src.pages[offset / PAGE_SIZE + u64(i)]))
+	for i in 0 ..< size / PAGE_SIZE {
+		copy(page_bytes(vmo_page(dup, i)), page_bytes(vmo_page(src, offset / PAGE_SIZE + i)))
 	}
 	return return_handle(&dup.obj, vx.ALL_RIGHTS - {.Debug}, out) // as vmo_create
 }
