@@ -1,6 +1,6 @@
 # ADR-0004: Vector state in the kernel
 
-Status: proposed, 2026-10-03.
+Status: accepted, 2026-10-04: implemented in P1 for kernel traps (`kernel/arch/*/entry.S`), tested by `tests/qemu/simd.ndb`. Per-thread save areas arrive with threads in P2.
 
 ## Context
 
@@ -19,7 +19,8 @@ The Odin kernel uses vector registers, and accounts for them:
   - aarch64: `q0`–`q31`, `FPCR` and `FPSR`.
 - **Save areas are budgeted.** Each thread's area comes from a typed pool charged to its task's budget (no general allocator). Areas are 64-byte aligned, and every kernel stack is 16-byte aligned at each call into Odin.
 - **Context switch** saves and restores the full set. On x86_64, `vzeroupper` at the user/kernel transitions avoids AVX-to-SSE penalties.
-- **Tests:** a ktest fills user vector registers with a pattern and checks them across syscalls, IRQs, preemption and migration between CPUs; a scenario drives an IRQ storm during vector-heavy kernel paths. `./build bench` reports entry cost.
+- **Tests:** `vx.selftest=simd` (`tests/qemu/simd.ndb`) fills every vector register with a pattern and keeps it live across eight timer interrupts, each of which wipes every vector register; only the trap path's save and restore bring the pattern back (512 bytes: ymm0-15 or q0-31). With the restore removed, the test fails on both architectures. With threads (P2), a ktest checks user vector registers across syscalls, preemption and migration. `./build bench` reports entry cost.
+- **Unlike upstream,** x86_64 sets CR4.OSXSAVE and enables AVX in XCR0, so user code may use AVX from the start; the kernel saves what XCR0 enables, sized by CPUID leaf 0Dh at boot.
 
 ## Consequences
 

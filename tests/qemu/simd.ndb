@@ -1,0 +1,8 @@
+# tests/qemu/simd.ndb: this tree's own scenario (not upstream's). The kernel
+# computes with vector registers across timer interrupts, whose entry saves
+# and restores the vector state (ADR-0004), and gets the right lanes.
+
+scenario=simd timeout=10 cmdline=vx.selftest=simd
+expect="vx: kernel 0.1.0 $arch, "
+expect="vx: selftest simd ok"
+fail="vx: panic"

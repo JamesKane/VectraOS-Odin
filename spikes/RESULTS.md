@@ -31,10 +31,16 @@ _2026-10-03, macOS host (Apple M4 Max), Odin `dev-2026-09:a2fb372b7`, LLVM 22.1.
 - **Odin's IR is not reproducible by default.** The threaded checker numbers entities and orders debug metadata differently from run to run, and the debug info records the wall-clock time as `ODIN_COMPILE_TIMESTAMP` (ignoring `SOURCE_DATE_EPOCH`). `build` passes `-no-threaded-checker -thread-count:1` and rewrites that one constant to `SOURCE_DATE_EPOCH` in the IR before `llc`. Kernels and disk images are then byte-identical between builds.
 - **`core:os` process API:** a `nil` `stdin` in `Process_Desc` closes the child's input rather than inheriting it; pass `os.stdin` to inherit. Slice literals appended inside a loop alias one stack array: build command lines with an allocated `[dynamic]string`.
 
+## Found during P1
+
+- **`foreign` variables are broken in freestanding ELF builds:** Odin emits `weak dllimport externally_initialized global` with no initializer, which `llc` rejects. Workaround in ADR-0003 (Odin-owned `@(export)` data; address-only symbols as foreign procedures).
+- **Globals are not `dso_local`,** so aarch64 code reaches some through a `.got` even at `-relocation-model=static`. An unplaced `.got` landed after the boot stack, outside the kernel's mappings, and the first access faulted inside a panic loop. The linker scripts now put `.got` in `.data`.
+- **Procedure-local statics are numbered nondeterministically** (`proc-.state-4433`), even with the single-threaded checker. `build` renumbers them per module in the IR.
+- **Symbol names:** polymorphic and some runtime procedures carry their signature in the symbol (`response:proc"contextless"(...)`), and file-private ones a file prefix (`[main.odin]::selftests`). The kernel's symbol map trims both, so backtraces read like upstream's (`kernel_main_on_kstack+0x88`).
+- **Odin's runtime trap** after a failed bounds check is `ud2` (x86_64) or `brk #1` (aarch64); its message goes to a freestanding stderr that discards it. The trap handler names it.
+
 ## Not yet covered
 
-- SMP: secondary CPUs must enable FP and SIMD in their own entry before Odin code (ADR-0004).
-- Interrupts (not just a synchronous trap), nesting, preemption and migration in the vector-state test. These belong to P1's ktest.
-- XSAVE area sizing from CPUID leaf 0xD (the spike uses a fixed 4 KiB on the stack) and XSAVEOPT.
-- Bounds-check failure procedures routed to `panic`.
+- Preemption and migration in the vector-state test: they need threads (P2). (SMP entry, asynchronous interrupts and XSAVE sizing from CPUID leaf 0Dh are done in P1.)
+- XSAVEOPT or XSAVES in place of XSAVE, behind a benchmark.
 - The Fedora 44 host.

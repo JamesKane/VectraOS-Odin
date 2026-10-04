@@ -72,17 +72,90 @@ build_kernel :: proc(a: ^Arch, mode: Mode) -> (elf: string, ok: bool) {
 	}
 	run_parallel(cmds[:]) or_return
 
-	ld := cmd_make(LLD, "-nostdlib", "-static", "-z", "max-page-size=0x1000", "--build-id", "-T", fmt.tprintf("kernel/linker/%s.ld", a.name), "-o", elf)
-	append(&ld, ..objs[:])
-	run(ld[:]) or_return
+	// Link twice: first with an empty symbol map, to learn the addresses, then
+	// with the real one, which panic backtraces read. The map is last in
+	// .rodata, after all code, so its size moves no function.
+	map_s := fmt.tprintf("%s/symbols.S", out)
+	map_o := fmt.tprintf("%s/symbols.o", out)
+	nomap := fmt.tprintf("%s/kernel_nomap.elf", out)
+	for pass in 0 ..< 2 {
+		write_symbol_map(pass == 0 ? "" : nomap, map_s, ".section .vx_symbols, \"a\"", "vx_symbols", "kernel::") or_return
+		run({CLANG, fmt.tprintf("--target=%s", a.clang_target), "-c", map_s, "-o", map_o}) or_return
+		ld := cmd_make(LLD, "-nostdlib", "-static", "-z", "max-page-size=0x1000", "--build-id", "-T", fmt.tprintf("kernel/linker/%s.ld", a.name), "-o", pass == 0 ? nomap : elf)
+		append(&ld, ..objs[:])
+		append(&ld, map_o)
+		run(ld[:]) or_return
+	}
 	return elf, true
 }
 
-// Odin writes the wall-clock time into the debug info as the value of
-// ODIN_COMPILE_TIMESTAMP, and ignores SOURCE_DATE_EPOCH. This puts
-// SOURCE_DATE_EPOCH there instead, so one commit always gives the same
-// kernel. Nothing first-party uses ODIN_COMPILE_TIMESTAMP in code.
+// Makes Odin's IR reproducible, so one commit always gives the same kernel:
+//  - Odin writes the wall-clock time into the debug info as the value of
+//    ODIN_COMPILE_TIMESTAMP, ignoring SOURCE_DATE_EPOCH; SOURCE_DATE_EPOCH
+//    goes there instead. Nothing first-party uses it in code.
+//  - Procedure-local statics are named after an entity number that varies
+//    from run to run (`proc-.state-4433`). They are internal to their module,
+//    so they are renumbered by order of first appearance.
 scrub_ir :: proc(ir: string) -> bool {
+	files := tree_files(ir) or_return
+	for f in files {
+		if strings.has_suffix(f, ".ll") {
+			text := read_file(f) or_return
+			if renamed, changed := renumber_statics(text); changed {
+				write_file(f, renamed) or_return
+			}
+		}
+	}
+	return scrub_timestamp(ir)
+}
+
+// Renames every @"...-.name-DIGITS" global to @"...-.name-K", K counting from
+// 0 in order of first appearance in the module.
+@(private="file")
+renumber_statics :: proc(text: string) -> (string, bool) {
+	b := strings.builder_make(context.temp_allocator)
+	seen := make(map[string]int, allocator = context.temp_allocator)
+	changed := false
+	rest := text
+	for {
+		i := strings.index(rest, `@"`)
+		if i < 0 {
+			break
+		}
+		strings.write_string(&b, rest[:i + 2])
+		rest = rest[i + 2:]
+		end := strings.index_byte(rest, '"')
+		if end < 0 {
+			break
+		}
+		name := rest[:end]
+		dash := strings.last_index_byte(name, '-')
+		digits := dash >= 0 ? name[dash + 1:] : ""
+		is_static := dash > 0 && len(digits) > 0 && strings.contains(name[:dash], "-.")
+		for c in digits {
+			if c < '0' || c > '9' {
+				is_static = false
+			}
+		}
+		if is_static {
+			k, ok := seen[name]
+			if !ok {
+				k = len(seen)
+				seen[name] = k
+			}
+			fmt.sbprintf(&b, "%s-%d", name[:dash], k)
+			changed = true
+		} else {
+			strings.write_string(&b, name)
+		}
+		rest = rest[end:]
+	}
+	strings.write_string(&b, rest)
+	return strings.to_string(b), changed
+}
+
+@(private="file")
+scrub_timestamp :: proc(ir: string) -> bool {
 	epoch := os.get_env("SOURCE_DATE_EPOCH", context.temp_allocator)
 	stamp := fmt.tprintf("%s000000000", epoch == "" ? "0" : epoch)
 	files := tree_files(ir) or_return

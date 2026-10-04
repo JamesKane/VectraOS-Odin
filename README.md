@@ -4,9 +4,10 @@ A clean-room re-implementation of [VectraOS](https://github.com/JamesKane/Vectra
 
 - [docs/PLAN.md](docs/PLAN.md): the plan, phases and work streams
 - [docs/adr/](docs/adr/README.md): decisions
-- [spikes/RESULTS.md](spikes/RESULTS.md): what P0's go/no-go spikes settled
+- [docs/milestones.md](docs/milestones.md): progress, phase by phase
+- [spikes/RESULTS.md](spikes/RESULTS.md): what the spikes and the phases since found about Odin
 
-Status: P0 (foundation). The kernel boots through Limine on x86_64 and aarch64 with vector state handled at every trap; P1 (M1, first light) is next.
+Status: P1 done (M1's kernel): the kernel boots on x86_64 and aarch64 with its own page tables, guard-paged kernel stacks, SMP, timers, symbolized panics and vector state saved at every trap. P2 (M2, a shell in a namespace) is next. See [docs/milestones.md](docs/milestones.md).
 
 ## Build it
 
@@ -23,4 +24,4 @@ Status: P0 (foundation). The kernel boots through Limine on x86_64 and aarch64 w
 
 `./build` compiles the build tool (`tools/build`) when its sources change. The toolchain is pinned (ADR-0001): Odin `dev-2026-09:a2fb372b7` and LLVM 22.1.8 (clang, llc, lld), plus nasm 3.02, mtools and QEMU. On macOS they come from Homebrew (`odin`, `llvm@22`, `lld@22`, `nasm`, `mtools`, `qemu`); `build` calls each by absolute path and refuses other versions.
 
-Only `first-light` passes so far; upstream's scenarios start passing as the milestones land.
+Upstream's kernel scenarios (`panic`, `phys`, `timer`, `smp`, `lower-half`, `stack-overflow`, `write-text`, `write-text-alias`) pass, with this tree's `simd`; the rest start passing as the milestones land.

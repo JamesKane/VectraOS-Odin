@@ -100,16 +100,41 @@ cstring_at :: proc(table: string, off: u32) -> string {
 // A symbol map as assembly: for each function, `.quad address` and `.asciz
 // "name"`, then `.quad -1`. Limine links one into itself for its panic
 // backtraces (what its gensyms.sh makes with objdump, sort, awk and sed).
-write_symbol_map :: proc(elf_path, out_path, section, symbol: string) -> bool {
-	syms, ok := elf_functions(elf_path)
-	if !ok {
-		return false
+// With no ELF file, the map holds only the terminator: the first of two
+// links. strip comes off the front of each name that has it (the kernel's
+// "kernel::" package prefix).
+write_symbol_map :: proc(elf_path, out_path, section, symbol: string, strip := "") -> bool {
+	syms: [dynamic]Func_Symbol
+	if elf_path != "" {
+		ok: bool
+		if syms, ok = elf_functions(elf_path); !ok {
+			return false
+		}
 	}
 	b := strings.builder_make(context.temp_allocator)
 	fmt.sbprintf(&b, "%s\n.globl %s\n%s:\n", section, symbol, symbol)
 	for s in syms {
-		fmt.sbprintf(&b, ".quad 0x%016x\n.asciz \"%s\"\n", s.addr, s.name)
+		fmt.sbprintf(&b, ".quad 0x%016x\n.asciz \"%s\"\n", s.addr, map_name(s.name, strip))
 	}
 	fmt.sbprintln(&b, ".quad 0xffffffffffffffff")
 	return write_file(out_path, strings.to_string(b))
+}
+
+// A name as the map holds it: Odin's names for polymorphic and some runtime
+// procedures carry their signature (`response:proc"contextless"(...)`), which
+// is cut off; what remains is escaped for .asciz.
+@(private="file")
+map_name :: proc(name, strip: string) -> string {
+	n := strings.trim_prefix(name, strip) if strip != "" else name
+	if strings.has_prefix(n, "[") { // a file-private procedure: "[main.odin]::selftests"
+		if i := strings.index(n, "]::"); i > 0 {
+			n = n[i + 3:]
+		}
+	}
+	if i := strings.index(n, ":proc"); i > 0 {
+		n = n[:i]
+	}
+	n, _ = strings.replace_all(n, "\\", "\\\\", context.temp_allocator)
+	n, _ = strings.replace_all(n, "\"", "\\\"", context.temp_allocator)
+	return n
 }

@@ -1,0 +1,151 @@
+package kernel
+
+// The kernel's page tables. Both architectures use a 4 KiB granule and four
+// levels for 48-bit virtual addresses: level 0 is the top, level 3 holds 4 KiB
+// pages, and levels 1 and 2 may hold 1 GiB and 2 MiB leaves. The entry format
+// is the architecture's (arch_pte_*).
+
+Map_Flag :: enum u32 {
+	Write,
+	Exec,
+	User,
+	Device, // uncached device memory
+}
+
+Map_Flags :: bit_set[Map_Flag; u32] // a mapping is always readable
+
+kernel_root: u64 // physical address of the kernel's top-level table
+
+table_at :: #force_inline proc "contextless" (pa: u64) -> [^]u64 {
+	return cast([^]u64)phys_to_virt(pa)
+}
+
+// Pages for new tables: from the early allocator until phys_init has run.
+@(private="file")
+table_page :: proc "contextless" () -> u64 {
+	return phys.frame_state != nil ? phys_alloc_zeroed(0) : early_alloc(1)
+}
+
+// Maps [va, va + size) to [pa, pa + size), with the largest leaves that
+// alignment allows. Fails without undoing anything if a table cannot be
+// allocated or the range is already mapped; callers treat that as fatal.
+@(require_results)
+map_range :: proc "contextless" (root, va_start, pa_start, length: u64, flags: Map_Flags) -> bool {
+	va, pa, size := va_start, pa_start, length
+	for size > 0 {
+		level := 3
+		step := u64(4096)
+		if (va | pa) & (1 << 30 - 1) == 0 && size >= 1 << 30 {
+			level, step = 1, 1 << 30
+		} else if (va | pa) & (1 << 21 - 1) == 0 && size >= 1 << 21 {
+			level, step = 2, 1 << 21
+		}
+		t := table_at(root)
+		for l in 0 ..< level {
+			idx := (va >> uint(39 - 9 * l)) & 511
+			if !arch_pte_valid(t[idx]) {
+				page := table_page()
+				if page == 0 {
+					return false
+				}
+				arch_pte_publish() // the new table's zeroes, before the entry that leads to it
+				t[idx] = arch_pte_table(page)
+			} else if !arch_pte_is_table(t[idx], l) {
+				return false
+			}
+			t = table_at(arch_pte_addr(t[idx]))
+		}
+		idx := (va >> uint(39 - 9 * level)) & 511
+		if arch_pte_valid(t[idx]) {
+			return false
+		}
+		t[idx] = arch_pte_leaf(pa, flags, level)
+		va += step
+		pa += step
+		size -= step
+	}
+	arch_pte_publish()
+	return true
+}
+
+// Section bounds from the linker script: addresses only (console.odin says why
+// they are declared as procedures).
+foreign _ {
+	vx_text_start :: proc "c" () ---
+	vx_text_end :: proc "c" () ---
+	vx_rodata_start :: proc "c" () ---
+	vx_rodata_end :: proc "c" () ---
+	vx_data_start :: proc "c" () ---
+	vx_data_end :: proc "c" () ---
+	vx_boot_stack_bottom :: proc "c" () ---
+	vx_boot_stack_top :: proc "c" () ---
+}
+
+page_up :: #force_inline proc "contextless" (v: u64) -> u64 {
+	return (v + 4095) &~ 4095
+}
+
+@(private="file")
+map_image_part :: proc "contextless" (start, end: proc "c" (), flags: Map_Flags) {
+	va := u64(uintptr(rawptr(start)))
+	size := page_up(u64(uintptr(rawptr(end)))) - va
+	if !map_range(kernel_root, va, va - boot.kernel_virt + boot.kernel_phys, size, flags) {
+		kpanic("cannot map the kernel image")
+	}
+}
+
+// Builds the kernel's own page tables and switches to them:
+//  - the kernel image, each part with its own permissions (W^X);
+//  - the direct map: RAM, firmware tables and runtime services, never
+//    executable, read-write but for the kernel image and the modules;
+//  - the architecture's device pages (arch_kernel_mappings);
+//  - nothing in the lower half, so null pointers fault.
+paging_init :: proc "contextless" () {
+	kernel_root = phys_alloc_zeroed(0)
+	if kernel_root == 0 {
+		kpanic("no memory for page tables")
+	}
+	map_image_part(vx_text_start, vx_text_end, {.Exec})
+	map_image_part(vx_rodata_start, vx_rodata_end, {})
+	map_image_part(vx_data_start, vx_data_end, {.Write})
+	map_image_part(vx_boot_stack_bottom, vx_boot_stack_top, {.Write}) // the page below stays unmapped
+
+	// Runs of adjacent regions with the same permissions merge, so large
+	// leaves fit. The kernel image and the boot modules are read-only here:
+	// the image is written only through its own mapping (W^X).
+	mm := response(&memmap_request)
+	run_lo, run_hi: u64
+	run_flags: Map_Flags
+	for i in 0 ..= mm.entry_count {
+		lo, hi: u64
+		flags := Map_Flags{.Write}
+		if i < mm.entry_count {
+			e := mm.entries[i]
+			#partial switch e.type {
+			case .Executable_And_Modules:
+				flags = {}
+			case .Usable, .Bootloader_Reclaimable, .Acpi_Reclaimable, .Acpi_Nvs, .Reserved_Mapped:
+			case:
+				continue
+			}
+			lo = e.base &~ 4095
+			hi = page_up(e.base + e.length)
+			if run_hi != 0 && lo <= run_hi && flags == run_flags { // the map is sorted: extend the run
+				if hi > run_hi {
+					run_hi = hi
+				}
+				continue
+			}
+			if run_hi != 0 && lo < run_hi {
+				lo = run_hi // a page shared with the run before: that run has it
+			}
+		}
+		if run_hi != 0 && !map_range(kernel_root, boot.hhdm + run_lo, run_lo, run_hi - run_lo, run_flags) {
+			kpanic("cannot build the direct map")
+		}
+		run_lo, run_hi, run_flags = lo, hi, flags
+	}
+
+	arch_kernel_mappings(kernel_root)
+	arch_switch_tables(kernel_root)
+}
