@@ -15,6 +15,7 @@ import "core:testing"
 import "vx:p9"
 import "vx:rt"
 import procfs "../../../servers/procfs"
+import "../p9test"
 
 TASKS :: vx.Handle(0x101) // the "tasks" handle the fake spawn message gives
 LISTEN :: vx.Handle(0x102)
@@ -97,11 +98,6 @@ fake_syscall :: proc "c" (nr: vx.Syscall, a0, a1, a2, a3, a4, a5: u64) -> i64 {
 	return i64(vx.Status.Err_Unsupported) // port_create among them: vx_main returns
 }
 
-loopback :: proc "contextless" (ctx: rawptr, req: []u8, resp: []u8) -> int {
-	n, res := p9.serve((^p9.Server)(ctx), req, resp)
-	return res == .Reply ? n : 0 // a loopback cannot hold a request: a deferral ends it too
-}
-
 read_file :: proc(c: ^p9.Client, root: p9.Fid, path: string, buf: []u8) -> (string, vx.Status) {
 	f, e := p9.client_walk(c, root, path)
 	if e != .Ok {
@@ -128,46 +124,6 @@ write_file :: proc(c: ^p9.Client, root: p9.Fid, path: string, data: string) -> (
 	return p9.client_write(c, f, 0, transmute([]u8)data)
 }
 
-stat_of :: proc(c: ^p9.Client, root: p9.Fid, path: string, st: ^p9.Stat) -> vx.Status {
-	f, e := p9.client_walk(c, root, path)
-	if e != .Ok {
-		return e
-	}
-	defer _ = p9.client_clunk(c, f)
-	return p9.client_stat(c, f, st)
-}
-
-// The names a directory reads as, in order, joined by spaces.
-list :: proc(c: ^p9.Client, root: p9.Fid, path: string, out: []u8) -> string {
-	f, e := p9.client_walk(c, root, path)
-	if e != .Ok {
-		return "(walk failed)"
-	}
-	defer _ = p9.client_clunk(c, f)
-	if p9.client_open(c, f, p9.OREAD) != .Ok {
-		return "(open failed)"
-	}
-	dir: [4096]u8
-	n, re := p9.client_read(c, f, 0, dir[:])
-	if re != .Ok {
-		return "(read failed)"
-	}
-	used := 0
-	for off := 0; off + 2 <= n; {
-		length := int(dir[off]) | int(dir[off + 1]) << 8
-		st: p9.Stat
-		if p9.stat_decode(dir[off:][:length + 2], &st) != .Ok {
-			return "(bad entry)"
-		}
-		if used > 0 {
-			used += copy(out[used:], " ")
-		}
-		used += copy(out[used:], st.name)
-		off += length + 2
-	}
-	return string(out[:used])
-}
-
 @(test)
 test_procfs :: proc(t: ^testing.T) {
 	// The spawn message svcd would send: "tasks" and "listen".
@@ -180,7 +136,7 @@ test_procfs :: proc(t: ^testing.T) {
 
 	srv := p9.Server{fs = procfs.server.fs, max_msize = 8192}
 	tbuf, rbuf: [8192]u8
-	c := p9.Client{rpc = loopback, ctx = &srv, tbuf = tbuf[:], rbuf = rbuf[:]}
+	c := p9.Client{rpc = p9test.loopback, ctx = &srv, tbuf = tbuf[:], rbuf = rbuf[:]}
 	testing.expect_value(t, p9.client_version(&c, 8192, {}), vx.Status.Ok)
 	_, ae := p9.client_attach(&c, "1")
 	testing.expect_value(t, ae, vx.Status.Err_Not_Found) // no aname
@@ -207,16 +163,17 @@ test_procfs :: proc(t: ^testing.T) {
 		f, _ := p9.client_walk(&c, root, "1/status")
 		_ = p9.client_open(&c, f, p9.OREAD)
 		n, re := p9.client_read(&c, f, 5, buf[:4])
-		testing.expect(t, re == .Ok && string(buf[:n]) == "svcd")
+		testing.expect_value(t, re, vx.Status.Ok)
+		testing.expect_value(t, string(buf[:n]), "svcd")
 		n, re = p9.client_read(&c, f, 1000, buf[:])
-		testing.expect(t, re == .Ok && n == 0)
+		testing.expect_value(t, re, vx.Status.Ok)
+		testing.expect_value(t, n, 0)
 		_ = p9.client_clunk(&c, f)
 	}
 
 	// The tree: live tasks in id order; status and ctl in each.
-	names: [256]u8
-	testing.expect_value(t, list(&c, root, "", names[:]), "1 2 3 5 7")
-	testing.expect_value(t, list(&c, root, "3", names[:]), "status ctl")
+	testing.expect_value(t, p9test.list(&c, root, ""), "1 2 3 5 7")
+	testing.expect_value(t, p9test.list(&c, root, "3"), "status ctl")
 
 	// Names that are not tasks.
 	for name in ([]string{"4", "6", "01", "0", "1x", "-1", "99999999999999999999", "status"}) {
@@ -238,15 +195,28 @@ test_procfs :: proc(t: ^testing.T) {
 
 	// Stats.
 	st: p9.Stat
-	testing.expect_value(t, stat_of(&c, root, "", &st), vx.Status.Ok)
-	testing.expect(t, st.name == "/" && st.mode == p9.DMDIR | 0o555 && st.qid == {type = p9.QTDIR, path = 1})
-	testing.expect(t, st.uid == "proc" && st.gid == "proc" && st.muid == "proc" && st.length == 0)
-	_ = stat_of(&c, root, "7", &st)
-	testing.expect(t, st.name == "7" && st.mode == p9.DMDIR | 0o555 && st.qid == {type = p9.QTDIR, path = 7 << 2})
-	_ = stat_of(&c, root, "7/status", &st)
-	testing.expect(t, st.name == "status" && st.mode == 0o444 && st.qid == {type = p9.QTFILE, path = 7 << 2 | 1} && st.length == 0)
-	_ = stat_of(&c, root, "7/ctl", &st)
-	testing.expect(t, st.name == "ctl" && st.mode == 0o222 && st.qid == {type = p9.QTFILE, path = 7 << 2 | 2} && st.uid == "proc")
+	testing.expect_value(t, p9test.stat_of(&c, root, "", &st), vx.Status.Ok)
+	testing.expect_value(t, st.name, "/")
+	testing.expect_value(t, st.mode, p9.DMDIR | 0o555)
+	testing.expect_value(t, st.qid, p9.Qid{type = p9.QTDIR, path = 1})
+	testing.expect_value(t, st.uid, "proc")
+	testing.expect_value(t, st.gid, "proc")
+	testing.expect_value(t, st.muid, "proc")
+	testing.expect_value(t, st.length, 0)
+	_ = p9test.stat_of(&c, root, "7", &st)
+	testing.expect_value(t, st.name, "7")
+	testing.expect_value(t, st.mode, p9.DMDIR | 0o555)
+	testing.expect_value(t, st.qid, p9.Qid{type = p9.QTDIR, path = 7 << 2})
+	_ = p9test.stat_of(&c, root, "7/status", &st)
+	testing.expect_value(t, st.name, "status")
+	testing.expect_value(t, st.mode, 0o444)
+	testing.expect_value(t, st.qid, p9.Qid{type = p9.QTFILE, path = 7 << 2 | 1})
+	testing.expect_value(t, st.length, 0)
+	_ = p9test.stat_of(&c, root, "7/ctl", &st)
+	testing.expect_value(t, st.name, "ctl")
+	testing.expect_value(t, st.mode, 0o222)
+	testing.expect_value(t, st.qid, p9.Qid{type = p9.QTFILE, path = 7 << 2 | 2})
+	testing.expect_value(t, st.uid, "proc")
 
 	// Open modes: status is only read, ctl only written, nothing truncated.
 	open_mode :: proc(c: ^p9.Client, root: p9.Fid, path: string, mode: p9.Open_Mode) -> vx.Status {
@@ -276,11 +246,13 @@ test_procfs :: proc(t: ^testing.T) {
 	testing.expect_value(t, e, vx.Status.Err_Access)
 	testing.expect_value(t, fake_tasks[0].state, vx.Task_State.Running)
 	n, e = write_file(&c, root, "7/ctl", "kill \n\n")
-	testing.expect(t, e == .Ok && n == 7) // the whole message
-	testing.expect(t, fake_tasks[5].state == .Exited && fake_tasks[5].exit_status == -9)
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect_value(t, n, 7) // the whole message
+	testing.expect_value(t, fake_tasks[5].state, vx.Task_State.Exited)
+	testing.expect_value(t, fake_tasks[5].exit_status, -9)
 	_, e = p9.client_walk(&c, root, "7")
 	testing.expect_value(t, e, vx.Status.Err_Not_Found) // gone
-	testing.expect_value(t, list(&c, root, "", names[:]), "1 2 3 5")
+	testing.expect_value(t, p9test.list(&c, root, ""), "1 2 3 5")
 
 	// A file open before its task went: status reads empty, ctl kills nothing.
 	{
@@ -289,9 +261,11 @@ test_procfs :: proc(t: ^testing.T) {
 		_ = p9.client_open(&c, sf, p9.OREAD)
 		_ = p9.client_open(&c, cf, p9.OWRITE)
 		n, e = p9.client_write(&c, cf, 0, transmute([]u8)string("kill"))
-		testing.expect(t, e == .Ok && n == 4)
+		testing.expect_value(t, e, vx.Status.Ok)
+		testing.expect_value(t, n, 4)
 		n, e = p9.client_read(&c, sf, 0, buf[:])
-		testing.expect(t, e == .Ok && n == 0)
+		testing.expect_value(t, e, vx.Status.Ok)
+		testing.expect_value(t, n, 0)
 		_, e = p9.client_write(&c, cf, 0, transmute([]u8)string("kill"))
 		testing.expect_value(t, e, vx.Status.Err_Not_Found)
 		_ = p9.client_clunk(&c, sf)
