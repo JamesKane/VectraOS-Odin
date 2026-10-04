@@ -11,8 +11,10 @@ import "core:strings"
 // when its sources change, then runs it from the repository root.
 
 USAGE :: `usage: ./build <command> [--arch x86_64|aarch64] [--release] [-v]
-  all            the kernel and the Limine loaders
-  image          GPT disk images: out/<arch>/<mode>/vectra-<arch>.img
+  all            the kernel, the Limine loaders, the user programs, and
+                 out/host/vx9pserve once tools/vx9pserve is there
+  image [--iso]  GPT disk images: out/<arch>/<mode>/vectra-<arch>.img;
+                 with --iso, UEFI CD images too: vectra-<arch>.iso
   qemu           boot an image on the serial console (Ctrl-A X quits)
   test [name...] boot headless and check tests/qemu/*.ndb
   check          host tests under ASan, vendor-check
@@ -30,6 +32,7 @@ main :: proc() {
 	chosen: bit_set[Arch_Kind] // by --arch; none means all
 	names := make([dynamic]string, context.temp_allocator)
 	mode := Mode.Debug
+	want_iso := false
 	for i := 2; i < len(os.args); i += 1 {
 		switch arg := os.args[i]; arg {
 		case "--arch":
@@ -48,6 +51,12 @@ main :: proc() {
 			mode = .Release
 		case "-v":
 			verbose = true
+		case "--iso":
+			if command != "image" {
+				fmt.eprintln("build: --iso goes with image")
+				os.exit(2)
+			}
+			want_iso = true
 		case:
 			if strings.has_prefix(arg, "-") {
 				fmt.eprintln(USAGE)
@@ -90,10 +99,15 @@ main :: proc() {
 				pok := kok && build_programs(a, mode)
 				ok = ok && lok && kok && pok
 			}
+			// The host tools' sources compile with the rest, once they are there.
+			if os.is_dir(VX9PSERVE_SRC) {
+				ok = build_vx9pserve() && ok
+			}
 		case "image":
 			for a in arches {
 				runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-				ok = build_image(a, mode, image_path(a, mode)) && ok
+				iso := want_iso ? fmt.tprintf("%s/vectra-%s.iso", out_dir(a, mode), a.name) : ""
+				ok = build_image(a, mode, image_path(a, mode), iso = iso) && ok
 			}
 		case "qemu":
 			a := arches[0]
@@ -115,8 +129,16 @@ main :: proc() {
 cmd_qemu :: proc(a: ^Arch, mode: Mode) -> bool {
 	image := image_path(a, mode)
 	build_image(a, mode, image) or_return
+	// vx9pserve serves out/share at 10.0.2.100!5640: kept between runs, made once.
+	if !build_vx9pserve() {
+		fmt.eprintln("build: booting without vx9pserve: mounting 10.0.2.100!5640 will fail")
+	}
+	share := "out/share"
+	if !os.exists(share) {
+		fresh_share(share) or_return
+	}
 	fmt.eprintln("build: starting QEMU; Ctrl-A X quits")
-	return run(qemu_cmd(a, image, {}))
+	return run(qemu_cmd(a, image, {share = share}))
 }
 
 cmd_test :: proc(arches: []^Arch, mode: Mode, names: []string) -> bool {

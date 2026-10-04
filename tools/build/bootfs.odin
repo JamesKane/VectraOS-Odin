@@ -43,6 +43,7 @@ make_bootfs :: proc(a: ^Arch, mode: Mode, out: string, with := "") -> bool {
 			append(&entries, Bootfs_Entry{fmt.tprintf("boot/bin/%s", p.name), data, 0o755})
 		}
 	}
+	// The service manifests, then the driver manifests devmgr matches (M3).
 	for dir in ([]string{"boot/svc", "boot/drv"}) {
 		if !os.is_dir(dir) {
 			continue
