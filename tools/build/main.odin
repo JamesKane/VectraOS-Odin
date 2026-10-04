@@ -17,7 +17,8 @@ USAGE :: `usage: ./build <command> [--arch x86_64|aarch64] [--release] [-v]
   check          host tests under ASan, vendor-check
   vendor-check   check third_party/ against VENDOR.ndb
   loc            the line-count ledger
-  abi            generate abi/vx/abi_gen.odin from abi/vx/*.def`
+(abi/vx/abi_gen.odin is made from abi/vx/*.def by tools/abigen, which the
+./build wrapper runs first.)`
 
 main :: proc() {
 	if len(os.args) < 2 {
@@ -60,16 +61,8 @@ main :: proc() {
 		}
 	}
 	set_source_date_epoch()
-	// abi_gen.odin is build's output, not the repository's: make it before
-	// anything compiles against abi:vx.
-	if command != "abi" && command != "loc" && command != "vendor-check" && !gen_abi(".") {
-		os.exit(1)
-	}
-
 	ok := false
 	switch command {
-	case "abi":
-		ok = gen_abi(".")
 	case "vendor-check":
 		ok = cmd_vendor_check()
 	case "loc":

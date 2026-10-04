@@ -19,9 +19,8 @@ Status: P1 done (M1's kernel): the kernel boots on x86_64 and aarch64 with its o
 ./build check                     # host tests under ASan, vendor-check
 ./build vendor-check              # check third_party/ against VENDOR.ndb
 ./build loc                       # the line-count ledger
-./build abi                       # generate abi/vx/abi_gen.odin from the .def tables
 ```
 
-`./build` compiles the build tool (`tools/build`) when its sources change. The toolchain is pinned (ADR-0001): Odin `dev-2026-09:a2fb372b7` and LLVM 22.1.8 (clang, llc, lld), plus nasm 3.02, mtools and QEMU. On macOS they come from Homebrew (`odin`, `llvm@22`, `lld@22`, `nasm`, `mtools`, `qemu`); `build` calls each by absolute path and refuses other versions.
+`./build` makes `abi/vx/abi_gen.odin` from the ABI tables (`tools/abigen`) and compiles the build tool (`tools/build`) when their sources change. The toolchain is pinned (ADR-0001): Odin `dev-2026-09:a2fb372b7` and LLVM 22.1.8 (clang, llc, lld), plus nasm 3.02, mtools and QEMU. On macOS they come from Homebrew (`odin`, `llvm@22`, `lld@22`, `nasm`, `mtools`, `qemu`); `build` calls each by absolute path and refuses other versions.
 
 Upstream's kernel scenarios (`panic`, `phys`, `timer`, `smp`, `lower-half`, `stack-overflow`, `write-text`, `write-text-alias`) pass, with this tree's `simd`; the rest start passing as the milestones land.

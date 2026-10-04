@@ -1,13 +1,19 @@
 #!/bin/sh
-# ./build: compiles the build tool (tools/build) when it or the libraries it
-# uses change, then runs it from the repository root. See tools/build/main.odin.
+# ./build: makes abi/vx/abi_gen.odin from the ABI tables (tools/abigen) and
+# compiles the build tool (tools/build) when their sources change, then runs
+# it from the repository root. See tools/build/main.odin.
 set -eu
 cd "$(dirname "$0")"
 ODIN=/opt/homebrew/bin/odin
 [ -x "$ODIN" ] || ODIN=/opt/odin/odin
+mkdir -p out/bin
+gen=abi/vx/abi_gen.odin
+if [ ! -f "$gen" ] || [ -n "$(find abi/vx tools/abigen -newer "$gen" \( -name '*.def' -o -name '*.odin' \) ! -name abi_gen.odin 2>/dev/null | head -1)" ]; then
+  "$ODIN" build tools/abigen -vet -strict-style -warnings-as-errors -out:out/bin/abigen
+  out/bin/abigen
+fi
 tool=out/bin/build
-if [ ! -x "$tool" ] || [ -n "$(find tools/build lib -newer "$tool" -name '*.odin' 2>/dev/null | head -1)" ]; then
-  mkdir -p out/bin
-  "$ODIN" build tools/build -collection:vx=lib -vet -strict-style -warnings-as-errors -out:"$tool"
+if [ ! -x "$tool" ] || [ -n "$(find tools/build lib abi -newer "$tool" -name '*.odin' 2>/dev/null | head -1)" ]; then
+  "$ODIN" build tools/build -collection:vx=lib -collection:abi=abi -vet -strict-style -warnings-as-errors -out:"$tool"
 fi
 exec "$tool" "$@"

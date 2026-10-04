@@ -22,6 +22,7 @@ Program :: struct {
 
 PROGRAMS := []Program {
 	{name = "svcd", dir = "servers/svcd", place = .Module},
+	{name = "ktest", dir = "tests/kernel/ktest", place = .Module},
 }
 
 USER_ODIN_FLAGS := []string {

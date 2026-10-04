@@ -37,7 +37,11 @@ build_image :: proc(a: ^Arch, mode: Mode, image: string, cmdline := "") -> bool 
 		write_file(config, fmt.tprintf("%s    cmdline: %s\n", conf_text, cmdline)) or_return
 	}
 
+	bootfs := fmt.tprintf("%s.bootfs.tar", image)
+	make_bootfs(a, mode, bootfs) or_return
+
 	seed := FNV_OFFSET
+	seed = fnv(seed, read_file(bootfs) or_return)
 	seed = fnv(seed, read_file(loader) or_return)
 	seed = fnv(seed, read_file(kernel) or_return)
 	seed = fnv(seed, read_file(config) or_return)
@@ -60,9 +64,11 @@ build_image :: proc(a: ^Arch, mode: Mode, image: string, cmdline := "") -> bool 
 			mtools(MCOPY, esp, program_path(a, mode, p.name), fmt.tprintf("::/boot/vx/%s", p.name)) or_return
 		}
 	}
+	mtools(MCOPY, esp, bootfs, "::/boot/vx/bootfs.tar") or_return
 	mtools(MCOPY, esp, config, "::/boot/limine/limine.conf") or_return
 	write_gpt_disk(image, esp, seed) or_return
 	_ = os.remove(esp)
+	_ = os.remove(bootfs)
 	return true
 }
 

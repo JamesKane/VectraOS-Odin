@@ -1,4 +1,7 @@
-package build
+// abigen: expands abi/vx/*.def into abi/vx/abi_gen.odin. The ./build wrapper
+// runs it before compiling anything, the build tool included (which reaches
+// abi:vx through lib/tar), whenever a table is newer than its output.
+package abigen
 
 import "core:fmt"
 import "core:os"
@@ -138,4 +141,8 @@ gen_abi :: proc(root: string) -> bool {
 	}
 	fmt.printfln("build: %s (%d syscalls, %d rights, %d statuses)", out, len(syscalls), len(rights), len(statuses))
 	return true
+}
+
+main :: proc() {
+	os.exit(gen_abi(".") ? 0 : 1)
 }
