@@ -57,3 +57,21 @@ Bugs fixed along the way: `./build test` could pass having run nothing; port-tar
 | merge of `4c220e0` | Kernel: `Paddr`/`Uva`/`Pte`, `Pool($T)`, `handle_get_as`, statuses inside, slices over multi-pointers |
 | merge of `12e215a` | Host tests: `expect_value`, tables, shared `p9test` |
 | merge of `ff01ffd` | User programs |
+
+## P3: M3, mount the network — done 2026-10-04
+
+On macOS, every M3 scenario passes on x86_64 and aarch64: `pci`, `net`, `netd`, `tcp`, `mount`, `iso`, and M3's `boot`, `cons`, `ktest` (188 checks on x86_64, 184 on aarch64), `ns` and `shell`, which replace the `m2/` ones as regression checks. `u9fs` needs Linux user namespaces and runs on Fedora. The shell mounts a host directory over 9P on TCP (`mount tcp!10.0.2.100!5640 /n/host`), served by `vx9pserve`, through devmgr's PCI scan, the virtio-net driver on MSI-X (an APIC vector on x86_64, an LPI through the GIC's ITS on aarch64), netd and `vx:net`. Scenarios are upstream's as M3 left them (`tests/qemu/m3/`).
+
+| Commit | Step |
+|---|---|
+| `e192ad6` | The M3-era scenarios and the 9P share fixture |
+| `6e9388c`, `2110525` | Kernel: ACPI export, MSIs, DMA domains, M3's object fixes; ktest's M3 cases |
+| `9e78180` | devmgr, `vx:acpi`, `vx:pci`; svcd's rendezvous posts and claims |
+| `365f77b` | The virtio-pci transport; the console reads in pieces |
+| merge `64f2633` | Build tool: QEMU networking, host servers, `host=` checks, `image --iso`; u9fs vendored (ADR-0006, review pending) |
+| merge `09c00f6` | `vx:net` (Ethernet, ARP, IPv4, ICMP, UDP, DHCP, TCP, DNS), frame-for-frame against upstream's C |
+| merge `3a05908` | p9, ns, ring and tar as M3 left them; dialing 9P over TCP; `vx9pserve` in Odin |
+| `6a091b8` | drv-virtio-net, ring sessions, nettest |
+| `f74978c`, `179bd69` | netd, ping, cs, tcptest; gsh's `mount` |
+
+Found along the way, and recorded in [UPSTREAM-FINDINGS.md](UPSTREAM-FINDINGS.md): an unmount that crashes while a bind still uses the connection (fixed here), and netd's query answers cut off at 256 bytes (kept, byte for byte).
