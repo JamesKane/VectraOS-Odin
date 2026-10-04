@@ -53,6 +53,10 @@ SECOND :: vx.Instant(1_000_000_000)
 stack: net.Net
 stack_up: bool // net.init done: the driver said its MAC address
 server: p9ring.Server
+// Each socket a POSIX program polls has a connection of its own (two, when
+// it writes without waiting), besides its namespace's: more than the default.
+NETD_CONNS :: 64
+conns: [NETD_CONNS]p9ring.Server_Conn
 
 // --- The driver ---
 
@@ -135,6 +139,7 @@ link_down :: proc "contextless" () {
 		rt.print("netd: the driver is gone; asking again\n")
 	}
 	_ = rt.handle_close(link.end)
+	rt.session_unmap(&link.ring)
 	link.up, link.bell_armed = false, false
 	link.gen += 1
 	link.retry_at = rt.clock_read() + SECOND
@@ -244,7 +249,13 @@ tick :: proc "contextless" (ctx: rawptr) -> vx.Instant {
 		}
 	}
 	if stack_up {
+		frames_in := stack.stats.frames_in
 		next = min(next, net.poll(&stack, now))
+		// Packets looped back were taken in just now, after the serving pass:
+		// a held request they settled (a refused connect, say) is served once more.
+		if stack.stats.frames_in != frames_in {
+			next = now
+		}
 		if stack.addr != last_addr { // say what the address became
 			last_addr = stack.addr
 			text: [TEXT_MAX]u8
@@ -872,7 +883,7 @@ fs_read :: proc "contextless" (ctx: rawptr, n: p9.Node, offset: u64, buf: []u8) 
 	case .Ctl:
 		str.write_u64(&t, u64(m.index))
 	case .Local:
-		addr_port(&t, stack.addr, c.lport)
+		addr_port(&t, c.raddr >> 24 == 127 ? c.raddr : stack.addr, c.lport) // loopback's own
 	case .Remote:
 		addr_port(&t, c.raddr, c.rport)
 	case .Status:
@@ -1087,7 +1098,7 @@ vx_main :: proc() -> int {
 	}
 	if pst != .Ok {
 		rt.print("netd: FAILED: no connector to /srv/ether0, or no listen channel\n")
-		return 1
+		rt.exits("no connector to /srv/ether0, or no listen channel")
 	}
 	server.fs = {
 		attach  = fs_attach,
@@ -1102,8 +1113,9 @@ vx_main :: proc() -> int {
 		clunk   = fs_clunk,
 	}
 	server.name = "netd"
+	server.conns = conns[:]
 	server.event = event
 	server.tick = tick
 	rt.print("netd: serving /srv/net\n")
-	return int(p9ring.serve(&server))
+	rt.exits(p9ring.serve(&server) == .Ok ? "" : "cannot serve")
 }
