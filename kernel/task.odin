@@ -108,7 +108,7 @@ Thread :: struct {
 	wake_late:    Instant, // wake_at plus its leeway: the timer may wait until here
 	wait_token:   rawptr, // what it waits on, until it is woken or times out (sched.odin)
 	wake_pending: bool, // woken between joining a list of waiters and blocking
-	wait_result:  i64,
+	wait_result:  vx.Status,
 }
 
 #assert(offset_of(Thread, obj) == 0) // objects are cast from ^Object
@@ -203,6 +203,14 @@ dup_source :: proc "contextless" (t: ^Task, h: vx.Handle, rights: Maybe(vx.Right
 	}
 	object_ref(e.obj)
 	return e.obj, r, .Ok
+}
+
+// handle_get for an object of type T, as a ^T.
+@(require_results)
+handle_get_as :: proc "contextless" (t: ^Task, h: vx.Handle, $T: typeid, rights: vx.Rights) -> (p: ^T, st: vx.Status) {
+	#assert(offset_of(T, obj) == 0)
+	o := handle_get(t, h, obj_type_of(T), rights) or_return
+	return cast(^T)o, .Ok
 }
 
 @(require_results)

@@ -129,7 +129,8 @@ ring_bind :: proc "contextless" (e: ^Ring_End, b: ^Binding) -> vx.Status {
 
 // Puts moved handles in a free slot for the peer; returns the slot, or
 // SHOULD_WAIT if all are taken.
-ring_put :: proc "contextless" (e: ^Ring_End, handles: []Moved_Handle) -> i64 {
+@(require_results)
+ring_put :: proc "contextless" (e: ^Ring_End, handles: []Moved_Handle) -> (slot: u32, st: vx.Status) {
 	spin_lock(&e.pair.lock)
 	defer spin_unlock(&e.pair.lock)
 	for i in 0 ..< vx.RING_SLOTS {
@@ -139,9 +140,9 @@ ring_put :: proc "contextless" (e: ^Ring_End, handles: []Moved_Handle) -> i64 {
 		}
 		s.count = u32(len(handles))
 		copy(s.handles[:], handles)
-		return i64(i)
+		return u32(i), .Ok
 	}
-	return i64(vx.Status.Err_Should_Wait)
+	return 0, .Err_Should_Wait
 }
 
 // Takes the peer's slot; its handles are the caller's to install. INVALID if

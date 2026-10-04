@@ -67,7 +67,7 @@ port_wake_one :: proc "contextless" (p: ^Port) {
 	for p.waiters != nil {
 		t := p.waiters
 		p.waiters = t.next
-		if thread_wake_token(t, p, i64(vx.Status.Ok)) {
+		if thread_wake_token(t, p, .Ok) {
 			break
 		}
 	}

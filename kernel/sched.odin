@@ -176,7 +176,7 @@ schedule :: proc "contextless" () {
 // stopped waiting (its deadline passed first, or it is being killed). A
 // thread between joining a list and blocking keeps the wake for thread_block
 // to find. Returns whether it woke.
-thread_wake_token :: proc "contextless" (t: ^Thread, token: rawptr, result: i64) -> bool {
+thread_wake_token :: proc "contextless" (t: ^Thread, token: rawptr, result: vx.Status) -> bool {
 	spin_lock(&sched.lock)
 	defer spin_unlock(&sched.lock)
 	if token == nil || t.wait_token != token {
@@ -195,7 +195,8 @@ thread_wake_token :: proc "contextless" (t: ^Thread, token: rawptr, result: i64)
 // Blocks the current thread until it is woken, or until the deadline (plus
 // up to `leeway`, which lets one timer interrupt serve several waits).
 // Returns the wait's result: .Err_Timed_Out if the deadline passed.
-thread_block :: proc "contextless" (deadline: Instant, leeway: Instant) -> i64 {
+@(require_results)
+thread_block :: proc "contextless" (deadline: Instant, leeway: Instant) -> vx.Status {
 	c := this_cpu()
 	t := c.current
 	spin_lock(&sched.lock)
@@ -248,7 +249,7 @@ sched_timer :: proc "contextless" () {
 	for c.sleepers != nil && c.sleepers.wake_at <= now {
 		t := c.sleepers
 		t.wait_token = nil // a waker that finds it later skips it
-		t.wait_result = i64(vx.Status.Err_Timed_Out)
+		t.wait_result = .Err_Timed_Out
 		make_ready(t)
 	}
 	if now >= c.slice_end {
@@ -330,14 +331,14 @@ sched_kick_for_kill :: proc "contextless" (t: ^Thread) {
 	defer spin_unlock(&sched.lock)
 	if t.state == .Blocked {
 		t.wait_token = nil
-		t.wait_result = i64(vx.Status.Err_Killed)
+		t.wait_result = .Err_Killed
 		make_ready(t)
 	} else if t.state != .Dead {
 		// Ready, or running here or elsewhere: if it is about to block, the
 		// block returns at once; if it is in user mode on another CPU,
 		// interrupt it.
 		t.wake_pending = true
-		t.wait_result = i64(vx.Status.Err_Killed)
+		t.wait_result = .Err_Killed
 		if t.state == .Running && t.cpu != nil && t.cpu != this_cpu() {
 			arch_send_resched(t.cpu)
 		}

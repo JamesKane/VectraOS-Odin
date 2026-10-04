@@ -29,6 +29,33 @@ Object :: struct {
 	dying_next: ^Object, // on its CPU's list of objects to destroy (object_drop)
 }
 
+// The Obj_Type of an object struct.
+obj_type_of :: #force_inline proc "contextless" ($T: typeid) -> Obj_Type {
+	when T == Task {
+		return .Task
+	} else when T == Thread {
+		return .Thread
+	} else when T == Vmo {
+		return .Vmo
+	} else when T == Port {
+		return .Port
+	} else when T == Channel {
+		return .Channel
+	} else when T == Counter {
+		return .Counter
+	} else when T == Ring_End {
+		return .Ring
+	} else when T == Resource {
+		return .Resource
+	} else when T == Irq {
+		return .Irq
+	} else when T == Iorange {
+		return .Iorange
+	} else {
+		#panic("not a kernel object")
+	}
+}
+
 object_init :: proc "contextless" (o: ^Object, type: Obj_Type) {
 	o.type = type
 	intrinsics.atomic_store_explicit(&o.refs, 1, .Relaxed)

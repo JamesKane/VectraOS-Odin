@@ -156,7 +156,7 @@ channel_deliver :: proc "contextless" (to: ^Channel, m: ^Channel_Msg) -> vx.Stat
 			}
 			link^ = w.next
 			w.reply = m
-			_ = thread_wake_token(w.thread, w, i64(vx.Status.Ok))
+			_ = thread_wake_token(w.thread, w, .Ok)
 			return .Ok
 		}
 	}
@@ -256,7 +256,7 @@ channel_call :: proc "contextless" (c: ^Channel, request: ^Channel_Msg, deadline
 	if w.reply != nil {
 		return w.reply, true, .Ok
 	}
-	return nil, true, woke == i64(vx.Status.Ok) ? .Err_Peer_Closed : vx.Status(woke)
+	return nil, true, woke == .Ok ? .Err_Peer_Closed : woke
 }
 
 // Attaches a READABLE or PEER_CLOSED binding, or fires it at once if it holds.
@@ -290,7 +290,7 @@ channel_destroy :: proc "contextless" (c: ^Channel) {
 	if peer != nil {
 		observers_fire(&peer.obs, .Peer_Closed, 0)
 		for w := peer.calls; w != nil; w = w.next {
-			_ = thread_wake_token(w.thread, w, i64(vx.Status.Err_Peer_Closed))
+			_ = thread_wake_token(w.thread, w, .Err_Peer_Closed)
 		}
 		peer.calls = nil
 	}
