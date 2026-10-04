@@ -22,6 +22,10 @@ USAGE :: `usage: ./build <command> [--arch x86_64|aarch64] [--release] [-v]
                  with --iso, UEFI CD images too: vectra-<arch>.iso
   qemu           boot an image on the serial console (Ctrl-A X quits)
   test [name...] boot headless and check tests/qemu/*.ndb
+  release [--verify RECORD]
+                 both architectures' base trees in out/release/store,
+                 store-ARCH.tar, and release.ndb (unsigned); --verify
+                 rebuilds and compares
   check          host tests under ASan, vendor-check
   vendor-check   check third_party/ against VENDOR.ndb
   loc            the line-count ledger
@@ -39,6 +43,7 @@ main :: proc() {
 	mode := Mode.Debug
 	want_iso := false
 	backend_override := "" // --musl-backend
+	verify := "" // release --verify RECORD
 	for i := 2; i < len(os.args); i += 1 {
 		switch arg := os.args[i]; arg {
 		case "--arch":
@@ -64,6 +69,13 @@ main :: proc() {
 				os.exit(2)
 			}
 			backend_override = os.args[i]
+		case "--verify":
+			i += 1
+			if command != "release" || i == len(os.args) {
+				fmt.eprintln("build: --verify RECORD goes with release")
+				os.exit(2)
+			}
+			verify = os.args[i]
 		case "--iso":
 			if command != "image" {
 				fmt.eprintln("build: --iso goes with image")
@@ -93,6 +105,8 @@ main :: proc() {
 		ok = cmd_loc()
 	case "check":
 		ok = cmd_check()
+	case "release":
+		ok = check_pins() && cmd_release(verify)
 	case "all", "image", "qemu", "test":
 		if !check_pins() {
 			os.exit(1)

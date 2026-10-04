@@ -74,10 +74,21 @@ image_path :: proc(a: ^Arch, mode: Mode) -> string {
 	return fmt.tprintf("%s/vectra-%s.img", out_dir(a, mode), a.name)
 }
 
+// An install medium (upstream's M5 steps 9c, 9d): the ISO carries the
+// image's own system as release 1 (make_install_store) in boot/vx/store.tar,
+// a Limine module, and its command line starts with vx.live. With media,
+// release 2 is made too, the same with tests/user/release2.ndb in its
+// bootfs, and media_store is where its store is, for a scenario to put on a
+// disk.
+Install_Medium :: struct {
+	media:       bool,
+	media_store: string, // set by build_image
+}
+
 // Builds the kernel and the loader, then the image. cmdline, if set, is
 // added to limine.conf. With iso, a CD image of the same system is written
-// there too (write_iso).
-build_image :: proc(a: ^Arch, mode: Mode, image: string, cmdline := "", with := "", iso := "") -> bool {
+// there too (write_iso); with medium, that ISO is an install medium.
+build_image :: proc(a: ^Arch, mode: Mode, image: string, cmdline := "", with := "", iso := "", medium: ^Install_Medium = nil) -> bool {
 	limine := port_load("limine") or_return
 	loader := build_port_target(&limine, a.limine) or_return
 	kernel := build_kernel(a, mode) or_return
@@ -131,9 +142,23 @@ build_image :: proc(a: ^Arch, mode: Mode, image: string, cmdline := "", with := 
 		mtools(MMD, efiboot, "::/EFI", "::/EFI/BOOT") or_return
 		mtools(MCOPY, efiboot, loader, fmt.tprintf("::/EFI/BOOT/%s", a.loader)) or_return
 		files := make([dynamic]Iso_File, context.temp_allocator)
+		iso_config := config
+		if medium != nil { // an install medium: the release's objects too, and a command line that says so
+			made := Image_Files{loader = loader, kernel = kernel, bootfs = bootfs}
+			store_tar, _ := make_install_store(a, mode, image, made, 1) or_return
+			if medium.media { // release 2: the same, and a marker in its bootfs (tests/user/release2.ndb)
+				made.bootfs = fmt.tprintf("%s.bootfs2.tar", image)
+				make_bootfs(a, mode, made.bootfs, with != "" ? fmt.tprintf("%s,release2", with) : "release2") or_return
+				_, medium.media_store = make_install_store(a, mode, image, made, 2) or_return
+			}
+			append(&files, Iso_File{path = "boot/vx/store.tar", from = store_tar})
+			iso_config = fmt.tprintf("%s.iso.conf", image)
+			extra := cmdline != "" ? fmt.tprintf(" %s", cmdline) : ""
+			write_file(iso_config, fmt.tprintf("%s    module_path: boot():/boot/vx/store.tar\n    cmdline: vx.live%s\n", conf_text, extra)) or_return
+		}
 		append(&files, Iso_File{path = "boot/vx/kernel.elf", from = kernel})
 		append(&files, Iso_File{path = "boot/vx/bootfs.tar", from = bootfs})
-		append(&files, Iso_File{path = "boot/limine/limine.conf", from = config})
+		append(&files, Iso_File{path = "boot/limine/limine.conf", from = iso_config})
 		for p in PROGRAMS {
 			if p.place == .Module {
 				append(&files, Iso_File{path = fmt.tprintf("boot/vx/%s", p.name), from = program_path(a, mode, p.name)})
