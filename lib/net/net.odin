@@ -6,7 +6,11 @@
 //
 // Ethernet, ARP, IPv4 (no fragments: they are dropped, and nothing sent is
 // bigger than the MTU), ICMP echo, UDP, a DHCP client (RFC 2131), TCP
-// (tcp.odin) and a DNS stub resolver (dns.odin).
+// (tcp.odin) and a DNS stub resolver (dns.odin). Loopback: a packet for
+// 127/8, or for the interface's own address, never reaches the wire; it is
+// queued, and poll takes it in, as if it had arrived. A packet for 127/8
+// comes from the address it went to, as Linux's loopback has it, so both ends
+// name the same pair; it needs no driver address.
 //
 // Conversations are Plan 9's (upstream 02 §5): numbered endpoints, each of
 // one protocol, with a local port and, once connected, a remote address.
@@ -20,7 +24,7 @@
 // missed traps rather than reading past the frame; lengths on the wire are at
 // most 16 bits and every check on them is made in int, so no sum overflows.
 //
-// Nothing allocates: a Net holds every table and ring (about 4.3 MiB), and
+// Nothing allocates: a Net holds every table and ring (about 4.4 MiB), and
 // the caller provides it. All zeroes is not a usable stack; init makes one.
 package net
 
@@ -33,6 +37,7 @@ ETHER_MAX_FRAME :: 1514 // 14 bytes of Ethernet header, 1500 of IP
 CONVS :: 32
 CONV_QUEUE :: 8192 // bytes of datagrams a conversation holds
 ARP_ENTRIES :: 16
+LOOP_BYTES :: 65536 // packets looped back, not yet taken in
 IP4_TEXT_MAX :: 15 // "255.255.255.255"
 
 // An IPv4 address, in host order (10.0.2.15 is 0x0a00020f).
@@ -126,6 +131,10 @@ Net :: struct {
 	seed:                u32, // for transaction IDs and ports: not secret, only varied
 	stats:               Stats,
 	frame:               [ETHER_MAX_FRAME]u8, // the one being built
+	// Looped-back IP packets, each after its length (2 bytes, little-endian).
+	loop:                [LOOP_BYTES]u8,
+	loop_head:           u32,
+	loop_used:           u32,
 }
 
 // --- Bytes on the wire: network order ---
@@ -419,10 +428,48 @@ arp_slot :: proc "contextless" (n: ^Net, ip: Ip4) -> ^Arp_Entry {
 	return victim
 }
 
+@(private)
+loopback :: proc "contextless" (a: Ip4) -> bool {
+	return a >> 24 == 127
+}
+
+// The address a packet to dst comes from: dst itself, for 127/8.
+@(private)
+source_for :: proc "contextless" (n: ^Net, dst: Ip4) -> Ip4 {
+	return dst if loopback(dst) else n.addr
+}
+
+// Whether dst is reachable: on loopback always; otherwise once configured.
+@(private)
+can_send :: proc "contextless" (n: ^Net, dst: Ip4) -> bool {
+	return loopback(dst) || n.addr != 0
+}
+
+// Queues the IP packet at IP_AT (size bytes) to be taken in by poll; a full
+// queue drops it, as a full interface queue does.
+@(private="file")
+loop_put :: proc "contextless" (n: ^Net, size: int) {
+	if 2 + size > LOOP_BYTES - int(n.loop_used) {
+		n.stats.dropped += 1
+		return
+	}
+	at := int(n.loop_head + n.loop_used) % LOOP_BYTES
+	head := u16le(size)
+	ring_write(n.loop[:], at, memory.ptr_to_bytes(&head))
+	ring_write(n.loop[:], (at + 2) % LOOP_BYTES, n.frame[IP_AT:][:size])
+	n.loop_used += u32(2 + size)
+}
+
 // Sends the IP packet built at IP_AT (size bytes, header included) to its
-// next hop: at once if its MAC is known, or else once ARP finds it.
+// next hop: at once if its MAC is known, or else once ARP finds it; or, for
+// loopback and the interface's own address, back to this stack.
 @(private)
 ip_route :: proc "contextless" (n: ^Net, dst: Ip4, size: int, now: vx.Instant) {
+	if loopback(dst) || (n.addr != 0 && dst == n.addr) {
+		n.stats.frames_out += 1
+		loop_put(n, size)
+		return
+	}
 	if dst == BROADCAST || (n.mask != BROADCAST && n.addr != 0 && dst == (n.addr | ~n.mask)) {
 		ether_send(n, BROADCAST_MAC, ETHER_IP4, size)
 		return
@@ -671,11 +718,11 @@ conv_write :: proc "contextless" (n: ^Net, c: ^Conv, addr: Ip4, port: Port, data
 	if addr == 0 || c.lport == 0 {
 		return .Err_Bad_State
 	}
-	if n.addr == 0 {
+	if !can_send(n, addr) {
 		return .Err_Bad_State // no address yet
 	}
 	if c.proto == .Udp {
-		return udp_out(n, n.addr, c.lport, addr, port, data, now)
+		return udp_out(n, source_for(n, addr), c.lport, addr, port, data, now)
 	}
 	if len(data) < size_of(Icmp_Header) || len(data) > int(n.mtu) - 20 {
 		return .Err_Invalid
@@ -688,7 +735,7 @@ conv_write :: proc "contextless" (n: ^Net, c: ^Conv, addr: Ip4, port: Port, data
 	store(m, h)
 	h.sum = u16be(fold(sum16(0, m)))
 	store(m, h)
-	ip_header(n, .Icmp, n.addr, addr, len(data))
+	ip_header(n, .Icmp, source_for(n, addr), addr, len(data))
 	ip_route(n, addr, 20 + len(data), now)
 	return .Ok
 }
@@ -961,7 +1008,7 @@ icmp_input :: proc "contextless" (n: ^Net, src, dst: Ip4, m: []u8, now: vx.Insta
 		return
 	}
 	h := load(m, Icmp_Header)
-	if h.type == ICMP_ECHO && h.code == 0 && dst == n.addr { // for us: the same back, as a reply
+	if h.type == ICMP_ECHO && h.code == 0 && (dst == n.addr || loopback(dst)) { // for us: the same back, as a reply
 		r := n.frame[L4_AT:][:len(m)]
 		copy(r, m)
 		h.type = ICMP_ECHO_REPLY
@@ -969,7 +1016,7 @@ icmp_input :: proc "contextless" (n: ^Net, src, dst: Ip4, m: []u8, now: vx.Insta
 		store(r, h)
 		h.sum = u16be(fold(sum16(0, r)))
 		store(r, h)
-		ip_header(n, .Icmp, n.addr, src, len(m))
+		ip_header(n, .Icmp, source_for(n, src), src, len(m))
 		ip_route(n, src, 20 + len(m), now)
 		return
 	}
@@ -1004,14 +1051,16 @@ udp_input :: proc "contextless" (n: ^Net, src, dst: Ip4, b: []u8, now: vx.Instan
 	if sport == 53 && n.addr != 0 && dst == n.addr && dns_input(n, src, dport, data, now) {
 		return
 	}
-	if n.addr == 0 || (dst != n.addr && dst != BROADCAST) {
+	if !loopback(dst) && (n.addr == 0 || (dst != n.addr && dst != BROADCAST)) {
 		return
 	}
 	deliver(n, .Udp, dport, src, sport, data)
 }
 
+// An IP packet, from the wire or (looped) from the loopback queue; 127/8 on
+// the wire is a forgery (RFC 1122 §3.2.1.3), and dropped.
 @(private="file")
-ip_input :: proc "contextless" (n: ^Net, b: []u8, now: vx.Instant) {
+ip_input :: proc "contextless" (n: ^Net, b: []u8, looped: bool, now: vx.Instant) {
 	if len(b) < size_of(Ip4_Header) {
 		n.stats.bad += 1
 		return
@@ -1027,7 +1076,11 @@ ip_input :: proc "contextless" (n: ^Net, b: []u8, now: vx.Instant) {
 		return
 	}
 	src, dst := Ip4(h.src), Ip4(h.dst)
-	ours := dst == BROADCAST || (n.addr != 0 && (dst == n.addr || dst == (n.addr | ~n.mask)))
+	if !looped && (loopback(src) || loopback(dst)) {
+		n.stats.bad += 1
+		return
+	}
+	ours := dst == BROADCAST || loopback(dst) || (n.addr != 0 && (dst == n.addr || dst == (n.addr | ~n.mask)))
 	dhcp := n.dhcp.state != .Off && Proto(h.proto) == .Udp // an offer may come to the address it offers
 	if !ours && !dhcp {
 		return
@@ -1058,7 +1111,7 @@ input :: proc "contextless" (n: ^Net, frame: []u8, now: vx.Instant) {
 	case ETHER_ARP:
 		arp_input(n, frame[size_of(Ether_Header):], now)
 	case ETHER_IP4:
-		ip_input(n, frame[size_of(Ether_Header):], now)
+		ip_input(n, frame[size_of(Ether_Header):], false, now)
 	}
 }
 
@@ -1066,6 +1119,23 @@ input :: proc "contextless" (n: ^Net, frame: []u8, now: vx.Instant) {
 // when to be called again.
 poll :: proc "contextless" (n: ^Net, now: vx.Instant) -> vx.Instant {
 	next := NEVER
+	// What was looped back, as many packets as were queued when this began:
+	// replies they make wait for the next call, which is due at once.
+	for queued := n.loop_used; queued > 0; {
+		head: u16le
+		ring_read(memory.ptr_to_bytes(&head), n.loop[:], int(n.loop_head))
+		size := u32(head)
+		packet: [ETHER_MAX_FRAME]u8
+		ring_read(packet[:size], n.loop[:], int(n.loop_head + 2) % LOOP_BYTES)
+		n.loop_head = (n.loop_head + 2 + size) % LOOP_BYTES
+		n.loop_used -= 2 + size
+		queued -= 2 + size
+		n.stats.frames_in += 1
+		ip_input(n, packet[:size], true, now)
+	}
+	if n.loop_used != 0 {
+		next = now
+	}
 	for &e in n.arp {
 		if e.ip == 0 || e.resolved {
 			continue
