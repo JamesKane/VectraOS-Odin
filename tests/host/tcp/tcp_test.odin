@@ -2,7 +2,8 @@
 // (10.0.2.2), joined by a simulated wire that can lose frames. Time is the
 // test's: when nothing is moving, it jumps to the next deadline either stack
 // asked for. Hand-built segments check what a hostile peer cannot do: reset a
-// connection with a guessed sequence number. Each test also checks the
+// connection with a guessed sequence number. Loopback runs one stack against
+// itself. Each test also checks the
 // digest of every frame either stack sent against upstream's.
 package tcp_test
 
@@ -490,4 +491,93 @@ test_backlog_and_orphans :: proc(t: ^testing.T) {
 	advance(s)
 	testing.expect_value(t, s1.proto, net.Proto.None)
 	nt.expect_digest(t, s.digest, 0x2d05d6283ecafb37)
+}
+
+// Loopback: one stack talks to itself, on 127.0.0.1 and on its own address,
+// with nothing on the wire; a forged 127/8 packet from the wire is dropped.
+loop_settle :: proc(s: ^Sim, n: ^net.Net) {
+	for i := 0; i < 1000 && n.loop_used != 0; i += 1 {
+		_ = net.poll(n, s.now)
+	}
+}
+
+@(test)
+test_loopback :: proc(t: ^testing.T) {
+	s := setup()
+	defer free(s)
+	n := &s.client
+	wire_before := s.sent_frames
+	addrs := [2]net.Ip4{0x7f00_0001, C_IP}
+	big := make([]u8, 20000)
+	got := make([]u8, 20000)
+	defer delete(big)
+	defer delete(got)
+	for &x, i in big {
+		x = u8(i * 7)
+	}
+	for addr, a in addrs {
+		port := net.Port(7000 + a)
+		l, lid := conv(t, n)
+		c, _ := conv(t, n)
+		testing.expect_value(t, net.tcp_listen(n, l, port), vx.Status.Ok)
+		testing.expect_value(t, net.tcp_connect(n, c, addr, port, s.now), vx.Status.Ok)
+		loop_settle(s, n)
+		testing.expect_value(t, c.tcb.state, net.Tcp_State.Established)
+		sid, st := net.tcp_accept(n, l)
+		testing.expect_value(t, st, vx.Status.Ok)
+		ss := &n.conv[sid]
+		testing.expect_value(t, ss.raddr, addr)
+		testing.expect_value(t, ss.rport, c.lport)
+		sent, recvd := 0, 0
+		for round := 0; round < 1000 && recvd < len(big); round += 1 {
+			if sent < len(big) {
+				if taken, wst := net.tcp_write(n, c, big[sent:], s.now); wst == .Ok {
+					sent += taken
+				}
+			}
+			loop_settle(s, n)
+			if k, rst := net.tcp_read(n, ss, got[recvd:], s.now); rst == .Ok {
+				recvd += k
+			}
+		}
+		testing.expect_value(t, recvd, len(big))
+		testing.expect(t, string(big) == string(got))
+		net.conv_free(n, lid, s.now)
+		net.tcp_close(n, c, s.now)
+		net.tcp_close(n, ss, s.now)
+		loop_settle(s, n)
+		testing.expectf(t, c.tcb.state == .Closed || c.tcb.state == .Time_Wait, "%v: %v", addr, c.tcb.state)
+	}
+	// UDP over loopback.
+	uid, st := net.conv_new(n, .Udp)
+	testing.expect_value(t, st, vx.Status.Ok)
+	u := &n.conv[uid]
+	testing.expect_value(t, net.conv_announce(n, u, 9000), vx.Status.Ok)
+	testing.expect_value(t, net.conv_write(n, u, 0x7f00_0001, 9000, bytes("ping"), s.now), vx.Status.Ok)
+	loop_settle(s, n)
+	buf: [16]u8
+	d, k, ok := net.conv_read(u, buf[:])
+	testing.expect(t, ok)
+	testing.expect_value(t, k, 4)
+	testing.expect_value(t, d.addr, net.Ip4(0x7f00_0001))
+	testing.expect_value(t, d.port, 9000)
+	testing.expect_value(t, s.sent_frames, wire_before) // nothing went out
+
+	// The same datagram, from the wire: dropped, as a forgery.
+	f: [60]u8
+	nt.eth_header(f[:], C_MAC, S_MAC, 0x0800)
+	ip := f[14:]
+	ip[0], ip[3], ip[8], ip[9] = 0x45, 32, 64, 17
+	nt.put32(ip[12:], 0x7f00_0001)
+	nt.put32(ip[16:], 0x7f00_0001)
+	nt.put16(ip[10:], nt.fold(nt.sum(0, ip[:20])))
+	nt.put16(ip[20:], 9000)
+	nt.put16(ip[22:], 9000)
+	nt.put16(ip[24:], 12)
+	copy(ip[28:], "evil")
+	bad := n.stats.bad
+	net.input(n, f[:], s.now)
+	testing.expect_value(t, n.stats.bad, bad + 1)
+	_, _, ok = net.conv_read(u, buf[:])
+	testing.expect(t, !ok)
 }

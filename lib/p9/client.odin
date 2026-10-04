@@ -182,3 +182,165 @@ client_remove :: proc "contextless" (c: ^Client, fid: Fid) -> vx.Status {
 	t := Msg{type = .Tremove, fid = fid}
 	return call(c, &t)
 }
+
+// One Twalk of at most MAXWELEM names from fid: the qid of each name it
+// reached goes in qids, and how many in nwqid. Only a walk that reaches every
+// name makes a new fid, as 9P has it (made is then true). An error is the
+// server's, for the first name.
+@(require_results)
+client_walk_names :: proc "contextless" (c: ^Client, fid: Fid, names: []string, qids: ^[MAXWELEM]Qid) -> (newfid: Fid, nwqid: int, made: bool, e: vx.Status) {
+	if len(names) > MAXWELEM {
+		return 0, 0, false, .Err_Range
+	}
+	t := Msg{type = .Twalk, fid = fid, newfid = c.next_fid, nwname = u16(len(names))}
+	c.next_fid += 1
+	copy(t.wname[:], names)
+	call(c, &t) or_return
+	nwqid = int(c.reply.nwqid) <= len(names) ? int(c.reply.nwqid) : 0
+	copy(qids[:nwqid], c.reply.wqid[:nwqid])
+	if nwqid == len(names) {
+		return t.newfid, nwqid, true, .Ok
+	}
+	return 0, nwqid, false, .Ok
+}
+
+// --- The posix and xattr extensions (upstream docs/proto/posix.md) ---
+//
+// Each needs its extension negotiated (c.extensions); without it the call is
+// Err_Unsupported and sends nothing.
+
+@(require_results)
+client_getattr :: proc "contextless" (c: ^Client, fid: Fid) -> (attr: Attr, e: vx.Status) {
+	if .Xattr not_in c.extensions {
+		return {}, .Err_Unsupported
+	}
+	t := Msg{type = .Tgetattr, fid = fid, mask = GETATTR_BASIC}
+	call(c, &t) or_return
+	return c.reply.attr, .Ok
+}
+
+@(require_results)
+client_setattr :: proc "contextless" (c: ^Client, fid: Fid, a: Setattr) -> vx.Status {
+	if .Xattr not_in c.extensions {
+		return .Err_Unsupported
+	}
+	t := Msg{type = .Tsetattr, fid = fid, setattr = a}
+	return call(c, &t)
+}
+
+// Renames olddir's entry oldname to newname in newdir, both on this
+// connection.
+@(require_results)
+client_renameat :: proc "contextless" (c: ^Client, olddir: Fid, oldname: string, newdir: Fid, newname: string) -> vx.Status {
+	if .Posix not_in c.extensions {
+		return .Err_Unsupported
+	}
+	t := Msg{type = .Trenameat, fid = olddir, name = oldname, newfid = newdir, name2 = newname}
+	return call(c, &t)
+}
+
+@(require_results)
+client_symlink :: proc "contextless" (c: ^Client, dir: Fid, name, target: string) -> vx.Status {
+	if .Posix not_in c.extensions {
+		return .Err_Unsupported
+	}
+	t := Msg{type = .Tsymlink, fid = dir, name = name, name2 = target}
+	return call(c, &t)
+}
+
+// A symbolic link's target; it points into the reply buffer, until the next
+// call.
+@(require_results)
+client_readlink :: proc "contextless" (c: ^Client, fid: Fid) -> (target: string, e: vx.Status) {
+	if .Posix not_in c.extensions {
+		return "", .Err_Unsupported
+	}
+	t := Msg{type = .Treadlink, fid = fid}
+	call(c, &t) or_return
+	return c.reply.name2, .Ok
+}
+
+@(require_results)
+client_fsync :: proc "contextless" (c: ^Client, fid: Fid) -> vx.Status {
+	if .Posix not_in c.extensions {
+		return .Ok // a server without it has no later to write at
+	}
+	t := Msg{type = .Tfsync, fid = fid}
+	return call(c, &t)
+}
+
+// An open file shared between connections (posix): a token for `holds`
+// joins of it.
+@(require_results)
+client_share :: proc "contextless" (c: ^Client, fid: Fid, holds: u32) -> (token: [TOKEN_SIZE]u8, e: vx.Status) {
+	if .Posix not_in c.extensions {
+		return {}, .Err_Unsupported
+	}
+	t := Msg{type = .Tshare, fid = fid, holds = holds}
+	call(c, &t) or_return
+	return c.reply.token, .Ok
+}
+
+// A new fid, open on the open file a token names (on this connection's
+// server).
+@(require_results)
+client_join :: proc "contextless" (c: ^Client, token: [TOKEN_SIZE]u8) -> (fid: Fid, e: vx.Status) {
+	if .Posix not_in c.extensions {
+		return 0, .Err_Unsupported
+	}
+	t := Msg{type = .Tjoin, newfid = c.next_fid, token = token}
+	c.next_fid += 1
+	call(c, &t) or_return
+	return t.newfid, .Ok
+}
+
+// Moves the open file's own offset, and says where it is.
+@(require_results)
+client_seek :: proc "contextless" (c: ^Client, fid: Fid, offset: i64, whence: Whence) -> (at: u64, e: vx.Status) {
+	if .Posix not_in c.extensions {
+		return 0, .Err_Unsupported
+	}
+	t := Msg{type = .Tseek, fid = fid, offset = u64(offset), whence = whence}
+	call(c, &t) or_return
+	return c.reply.offset, .Ok
+}
+
+@(require_results)
+client_append :: proc "contextless" (c: ^Client, fid: Fid, append: bool) -> vx.Status {
+	if .Posix not_in c.extensions {
+		return .Err_Unsupported
+	}
+	t := Msg{type = .Tdesc, fid = fid, desc_flags = append ? {.Append} : {}}
+	return call(c, &t)
+}
+
+// A byte-range lock, owned by proc_id on this connection; length 0 is to the
+// end.
+@(require_results)
+client_lock :: proc "contextless" (c: ^Client, fid: Fid, type: Lock_Type, start, length: u64, proc_id: u32) -> (status: Lock_Status, e: vx.Status) {
+	if .Posix not_in c.extensions {
+		return .Error, .Err_Unsupported
+	}
+	t := Msg{type = .Tlock, fid = fid, lock_type = type, start = start, length = length, proc_id = proc_id, client_id = ""}
+	call(c, &t) or_return
+	return c.reply.status, .Ok
+}
+
+// A lock, as Rgetlock describes it.
+Lock_Held :: struct {
+	type:          Lock_Type, // .Unlock: none
+	start, length: u64, // length 0: to the end
+	proc_id:       u32,
+}
+
+// The first lock that would stop one of `type` over the range: its type,
+// range and owner, or .Unlock as its type when none would.
+@(require_results)
+client_getlock :: proc "contextless" (c: ^Client, fid: Fid, type: Lock_Type, start, length: u64, proc_id: u32) -> (l: Lock_Held, e: vx.Status) {
+	if .Posix not_in c.extensions {
+		return {}, .Err_Unsupported
+	}
+	t := Msg{type = .Tgetlock, fid = fid, lock_type = type, start = start, length = length, proc_id = proc_id, client_id = ""}
+	call(c, &t) or_return
+	return {type = c.reply.lock_type, start = c.reply.start, length = c.reply.length, proc_id = c.reply.proc_id}, .Ok
+}

@@ -3,6 +3,38 @@
 // from this table. 9Px's extensions add rows when their first user lands
 // (02 §3.3). Terror (106) does not exist.
 
+// 9P2000.L's, unchanged on the wire, for the posix and xattr extensions
+// (docs/proto/posix.md). A server answers them only once one is negotiated.
+P9_MSG(Tsymlink,  16, P9F_FID, P9F_NAME, P9F_NAME2, P9F_GID)
+P9_MSG(Rsymlink,  17, P9F_QID)
+P9_MSG(Treadlink, 22, P9F_FID)
+P9_MSG(Rreadlink, 23, P9F_NAME2)
+P9_MSG(Tgetattr,  24, P9F_FID, P9F_MASK)
+P9_MSG(Rgetattr,  25, P9F_ATTR)
+P9_MSG(Tsetattr,  26, P9F_FID, P9F_SETATTR)
+P9_MSG(Rsetattr,  27)
+P9_MSG(Tfsync,    50, P9F_FID, P9F_DATASYNC)
+P9_MSG(Rfsync,    51)
+P9_MSG(Tlink,     70, P9F_FID, P9F_NEWFID, P9F_NAME)            // dfid, fid, name
+P9_MSG(Rlink,     71)
+P9_MSG(Trenameat, 74, P9F_FID, P9F_NAME, P9F_NEWFID, P9F_NAME2) // olddirfid, oldname, newdirfid, newname
+P9_MSG(Rrenameat, 75)
+P9_MSG(Tlock,     52, P9F_FID, P9F_LOCKTYPE, P9F_LOCKFLAGS, P9F_START, P9F_LENGTH, P9F_PROCID, P9F_CLIENTID)
+P9_MSG(Rlock,     53, P9F_STATUS)
+P9_MSG(Tgetlock,  54, P9F_FID, P9F_LOCKTYPE, P9F_START, P9F_LENGTH, P9F_PROCID, P9F_CLIENTID)
+P9_MSG(Rgetlock,  55, P9F_LOCKTYPE, P9F_START, P9F_LENGTH, P9F_PROCID, P9F_CLIENTID)
+
+// 9Px's own, for posix: open files shared between connections, and their
+// offsets kept by the server (docs/proto/posix.md).
+P9_MSG(Tshare,   150, P9F_FID, P9F_HOLDS)
+P9_MSG(Rshare,   151, P9F_TOKEN)
+P9_MSG(Tjoin,    152, P9F_NEWFID, P9F_TOKEN)
+P9_MSG(Rjoin,    153, P9F_QID, P9F_IOUNIT)
+P9_MSG(Tseek,    154, P9F_FID, P9F_OFFSET, P9F_WHENCE)
+P9_MSG(Rseek,    155, P9F_OFFSET)
+P9_MSG(Tdesc,    156, P9F_FID, P9F_DESCFLAGS)
+P9_MSG(Rdesc,    157)
+
 P9_MSG(Tversion, 100, P9F_MSIZE, P9F_VERSION)
 P9_MSG(Rversion, 101, P9F_MSIZE, P9F_VERSION)
 P9_MSG(Tauth,    102, P9F_AFID, P9F_UNAME, P9F_ANAME)

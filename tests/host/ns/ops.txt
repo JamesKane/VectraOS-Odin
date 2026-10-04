@@ -1,0 +1,34 @@
+m boot / -
+b /boot/bin /bin a
+m dev /dev a
+b /boot /dev b
+b /dev/bin /n/x -
+m dev /n/x/ls -
+b /readme /bin ac
+u /boot/bin /bin
+u - /dev
+b /boot /boot/bin/cat -
+m dev /boot/bin b
+b /bin /boot -
+b /boot/bin /bin a
+m dev /new -
+b /new /boot/bin a
+u - /new
+b /bin/.. /n -
+b /n /n/n a
+b /n/n /n b
+u - /n
+m boot /n -
+b /n/boot /n/boot/bin a
+u /srv/bootfs /n
+b /dev /readme -
+m dev /readme/cons -
+u - /readme
+b /boot/bin /dev c
+b /dev /boot/bin a
+b /boot/bin /dev a
+u - /boot/bin
+u - /bin
+u - /
+m dev / -
+b /cons /null a

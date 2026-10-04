@@ -1,5 +1,6 @@
-// 9P2000 and 9Px (upstream 02 §3): the codec for messages, stat entries and
-// 9Px version strings; the server framework (server.odin), which keeps a
+// 9P2000 and 9Px (upstream 02 §3), with the 9P2000.L messages of 9Px's
+// posix and xattr extensions (upstream docs/proto/posix.md): the codec for
+// messages, stat entries and 9Px version strings; the server framework (server.odin), which keeps a
 // hostile client inside its attach root; and a client (client.odin). Neither
 // side has a transport of its own: the server turns one request into one
 // reply, and the client sends through a procedure it is given.
@@ -49,7 +50,15 @@ QTEXCL :: Qid_Type{.Excl}
 QTAUTH :: Qid_Type{.Auth}
 QTFILE :: Qid_Type{}
 
-DMDIR :: u32(0x8000_0000) // a stat's mode: a directory (beside the permission bits, so a plain u32)
+// A stat's mode: a directory; and 9P2000.u's link and device (a terminal, to
+// the musl back end). Beside the permission bits, so plain u32s.
+DMDIR :: u32(0x8000_0000)
+DMSYMLINK :: u32(0x0200_0000)
+DMDEVICE :: u32(0x0080_0000)
+
+// Tread's and Twrite's offset that means the open file's own, which the
+// server keeps and moves on (posix).
+OFFSET_CURRENT :: max(u64)
 
 // Topen's and Tcreate's mode: the access in its low two bits, and flags.
 Access :: enum u8 {
@@ -63,9 +72,14 @@ Open_Mode :: bit_field u8 {
 	access: Access | 2,
 	_:      u8     | 2,
 	trunc:  bool   | 1, // OTRUNC, 0x10
-	_:      u8     | 1,
+	// fs.open's, never a client's (the server takes it out of theirs): a
+	// Tjoin's open, another fid for a file already open, which may have been
+	// removed since. 0x20.
+	join:   bool   | 1,
 	rclose: bool   | 1, // ORCLOSE, 0x40
-	_:      u8     | 1,
+	// Topen's (posix): the open file's writes at OFFSET_CURRENT go to its end.
+	// 0x80.
+	append: bool   | 1,
 }
 #assert(size_of(Open_Mode) == 1)
 
@@ -84,6 +98,100 @@ Qid :: struct {
 	version: u32,
 	path:    u64,
 }
+
+// Rgetattr's attributes, as 9P2000.L has them: which are set, by Linux's
+// numbers.
+Getattr_Bit :: enum u64 {
+	Mode,
+	Nlink,
+	Uid,
+	Gid,
+	Rdev,
+	Atime,
+	Mtime,
+	Ctime,
+	Ino,
+	Size,
+	Blocks,
+}
+Getattr_Mask :: bit_set[Getattr_Bit;u64]
+GETATTR_BASIC :: Getattr_Mask{.Mode, .Nlink, .Uid, .Gid, .Rdev, .Atime, .Mtime, .Ctime, .Ino, .Size, .Blocks} // 0x7ff
+
+// Tsetattr's: which attributes to change.
+Setattr_Bit :: enum u32 {
+	Mode,
+	Uid,
+	Gid,
+	Size,
+	Atime, // to now, without Atime_Set
+	Mtime,
+	Ctime,
+	Atime_Set, // to atime_sec and atime_nsec
+	Mtime_Set,
+}
+Setattr_Mask :: bit_set[Setattr_Bit;u32]
+
+// POSIX's file types in an Attr's mode, which is POSIX's, not 9P2000's.
+S_IFMT :: u32(0o170000)
+S_IFDIR :: u32(0o040000)
+S_IFREG :: u32(0o100000)
+S_IFLNK :: u32(0o120000)
+S_IFCHR :: u32(0o020000)
+
+Attr :: struct {
+	valid:                               Getattr_Mask,
+	qid:                                 Qid,
+	mode, uid, gid:                      u32,
+	nlink, rdev, size, blksize, blocks:  u64,
+	atime_sec, atime_nsec:               u64,
+	mtime_sec, mtime_nsec:               u64,
+	ctime_sec, ctime_nsec:               u64,
+	btime_sec, btime_nsec:               u64,
+	gen, data_version:                   u64,
+}
+
+Setattr :: struct {
+	valid:                 Setattr_Mask,
+	mode, uid, gid:        u32,
+	size:                  u64,
+	atime_sec, atime_nsec: u64,
+	mtime_sec, mtime_nsec: u64,
+}
+
+// Tlock's and Tgetlock's lock types, and Rlock's answer. A peer's byte is
+// kept as it came; the server refuses one it does not know.
+Lock_Type :: enum u8 {
+	Read,
+	Write,
+	Unlock,
+}
+
+Lock_Status :: enum u8 {
+	Success,
+	Blocked, // the client waits and asks again (F_SETLKW)
+	Error,
+}
+
+Lock_Flag :: enum u32 {
+	Block,
+	Reclaim,
+}
+Lock_Flags :: bit_set[Lock_Flag;u32]
+
+// Tseek's whence.
+Whence :: enum u8 {
+	Set,
+	Current,
+	End,
+}
+
+// Tdesc's flags: the open file's O_APPEND.
+Desc_Flag :: enum u32 {
+	Append,
+}
+Desc_Flags :: bit_set[Desc_Flag;u32]
+
+TOKEN_SIZE :: 16
 
 Msg :: struct {
 	type:   Type,
@@ -106,6 +214,24 @@ Msg :: struct {
 	wqid:   [MAXWELEM]Qid,
 	data:   []u8, // Rread, Twrite; its length is count
 	stat:   []u8, // Rstat, Twstat: one stat entry, its own size[2] included
+	// 9P2000.L's and 9Px's, for the posix and xattr extensions.
+	name2:      string,
+	gid:        u32,
+	datasync:   u32,
+	mask:       Getattr_Mask,
+	attr:       Attr,
+	setattr:    Setattr,
+	lock_type:  Lock_Type,
+	status:     Lock_Status,
+	whence:     Whence,
+	lock_flags: Lock_Flags,
+	proc_id:    u32,
+	holds:      u32,
+	desc_flags: Desc_Flags,
+	start:      u64,
+	length:     u64,
+	client_id:  string,
+	token:      [TOKEN_SIZE]u8,
 }
 
 // --- Encoding ---
@@ -140,8 +266,50 @@ put_qid :: proc "contextless" (o: ^str.Buf, q: Qid) {
 	put(o, q.path)
 }
 
+@(private="file")
+put_attr :: proc "contextless" (o: ^str.Buf, a: ^Attr) {
+	put(o, transmute(u64)a.valid)
+	put_qid(o, a.qid)
+	put(o, a.mode)
+	put(o, a.uid)
+	put(o, a.gid)
+	rest := [?]u64 {
+		a.nlink,
+		a.rdev,
+		a.size,
+		a.blksize,
+		a.blocks,
+		a.atime_sec,
+		a.atime_nsec,
+		a.mtime_sec,
+		a.mtime_nsec,
+		a.ctime_sec,
+		a.ctime_nsec,
+		a.btime_sec,
+		a.btime_nsec,
+		a.gen,
+		a.data_version,
+	}
+	for v in rest {
+		put(o, v)
+	}
+}
+
+@(private="file")
+put_setattr :: proc "contextless" (o: ^str.Buf, a: ^Setattr) {
+	put(o, transmute(u32)a.valid)
+	put(o, a.mode)
+	put(o, a.uid)
+	put(o, a.gid)
+	put(o, a.size)
+	put(o, a.atime_sec)
+	put(o, a.atime_nsec)
+	put(o, a.mtime_sec)
+	put(o, a.mtime_nsec)
+}
+
 // Encodes m into buf. Returns its length, or 0 if it does not fit or is not a
-// message 9P2000 has.
+// message the tables have.
 encode :: proc "contextless" (m: ^Msg, buf: []u8) -> int {
 	if !known(m.type) {
 		return 0
@@ -217,6 +385,40 @@ encode :: proc "contextless" (m: ^Msg, buf: []u8) -> int {
 			}
 			put(&o, u16(len(m.stat)))
 			str.write_bytes(&o, m.stat)
+		case .Name2:
+			put_str(&o, m.name2)
+		case .Gid:
+			put(&o, m.gid)
+		case .Mask:
+			put(&o, transmute(u64)m.mask)
+		case .Datasync:
+			put(&o, m.datasync)
+		case .Attr:
+			put_attr(&o, &m.attr)
+		case .Setattr:
+			put_setattr(&o, &m.setattr)
+		case .Locktype:
+			put(&o, u8(m.lock_type))
+		case .Lockflags:
+			put(&o, transmute(u32)m.lock_flags)
+		case .Start:
+			put(&o, m.start)
+		case .Length:
+			put(&o, m.length)
+		case .Procid:
+			put(&o, m.proc_id)
+		case .Clientid:
+			put_str(&o, m.client_id)
+		case .Status:
+			put(&o, u8(m.status))
+		case .Holds:
+			put(&o, m.holds)
+		case .Token:
+			str.write_bytes(&o, m.token[:])
+		case .Whence:
+			put(&o, u8(m.whence))
+		case .Descflags:
+			put(&o, transmute(u32)m.desc_flags)
 		}
 	}
 	if o.failed || u64(o.len) > u64(max(u32)) {
@@ -283,6 +485,50 @@ get_qid :: proc "contextless" (in_: ^In) -> (q: Qid) {
 	q.type = transmute(Qid_Type)get(in_, u8)
 	q.version = get(in_, u32)
 	q.path = get(in_, u64)
+	return
+}
+
+@(private="file")
+get_attr :: proc "contextless" (in_: ^In) -> (a: Attr) {
+	a.valid = transmute(Getattr_Mask)get(in_, u64)
+	a.qid = get_qid(in_)
+	a.mode = get(in_, u32)
+	a.uid = get(in_, u32)
+	a.gid = get(in_, u32)
+	rest := [?]^u64 {
+		&a.nlink,
+		&a.rdev,
+		&a.size,
+		&a.blksize,
+		&a.blocks,
+		&a.atime_sec,
+		&a.atime_nsec,
+		&a.mtime_sec,
+		&a.mtime_nsec,
+		&a.ctime_sec,
+		&a.ctime_nsec,
+		&a.btime_sec,
+		&a.btime_nsec,
+		&a.gen,
+		&a.data_version,
+	}
+	for v in rest {
+		v^ = get(in_, u64)
+	}
+	return
+}
+
+@(private="file")
+get_setattr :: proc "contextless" (in_: ^In) -> (a: Setattr) {
+	a.valid = transmute(Setattr_Mask)get(in_, u32)
+	a.mode = get(in_, u32)
+	a.uid = get(in_, u32)
+	a.gid = get(in_, u32)
+	a.size = get(in_, u64)
+	a.atime_sec = get(in_, u64)
+	a.atime_nsec = get(in_, u64)
+	a.mtime_sec = get(in_, u64)
+	a.mtime_nsec = get(in_, u64)
 	return
 }
 
@@ -360,6 +606,40 @@ decode :: proc "contextless" (buf: []u8, m: ^Msg) -> vx.Status {
 			m.data = get_bytes(&in_, u64(m.count))
 		case .Stat:
 			m.stat = get_bytes(&in_, u64(get(&in_, u16)))
+		case .Name2:
+			m.name2 = get_str(&in_)
+		case .Gid:
+			m.gid = get(&in_, u32)
+		case .Mask:
+			m.mask = transmute(Getattr_Mask)get(&in_, u64)
+		case .Datasync:
+			m.datasync = get(&in_, u32)
+		case .Attr:
+			m.attr = get_attr(&in_)
+		case .Setattr:
+			m.setattr = get_setattr(&in_)
+		case .Locktype:
+			m.lock_type = Lock_Type(get(&in_, u8))
+		case .Lockflags:
+			m.lock_flags = transmute(Lock_Flags)get(&in_, u32)
+		case .Start:
+			m.start = get(&in_, u64)
+		case .Length:
+			m.length = get(&in_, u64)
+		case .Procid:
+			m.proc_id = get(&in_, u32)
+		case .Clientid:
+			m.client_id = get_str(&in_)
+		case .Status:
+			m.status = Lock_Status(get(&in_, u8))
+		case .Holds:
+			m.holds = get(&in_, u32)
+		case .Token:
+			copy(m.token[:], get_bytes(&in_, TOKEN_SIZE))
+		case .Whence:
+			m.whence = Whence(get(&in_, u8))
+		case .Descflags:
+			m.desc_flags = transmute(Desc_Flags)get(&in_, u32)
 		}
 	}
 	if in_.failed || in_.pos != len(buf) {
@@ -553,6 +833,8 @@ ERRORS := [?]Error_Text {
 	{.Err_Refused, "connection refused"},
 	{.Err_Timed_Out, "connection timed out"},
 	{.Err_Peer_Closed, "i/o on hungup channel"},
+	{.Err_Interrupted, "interrupted"},
+	{.Err_No_Child, "no living children"},
 	{.Err_Invalid, "bad message"},
 }
 

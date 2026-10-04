@@ -1,23 +1,27 @@
 // The boot image's archive format, ustar (POSIX.1-1988), read by svcd and
 // bootfs and written by build's mkbootfs (upstream 04 §3.4).
 //
-// Only what a boot image holds: regular files and directories. The reader is
+// Only what a boot image holds: regular files, directories, and hard links
+// to a regular file earlier in the archive, read as that file's contents (one
+// program under many names: sbase's box, upstream ADR-0016). The reader is
 // strict, because a boot image may be built by anyone with access to the ESP:
 // every header's checksum and octal fields are checked, every file lies inside
 // the image, and every path is relative, has no empty, "." or ".." component,
-// and fits its fields. The first bad header ends the archive with
+// is a name as upstream ADR-0013 has it (UTF-8, no control characters), and
+// fits its fields. The first bad header ends the archive with
 // Err_Invalid; no entry after it is returned.
 //
 // The writer is deterministic: the same files in the same order give the same
 // bytes (mtime, uid and gid are zero; names are as given), so images are
 // reproducible (upstream 04 §3.3).
 //
-// Imports only the ABI and lib/str, and allocates nothing, so the kernel's
+// Imports only the ABI, lib/str and lib/utf, and allocates nothing, so the kernel's
 // bootfs and the host build tool share it.
 package tar
 
 import vx "abi:vx"
 import "vx:str"
+import "vx:utf"
 
 BLOCK :: 512
 
@@ -73,11 +77,17 @@ open :: proc "contextless" (image: []u8) -> Reader {
 	return Reader{image = image}
 }
 
-// The next entry. Err_Not_Found at the end of the archive (a zero block, or
-// the end of the image); Err_Invalid at a bad header, and for every call
-// after it.
-@(require_results)
-next :: proc "contextless" (t: ^Reader, e: ^Entry) -> vx.Status {
+// A hard link's target path, as its header has it.
+@(private="file")
+Link :: [dynamic; 100]u8
+
+// The next entry, as its header has it; a link's target path in link (else
+// empty), unresolved, with no data. Err_Not_Found at the end of the archive
+// (a zero block, or the end of the image); Err_Invalid at a bad header, and
+// for every call after it.
+@(private="file")
+read_entry :: proc "contextless" (t: ^Reader, e: ^Entry, link: ^Link) -> vx.Status {
+	clear(link)
 	e^ = {}
 	if t.failed {
 		return .Err_Invalid
@@ -104,12 +114,13 @@ next :: proc "contextless" (t: ^Reader, e: ^Entry) -> vx.Status {
 	if mode, ok = octal(h.mode[:]); !ok {
 		return .Err_Invalid
 	}
+	is_link := h.typeflag == '1'
 	if h.typeflag == '5' {
 		e.dir = true
-	} else if h.typeflag != '0' && h.typeflag != 0 {
-		return .Err_Invalid // no links, devices or extensions
+	} else if h.typeflag != '0' && h.typeflag != 0 && !is_link {
+		return .Err_Invalid // no symbolic links, devices or extensions
 	}
-	if (e.dir && size != 0) || mode > 0o7777 {
+	if (is_link && size != 0) || (e.dir && size != 0) || mode > 0o7777 {
 		return .Err_Invalid
 	}
 	e.mode = u32(mode)
@@ -137,11 +148,51 @@ next :: proc "contextless" (t: ^Reader, e: ^Entry) -> vx.Status {
 	if size > u64(len(t.image)) || blocks > u64((len(t.image) - t.pos) / BLOCK - 1) {
 		return .Err_Invalid
 	}
-	if !e.dir {
+	if is_link {
+		tlen, tok := field_len(h.linkname[:])
+		if !tok || !path_ok(string(h.linkname[:tlen])) {
+			return .Err_Invalid
+		}
+		_ = append(link, ..h.linkname[:tlen])
+	} else if !e.dir {
 		e.data = src[BLOCK:][:size]
 	}
 	t.pos += int(1 + blocks) * BLOCK
 	t.failed = false
+	return .Ok
+}
+
+// The regular file at path among the archive's first bytes, before: what a
+// link there names. Links are not followed, so none forms a cycle.
+@(private="file")
+link_target :: proc "contextless" (before: []u8, path: string, e: ^Entry) -> bool {
+	scan := open(before)
+	link: Link
+	for read_entry(&scan, e, &link) == .Ok {
+		if !e.dir && len(link) == 0 && entry_path(e) == path {
+			return true
+		}
+	}
+	return false
+}
+
+// The next entry; a link reads as the regular file it names, earlier in the
+// archive. Err_Not_Found at the end of the archive (a zero block, or the end
+// of the image); Err_Invalid at a bad header, and for every call after it.
+@(require_results)
+next :: proc "contextless" (t: ^Reader, e: ^Entry) -> vx.Status {
+	link: Link
+	at := t.pos
+	read_entry(t, e, &link) or_return
+	if len(link) == 0 {
+		return .Ok
+	}
+	target: Entry
+	if !link_target(t.image[:at], string(link[:]), &target) {
+		t.failed = true
+		return .Err_Invalid
+	}
+	e.data = target.data
 	return .Ok
 }
 
@@ -206,8 +257,9 @@ field_len :: proc "contextless" (f: []u8) -> (n: int, ok: bool) {
 	return n, true
 }
 
-// A relative path with no empty, "." or ".." component, and nothing
-// unprintable. A directory's one trailing '/' is removed before this.
+// A relative path with no empty, "." or ".." component, whose components are
+// names as ADR-0013 has them: UTF-8, no control characters. A directory's one
+// trailing '/' is removed before this.
 @(private="file")
 path_ok :: proc "contextless" (p: string) -> bool {
 	if p == "" || str.has_suffix(p, "/") { // an empty last component
@@ -215,12 +267,7 @@ path_ok :: proc "contextless" (p: string) -> bool {
 	}
 	rest := p
 	for c in str.split_iterator(&rest, '/') {
-		if c == "" || c == "." || c == ".." {
-			return false
-		}
-	}
-	for b in transmute([]u8)p {
-		if b < 0x20 || b == 0x7f {
+		if c == "" || c == "." || c == ".." || !utf.is_name(c) {
 			return false
 		}
 	}
@@ -297,6 +344,27 @@ add :: proc "contextless" (w: ^Writer, path: string, dir: bool, mode: u32, data:
 		b = 0
 	}
 	w.len += len(out)
+}
+
+// Adds a hard link at path to target, a regular file added before it.
+add_link :: proc "contextless" (w: ^Writer, path, target: string, mode: u32) {
+	if w.failed {
+		return
+	}
+	before := w.len
+	add(w, path, false, mode, nil)
+	if w.failed {
+		return
+	}
+	h := (^Header)(raw_data(w.buf[before:]))
+	if len(target) > len(h.linkname) || !path_ok(target) {
+		w.failed = true
+		return
+	}
+	copy(h.linkname[:], target)
+	h.typeflag = '1'
+	put_octal(h.chksum[:7], u64(checksum(h)))
+	h.chksum[7] = ' '
 }
 
 // Ends the archive with its two zero blocks. Returns its length, or 0.

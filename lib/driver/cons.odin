@@ -6,7 +6,8 @@
 //
 // The tree is one file, /cons. Reads are cooked, as Plan 9's cons is: typed
 // bytes are echoed and gathered into a line, with backspace (BS or DEL) and
-// kill-line (^U), and a read returns at most one line, once it is ended (by
+// kill-line (^U), each taking back whole runes, as UTF-8 is all text is
+// (upstream ADR-0013), and a read returns at most one line, once it is ended (by
 // return) or sent (^D), never part of the next. ^D on an empty line makes one
 // read return 0, the end of the file, in its place among the lines. Writes
 // go out with each newline as CR LF. A read with nothing
@@ -17,6 +18,7 @@ package driver
 import vx "abi:vx"
 import "vx:p9"
 import "vx:rt"
+import "vx:utf"
 
 Cons :: struct {
 	dev:       rawptr,
@@ -93,8 +95,10 @@ echo :: proc "contextless" (c: ^Cons, b: u8) {
 	push(&c.out, b)
 }
 
+// Takes back the last rune typed (ADR-0013), echoed as one character erased.
 @(private="file")
 erase :: proc "contextless" (c: ^Cons) {
+	c.line_len = u32(utf.back(string(c.line[:]), int(c.line_len)))
 	push(&c.out, '\b')
 	push(&c.out, ' ')
 	push(&c.out, '\b')
@@ -115,27 +119,50 @@ finish_line :: proc "contextless" (c: ^Cons) {
 	c.line_len = 0
 }
 
+// The line is full: it ends at the last whole rune that fits, and a rune it
+// would have split starts the next line.
+@(private="file")
+line_full :: proc "contextless" (c: ^Cons) {
+	end := c.line_len
+	start := end
+	for start > 0 && end - start < utf.UTF_MAX && c.line[start - 1] & 0xc0 == 0x80 {
+		start -= 1
+	}
+	if start > 0 && c.line[start - 1] >= 0xc0 {
+		start -= 1 // the lead byte of the last rune
+	}
+	if start < end && !utf.full_rune(string(c.line[start:end])) {
+		end = start
+	}
+	rest: [utf.UTF_MAX]u8
+	kept := copy(rest[:], c.line[end:c.line_len])
+	c.line_len = end
+	finish_line(c)
+	copy(c.line[:], rest[:kept])
+	c.line_len = u32(kept)
+}
+
 // A byte from the device, through the line discipline.
 cons_input :: proc "contextless" (c: ^Cons, byte: u8) {
 	b := byte == '\r' ? '\n' : byte
 	switch {
 	case b == 0x08 || b == 0x7f: // erase
 		if c.line_len > 0 {
-			c.line_len -= 1
 			erase(c)
 		}
 	case b == 0x15: // ^U: kill the line
-		for ; c.line_len > 0; c.line_len -= 1 {
+		for c.line_len > 0 {
 			erase(c)
 		}
 	case b == 0x04: // ^D: send the line, or (on an empty one) end the file
 		finish_line(c)
 	case b == '\n' || b >= 0x20 || b == '\t':
-		if c.line_len < len(c.line) - 1 || b == '\n' { // a full line keeps room for its newline
-			c.line[c.line_len] = b
-			c.line_len += 1
-			echo(c, b)
+		if c.line_len == len(c.line) - 1 && b != '\n' {
+			line_full(c) // a full line keeps room for its newline
 		}
+		c.line[c.line_len] = b
+		c.line_len += 1
+		echo(c, b)
 		if b == '\n' {
 			finish_line(c)
 		}

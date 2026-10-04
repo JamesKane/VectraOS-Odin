@@ -1,0 +1,313 @@
+note -1 0 posix: SIG18446744073709551615
+note -1 12 posix: SIG18446744073709551615 pid=12
+note -1 -3 posix: SIG18446744073709551615
+note 0 0 posix: SIG0
+note 0 12 posix: SIG0 pid=12
+note 0 -3 posix: SIG0
+note 1 0 hangup
+note 1 12 posix: SIGHUP pid=12
+note 1 -3 posix: SIGHUP
+note 2 0 interrupt
+note 2 12 posix: SIGINT pid=12
+note 2 -3 posix: SIGINT
+note 3 0 posix: SIGQUIT
+note 3 12 posix: SIGQUIT pid=12
+note 3 -3 posix: SIGQUIT
+note 4 0 posix: SIGILL
+note 4 12 posix: SIGILL pid=12
+note 4 -3 posix: SIGILL
+note 5 0 posix: SIGTRAP
+note 5 12 posix: SIGTRAP pid=12
+note 5 -3 posix: SIGTRAP
+note 6 0 posix: SIGABRT
+note 6 12 posix: SIGABRT pid=12
+note 6 -3 posix: SIGABRT
+note 7 0 posix: SIGBUS
+note 7 12 posix: SIGBUS pid=12
+note 7 -3 posix: SIGBUS
+note 8 0 posix: SIGFPE
+note 8 12 posix: SIGFPE pid=12
+note 8 -3 posix: SIGFPE
+note 9 0 posix: SIGKILL
+note 9 12 posix: SIGKILL pid=12
+note 9 -3 posix: SIGKILL
+note 10 0 posix: SIGUSR1
+note 10 12 posix: SIGUSR1 pid=12
+note 10 -3 posix: SIGUSR1
+note 11 0 posix: SIGSEGV
+note 11 12 posix: SIGSEGV pid=12
+note 11 -3 posix: SIGSEGV
+note 12 0 posix: SIGUSR2
+note 12 12 posix: SIGUSR2 pid=12
+note 12 -3 posix: SIGUSR2
+note 13 0 sys: write on closed pipe
+note 13 12 posix: SIGPIPE pid=12
+note 13 -3 posix: SIGPIPE
+note 14 0 alarm
+note 14 12 posix: SIGALRM pid=12
+note 14 -3 posix: SIGALRM
+note 15 0 posix: SIGTERM
+note 15 12 posix: SIGTERM pid=12
+note 15 -3 posix: SIGTERM
+note 16 0 posix: SIGSTKFLT
+note 16 12 posix: SIGSTKFLT pid=12
+note 16 -3 posix: SIGSTKFLT
+note 17 0 posix: SIGCHLD
+note 17 12 posix: SIGCHLD pid=12
+note 17 -3 posix: SIGCHLD
+note 18 0 posix: SIGCONT
+note 18 12 posix: SIGCONT pid=12
+note 18 -3 posix: SIGCONT
+note 19 0 posix: SIGSTOP
+note 19 12 posix: SIGSTOP pid=12
+note 19 -3 posix: SIGSTOP
+note 20 0 posix: SIGTSTP
+note 20 12 posix: SIGTSTP pid=12
+note 20 -3 posix: SIGTSTP
+note 21 0 posix: SIGTTIN
+note 21 12 posix: SIGTTIN pid=12
+note 21 -3 posix: SIGTTIN
+note 22 0 posix: SIGTTOU
+note 22 12 posix: SIGTTOU pid=12
+note 22 -3 posix: SIGTTOU
+note 23 0 posix: SIGURG
+note 23 12 posix: SIGURG pid=12
+note 23 -3 posix: SIGURG
+note 24 0 posix: SIGXCPU
+note 24 12 posix: SIGXCPU pid=12
+note 24 -3 posix: SIGXCPU
+note 25 0 posix: SIGXFSZ
+note 25 12 posix: SIGXFSZ pid=12
+note 25 -3 posix: SIGXFSZ
+note 26 0 posix: SIGVTALRM
+note 26 12 posix: SIGVTALRM pid=12
+note 26 -3 posix: SIGVTALRM
+note 27 0 posix: SIGPROF
+note 27 12 posix: SIGPROF pid=12
+note 27 -3 posix: SIGPROF
+note 28 0 posix: SIGWINCH
+note 28 12 posix: SIGWINCH pid=12
+note 28 -3 posix: SIGWINCH
+note 29 0 posix: SIGIO
+note 29 12 posix: SIGIO pid=12
+note 29 -3 posix: SIGIO
+note 30 0 posix: SIGPWR
+note 30 12 posix: SIGPWR pid=12
+note 30 -3 posix: SIGPWR
+note 31 0 posix: SIGSYS
+note 31 12 posix: SIGSYS pid=12
+note 31 -3 posix: SIGSYS
+note 32 0 posix: SIG32
+note 32 12 posix: SIG32 pid=12
+note 32 -3 posix: SIG32
+note 33 0 posix: SIG33
+note 33 12 posix: SIG33 pid=12
+note 33 -3 posix: SIG33
+note 34 0 posix: SIG34
+note 34 12 posix: SIG34 pid=12
+note 34 -3 posix: SIG34
+note 35 0 posix: SIG35
+note 35 12 posix: SIG35 pid=12
+note 35 -3 posix: SIG35
+note 36 0 posix: SIG36
+note 36 12 posix: SIG36 pid=12
+note 36 -3 posix: SIG36
+note 37 0 posix: SIG37
+note 37 12 posix: SIG37 pid=12
+note 37 -3 posix: SIG37
+note 38 0 posix: SIG38
+note 38 12 posix: SIG38 pid=12
+note 38 -3 posix: SIG38
+note 39 0 posix: SIG39
+note 39 12 posix: SIG39 pid=12
+note 39 -3 posix: SIG39
+note 40 0 posix: SIG40
+note 40 12 posix: SIG40 pid=12
+note 40 -3 posix: SIG40
+note 41 0 posix: SIG41
+note 41 12 posix: SIG41 pid=12
+note 41 -3 posix: SIG41
+note 42 0 posix: SIG42
+note 42 12 posix: SIG42 pid=12
+note 42 -3 posix: SIG42
+note 43 0 posix: SIG43
+note 43 12 posix: SIG43 pid=12
+note 43 -3 posix: SIG43
+note 44 0 posix: SIG44
+note 44 12 posix: SIG44 pid=12
+note 44 -3 posix: SIG44
+note 45 0 posix: SIG45
+note 45 12 posix: SIG45 pid=12
+note 45 -3 posix: SIG45
+note 46 0 posix: SIG46
+note 46 12 posix: SIG46 pid=12
+note 46 -3 posix: SIG46
+note 47 0 posix: SIG47
+note 47 12 posix: SIG47 pid=12
+note 47 -3 posix: SIG47
+note 48 0 posix: SIG48
+note 48 12 posix: SIG48 pid=12
+note 48 -3 posix: SIG48
+note 49 0 posix: SIG49
+note 49 12 posix: SIG49 pid=12
+note 49 -3 posix: SIG49
+note 50 0 posix: SIG50
+note 50 12 posix: SIG50 pid=12
+note 50 -3 posix: SIG50
+note 51 0 posix: SIG51
+note 51 12 posix: SIG51 pid=12
+note 51 -3 posix: SIG51
+note 52 0 posix: SIG52
+note 52 12 posix: SIG52 pid=12
+note 52 -3 posix: SIG52
+note 53 0 posix: SIG53
+note 53 12 posix: SIG53 pid=12
+note 53 -3 posix: SIG53
+note 54 0 posix: SIG54
+note 54 12 posix: SIG54 pid=12
+note 54 -3 posix: SIG54
+note 55 0 posix: SIG55
+note 55 12 posix: SIG55 pid=12
+note 55 -3 posix: SIG55
+note 56 0 posix: SIG56
+note 56 12 posix: SIG56 pid=12
+note 56 -3 posix: SIG56
+note 57 0 posix: SIG57
+note 57 12 posix: SIG57 pid=12
+note 57 -3 posix: SIG57
+note 58 0 posix: SIG58
+note 58 12 posix: SIG58 pid=12
+note 58 -3 posix: SIG58
+note 59 0 posix: SIG59
+note 59 12 posix: SIG59 pid=12
+note 59 -3 posix: SIG59
+note 60 0 posix: SIG60
+note 60 12 posix: SIG60 pid=12
+note 60 -3 posix: SIG60
+note 61 0 posix: SIG61
+note 61 12 posix: SIG61 pid=12
+note 61 -3 posix: SIG61
+note 62 0 posix: SIG62
+note 62 12 posix: SIG62 pid=12
+note 62 -3 posix: SIG62
+note 63 0 posix: SIG63
+note 63 12 posix: SIG63 pid=12
+note 63 -3 posix: SIG63
+note 64 0 posix: SIG64
+note 64 12 posix: SIG64 pid=12
+note 64 -3 posix: SIG64
+note 65 0 posix: SIG65
+note 65 12 posix: SIG65 pid=12
+note 65 -3 posix: SIG65
+note 66 0 posix: SIG66
+note 66 12 posix: SIG66 pid=12
+note 66 -3 posix: SIG66
+signal [] 0 0 0
+signal [hangup] 1 0 1
+signal [hangup ] 0 0 256
+signal [interrupt] 2 0 2
+signal [alarm] 14 0 14
+signal [sys: write on closed pipe] 13 0 13
+signal [killed] 9 0 9
+signal [sys: trap: fault read addr=0x0 pc=0x401000] 11 0 11
+signal [sys: trap: fault ] 11 0 11
+signal [sys: trap: fault] 0 0 256
+signal [sys: trap: general fault] 11 0 11
+signal [sys: trap: illegal instruction pc=0x1] 4 0 4
+signal [sys: trap: fp disabled pc=0x2] 4 0 4
+signal [sys: trap: arithmetic pc=0x3] 8 0 8
+signal [sys: trap: misaligned addr=0x8 pc=0x4] 7 0 7
+signal [sys: breakpoint pc=0x5] 5 0 5
+signal [sys: trap: step pc=0x6] 5 0 5
+signal [posix: SIGTERM] 15 0 15
+signal [posix: SIGTERM pid=12] 15 12 15
+signal [posix: SIGTERM pid=] 15 0 15
+signal [posix: SIGTERM pid=1x] 15 1 15
+signal [posix: SIGTERM pid=123456789012345678901234] 15 123456789012345678 15
+signal [posix: SIGTERMX pid=12] 0 0 256
+signal [posix: SIG34] 34 0 34
+signal [posix: SIG34 pid=7] 34 7 34
+signal [posix: SIG64] 64 0 64
+signal [posix: SIG65] 0 0 256
+signal [posix: SIG0] 0 0 256
+signal [posix: SIG] 0 0 256
+signal [posix: SIG1234] 0 0 256
+signal [posix: SIGKILL] 9 0 9
+signal [posix: SIGHUP] 1 0 1
+signal [posix: sigterm] 0 0 256
+signal [posix:SIGTERM] 0 0 256
+signal [0] 0 0 0
+signal [1] 0 0 256
+signal [255] 0 0 65280
+signal [256] 0 0 0
+signal [257] 0 0 256
+signal [12345678901234567890123] 0 0 256
+signal [1a] 0 0 256
+signal [error] 0 0 256
+signal [interrupted] 0 0 256
+ignored 0 0
+ignored 1 0
+ignored 2 0
+ignored 3 0
+ignored 4 0
+ignored 5 0
+ignored 6 0
+ignored 7 0
+ignored 8 0
+ignored 9 0
+ignored 10 0
+ignored 11 0
+ignored 12 0
+ignored 13 0
+ignored 14 0
+ignored 15 0
+ignored 16 0
+ignored 17 1
+ignored 18 1
+ignored 19 0
+ignored 20 0
+ignored 21 0
+ignored 22 0
+ignored 23 1
+ignored 24 0
+ignored 25 0
+ignored 26 0
+ignored 27 0
+ignored 28 1
+ignored 29 0
+ignored 30 0
+ignored 31 0
+ignored 32 0
+ignored 33 0
+ignored 34 0
+ignored 35 0
+ignored 36 0
+ignored 37 0
+ignored 38 0
+ignored 39 0
+ignored 40 0
+ignored 41 0
+ignored 42 0
+ignored 43 0
+ignored 44 0
+ignored 45 0
+ignored 46 0
+ignored 47 0
+ignored 48 0
+ignored 49 0
+ignored 50 0
+ignored 51 0
+ignored 52 0
+ignored 53 0
+ignored 54 0
+ignored 55 0
+ignored 56 0
+ignored 57 0
+ignored 58 0
+ignored 59 0
+ignored 60 0
+ignored 61 0
+ignored 62 0
+ignored 63 0
+ignored 64 0
+ignored 65 0

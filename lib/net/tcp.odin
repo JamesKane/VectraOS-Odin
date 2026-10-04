@@ -177,9 +177,10 @@ emit :: proc "contextless" (n: ^Net, raddr: Ip4, lport, rport: Port, seq, ack: u
 	if size > 0 {
 		ring_read(s[hlen:total], ring, int(start))
 	}
-	h.sum = u16be(fold(sum16(pseudo(n.addr, raddr, .Tcp, total), s[:total])))
+	src := source_for(n, raddr)
+	h.sum = u16be(fold(sum16(pseudo(src, raddr, .Tcp, total), s[:total])))
 	store(s, h)
-	ip_header(n, .Tcp, n.addr, raddr, total)
+	ip_header(n, .Tcp, src, raddr, total)
 	ip_route(n, raddr, 20 + total, now)
 }
 
@@ -680,7 +681,7 @@ tcp_input :: proc "contextless" (n: ^Net, src, dst: Ip4, s: []u8, now: vx.Instan
 		n.stats.bad += 1
 		return
 	}
-	if n.addr == 0 || dst != n.addr {
+	if !loopback(dst) && (n.addr == 0 || dst != n.addr) {
 		return // no broadcast TCP
 	}
 	sport, dport, window := Port(h.sport), Port(h.dport), u16(h.window)
@@ -813,7 +814,7 @@ tcp_connect :: proc "contextless" (n: ^Net, c: ^Conv, addr: Ip4, port: Port, now
 	if c.proto != .Tcp || c.raddr != 0 || c.tcb.state != .Closed || addr == 0 || port == 0 {
 		return .Err_Invalid
 	}
-	if n.addr == 0 {
+	if !can_send(n, addr) {
 		return .Err_Bad_State
 	}
 	if c.lport == 0 {
@@ -831,11 +832,11 @@ tcp_connect :: proc "contextless" (n: ^Net, c: ^Conv, addr: Ip4, port: Port, now
 	return .Ok
 }
 
-// Listens on a port: SYNs that come to it make connections, for tcp_accept
-// to take.
+// Listens on a port (0: a free one): SYNs that come to it make connections,
+// for tcp_accept to take.
 @(require_results)
 tcp_listen :: proc "contextless" (n: ^Net, c: ^Conv, port: Port) -> vx.Status {
-	if c.proto != .Tcp || c.raddr != 0 || c.tcb.state != .Closed || port == 0 {
+	if c.proto != .Tcp || c.raddr != 0 || c.tcb.state != .Closed {
 		return .Err_Invalid
 	}
 	conv_announce(n, c, port) or_return

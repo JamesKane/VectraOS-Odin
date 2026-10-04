@@ -9,7 +9,36 @@ package p9
 // A message's type byte. None is not a message: it is what a zeroed Msg holds.
 // Terror (106) does not exist.
 Type :: enum u8 {
-	None     = 0,
+	None      = 0,
+	// 9P2000.L's, unchanged on the wire, for the posix and xattr extensions.
+	Tsymlink  = 16,
+	Rsymlink  = 17,
+	Treadlink = 22,
+	Rreadlink = 23,
+	Tgetattr  = 24,
+	Rgetattr  = 25,
+	Tsetattr  = 26,
+	Rsetattr  = 27,
+	Tfsync    = 50,
+	Rfsync    = 51,
+	Tlink     = 70,
+	Rlink     = 71,
+	Trenameat = 74,
+	Rrenameat = 75,
+	Tlock     = 52,
+	Rlock     = 53,
+	Tgetlock  = 54,
+	Rgetlock  = 55,
+	// 9Px's own, for posix: open files shared between connections, and their
+	// offsets kept by the server.
+	Tshare    = 150,
+	Rshare    = 151,
+	Tjoin     = 152,
+	Rjoin     = 153,
+	Tseek     = 154,
+	Rseek     = 155,
+	Tdesc     = 156,
+	Rdesc     = 157,
 	Tversion = 100,
 	Rversion = 101,
 	Tauth    = 102,
@@ -39,7 +68,7 @@ Type :: enum u8 {
 	Rwstat   = 127,
 }
 
-// The fields 9P2000 messages are made of, in fields.def's order.
+// The fields messages are made of, in fields.def's order.
 Field :: enum u8 {
 	Fid,
 	Newfid,
@@ -61,6 +90,25 @@ Field :: enum u8 {
 	Wqids,
 	Data,
 	Stat,
+	// 9P2000.L's, for the posix and xattr extensions.
+	Name2, // a second name: Trenameat's new one, Tsymlink's target, Rreadlink's
+	Gid,
+	Mask, // Tgetattr's request_mask
+	Datasync,
+	Attr, // Rgetattr's body, valid[8] first
+	Setattr, // Tsetattr's body, valid[4] first
+	Locktype, // Tlock's and Tgetlock's: read 0, write 1, unlock 2
+	Lockflags, // Tlock's: block 1, reclaim 2
+	Start,
+	Length, // 0: to the end of the file
+	Procid,
+	Clientid,
+	Status, // Rlock's: success 0, blocked 1, error 2
+	// 9Px's own, for posix.
+	Holds, // Tshare's: joins to keep the open file for
+	Token, // 16 bytes
+	Whence, // Tseek's: set 0, current 1, end 2
+	Descflags, // Tdesc's: append 1
 }
 
 // How a field is laid out on the wire.
@@ -75,6 +123,9 @@ Field_Kind :: enum u8 {
 	Wqids, // nwqid[2], then nwqid qids
 	Data, // count[4], then count bytes (count is set too)
 	Stat, // n[2], then n bytes of stat
+	Attr, // Rgetattr's: valid[8] qid[13] mode[4] uid[4] gid[4], then 15 u64s
+	Setattr, // Tsetattr's: valid[4] mode[4] uid[4] gid[4], then 5 u64s
+	Token, // 16 bytes
 }
 
 Field_Info :: struct {
@@ -103,7 +154,24 @@ FIELDS := [Field]Field_Info {
 	.Wnames  = {.Wnames, "wname"},
 	.Wqids   = {.Wqids, "wqid"},
 	.Data    = {.Data, "data"},
-	.Stat    = {.Stat, "stat"},
+	.Stat      = {.Stat, "stat"},
+	.Name2     = {.Str, "name2"},
+	.Gid       = {.U32, "gid"},
+	.Mask      = {.U64, "mask"},
+	.Datasync  = {.U32, "datasync"},
+	.Attr      = {.Attr, "attr"},
+	.Setattr   = {.Setattr, "setattr"},
+	.Locktype  = {.U8, "lock_type"},
+	.Lockflags = {.U32, "lock_flags"},
+	.Start     = {.U64, "start"},
+	.Length    = {.U64, "length"},
+	.Procid    = {.U32, "proc_id"},
+	.Clientid  = {.Str, "client_id"},
+	.Status    = {.U8, "status"},
+	.Holds     = {.U32, "holds"},
+	.Token     = {.Token, "token"},
+	.Whence    = {.U8, "whence"},
+	.Descflags = {.U32, "desc_flags"},
 }
 
 // A message type's name and its fields in wire order. An entry with no name
@@ -116,6 +184,24 @@ Message :: struct {
 
 @(rodata)
 MESSAGES := [256]Message {
+	16 = {"Tsymlink", {.Fid, .Name, .Name2, .Gid}},
+	17 = {"Rsymlink", {.Qid}},
+	22 = {"Treadlink", {.Fid}},
+	23 = {"Rreadlink", {.Name2}},
+	24 = {"Tgetattr", {.Fid, .Mask}},
+	25 = {"Rgetattr", {.Attr}},
+	26 = {"Tsetattr", {.Fid, .Setattr}},
+	27 = {"Rsetattr", {}},
+	50 = {"Tfsync", {.Fid, .Datasync}},
+	51 = {"Rfsync", {}},
+	52 = {"Tlock", {.Fid, .Locktype, .Lockflags, .Start, .Length, .Procid, .Clientid}},
+	53 = {"Rlock", {.Status}},
+	54 = {"Tgetlock", {.Fid, .Locktype, .Start, .Length, .Procid, .Clientid}},
+	55 = {"Rgetlock", {.Locktype, .Start, .Length, .Procid, .Clientid}},
+	70 = {"Tlink", {.Fid, .Newfid, .Name}}, // dfid, fid, name
+	71 = {"Rlink", {}},
+	74 = {"Trenameat", {.Fid, .Name, .Newfid, .Name2}}, // olddirfid, oldname, newdirfid, newname
+	75 = {"Rrenameat", {}},
 	100 = {"Tversion", {.Msize, .Version}},
 	101 = {"Rversion", {.Msize, .Version}},
 	102 = {"Tauth", {.Afid, .Uname, .Aname}},
@@ -143,9 +229,17 @@ MESSAGES := [256]Message {
 	125 = {"Rstat", {.Stat}},
 	126 = {"Twstat", {.Fid, .Stat}},
 	127 = {"Rwstat", {}},
+	150 = {"Tshare", {.Fid, .Holds}},
+	151 = {"Rshare", {.Token}},
+	152 = {"Tjoin", {.Newfid, .Token}},
+	153 = {"Rjoin", {.Qid, .Iounit}},
+	154 = {"Tseek", {.Fid, .Offset, .Whence}},
+	155 = {"Rseek", {.Offset}},
+	156 = {"Tdesc", {.Fid, .Descflags}},
+	157 = {"Rdesc", {}},
 }
 
-// Whether t is a message 9P2000 has.
+// Whether t is a message 9P2000, or 9P2000.L's or 9Px's extensions, have.
 known :: proc "contextless" (t: Type) -> bool {
 	return len(MESSAGES[u8(t)].name) > 0
 }
