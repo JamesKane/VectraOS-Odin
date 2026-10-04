@@ -172,7 +172,7 @@ test_names :: proc(t: ^testing.T) {
 	f.stack.dns = 0
 	_, _, st = resolve(f, "host.example")
 	testing.expect_value(t, st, vx.Status.Err_Bad_State) // no server
-	testing.expect_value(t, f.digest, 0xcbf29ce484222325)
+	nt.expect_digest(t, f.digest, 0xcbf29ce484222325)
 }
 
 @(test)
@@ -222,7 +222,7 @@ test_answer_and_cache :: proc(t: ^testing.T) {
 	_, _, st = resolve(f, "host.example")
 	testing.expect_value(t, st, vx.Status.Err_Should_Wait) // expired: asked again
 	testing.expect_value(t, f.sent, before + 1)
-	testing.expect_value(t, f.digest, 0x4055dc12e8e3403c)
+	nt.expect_digest(t, f.digest, 0x4055dc12e8e3403c)
 }
 
 @(test)
@@ -252,7 +252,7 @@ test_cname_chain :: proc(t: ^testing.T) {
 	f.now += 31 * SECOND
 	_, _, st = resolve(f, "www.example")
 	testing.expect_value(t, st, vx.Status.Err_Should_Wait) // the shortest TTL on the chain ruled
-	testing.expect_value(t, f.digest, 0x2be2ea29a7d6b6b8)
+	nt.expect_digest(t, f.digest, 0x2be2ea29a7d6b6b8)
 }
 
 @(test)
@@ -304,7 +304,7 @@ test_failures :: proc(t: ^testing.T) {
 	_, _, st = resolve(f, "silent.example")
 	testing.expect_value(t, st, vx.Status.Err_Timed_Out)
 	testing.expect_value(t, f.sent, before + 2)
-	testing.expect_value(t, f.digest, 0x93ea38e938b357f4)
+	nt.expect_digest(t, f.digest, 0x93ea38e938b357f4)
 }
 
 @(test)
@@ -343,5 +343,5 @@ test_hostile :: proc(t: ^testing.T) {
 	testing.expect_value(t, st, vx.Status.Ok)
 	testing.expect_value(t, n, 1)
 	testing.expect_value(t, a[0], 0x0909_0909)
-	testing.expect_value(t, f.digest, 0x5722837289cb24f7)
+	nt.expect_digest(t, f.digest, 0x5722837289cb24f7)
 }

@@ -242,7 +242,7 @@ test_handshake_and_data :: proc(t: ^testing.T) {
 	advance(s)
 	testing.expect_value(t, c.tcb.state, net.Tcp_State.Closed)
 	testing.expect_value(t, c.tcb.error, vx.Status.Ok)
-	testing.expect_value(t, s.digest, 0x1fa5e0f1827a0500)
+	nt.expect_digest(t, s.digest, 0x1fa5e0f1827a0500)
 }
 
 // Loses every loss_every'th frame from the client that carries TCP data.
@@ -280,7 +280,7 @@ test_loss :: proc(t: ^testing.T) {
 	s.loss_count, s.loss_every = 0, 3
 	testing.expect(t, transfer(s, &s.client, c, &s.server, sv, 200_000))
 	s.lose = nil
-	testing.expect_value(t, s.digest, 0xc2a40ea086a73889)
+	nt.expect_digest(t, s.digest, 0xc2a40ea086a73889)
 }
 
 lose_everything :: proc(s: ^Sim, f: []u8) -> bool {
@@ -313,7 +313,7 @@ test_refused_and_timeout :: proc(t: ^testing.T) {
 	testing.expect_value(t, d.tcb.error, vx.Status.Err_Timed_Out)
 	testing.expect(t, s.now - start > 60 * SECOND) // 1 + 2 + 4 + ... seconds of trying
 	s.lose = nil
-	testing.expect_value(t, s.digest, 0xeae5602dd5b710e2)
+	nt.expect_digest(t, s.digest, 0xeae5602dd5b710e2)
 }
 
 @(test)
@@ -355,7 +355,7 @@ test_zero_window :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, got, total)
 	testing.expect_value(t, c.tcb.slen, 0)
-	testing.expect_value(t, s.digest, 0x1f50ccf9de813f78)
+	nt.expect_digest(t, s.digest, 0x1f50ccf9de813f78)
 }
 
 // A segment from the server's address and port to the client's connection.
@@ -403,7 +403,7 @@ test_hostile_segments :: proc(t: ^testing.T) {
 	inject(s, c, c.tcb.rcv_nxt, 0, {.Rst})
 	testing.expect_value(t, c.tcb.state, net.Tcp_State.Closed)
 	testing.expect_value(t, c.tcb.error, vx.Status.Err_Peer_Closed)
-	testing.expect_value(t, s.digest, 0xdf8590035f1fcce3)
+	nt.expect_digest(t, s.digest, 0xdf8590035f1fcce3)
 }
 
 @(test)
@@ -489,5 +489,5 @@ test_backlog_and_orphans :: proc(t: ^testing.T) {
 	testing.expect_value(t, s1.tcb.state, net.Tcp_State.Time_Wait)
 	advance(s)
 	testing.expect_value(t, s1.proto, net.Proto.None)
-	testing.expect_value(t, s.digest, 0x2d05d6283ecafb37)
+	nt.expect_digest(t, s.digest, 0x2d05d6283ecafb37)
 }

@@ -167,7 +167,7 @@ test_addresses :: proc(t: ^testing.T) {
 	buf: [net.IP4_TEXT_MAX]u8
 	testing.expect_value(t, net.format_ip(&buf, GUEST), "10.0.2.15")
 	testing.expect_value(t, net.format_ip(&buf, 0xc0a8_0064), "192.168.0.100")
-	testing.expect_value(t, f.cap.digest, 0xcbf29ce484222325)
+	nt.expect_digest(t, f.cap.digest, 0xcbf29ce484222325)
 }
 
 @(test)
@@ -247,7 +247,7 @@ test_dhcp :: proc(t: ^testing.T) {
 	testing.expect_value(t, s.dhcp.state, net.Dhcp_State.Requesting)
 	net.input(s, dhcp_reply(f, DHCP_NAK, s.dhcp.xid, 86400, false), now)
 	testing.expect_value(t, s.dhcp.state, net.Dhcp_State.Selecting)
-	testing.expect_value(t, f.cap.digest, 0x66938cf1aa3a7653)
+	nt.expect_digest(t, f.cap.digest, 0x66938cf1aa3a7653)
 }
 
 configured :: proc(f: ^Fixture) {
@@ -301,7 +301,7 @@ test_arp :: proc(t: ^testing.T) {
 	testing.expect_value(t, f.cap.count, 1)
 	testing.expect_value(t, nt.mac_at(last(f)[:6]), HOST_MAC)
 	testing.expect_value(t, net.Ip4(nt.get32(last(f)[30:])), 0x0808_0808)
-	testing.expect_value(t, f.cap.digest, 0x3358e385b4cb78d0)
+	nt.expect_digest(t, f.cap.digest, 0x3358e385b4cb78d0)
 }
 
 @(test)
@@ -363,7 +363,7 @@ test_icmp :: proc(t: ^testing.T) {
 	net.input(s, ip_packet(f, HOST, GUEST, .Icmp, reply[:]), now)
 	_, _, ok = net.conv_read(c, buf[:])
 	testing.expect(t, !ok)
-	testing.expect_value(t, f.cap.digest, 0x2678ac2a5d5193d3)
+	nt.expect_digest(t, f.cap.digest, 0x2678ac2a5d5193d3)
 }
 
 @(test)
@@ -456,5 +456,5 @@ test_udp :: proc(t: ^testing.T) {
 	testing.expect(t, !ok)
 	_, ok = net.conv_get(s, b)
 	testing.expect(t, ok)
-	testing.expect_value(t, f.cap.digest, 0x3b86b1491a0984b8)
+	nt.expect_digest(t, f.cap.digest, 0x3b86b1491a0984b8)
 }

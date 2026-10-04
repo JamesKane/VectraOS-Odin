@@ -11,6 +11,7 @@
 // the same order.
 package nettest
 
+import "core:testing"
 import "vx:net"
 
 FNV_OFFSET :: u64(0xcbf29ce484222325)
@@ -167,4 +168,9 @@ checksums_ok :: proc(f: []u8) -> bool {
 	case .None:
 	}
 	return false
+}
+
+// Checks a digest against upstream's, saying both in hex.
+expect_digest :: proc(t: ^testing.T, got, want: u64, loc := #caller_location) {
+	testing.expectf(t, got == want, "frames digest %016x, upstream's %016x", got, want, loc = loc)
 }
