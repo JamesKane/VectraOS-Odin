@@ -36,6 +36,9 @@ vx_write_\name:
     WRITE mdscr, mdscr_el1
     READ tpidr_el0, tpidr_el0
     WRITE tpidr_el0, tpidr_el0
+    READ id_aa64dfr0, id_aa64dfr0_el1
+    READ cntkctl, cntkctl_el1
+    WRITE cntkctl, cntkctl_el1
 
     .globl vx_read_cntvct
     .type vx_read_cntvct, %function
@@ -285,5 +288,83 @@ vx_sync_icache:
 2:  dsb ish
     ic ialluis
     dsb ish
+    isb
+    ret
+
+// (slot: u32, value, control: u64): one watchpoint's registers, which are
+// named in the instruction: a table of four-instruction entries, by slot.
+    .globl vx_watch_slot
+    .type vx_watch_slot, %function
+vx_watch_slot:
+    cmp w0, #16
+    b.hs 1f
+    adr x3, 2f
+    add x3, x3, x0, lsl #4
+    br x3
+1:  ret
+    .p2align 4
+2:
+    msr dbgwvr0_el1, x1
+    msr dbgwcr0_el1, x2
+    isb
+    ret
+    msr dbgwvr1_el1, x1
+    msr dbgwcr1_el1, x2
+    isb
+    ret
+    msr dbgwvr2_el1, x1
+    msr dbgwcr2_el1, x2
+    isb
+    ret
+    msr dbgwvr3_el1, x1
+    msr dbgwcr3_el1, x2
+    isb
+    ret
+    msr dbgwvr4_el1, x1
+    msr dbgwcr4_el1, x2
+    isb
+    ret
+    msr dbgwvr5_el1, x1
+    msr dbgwcr5_el1, x2
+    isb
+    ret
+    msr dbgwvr6_el1, x1
+    msr dbgwcr6_el1, x2
+    isb
+    ret
+    msr dbgwvr7_el1, x1
+    msr dbgwcr7_el1, x2
+    isb
+    ret
+    msr dbgwvr8_el1, x1
+    msr dbgwcr8_el1, x2
+    isb
+    ret
+    msr dbgwvr9_el1, x1
+    msr dbgwcr9_el1, x2
+    isb
+    ret
+    msr dbgwvr10_el1, x1
+    msr dbgwcr10_el1, x2
+    isb
+    ret
+    msr dbgwvr11_el1, x1
+    msr dbgwcr11_el1, x2
+    isb
+    ret
+    msr dbgwvr12_el1, x1
+    msr dbgwcr12_el1, x2
+    isb
+    ret
+    msr dbgwvr13_el1, x1
+    msr dbgwcr13_el1, x2
+    isb
+    ret
+    msr dbgwvr14_el1, x1
+    msr dbgwcr14_el1, x2
+    isb
+    ret
+    msr dbgwvr15_el1, x1
+    msr dbgwcr15_el1, x2
     isb
     ret

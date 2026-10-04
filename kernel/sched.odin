@@ -167,6 +167,7 @@ user_switch :: proc "contextless" (prev, next: ^Thread) {
 	}
 	if next.task != nil {
 		arch_tls_write(next.tls)
+		arch_watch_load(next.task)
 	}
 }
 

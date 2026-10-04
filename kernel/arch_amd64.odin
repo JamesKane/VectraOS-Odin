@@ -31,6 +31,9 @@ foreign _ {
 	vx_write_cr3 :: proc "c" (root: u64) ---
 	vx_read_cr3 :: proc "c" () -> u64 ---
 	vx_invlpg :: proc "c" (va: u64) ---
+	vx_watch_set :: proc "c" (addresses: ^[4]u64, dr7: u64) ---
+	vx_read_dr6 :: proc "c" () -> u64 ---
+	vx_write_dr6 :: proc "c" (v: u64) ---
 	vx_context_switch :: proc "c" (save_sp: ^u64, load_sp: u64) ---
 	vx_enter_user :: proc "c" (entry, sp, arg, arg2, kstack_top: u64) -> ! ---
 	syscall_entry :: proc "c" () --- // entry.S: an address only
@@ -554,6 +557,17 @@ arch_counter_hz :: proc "contextless" () -> u64 {
 	return boot.tsc_hz
 }
 
+// The counter's properties for /sys/clock/info: the TSC runs at one rate in
+// every power state (CPUID 80000007h, EDX bit 8), and user code reads it
+// (CR4.TSD is off).
+arch_counter_flags :: proc "contextless" () -> vx.Clock_Flags {
+	flags := vx.Clock_Flags{.User, .Tsc}
+	if cpuid(0x8000_0000)[0] >= 0x8000_0007 && cpuid(0x8000_0007)[3] & (1 << 8) != 0 {
+		flags += {.Invariant}
+	}
+	return flags
+}
+
 // Per CPU: this CPU's local APIC and its timer. The boot CPU also masks the
 // legacy PICs and, without TSC-deadline mode, measures the APIC timer once.
 arch_timer_init :: proc "contextless" () {
@@ -879,6 +893,42 @@ arch_frame_divert :: proc "contextless" (f: ^Trap_Frame, pc, arg: Uva) -> bool {
 	return true
 }
 
+// Watchpoints (thread_state .Set_Watch): DR0-DR3 and DR7, loaded on the way
+// into a task that has them, and DR7 cleared on the way into one that does
+// not. They fire in the kernel too, when it copies to or from a watched
+// address; x86_trap ignores those.
+@(private="file")
+watch_loaded: [MAX_CPUS]bool
+
+arch_watch_count :: proc "contextless" () -> u32 {
+	return 4
+}
+
+@(private="file")
+DR7_LEN := [9]u64{1 = 0, 2 = 1, 4 = 3, 8 = 2} // LEN's odd encoding, by bytes
+
+arch_watch_load :: proc "contextless" (t: ^Task) {
+	cpu := arch_cpu_index()
+	if !t.watching && !watch_loaded[cpu] {
+		return
+	}
+	dr7: u64
+	addresses: [4]u64
+	for &w, i in t.watches[:4] {
+		if !t.watching || w.kind == .Off {
+			continue
+		}
+		rw := w.kind == .Write ? u64(1) : 3 // 01 writes, 11 reads and writes
+		dr7 |= 1 << uint(2 * i) | rw << uint(16 + 4 * i) | DR7_LEN[w.len] << uint(18 + 4 * i)
+		addresses[i] = w.address
+	}
+	vx_watch_set(&addresses, dr7)
+	watch_loaded[cpu] = dr7 != 0
+}
+
+@(private="file")
+DR6_CLEAR :: u64(0xffff_0ff0)
+
 // A user-mode fault as an exception: its kind, code and address.
 @(private="file")
 x86_exception_kind :: proc "contextless" (f: ^Trap_Frame) -> (kind: vx.Exception_Kind, code: u32, address: u64) {
@@ -886,8 +936,14 @@ x86_exception_kind :: proc "contextless" (f: ^Trap_Frame) -> (kind: vx.Exception
 	switch f.vector {
 	case 0:
 		return .Arithmetic, code, 0 // divide error
-	case 1:
-		return .Step, code, 0 // the trap flag (exception_raise clears it, or sets it again)
+	case 1: // a watchpoint (DR6's B0-B3), or the trap flag (exception_raise clears it, or sets it again)
+		dr6 := vx_read_dr6()
+		vx_write_dr6(DR6_CLEAR)
+		if dr6 & 15 == 0 {
+			return .Step, code, 0
+		}
+		slot := u32(intrinsics.count_trailing_zeros(dr6 & 15))
+		return .Watchpoint, slot, this_cpu().current.task.watches[slot].address // a trap: the access is done
 	case 3:
 		return .Breakpoint, code, 0
 	case 6:
@@ -936,6 +992,10 @@ x86_trap :: proc "c" (f: ^Trap_Frame) {
 		irq_fire(u32(f.vector - VECTOR_IRQ_BASE)) // a level line is masked before the EOI
 		vx_wrmsr(X2APIC_EOI, 0)
 	case:
+		if f.vector == 1 && !from_user {
+			vx_write_dr6(DR6_CLEAR) // the kernel touched a watched user address for the task: not the task's access
+			return
+		}
 		if f.vector == 14 && !from_user && vx_read_cr2() < u64(USER_TOP) && uaccess_fixup(f.rip) != 0 {
 			f.rip = uaccess_fixup(f.rip) // a user page gone under a copy: it reports the failure
 			return

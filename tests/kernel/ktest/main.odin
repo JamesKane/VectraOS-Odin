@@ -298,6 +298,7 @@ Child_Code :: enum {
 	Read_Loop,
 	Fault_Load,
 	Break_Step,
+	Store_Data, // a write to CHILD_DATA, which start_child_bound maps for it, then exit 7
 }
 
 CHILD_DATA :: u64(0x30_0000) // .Fault_Load's page, which nothing maps at first
@@ -322,8 +323,13 @@ write_child :: proc "contextless" (what: Child_Code) -> (code: Child_Image) {
 			emit(&code, 0xcc) // int3: a breakpoint, then exit 7
 			what = .Exit_7
 		}
+		if what == .Store_Data {
+			emit(&code, 0x48, 0xb8); emit32(&code, u32(CHILD_DATA)); emit32(&code, 0) // movabs $CHILD_DATA, %rax
+			emit(&code, 0x48, 0x89, 0x00) // mov %rax, (%rax), then exit 7
+			what = .Exit_7
+		}
 		switch what {
-		case .Exit_7, .Use_Simd, .Break_Step:
+		case .Exit_7, .Use_Simd, .Break_Step, .Store_Data:
 			emit(&code, 0xbf); emit32(&code, 7) // mov $7, %edi
 			emit(&code, 0xb8); emit32(&code, u32(vx.Syscall.Thread_Exit)) // mov $thread_exit, %eax
 			emit(&code, 0x0f, 0x05) // syscall
@@ -377,8 +383,13 @@ write_child :: proc "contextless" (what: Child_Code) -> (code: Child_Image) {
 			emit(&code, 0xd4200020) // brk #1: a breakpoint, then exit 7
 			what = .Exit_7
 		}
+		if what == .Store_Data {
+			emit(&code, 0xd2a00001 | u32(CHILD_DATA >> 16) << 5) // movz x1, #CHILD_DATA >> 16, lsl #16
+			emit(&code, 0xf9000021) // str x1, [x1], then exit 7
+			what = .Exit_7
+		}
 		switch what {
-		case .Exit_7, .Use_Simd, .Break_Step:
+		case .Exit_7, .Use_Simd, .Break_Step, .Store_Data:
 			emit(&code, 0xd2800000 | 7 << 5) // movz x0, #7
 			emit(&code, 0xd2800008 | u32(vx.Syscall.Thread_Exit) << 5) // movz x8, #thread_exit
 			emit(&code, 0xd4000001) // svc #0
@@ -447,7 +458,7 @@ start_child :: proc "contextless" (what: Child_Code) -> (task: vx.Handle, ok: bo
 // A child task running `what`, started, with its faults going to exc_port if
 // that is not HANDLE_NONE (bound before it starts), and a handle to itself as
 // its first argument.
-start_child_bound :: proc "contextless" (what: Child_Code, exc_port: vx.Handle, options: vx.Exception_Options) -> (task: vx.Handle, ok: bool) {
+start_child_bound :: proc "contextless" (what: Child_Code, exc_port: vx.Handle, options: vx.Exception_Options, watches: ^vx.Watches = nil) -> (task: vx.Handle, ok: bool) {
 	code := write_child(what)
 	text, stack, th, itself: vx.Handle
 	defer rt.close_all(text, stack, th, itself) // itself is the child's once started
@@ -468,6 +479,19 @@ start_child_bound :: proc "contextless" (what: Child_Code, exc_port: vx.Handle, 
 		return
 	}
 	if exc_port != vx.HANDLE_NONE && rt.exception_bind(task, exc_port, 5, options) != .Ok {
+		return
+	}
+	if what == .Store_Data {
+		data, dst := rt.vmo_create(4096)
+		defer rt.close_all(data)
+		if dst != .Ok {
+			return
+		}
+		if _, st = rt.as_map(task, data, 0, 4096, {.Write}, CHILD_DATA); st != .Ok {
+			return
+		}
+	}
+	if watches != nil && rt.thread_state(task, 0, .Set_Watch, watches) != .Ok {
 		return
 	}
 	if th, st = rt.thread_create(task); st != .Ok {
@@ -795,6 +819,13 @@ test_m1_basics :: proc "contextless" () {
 	n, _ := rt.port_wait(port, vx.INFINITE, 0, got[:])
 	check(n == 1 && got[0].key == 42 && got[0].value == 7 && got[0].trigger == .User)
 	_ = rt.handle_close(port)
+
+	// This tree's check of clock_read's counter (upstream's /sys/clock/info):
+	// its rate, and user code reading it with no syscall.
+	info, ist := rt.clock_info()
+	check(ist == .Ok && info.counter_hz != 0 && .User in info.flags)
+	c0 := rt.cycles()
+	check(rt.cycles() >= c0)
 
 	vmo, vst := rt.vmo_create(64 * 1024)
 	check(vst == .Ok)
@@ -1332,6 +1363,28 @@ test_in_task :: proc "contextless" () {
 	check(rt.thread_interrupt(rt.self, 999, "nobody") == .Err_Not_Found)
 	_ = rt.handle_close(th)
 	check(rt.exception_bind(rt.self, vx.HANDLE_NONE, 0, {.In_Task}) == .Ok) // unbound
+
+	// This tree's check of vx:rt's notify (ADR-0010), which upstream's ktest
+	// leaves to its POSIX tests: a note to the caller itself reaches its
+	// handler on the way back from the call that posted it, through the
+	// entry that keeps its FP/SIMD registers, and .Cont goes on.
+	check(rt.notify(note_handler) == .Ok)
+	rt.fp_probe_put(0xc3c3_c3c3_c3c3_c3c3, FP_CTL_ZERO)
+	check(rt.thread_interrupt(rt.self, 1, "ping") == .Ok)
+	v, ctl := rt.fp_probe_get()
+	rt.fp_probe_put(0, FP_CTL_DEFAULT)
+	check(string(noted[:]) == "ping")
+	check(v == 0xc3c3_c3c3_c3c3_c3c3 && ctl == FP_CTL_ZERO)
+	check(rt.notify(nil) == .Ok)
+}
+
+noted: [dynamic; vx.ERRMAX]u8 // the note note_handler took
+
+note_handler :: proc "contextless" (e: ^vx.Exception, note: string) -> rt.Noted {
+	clear(&noted)
+	_ = append(&noted, note)
+	rt.fp_probe_put(0, FP_CTL_DEFAULT) // the entry gives back the thread's own
+	return .Cont
 }
 
 test_vmo_clone :: proc "contextless" () {
@@ -1422,6 +1475,23 @@ test_debugger :: proc "contextless" () {
 		check(fp.v[0][0] == 0x5a && fp.fpcr == 0x07ff9f00)
 	}
 	check(rt.thread_state(weak, 1, .Get_Fpregs, &fp) == .Err_Bad_State) // DEBUG needed
+	// Its watchpoints: as many as the hardware has, each checked when set.
+	w: vx.Watches
+	check(rt.thread_state(child, 0, .Get_Watch, &w) == .Ok && w.count >= 2 && w.count <= vx.WATCH_MAX && w.slot[0].kind == .Off)
+	w.slot[0] = {address = 0x40_0000, len = 8, kind = .Write}
+	check(rt.thread_state(child, 0, .Set_Watch, &w) == .Ok)
+	check(rt.thread_state(weak, 0, .Set_Watch, &w) == .Err_Access) // DEBUG needed
+	check(rt.thread_state(child, 1, .Set_Watch, &w) == .Err_Invalid) // the task's, thread 0
+	w.slot[1] = {address = 0x40_0004, len = 8, kind = .Rw} // not aligned
+	check(rt.thread_state(child, 0, .Set_Watch, &w) == .Err_Invalid)
+	w.slot[1] = {address = 0x40_0004, len = 3, kind = .Rw} // no such length
+	check(rt.thread_state(child, 0, .Set_Watch, &w) == .Err_Invalid)
+	w.slot[1] = {address = ~u64(0) - 7, len = 8, kind = .Rw} // not user space
+	check(rt.thread_state(child, 0, .Set_Watch, &w) == .Err_Invalid)
+	w = {}
+	check(rt.thread_state(child, 0, .Get_Watch, &w) == .Ok && w.slot[0].address == 0x40_0000 && w.slot[0].kind == .Write && w.slot[1].kind == .Off)
+	w.slot[0].kind = .Off
+	check(rt.thread_state(child, 0, .Set_Watch, &w) == .Ok)
 	mi, qst := rt.as_query(child, 0)
 	check(qst == .Ok && mi.base <= CHILD_CODE && mi.base + mi.size > CHILD_CODE && mi.flags == {.Exec})
 	_, qst = rt.as_query(child, ~u64(0) - 4096)
@@ -1465,6 +1535,23 @@ test_debugger :: proc "contextless" () {
 	check(rt.thread_resume(child, 0) == .Err_Bad_State) // counted: not suspended any more
 	check(wait_blocked(child))
 	check(rt.task_kill(child, "killed") == .Ok && exits_with(port, child, "killed"))
+	_ = rt.handle_close(child)
+
+	// This tree's check that a watchpoint fires (upstream leaves it to the dbg
+	// scenario): a write to the watched word stops the child at the
+	// debugger's port; with the watchpoint off it goes on (x86_64 stops after
+	// the write, aarch64 before it, and retries it).
+	watch: vx.Watches
+	watch.slot[0] = {address = CHILD_DATA, len = 8, kind = .Write}
+	child, ok = start_child_bound(.Store_Data, port, {.First_Chance}, &watch)
+	check(ok)
+	check(child_stopped(port))
+	check(rt.thread_state(child, 1, .Get_Exception, &e) == .Ok)
+	check(e.kind == .Watchpoint && e.address == CHILD_DATA && e.code == 0)
+	watch = {}
+	check(rt.thread_state(child, 0, .Set_Watch, &watch) == .Ok)
+	check(rt.exception_resume(child, 1, .Continue) == .Ok)
+	check(exits_with(port, child, ""))
 	rt.close_all(child, port)
 }
 

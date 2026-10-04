@@ -917,6 +917,15 @@ sys_task_exec :: proc "contextless" (sh, bootstrap: vx.Handle, entry, sp: Uva) -
 	thread_exit_current() // the new program goes on in the new thread
 }
 
+// clock_read(&info): the clock's counter, for /sys/clock/info; with no
+// argument, the time (syscall_dispatch).
+@(private="file", require_results)
+sys_clock_info :: proc "contextless" (out: Uva) -> (now: Instant, st: vx.Status) {
+	info := vx.Clock_Info{counter_hz = clock.hz, flags = arch_counter_flags()}
+	copy_out(out, &info) or_return
+	return clock_now(), .Ok
+}
+
 // --- Memory and handles ---
 
 // vmo_rw(vmo, op, offset, buffer, size): copies between a VMO and the
@@ -982,6 +991,9 @@ syscall_dispatch :: proc "contextless" (nr: u64, a: [6]u64) -> i64 {
 	case .Debug_Write:
 		return i64(sys_debug_write(Uva(a[0]), a[1]))
 	case .Clock_Read:
+		if a[0] != 0 {
+			return result(sys_clock_info(Uva(a[0])))
+		}
 		return i64(clock_now())
 	case .Task_Create:
 		return i64(sys_task_create(Uva(a[0]), a[1], Uva(a[2]), a[3]))

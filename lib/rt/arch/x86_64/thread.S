@@ -35,4 +35,14 @@ vx_fp_probe_get:
     movq %xmm7, %rax
     ret
 
+// vx_cycles() -> u64: the cycle counter the clock is made from, which user
+// code may always read.
+    .globl vx_cycles
+    .type vx_cycles, @function
+vx_cycles:                 // () -> u64
+    rdtsc
+    shlq $32, %rdx
+    orq %rdx, %rax
+    ret
+
     .section .note.GNU-stack, "", @progbits

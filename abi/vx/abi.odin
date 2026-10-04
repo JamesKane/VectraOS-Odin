@@ -8,6 +8,26 @@ Duration :: i64 // nanoseconds
 Instant :: i64 // the one monotonic clock, in nanoseconds
 
 HANDLE_NONE :: Handle(0)
+
+// clock_read(): the time on the monotonic clock. clock_read(&info): the same,
+// and the cycle counter it is made from, for /sys/clock/info: its frequency
+// (the clock is counter * 10^9 / counter_hz, exactly), and flags. User code
+// may always read the counter: rdtsc, or mrs cntvct_el0.
+Clock_Flag :: enum u32 {
+	Invariant, // one rate in every power state
+	User, // readable in user mode
+	Tsc, // x86_64's TSC
+	Cntvct, // aarch64's virtual counter
+}
+Clock_Flags :: bit_set[Clock_Flag; u32]
+
+Clock_Info :: struct {
+	counter_hz: u64,
+	flags:      Clock_Flags,
+	reserved:   u32,
+}
+
+#assert(size_of(Clock_Info) == 16)
 INFINITE :: Instant(max(i64)) // a deadline that never comes
 
 // Every right, and handle_dup's "the rights the handle has": bit 31, which

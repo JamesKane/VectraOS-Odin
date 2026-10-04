@@ -9,6 +9,12 @@ foreign _ {
 	vx_thread_word :: proc "c" () -> u64 ---
 	vx_fp_probe_put :: proc "c" (v: u64, ctl: u32) ---
 	vx_fp_probe_get :: proc "c" (ctl: ^u32) -> u64 ---
+	vx_cycles :: proc "c" () -> u64 ---
+}
+
+// The cycle counter, read in user mode: no syscall (clock_info says its rate).
+cycles :: proc "contextless" () -> u64 {
+	return vx_cycles()
 }
 
 // The calling thread's thread pointer.

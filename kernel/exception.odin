@@ -355,6 +355,42 @@ thread_tls_self :: proc "contextless" (h: vx.Handle, op: vx.Thread_State_Op, buf
 	return .Ok
 }
 
+// The task's watchpoints: .Get_Watch and .Set_Watch. A set is checked whole:
+// each slot off, or an aligned user address of 1, 2, 4 or 8 bytes, within
+// the hardware's count.
+@(private="file", require_results)
+thread_watch :: proc "contextless" (h: vx.Handle, op: vx.Thread_State_Op, buf: Uva) -> vx.Status {
+	w: vx.Watches
+	if op == .Set_Watch {
+		copy_in(&w, buf) or_return
+	}
+	count := arch_watch_count()
+	any := false
+	for s, i in w.slot {
+		if op != .Set_Watch || s.kind == .Off {
+			continue
+		}
+		len_ok := s.len == 1 || s.len == 2 || s.len == 4 || s.len == 8
+		if u32(i) >= count || s.kind > .Rw || !len_ok || s.address % u64(max(s.len, 1)) != 0 || s.address >= u64(USER_TOP) {
+			return .Err_Invalid
+		}
+		any = true
+	}
+	t := handle_get_as(current_task(), h, Task, {.Debug}) or_return // both: a debugger's
+	{
+		spin_guard(&t.lock)
+		if op == .Set_Watch {
+			t.watches = w.slot
+			t.watching = any
+		} else {
+			w.slot = t.watches
+		}
+	}
+	object_release(&t.obj)
+	w.count = count
+	return op == .Get_Watch ? copy_out(buf, &w) : .Ok
+}
+
 // The live thread of the task with the next id after `after`: .Next_Thread.
 @(private="file", require_results)
 thread_next :: proc "contextless" (h: vx.Handle, after: u64, buf: Uva) -> vx.Status {
@@ -423,7 +459,7 @@ sys_thread_state :: proc "contextless" (h: vx.Handle, id, op_arg: u64, buf: Uva,
 	case .Next_Thread:
 		return thread_next(h, id, buf)
 	case .Get_Watch, .Set_Watch:
-		return .Err_Unsupported
+		return id != 0 ? .Err_Invalid : thread_watch(h, op, buf)
 	case .Get_Tls, .Set_Tls:
 		if id == 0 {
 			return thread_tls_self(h, op, buf)

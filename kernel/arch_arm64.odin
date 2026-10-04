@@ -47,6 +47,10 @@ foreign _ {
 	vx_os_unlock :: proc "c" () ---
 	vx_sync_icache :: proc "c" (p: rawptr, length: u64) ---
 	vx_read_tpidr_el0 :: proc "c" () -> u64 ---
+	vx_read_id_aa64dfr0 :: proc "c" () -> u64 ---
+	vx_watch_slot :: proc "c" (slot: u32, value, control: u64) ---
+	vx_read_cntkctl :: proc "c" () -> u64 ---
+	vx_write_cntkctl :: proc "c" (v: u64) ---
 	vx_write_tpidr_el0 :: proc "c" (v: u64) ---
 	vx_write_icc_sgi1r :: proc "c" (v: u64) ---
 	vx_pan_off :: proc "c" () ---
@@ -345,6 +349,8 @@ arch_cpu_init :: proc "contextless" (index: u32) {
 	// (step_on_return).
 	vx_os_unlock()
 	vx_write_mdscr(vx_read_mdscr() &~ (MDSCR_KDE | MDSCR_SS))
+	// CNTKCTL_EL1.EL0VCTEN: user code may read the virtual counter.
+	vx_write_cntkctl(vx_read_cntkctl() | 1 << 1)
 	percpu_ready = true
 }
 
@@ -390,6 +396,12 @@ arch_counter :: proc "contextless" () -> u64 {
 
 arch_counter_hz :: proc "contextless" () -> u64 {
 	return vx_read_cntfrq()
+}
+
+// The generic timer's virtual counter: one rate always, and user code reads
+// it (CNTKCTL_EL1.EL0VCTEN, arch_cpu_init).
+arch_counter_flags :: proc "contextless" () -> vx.Clock_Flags {
+	return {.User, .Invariant, .Cntvct}
 }
 
 // Sets up the GIC for this CPU: the distributor once, on the boot CPU, then
@@ -723,6 +735,38 @@ arch_sync_icache :: proc "contextless" (p: []u8) {
 	vx_sync_icache(raw_data(p), u64(len(p)))
 }
 
+// Watchpoints (thread_state .Set_Watch): DBGWVRn_EL1 and DBGWCRn_EL1, for
+// EL0 only (PAC), so the kernel's own accesses never fire them, with
+// MDSCR_EL1.MDE on while a task that has them runs. ID_AA64DFR0_EL1.WRPs says
+// how many there are.
+@(private="file")
+watch_loaded: [MAX_CPUS]bool
+@(private="file")
+MDSCR_MDE :: u64(1) << 15
+
+arch_watch_count :: proc "contextless" () -> u32 {
+	return min(u32(vx_read_id_aa64dfr0() >> 20 & 15) + 1, vx.WATCH_MAX)
+}
+
+arch_watch_load :: proc "contextless" (t: ^Task) {
+	cpu := arch_cpu_index()
+	if !t.watching && !watch_loaded[cpu] {
+		return
+	}
+	for &w, i in t.watches[:arch_watch_count()] {
+		if !t.watching || w.kind == .Off {
+			vx_watch_slot(u32(i), 0, 0)
+			continue
+		}
+		base, bas := w.address &~ 7, (u64(1) << w.len - 1) << (w.address & 7)
+		lsc := w.kind == .Write ? u64(2) : 3 // stores, or loads and stores
+		vx_watch_slot(u32(i), base, bas << 5 | lsc << 3 | 2 << 1 | 1) // BAS, LSC, PAC = EL0, E
+	}
+	mdscr := vx_read_mdscr()
+	vx_write_mdscr(t.watching ? mdscr | MDSCR_MDE : mdscr &~ MDSCR_MDE)
+	watch_loaded[cpu] = t.watching
+}
+
 // A user-mode fault as an exception: its kind, code and address.
 @(private="file")
 aarch64_exception_kind :: proc "contextless" (f: ^Trap_Frame) -> (kind: vx.Exception_Kind, code: u32, address: u64) {
@@ -745,6 +789,15 @@ aarch64_exception_kind :: proc "contextless" (f: ^Trap_Frame) -> (kind: vx.Excep
 		return .Arithmetic, code, 0
 	case .Step_Lower:
 		return .Step, code, 0
+	case .Watch_Lower: // before the access
+		t := this_cpu().current.task
+		slot: u32
+		for w, i in t.watches { // the slot whose 8-byte span holds what was touched
+			if w.kind != .Off && w.address &~ 7 == f.far &~ 7 {
+				slot = u32(i)
+			}
+		}
+		return .Watchpoint, slot, t.watches[slot].address
 	}
 	return .General, code, 0
 }

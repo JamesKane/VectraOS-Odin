@@ -32,3 +32,12 @@ vx_fp_probe_get:
     str w1, [x0]
     fmov x0, d7
     ret
+
+// vx_cycles() -> u64: the cycle counter the clock is made from, which user
+// code may always read.
+    .globl vx_cycles
+    .type vx_cycles, %function
+vx_cycles:                 // () -> u64
+    isb
+    mrs x0, cntvct_el0
+    ret

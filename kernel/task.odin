@@ -84,6 +84,8 @@ Task :: struct {
 	exc_key:         u64,
 	dbg_port:        ^Port, // a debugger's, which sees faults first (.First_Chance); a reference, or nil
 	dbg_key:         u64,
+	watches:         [vx.WATCH_MAX]vx.Watch, // its watchpoints (thread_state .Set_Watch), loaded as its threads run
+	watching:        bool, // any of them on
 }
 
 #assert(offset_of(Task, obj) == 0) // objects are cast from ^Object

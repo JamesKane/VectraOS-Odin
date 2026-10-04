@@ -32,6 +32,14 @@ clock_read :: proc "contextless" () -> vx.Instant {
 	return vx.Instant(vx_syscall(.Clock_Read))
 }
 
+// The cycle counter the clock is made from (/sys/clock/info).
+@(require_results)
+clock_info :: proc "contextless" () -> (vx.Clock_Info, vx.Status) {
+	info: vx.Clock_Info
+	st := status(vx_syscall(.Clock_Read, addr(&info)))
+	return info, st
+}
+
 @(require_results)
 task_create :: proc "contextless" (name: string) -> (vx.Handle, vx.Status) {
 	h: vx.Handle
