@@ -11,6 +11,7 @@ Qemu_Opts :: struct {
 	iommu: Iommu_Mode,
 	disk:  string, // a second disk, on virtio-blk, or ""
 	nvme:  bool, // and on NVMe instead
+	persist: bool, // the boot disk's writes kept, even in a test (a boot after reboot: the installed disk)
 }
 
 // The machine's IOMMU (upstream's M5 steps 6c, 6d): VT-d on q35, SMMUv3 on
@@ -46,7 +47,7 @@ qemu_cmd :: proc(a: ^Arch, image: string, o: Qemu_Opts) -> []string {
 		append(&c, "-device", "virtio-scsi-pci,id=scsi,disable-legacy=on", "-device", "scsi-cd,drive=cd,bus=scsi.0")
 	} else {
 		// A test never writes the image, so several can boot one image at once.
-		append(&c, "-drive", fmt.tprintf("if=none,id=disk,format=raw,file=%s%s", image, o.test ? ",snapshot=on" : ""))
+		append(&c, "-drive", fmt.tprintf("if=none,id=disk,format=raw,file=%s%s", image, o.test && !o.persist ? ",snapshot=on" : ""))
 		append(&c, "-device", fmt.tprintf("virtio-blk-pci,drive=disk,disable-legacy=on%s", platform))
 	}
 	if o.disk != "" { // after the boot disk, so devmgr finds it second: /srv/disk1

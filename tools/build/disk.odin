@@ -20,9 +20,9 @@ TEST_DISK_SIGNATURE :: "VectraOS block test disk"
 SYSTEM_TYPE :: [16]u8{0x1a, 0x3e, 0x6d, 0x7c, 0x4f, 0x2b, 0x0a, 0x4e, 0x9c, 0x1d, 0x56, 0xf2, 0xa8, 0xb9, 0x0e, 0x35}
 
 // A scenario's second disk, at path: mib MiB, a GPT with the two test
-// partitions; with home, the system partition a volume whose home branch is
-// that directory's tree.
-test_disk :: proc(path: string, mib: i64, home: string) -> bool {
+// partitions; with home or store, the system partition a volume whose home
+// and store branches are those directories' trees.
+test_disk :: proc(path: string, mib: i64, home: string, store := "") -> bool {
 	Test_Part :: struct {
 		type:          [16]u8,
 		first, count:  u64,
@@ -54,14 +54,14 @@ test_disk :: proc(path: string, mib: i64, home: string) -> bool {
 		for c, k in p.name {
 			e.name[k] = u16le(c)
 		}
-		if home != "" && i == 1 {
+		if (home != "" || store != "") && i == 1 {
 			continue // the volume goes there
 		}
 		write_at(disk, path, transmute([]u8)p.marker, i64(p.first * SECTOR)) or_return
 	}
-	if home != "" { // the volume, made beside the disk and copied into the partition
+	if home != "" || store != "" { // the volume, made beside the disk and copied into the partition
 		vol := fmt.tprintf("%s.vxfs", path)
-		trees := [4]string{2 = home} // store, cfg, home, adm
+		trees := [4]string{0 = store, 2 = home} // store, cfg, home, adm
 		make_volume(vol, int(parts[1].count * SECTOR >> 20), trees) or_return
 		copy_into(disk, path, vol, i64(parts[1].count * SECTOR), i64(parts[1].first * SECTOR)) or_return
 	}

@@ -30,6 +30,13 @@ import "vx:ndb"
 // DIR's tree; with fat=12|16|32 it is one FAT volume, no partition table
 // (fatdisk.odin), which with fsck the host's fsck must find sound after the
 // run. isodisk makes the second disk the test ISO (iso.odin's make_test_iso).
+// storetree puts make_test_release's store in the test volume's store
+// branch; blank makes the disk= all zeros, as a new disk is. installer boots
+// an install medium (implying iso), and with media release 2 is on a FAT
+// disk too, for the boots after the first. A reboot= record ends a boot: the
+// expects after it are another boot's, from the second disk, with no CD, its
+// writes kept, and the media disk second. alone asks upstream's parallel
+// runner to run the scenario by itself; this runner runs one at a time.
 
 Expect_Kind :: enum {
 	Contains, // expect=: part of a line
@@ -66,6 +73,11 @@ Scenario :: struct {
 	fat:     int, // and fat=12|16|32: the disk is one FAT volume, no GPT
 	fsck:    bool, // and fsck: the host's fsck must find that volume sound after
 	isodisk: bool, // the second disk is the test ISO
+	storetree: bool, // the test volume's store branch make_test_release's
+	blank:   bool, // the disk= all zeros
+	installer: bool, // the ISO an install medium (implies iso)
+	media:   bool, // and release 2 on a FAT disk, the second disk of every boot after the first
+	phases:  [dynamic]int, // each boot's expects end here: [phases[k-1], phases[k])
 	expects: [dynamic]Expect,
 	fails:   [dynamic]string,
 	hosts:   [dynamic]Host_Check,
@@ -83,6 +95,7 @@ load_scenario :: proc(name: string, a: ^Arch) -> (sc: Scenario, ok: bool) {
 	sc.expects = make([dynamic]Expect, context.temp_allocator)
 	sc.fails = make([dynamic]string, context.temp_allocator)
 	sc.hosts = make([dynamic]Host_Check, context.temp_allocator)
+	sc.phases = make([dynamic]int, context.temp_allocator)
 	pending := "" // input waiting for the next expect
 	for rec in f.records {
 		switch {
@@ -145,12 +158,17 @@ load_scenario :: proc(name: string, a: ^Arch) -> (sc: Scenario, ok: bool) {
 			}
 			sc.fsck = ndb.has(rec, "fsck")
 			sc.isodisk = ndb.has(rec, "isodisk")
-			// What upstream's runner does that this one does not yet.
-			for feature in ([]string{"installer", "blank", "media", "storetree"}) {
-				if ndb.has(rec, feature) {
-					sc.needs = feature
-				}
+			sc.storetree = ndb.has(rec, "storetree")
+			sc.blank = ndb.has(rec, "blank")
+			sc.installer = ndb.has(rec, "installer")
+			sc.media = ndb.has(rec, "media")
+			sc.iso = sc.iso || sc.installer
+		case ndb.has(rec, "reboot"): // what follows is another boot, from the second disk
+			if len(sc.phases) == 3 || len(sc.expects) == 0 {
+				fmt.eprintfln("%s:%d: reboot= after an expect=, at most 3 times", path, rec.line)
+				return sc, false
 			}
+			append(&sc.phases, len(sc.expects))
 		case ndb.has(rec, "host"):
 			file := val(rec, "host")
 			if file == "" || file[0] == '/' || strings.has_prefix(file, "..") || strings.contains(file, "/..") {
@@ -184,6 +202,23 @@ load_scenario :: proc(name: string, a: ^Arch) -> (sc: Scenario, ok: bool) {
 	}
 	if sc.timeout <= 0 || len(sc.expects) == 0 {
 		fmt.eprintfln("%s: needs scenario= with a timeout, and an expect=", path)
+		return sc, false
+	}
+	if sc.storetree && sc.disk == 0 {
+		fmt.eprintfln("%s: storetree needs disk=", path)
+		return sc, false
+	}
+	if len(sc.phases) > 0 && sc.phases[len(sc.phases) - 1] == len(sc.expects) {
+		fmt.eprintfln("%s: reboot needs an expect= after it", path)
+		return sc, false
+	}
+	append(&sc.phases, len(sc.expects))
+	if sc.blank && (sc.disk == 0 || sc.volume != "" || sc.fat != 0 || sc.storetree) {
+		fmt.eprintfln("%s: blank needs disk= and nothing to put on it", path)
+		return sc, false
+	}
+	if sc.media && !sc.installer {
+		fmt.eprintfln("%s: media needs installer", path)
 		return sc, false
 	}
 	if sc.volume != "" && sc.disk == 0 {
@@ -255,7 +290,8 @@ run_scenario :: proc(a: ^Arch, mode: Mode, name: string) -> bool {
 	if sc.iso {
 		cdrom = fmt.tprintf("%s/test-%s.iso", out_dir(a, mode), file_name)
 	}
-	build_image(a, mode, image, sc.cmdline, sc.with, cdrom) or_return
+	medium := Install_Medium{media = sc.media}
+	build_image(a, mode, image, sc.cmdline, sc.with, cdrom, sc.installer ? &medium : nil) or_return
 
 	// What the run's servers serve, fresh: run-NAME/share for vx9pserve,
 	// run-NAME/u9fs for u9fs.
@@ -270,6 +306,13 @@ run_scenario :: proc(a: ^Arch, mode: Mode, name: string) -> bool {
 	disk := ""
 	disk_made := true
 	switch {
+	case sc.blank:
+		disk = fmt.tprintf("%s/disk.img", run_dir)
+		f, made := create_sized(disk, sc.disk << 20)
+		if made {
+			os.close(f)
+		}
+		disk_made = made
 	case sc.isodisk:
 		disk = fmt.tprintf("%s/test.iso", run_dir)
 		epoch, eok := source_date_epoch()
@@ -279,10 +322,28 @@ run_scenario :: proc(a: ^Arch, mode: Mode, name: string) -> bool {
 		disk_made = make_fat_disk(disk, int(sc.disk), sc.fat)
 	case sc.disk != 0:
 		disk = fmt.tprintf("%s/disk.img", run_dir)
-		disk_made = test_disk(disk, sc.disk, sc.volume)
+		store := ""
+		if sc.storetree {
+			store, disk_made = make_test_release(fmt.tprintf("%s/store", run_dir))
+		}
+		disk_made = disk_made && test_disk(disk, sc.disk, sc.volume, store)
 	}
 	if !disk_made {
 		fmt.eprintfln("%s FAILED: cannot make its disk, %s", label, disk)
+		return false
+	}
+	// Release 2's store as files on a FAT disk, for the boots after the first.
+	media_disk := ""
+	if sc.media {
+		media_disk = fmt.tprintf("%s/media.img", run_dir)
+		st := medium.media_store
+		if !make_fat_disk(media_disk, 128, 32) || !mtools(MCOPY, media_disk, "-s", fmt.tprintf("%s/b2", st), fmt.tprintf("%s/records", st), "::/") {
+			fmt.eprintfln("%s FAILED: cannot put release 2 on the media disk", label)
+			return false
+		}
+	}
+	if len(sc.phases) > 1 && disk == "" {
+		fmt.eprintfln("%s FAILED: reboot boots the second disk, and there is none", label)
 		return false
 	}
 
@@ -294,35 +355,28 @@ run_scenario :: proc(a: ^Arch, mode: Mode, name: string) -> bool {
 	}
 	defer os.close(log)
 
-	out_r, out_w, perr := os.pipe()
-	if perr != nil {
-		fmt.eprintln("build: pipe failed")
-		return false
+	why, passed := "", true
+	for last, ph in sc.phases {
+		if !passed {
+			break
+		}
+		first := ph > 0 ? sc.phases[ph - 1] : 0
+		if ph > 0 {
+			fmt.fprintf(log, "\n--- build: boot %d, from the second disk ---\n", ph + 1)
+		}
+		o := Qemu_Opts {
+			test    = true,
+			share   = share,
+			u9fs    = u9fs,
+			cdrom   = ph > 0 ? "" : cdrom,
+			iommu   = sc.iommu,
+			rtc     = sc.rtc,
+			disk    = ph > 0 ? media_disk : disk,
+			nvme    = sc.nvme,
+			persist = ph > 0,
+		}
+		why, passed = run_phase(a, ph > 0 ? disk : image, o, &sc, sc.expects[first:last], sc.exits && ph + 1 == len(sc.phases), log)
 	}
-	defer os.close(out_r)
-	keys_r, keys_w, kerr := os.pipe()
-	if kerr != nil {
-		os.close(out_w)
-		fmt.eprintln("build: pipe failed")
-		return false
-	}
-	defer os.close(keys_w)
-	cmd := qemu_cmd(a, image, {test = true, share = share, u9fs = u9fs, cdrom = cdrom, iommu = sc.iommu, rtc = sc.rtc, disk = disk, nvme = sc.nvme})
-	if verbose {
-		print_cmd(cmd, "")
-	}
-	// The child's ends close once it has them.
-	qemu, serr := os.process_start({command = cmd, stdout = out_w, stderr = out_w, stdin = keys_r})
-	os.close(out_w)
-	os.close(keys_r)
-	if serr != nil {
-		fmt.eprintfln("build: cannot run %s: %v", cmd[0], serr)
-		return false
-	}
-
-	why, passed := match_output(&sc, out_r, keys_w, log)
-	_ = os.process_kill(qemu)
-	_, _ = os.process_wait(qemu)
 	if passed {
 		why, passed = check_hosts(&sc, run_dir)
 	}
@@ -340,6 +394,38 @@ run_scenario :: proc(a: ^Arch, mode: Mode, name: string) -> bool {
 	}
 	fmt.eprintfln("%s FAILED: %s (log: %s)", label, why, log_path)
 	return false
+}
+
+// One boot: QEMU started with o, its serial output matched against expects;
+// with exits, QEMU exiting by itself once they have matched is the pass.
+@(private="file")
+run_phase :: proc(a: ^Arch, image: string, o: Qemu_Opts, sc: ^Scenario, expects: []Expect, exits: bool, log: ^os.File) -> (why: string, ok: bool) {
+	out_r, out_w, perr := os.pipe()
+	if perr != nil {
+		return "pipe failed", false
+	}
+	defer os.close(out_r)
+	keys_r, keys_w, kerr := os.pipe()
+	if kerr != nil {
+		os.close(out_w)
+		return "pipe failed", false
+	}
+	defer os.close(keys_w)
+	cmd := qemu_cmd(a, image, o)
+	if verbose {
+		print_cmd(cmd, "")
+	}
+	// The child's ends close once it has them.
+	qemu, serr := os.process_start({command = cmd, stdout = out_w, stderr = out_w, stdin = keys_r})
+	os.close(out_w)
+	os.close(keys_r)
+	if serr != nil {
+		return fmt.tprintf("cannot run %s: %v", cmd[0], serr), false
+	}
+	why, ok = match_output(sc, expects, exits, out_r, keys_w, log)
+	_ = os.process_kill(qemu)
+	_, _ = os.process_wait(qemu)
+	return
 }
 
 // What the guest was to leave on the host, in the run's directory.
@@ -360,7 +446,7 @@ check_hosts :: proc(sc: ^Scenario, run_dir: string) -> (why: string, ok: bool) {
 // Reads QEMU's serial output, typing and matching as the scenario says.
 // Returns whether every expect matched, and if not, why not.
 @(private="file")
-match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File) -> (why: string, ok: bool) {
+match_output :: proc(sc: ^Scenario, expects: []Expect, exits: bool, out: ^os.File, keys: ^os.File, log: ^os.File) -> (why: string, ok: bool) {
 	start := time.tick_now()
 	next, typed := 0, -1 // expects[typed].input has been typed
 	line := strings.builder_make(context.temp_allocator)
@@ -375,8 +461,8 @@ match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File
 	all_seen := false // every expect= met; with exits, QEMU's exit is what is waited for now
 
 	for {
-		if !all_seen && typed < next && sc.expects[next].input != "" {
-			if _, err := os.write(keys, transmute([]u8)sc.expects[next].input); err != nil {
+		if !all_seen && typed < next && expects[next].input != "" {
+			if _, err := os.write(keys, transmute([]u8)expects[next].input); err != nil {
 				return "cannot type into QEMU (it has exited?)", false
 			}
 			typed = next
@@ -390,7 +476,7 @@ match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File
 				if all_seen {
 					return "QEMU did not exit (exits)", false
 				}
-				return fmt.tprintf("timed out waiting for %q", sc.expects[next].text), false
+				return fmt.tprintf("timed out waiting for %q", expects[next].text), false
 			}
 			has, herr := os.pipe_has_data(out)
 			if herr != nil {
@@ -441,7 +527,7 @@ match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File
 				continue
 			}
 			matched := false
-			switch e := sc.expects[next]; e.kind {
+			switch e := expects[next]; e.kind {
 			case .Contains:
 				matched = strings.contains(text, e.text)
 			case .Line:
@@ -450,14 +536,14 @@ match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File
 			}
 			if matched {
 				next += 1
-				if next == len(sc.expects) {
-					if !sc.exits {
+				if next == len(expects) {
+					if !exits {
 						return "", true
 					}
 					all_seen = true
 					continue
 				}
-				if sc.expects[next].input != "" && typed < next {
+				if expects[next].input != "" && typed < next {
 					advanced = true
 					break // type it before what follows
 				}
@@ -469,15 +555,15 @@ match_output :: proc(sc: ^Scenario, out: ^os.File, keys: ^os.File, log: ^os.File
 		// A prompt has no newline after it, and may share its line with other
 		// programs' output: it counts if it started any line since the last
 		// thing typed.
-		if next < len(sc.expects) && sc.expects[next].kind == .Prompt {
-			p := sc.expects[next].text
+		if next < len(expects) && expects[next].kind == .Prompt {
+			p := expects[next].text
 			s := string(since[:])
 			if (!since_cut && strings.has_prefix(s, p)) || strings.contains(s, fmt.tprintf("\n%s", p)) {
 				clear(&since) // used: the next prompt= needs a prompt after this one
 				since_cut = false
 				next += 1
-				if next == len(sc.expects) {
-					if !sc.exits {
+				if next == len(expects) {
+					if !exits {
 						return "", true
 					}
 					all_seen = true
