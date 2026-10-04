@@ -10,7 +10,8 @@
 // to it, up to the next service=.
 //
 //   service=NAME program=/boot/bin/PROG [post=SRV] [bootimage] [console] [tasks]
-//           [resource] [pager] [acpi] [cmdline] [restart] [arch=A]
+//           [resource] [pager] [acpi] [cmdline] [restart] [arch=A] [when=WORD]
+//           [storeimage]
 //   arg=VALUE                                  an argument, in order
 //   env=NAME=VALUE                             an environment variable
 //   mount=OLD srv=SRV [aname=A] [flags=abc]    a mount in its namespace
@@ -24,8 +25,8 @@
 //                                              docs/proto/block.md §6)
 //   ns=NAME                                    the namespace template /lib/ns/NAME, a
 //                                              namespace(6) file (upstream ADR-0009), here
-//   user=NAME                                  who it runs as (upstream docs/11 §9), which
-//                                              its attaches name; else none
+//   user=NAME                                  who it runs as (upstream's docs/11 §9),
+//                                              which its attaches name; else none
 //
 // post=SRV: svcd makes a listen channel, gives the service its server end
 // ("listen") and keeps the client end as /srv/SRV, for mounts. It keeps a
@@ -34,14 +35,19 @@
 // boot image, read-only. console: it writes to /srv/cons (lib/rt). tasks:
 // it gets svcd's own task, and through it every task (procfs). arch: it runs
 // only on that architecture. vx.skip=NAME,... on the kernel command line
-// leaves services out. A service gets nothing that is not named here: no
-// ambient authority. resource and acpi: the root Resource and the ACPI
-// tables, which only devmgr needs. entropy: a seed of its own for a random
+// leaves services out; when=WORD keeps a service out unless the command
+// line has WORD (vx.live on an install medium, vx.system on an installed
+// system: upstream's M5 step 9c). storeimage: the store image, read-only,
+// when the kernel had a store.tar module (an install medium, upstream's 06
+// §8). A service gets nothing that is not named here: no ambient authority.
+// resource and acpi: the root Resource and the ACPI tables, which only
+// devmgr needs. pager: a handle to the root Resource with .Pager alone (and
+// .Transfer, .Inspect), "pager", which makes pagers and nothing else (fsd:
+// upstream's docs/11 §8). entropy: a seed of its own for a random
 // generator, from svcd's, which the kernel seeded from the bootloader's
-// entropy (vx:drbg). pager: a handle to the root Resource with .Pager alone,
-// "pager", which makes pagers and nothing else (fsd: upstream docs/11 §8).
-// cmdline: the kernel command line, as svcd's own spawn message has it
-// (devmgr, which gives it to bus-acpi and to drivers for their options).
+// entropy (vx:drbg). cmdline: the kernel command line, as svcd's own spawn
+// message has it (devmgr, which gives it to bus-acpi and to drivers for
+// their options).
 //
 // Drivers, the services with ioport, mmio or irq records, start first. svcd
 // mints their device objects from the root Resource once, keeps them, and
@@ -72,6 +78,8 @@ MAX_DEVICES :: 4 // device objects per driver
 MAX_NAME :: 31 // bytes in a service's or a post's name
 
 BOOT_IMAGE_RIGHTS :: vx.Rights{.Read, .Map, .Duplicate, .Transfer, .Inspect}
+PAGER_RIGHTS :: vx.Rights{.Pager, .Transfer, .Inspect} // pagers and nothing else
+USER_MAX :: 64 // bytes in a user= name
 CONNECTOR_RIGHTS :: vx.Rights{.Read, .Write, .Wait, .Duplicate, .Transfer, .Inspect}
 
 when ODIN_ARCH == .amd64 {
@@ -108,8 +116,8 @@ Post :: struct {
 services: [dynamic; MAX_SERVICES]Service // a service's index is its .Exit key
 posts: [dynamic; MAX_SERVICES]Post
 image: []u8
-image_vmo, port, resource, acpi_vmo: vx.Handle
-acpi_size: u64
+image_vmo, store_vmo, port, resource, acpi_vmo: vx.Handle
+acpi_size, store_size: u64
 console_attached: bool
 procfs_started: bool // procfs serves /srv/proc: services are registered with it as they start
 randomness: drbg.Drbg // seeded from the kernel's entropy; each service that asks gets a seed from it
@@ -397,7 +405,6 @@ start :: proc "contextless" (index: int) -> vx.Status {
 		rt.close_all(..g.handles[:])
 	}
 	w := ndb.Writer{buf = records_buf[:]}
-	user: [dynamic; 64]u8 // user=NAME
 
 	r := manifest_reader(s.manifest, s.at)
 	rec: ndb.Record
@@ -414,6 +421,12 @@ start :: proc "contextless" (index: int) -> vx.Status {
 		grant(&g, "bootimage", rt.handle_dup(image_vmo, BOOT_IMAGE_RIGHTS)) or_return
 		ndb.flag(&w, "bootimage")
 		ndb.put_u64(&w, "size", u64(len(image)))
+		_ = ndb.end(&w)
+	}
+	if ndb.has(&rec, "storeimage") && store_vmo != vx.HANDLE_NONE { // an install medium's objects (upstream's 06 §8)
+		grant(&g, "storeimage", rt.handle_dup(store_vmo, BOOT_IMAGE_RIGHTS)) or_return
+		ndb.flag(&w, "storeimage")
+		ndb.put_u64(&w, "size", store_size)
 		_ = ndb.end(&w)
 	}
 	srv, _ := ndb.get(&rec, "post")
@@ -433,8 +446,8 @@ start :: proc "contextless" (index: int) -> vx.Status {
 	if ndb.has(&rec, "resource") && resource != vx.HANDLE_NONE { // root authority over devices: devmgr
 		grant(&g, "resource", rt.handle_dup(resource, vx.RIGHTS_SAME)) or_return
 	}
-	if ndb.has(&rec, "pager") && resource != vx.HANDLE_NONE { // pagers and nothing else: fsd
-		grant(&g, "pager", rt.handle_dup(resource, {.Pager, .Transfer, .Inspect})) or_return
+	if ndb.has(&rec, "pager") && resource != vx.HANDLE_NONE { // pagers and nothing else: fsd (upstream's docs/11 §8)
+		grant(&g, "pager", rt.handle_dup(resource, PAGER_RIGHTS)) or_return
 	}
 	if ndb.has(&rec, "acpi") && acpi_vmo != vx.HANDLE_NONE {
 		grant(&g, "acpi", rt.handle_dup(acpi_vmo, vx.RIGHTS_SAME)) or_return
@@ -461,6 +474,7 @@ start :: proc "contextless" (index: int) -> vx.Status {
 
 	// The manifest's records, and a namespace template's lines where it
 	// names one (ns=NAME: /lib/ns/NAME, a namespace(6) file).
+	user: [dynamic; USER_MAX]u8 // user=NAME, copied: the reader's values last one record
 	for ndb.next(&r, &rec) == .Record && !ndb.has(&rec, "service") {
 		switch {
 		case ndb.has(&rec, "ns"):
@@ -507,13 +521,12 @@ start :: proc "contextless" (index: int) -> vx.Status {
 			flags, _ := ndb.get(&rec, "flags")
 			put_bind(&w, nw, old, flags)
 		case ndb.has(&rec, "user"):
-			// Copied: the reader's values last one record.
 			u, _ := ndb.get(&rec, "user")
-			if len(u) == 0 || len(u) > cap(user) {
+			if u == "" || len(u) > USER_MAX {
 				return .Err_Invalid
 			}
 			clear(&user)
-			_ = append(&user, u)
+			_ = append(&user, u) // it fits: checked above
 		}
 	}
 	if w.failed {
@@ -596,6 +609,31 @@ exited :: proc "contextless" (index: int) {
 	}
 }
 
+// Whether the kernel command line has word, alone: at its start or after a
+// space, and at its end or before one.
+cmdline_has :: proc "contextless" (word: string) -> bool {
+	c := rt.spawn.cmdline
+	for i := 0; i + len(word) <= len(c); i += 1 {
+		if (i == 0 || c[i - 1] == ' ') && (i + len(word) == len(c) || c[i + len(word)] == ' ') && c[i:][:len(word)] == word {
+			return true
+		}
+	}
+	return false
+}
+
+// Whether the service is wanted on this boot: its when=WORD, if it has one,
+// is a word of the kernel command line (vx.live on an install medium,
+// vx.system on an installed system: upstream's M5 step 9c).
+wanted :: proc "contextless" (s: ^Service) -> bool {
+	r := manifest_reader(s.manifest, s.at)
+	rec: ndb.Record
+	if ndb.next(&r, &rec) != .Record || !ndb.has(&rec, "when") {
+		return true
+	}
+	word, _ := ndb.get(&rec, "when")
+	return cmdline_has(word)
+}
+
 // Whether the kernel command line's vx.skip=NAME,NAME,... names the service.
 skipped :: proc "contextless" (name: string) -> bool {
 	KEY :: "vx.skip="
@@ -646,6 +684,17 @@ vx_main :: proc() -> int {
 		}
 	}
 	image_vmo = rt.spawn_take("bootimage")
+	store_vmo = rt.spawn_take("storeimage")
+	if store_vmo != vx.HANDLE_NONE {
+		rec: ndb.Record
+		size_ok := false
+		if rt.spawn_record("storeimage", &rec) {
+			store_size, size_ok = ndb.get_u64(&rec, "size")
+		}
+		if !size_ok {
+			store_vmo = vx.HANDLE_NONE
+		}
+	}
 	size, ok := rt.boot_image_size()
 	if image_vmo == vx.HANDLE_NONE || !ok {
 		fail("no boot image")
@@ -678,7 +727,7 @@ vx_main :: proc() -> int {
 
 	for drivers in ([2]bool{true, false}) { // drivers first, so the console is there for the rest
 		for &s, i in services {
-			if (len(s.devices) > 0) == drivers && !s.broken && !skipped(name_of(&s)) {
+			if (len(s.devices) > 0) == drivers && !s.broken && !skipped(name_of(&s)) && wanted(&s) {
 				if started := start(i); started != .Ok {
 					cannot("cannot start ", &s, started)
 				}
