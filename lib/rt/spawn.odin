@@ -4,6 +4,7 @@ import "base:intrinsics"
 import vx "abi:vx"
 import "vx:memory"
 import "vx:ndb"
+import "vx:process"
 import "vx:str"
 
 // Starting a program from an ELF image in memory. The ELF loader lives here,
@@ -131,6 +132,64 @@ Spawn_Args :: struct {
 	handles:      []vx.Handle, // given to the child: they leave the caller, whatever happens
 	handle_names: []string, // at most CHANNEL_MAX_HANDLES - 1; "self" is added
 	records:      string, // more ndb records for the spawn message: arg=, mount=, bind=
+	// If set, called once the task exists and its image is loaded, before
+	// its message is written or its thread started: it may give the child
+	// one more handle, named (a handle left HANDLE_NONE gives none).
+	prepare:      proc "contextless" (ctx: rawptr, task: vx.Handle) -> (h: vx.Handle, name: string, st: vx.Status),
+	ctx:          rawptr,
+	// Exec instead of spawn (ADR-0012): the caller becomes the program, and
+	// spawn_elf returns only on a failure. "self" names the caller's own task.
+	exec:         bool,
+	// If set, a connector to procfs's listen channel: the child is registered
+	// there before it runs, with these flags (vx:process). A child that
+	// cannot be registered is not started, unless the caller asked for no
+	// wait record (.No_Wait): it watches the child itself, so a procfs that
+	// is gone leaves it able to run programs.
+	proc_conn:    vx.Handle,
+	proc_flags:   process.Flags,
+	proc_group:   u64, // a note group to join, or 0
+	// If set (with proc_conn), called once the child is registered, with its
+	// pid, before its thread exists: a debugger sets its breakpoints there,
+	// so the program stops at them from its first instruction. A failure
+	// ends the spawn.
+	registered:   proc "contextless" (ctx: rawptr, pid: u64) -> vx.Status,
+}
+
+// How long a registration may take before procfs is taken to be gone.
+@(private="file")
+REGISTER_WAIT :: vx.Instant(2_000_000_000)
+
+// Registers a task as a child of the caller with procfs, through a connector
+// to its listen channel (vx:process), in note group `group` if not 0.
+// Returns the child's pid.
+@(require_results)
+proc_register :: proc "contextless" (connector, task: vx.Handle, flags: process.Flags, group: u64 = 0) -> (pid: u64, st: vx.Status) {
+	parent: i64
+	if self != vx.HANDLE_NONE {
+		if me, ist := task_info(self); ist == .Ok {
+			parent = i64(me.id)
+		}
+	}
+	dup := handle_dup(task, vx.RIGHTS_SAME) or_return
+	req := process.Msg {
+		header = {ordinal = process.REGISTER},
+		arg = {parent, i64(transmute(u32)flags), i64(group)},
+	}
+	rep: process.Msg
+	call := vx.Call {
+		wr_bytes   = &req,
+		wr_len     = size_of(req),
+		wr_handles = &dup,
+		wr_count   = 1,
+		rd_bytes   = &rep,
+		rd_cap     = size_of(rep),
+	}
+	channel_call(connector, &call, clock_read() + REGISTER_WAIT) or_return
+	if call.actual.bytes < size_of(rep) {
+		return 0, .Err_Invalid
+	}
+	process.reply_status(&rep) or_return
+	return u64(rep.arg[0]), .Ok
 }
 
 // The spawn message being built: its header, then its records.
@@ -142,34 +201,60 @@ spawn_out: struct {
 #assert(size_of(spawn_out) == vx.CHANNEL_MAX_BYTES)
 
 // Builds and starts the child; returns the parent's handle to it, to watch
-// (.Exit) or kill.
+// (.Exit) or kill. With a.exec the caller becomes the program instead: the
+// image is built the same way, in a scratch task, and task_exec moves it
+// into the caller's own task (ADR-0012), so the task, and the pid, carry on
+// with only the handles the spawn message names. Only a failure returns.
 spawn_elf :: proc "contextless" (a: ^Spawn_Args) -> (task: vx.Handle, st: vx.Status) {
-	t, me, stack, thread, ours, theirs: vx.Handle
-	given := false // a.handles are in the child's message
-	// On the way out, in this order: the caller's handles, unless they
-	// reached the message; ours, which the child does not need (it reads its
-	// message after our end is gone); and, on failure, the child.
+	t, stack, thread, ours, theirs: vx.Handle
+	// "self", the caller's handles, and prepare's: given to the child in its
+	// message, or closed, whatever happens.
+	given: [vx.CHANNEL_MAX_HANDLES]vx.Handle
+	names: [vx.CHANNEL_MAX_HANDLES]string
+	count := 1 + len(a.handles)
+	// On the way out, in this order: what was to be given, unless it reached
+	// the message; ours, which the child does not need (it reads its message
+	// after our end is gone); and, on failure, the child.
 	defer if st != .Ok && t != vx.HANDLE_NONE {
 		_ = task_kill(t, "spawn failed")
 		_ = handle_close(t)
 	}
-	defer close_all(stack, me, thread, ours, theirs)
-	defer if !given {
-		close_all(..a.handles)
-	}
+	defer close_all(stack, thread, ours, theirs)
+	defer close_all(..given[:]) // HANDLE_NONE once moved
 
-	if len(a.handles) >= vx.CHANNEL_MAX_HANDLES {
+	if count > vx.CHANNEL_MAX_HANDLES - (a.prepare != nil ? 1 : 0) {
+		close_all(..a.handles)
 		return 0, .Err_Range
 	}
+	names[0] = "self"
+	copy(given[1:], a.handles)
+	copy(names[1:], a.handle_names)
+
+	t = task_create(a.name) or_return
+	entry := elf_load(t, a.image) or_return
+	stack = vmo_create(STACK_SIZE) or_return
+	_ = as_map(t, stack, 0, STACK_SIZE, {.Write}, STACK_TOP - STACK_SIZE) or_return
+	if a.exec {
+		given[0] = handle_dup(self, vx.RIGHTS_SAME) or_return
+	} else {
+		given[0] = handle_dup(t, vx.ALL_RIGHTS) or_return
+	}
+	if a.prepare != nil {
+		h, name, pst := a.prepare(a.ctx, t)
+		if h != vx.HANDLE_NONE { // counted, failure or not, so it is closed with the rest
+			given[count], names[count] = h, name
+			count += 1
+		}
+		pst or_return
+	}
+
+	// The spawn message: the header, then its records.
 	w := ndb.Writer{buf = spawn_out.records[:]}
 	ndb.put(&w, "spawn", a.name)
 	_ = ndb.end(&w)
-	ndb.put(&w, "handle", "self")
-	ndb.put_u64(&w, "index", 0)
-	_ = ndb.end(&w)
-	for name, i in a.handle_names {
+	for name, i in names[:count] {
 		ndb.put(&w, "handle", name)
-		ndb.put_u64(&w, "index", u64(i + 1))
+		ndb.put_u64(&w, "index", u64(i))
 		_ = ndb.end(&w)
 	}
 	str.write_string(&w, a.records)
@@ -178,17 +263,22 @@ spawn_elf :: proc "contextless" (a: ^Spawn_Args) -> (task: vx.Handle, st: vx.Sta
 	}
 	spawn_out.header = {ordinal = vx.SPAWN}
 
-	t = task_create(a.name) or_return
-	entry := elf_load(t, a.image) or_return
-	stack = vmo_create(STACK_SIZE) or_return
-	_ = as_map(t, stack, 0, STACK_SIZE, {.Write}, STACK_TOP - STACK_SIZE) or_return
-	me = handle_dup(t, vx.ALL_RIGHTS) or_return
 	ours, theirs = channel_create() or_return
-	handles: [vx.CHANNEL_MAX_HANDLES]vx.Handle
-	handles[0] = me
-	copy(handles[1:], a.handles)
-	me, given = vx.HANDLE_NONE, true // moved, whatever happens
-	channel_write(ours, memory.ptr_to_bytes(&spawn_out)[:size_of(vx.Msg_Header) + w.len], handles[:len(a.handles) + 1]) or_return
+	wst := channel_write(ours, memory.ptr_to_bytes(&spawn_out)[:size_of(vx.Msg_Header) + w.len], given[:count])
+	given = {} // moved, whatever happened
+	wst or_return
+	if a.exec {
+		task_exec(t, theirs, entry, STACK_TOP) or_return // returns only on a failure
+	}
+	if a.proc_conn != vx.HANDLE_NONE {
+		pid, reg := proc_register(a.proc_conn, t, a.proc_flags, a.proc_group)
+		if .No_Wait not_in a.proc_flags {
+			reg or_return
+		}
+		if reg == .Ok && a.registered != nil {
+			a.registered(a.ctx, pid) or_return
+		}
+	}
 	thread = thread_create(t) or_return
 	thread_start(thread, entry, STACK_TOP, theirs, 0) or_return
 	theirs = vx.HANDLE_NONE // moved into the child

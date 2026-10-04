@@ -39,6 +39,10 @@ foreign _ {
 @(private="file")
 note_fn: Note_Handler
 
+// How .Dflt ends the program: exits, which flushes output first, unless a C
+// library's back end (ports/musl/vx) has its own.
+note_exit: proc "contextless" (note: string) -> !
+
 // Hands every note to handler from now on; nil goes back to ending the
 // program at the first one.
 @(require_results)
@@ -60,7 +64,6 @@ regs_pc :: proc "contextless" (r: ^vx.Regs) -> ^u64 {
 // The fault in e again, with no in-task handler: x86_64's int3 reports the
 // instruction after it, so the pc goes back to it; every other fault
 // reports the instruction itself.
-@(private="file")
 note_crash :: proc "contextless" (e: ^vx.Exception) -> ! {
 	_ = exception_bind(self, vx.HANDLE_NONE, 0, {.In_Task})
 	when ODIN_ARCH == .amd64 {
@@ -88,6 +91,9 @@ note_dispatch :: proc "c" (e: ^vx.Exception) {
 	}
 	if e.kind != .Interrupt {
 		note_crash(e) // a fault: where unhandled faults go
+	}
+	if note_exit != nil {
+		note_exit(note)
 	}
 	exits(note)
 }

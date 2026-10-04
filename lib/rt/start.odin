@@ -18,20 +18,29 @@ import "vx:str"
 //
 // It runs with a default context; its allocator is nil until user space has
 // arenas.
-foreign _ {
-	vx_main :: proc "odin" () -> int ---
-}
+//
+// A C library's back end (ports/musl/vx, ADR-0007) uses this package for its
+// calls and its spawn message but has an entry of its own, and no vx_main:
+// it is built with -define:VX_RT_START=false, which leaves _start out.
+RT_START :: #config(VX_RT_START, true)
 
-SPAWN_MAX_ARGS :: 64 // gsh's longest command line has fewer
 
-// What the spawn message said: the program's name, its arguments, the
-// kernel command line (the root task's), and its handles by name. handles
-// and handle_names are indexed by the message's index= values.
+// arg= and env= records each: a spawn message (64 KiB) holds about that many
+// short ones. A sender with more fails (E2BIG); a message with more is
+// refused, not cut short.
+SPAWN_MAX_ARGS :: 4096
+
+// What the spawn message said: the program's name, its arguments and
+// environment, the kernel command line (the root task's), and its handles by
+// name. handles and handle_names are indexed by the message's index= values.
 Spawn :: struct {
 	name:         string,
 	cmdline:      string,
-	args:         [dynamic; SPAWN_MAX_ARGS]string, // in order; any past the last fit are dropped
-	text:         string, // the records, for what the runtime does not read itself (mount=, bind=)
+	args:         [dynamic; SPAWN_MAX_ARGS]string, // in order
+	argv0:        string, // argv0=, the POSIX argv[0] (has_argv0), rather than spawn=
+	has_argv0:    bool,
+	envs:         [dynamic; SPAWN_MAX_ARGS]string, // env=, each NAME=VALUE, in order
+	text:       string, // the records, for what the runtime does not read itself (mount=, bind=)
 	handles:      [vx.CHANNEL_MAX_HANDLES]vx.Handle,
 	handle_names: [vx.CHANNEL_MAX_HANDLES]string,
 	handle_count: int,
@@ -50,7 +59,13 @@ spawn_msg: struct {
 @(private="file")
 spawn_scratch: [64 * 1024]u8 // decoded values, which never grow
 
-@(export, link_name="_start")
+foreign _ {
+	vx_main :: proc "odin" () -> int ---
+}
+
+// Not exported without RT_START: then nothing reaches it, and it is not
+// compiled, nor is the vx_main it calls asked for.
+@(export=RT_START, link_name="_start")
 start :: proc "c" (bootstrap: vx.Handle, arg2: u64) -> ! {
 	read_spawn(bootstrap)
 	stdio_init()
@@ -105,7 +120,9 @@ spawn_take :: proc "contextless" (name: string) -> vx.Handle {
 	return vx.HANDLE_NONE
 }
 
-@(private="file")
+// Reads the spawn message from the bootstrap channel, which it closes, into
+// spawn and self. _start calls it; a C library's back end, from its own
+// entry.
 read_spawn :: proc "contextless" (bootstrap: vx.Handle) {
 	got: [vx.CHANNEL_MAX_HANDLES]vx.Handle
 	size, st := channel_read(bootstrap, memory.ptr_to_bytes(&spawn_msg), got[:])
@@ -133,7 +150,13 @@ read_spawn :: proc "contextless" (bootstrap: vx.Handle) {
 			spawn.cmdline, _ = ndb.get(&rec, "cmdline")
 		case ndb.has(&rec, "arg"):
 			arg, _ := ndb.get(&rec, "arg")
-			_ = append(&spawn.args, arg) // a full list drops the rest
+			ok = append(&spawn.args, arg) == 1 // more than fit: refused
+		case ndb.has(&rec, "argv0"):
+			spawn.argv0, _ = ndb.get(&rec, "argv0")
+			spawn.has_argv0 = true
+		case ndb.has(&rec, "env"):
+			env, _ := ndb.get(&rec, "env")
+			ok = append(&spawn.envs, env) == 1
 		case ndb.has(&rec, "handle") && !ndb.has(&rec, "mount"):
 			index, iok := ndb.get_u64(&rec, "index")
 			ok = iok && index < u64(size.handles) && !named[index]

@@ -140,3 +140,37 @@ console_read :: proc "contextless" (buf: []u8) -> (int, vx.Status) {
 console_connector :: proc "contextless" () -> vx.Handle {
 	return console.connector
 }
+
+// Writes data to the console at once, after what print has buffered, for a
+// C library's write(2) (ports/musl/vx). A broken connection is made again
+// once (the driver restarted); failing that, or with no console, the data
+// goes to the kernel log.
+console_write :: proc "contextless" (data: []u8) {
+	if console.len > 0 {
+		console_flush()
+	}
+	if console.connector != vx.HANDLE_NONE {
+		if (console.open || console_open() == .Ok) && console_put(data) {
+			return
+		}
+		if console_open() == .Ok && console_put(data) {
+			return
+		}
+	}
+	_ = debug_write(string(data))
+}
+
+// Whether print has output buffered for the console.
+console_pending :: proc "contextless" () -> bool {
+	return console.len > 0
+}
+
+// After a fork: the connection's ring was not copied into this process, so
+// it is let go here (the parent keeps its own), and the next write connects
+// again.
+console_forget :: proc "contextless" () {
+	if console.conn.end != vx.HANDLE_NONE {
+		p9_disconnect(&console.conn)
+	}
+	console.open = false
+}
