@@ -36,7 +36,7 @@ name=musl
     license=MIT
     adr=docs/adr/0007-musl-odin-backend.md
     port=ports/musl/port.ndb
-    reviewed.by=pending
+    reviewed.by="James Kane" reviewed.date=2026-10-04
 
 name=compiler-rt
     version=22.1.8
@@ -48,7 +48,7 @@ name=compiler-rt
     license="Apache-2.0 WITH LLVM-exception"
     adr=docs/adr/0008-compiler-rt.md
     port=ports/compiler-rt/port.ndb
-    reviewed.by=pending
+    reviewed.by="James Kane" reviewed.date=2026-10-04
 
 name=lua
     version=5.5.1
@@ -58,7 +58,7 @@ name=lua
     license=MIT
     adr=docs/adr/0009-lua.md
     port=ports/lua/port.ndb
-    reviewed.by=pending
+    reviewed.by="James Kane" reviewed.date=2026-10-04
 
 name=sbase
     version="git c546c3a"
@@ -68,4 +68,4 @@ name=sbase
     license="MIT (LICENSE); libutf and some files under their own permissive notices, as LICENSE lists"
     adr=docs/adr/0010-sbase.md
     port=ports/sbase/port.ndb
-    reviewed.by=pending
+    reviewed.by="James Kane" reviewed.date=2026-10-04
