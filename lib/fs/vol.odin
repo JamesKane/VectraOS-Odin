@@ -167,6 +167,7 @@ label_set :: proc "contextless" (v: ^Vol, b: ^Sbatch, name: []u8, gen: Gen, flag
 	return snap_msg(v, b, .Insert, key_label(k[:], name), val[:])
 }
 
+@(require_results)
 snap_get :: proc "contextless" (v: ^Vol, gen: Gen) -> (s: Snap, st: vx.Status) {
 	k: [9]u8
 	buf: [INLMAX]u8
@@ -189,6 +190,7 @@ snap_get :: proc "contextless" (v: ^Vol, gen: Gen) -> (s: Snap, st: vx.Status) {
 }
 
 // What label `name` names: its snapshot, and whether it is a branch.
+@(require_results)
 label_get :: proc "contextless" (v: ^Vol, name: string) -> (gen: Gen, flags: Label_Flags, st: vx.Status) {
 	n := namelen(name, LABELMAX)
 	if n == 0 || n > LABELMAX {
@@ -499,6 +501,7 @@ pack_sb :: proc "contextless" (v: ^Vol, p: []u8) {
 }
 
 // A superblock, if it is one: false if not.
+@(require_results)
 unpack_sb :: proc "contextless" (p: []u8) -> (s: Sb, ok: bool) {
 	h := load(Sb_Disk, p)
 	if h.magic != MAGIC || h.version != VERSION || h.blksz != BLKSZ || h.bufspc != BUFSPC {
@@ -689,7 +692,7 @@ branch_named :: proc "contextless" (v: ^Vol, name: string) -> ^Branch {
 }
 
 // Loads branch `name`, as its label says now, into br.
-@(private = "file")
+@(private = "file", require_results)
 branch_load :: proc "contextless" (v: ^Vol, name: string, br: ^Branch) -> vx.Status {
 	n := namelen(name, LABELMAX)
 	gen, flags, st := label_get(v, name)
@@ -711,6 +714,7 @@ branch_load :: proc "contextless" (v: ^Vol, name: string, br: ^Branch) -> vx.Sta
 }
 
 // Branch `name`, open for changes: valid until the volume is unmounted.
+@(require_results)
 branch_open :: proc "contextless" (v: ^Vol, name: string) -> (^Branch, vx.Status) {
 	if open := branch_named(v, name); open != nil {
 		return open, .Ok
@@ -733,6 +737,7 @@ branch_open :: proc "contextless" (v: ^Vol, name: string) -> (^Branch, vx.Status
 }
 
 // The tree a label names, as of the last commit, to read.
+@(require_results)
 snap_open :: proc "contextless" (v: ^Vol, name: string) -> (Tree, vx.Status) {
 	gen, _, st := label_get(v, name)
 	s: Snap
@@ -866,7 +871,7 @@ fork_of :: proc "contextless" (v: ^Vol, b: ^Sbatch, s: ^Snap, name: []u8) -> boo
 	return snap_set(v, b, s^) && snap_set(v, b, f) && label_set(v, b, name, f.gen, {.Mutable})
 }
 
-@(private = "file")
+@(private = "file", require_results)
 vol_status :: proc "contextless" (v: ^Vol, ok: bool) -> vx.Status {
 	if ok {
 		return .Ok
@@ -1169,7 +1174,7 @@ unmount :: proc "contextless" (v: ^Vol) {
 }
 
 // The volume as one superblock describes it: its arenas loaded.
-@(private = "file")
+@(private = "file", require_results)
 mount_from :: proc "contextless" (v: ^Vol, sbuf: []u8, sb: Sb) -> vx.Status {
 	fs := &v.fs
 	v.sb = sb

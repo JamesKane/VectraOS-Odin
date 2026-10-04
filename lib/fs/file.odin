@@ -83,7 +83,7 @@ vol_bad :: proc "contextless" (v: ^Vol) -> vx.Status {
 	return .Err_Invalid
 }
 
-@(private = "file")
+@(private = "file", require_results)
 file_at :: proc "contextless" (v: ^Vol, t: ^Tree, k: []u8) -> (f: File, st: vx.Status) {
 	buf: [INLMAX]u8
 	val: []u8
@@ -125,7 +125,7 @@ Fbatch :: struct {
 	freeing: bool, // the operation frees: it may use half the reserve (room)
 }
 
-@(private = "file")
+@(private = "file", require_results)
 fb_flush :: proc "contextless" (v: ^Vol, t: ^Tree, b: ^Fbatch) -> vx.Status {
 	// Room for each upsert, not only the first: a long removal flushes many.
 	st := room(&v.fs, 0, b.freeing)
@@ -158,7 +158,7 @@ fb_add :: proc "contextless" (b: ^Fbatch, op: Op, k, val: []u8) {
 	b.size += 7 + u32(len(k) + len(val))
 }
 
-@(private = "file")
+@(private = "file", require_results)
 fb_put :: proc "contextless" (v: ^Vol, t: ^Tree, b: ^Fbatch, op: Op, k, val: []u8) -> vx.Status {
 	if !fb_room(b, len(k), len(val)) {
 		if st := fb_flush(v, t, b); st != .Ok {
@@ -170,7 +170,7 @@ fb_put :: proc "contextless" (v: ^Vol, t: ^Tree, b: ^Fbatch, op: Op, k, val: []u
 }
 
 // An Owstat for the entry keyed k: the fields `flags` names, from d.
-@(private = "file")
+@(private = "file", require_results)
 fb_wstat :: proc "contextless" (v: ^Vol, t: ^Tree, b: ^Fbatch, k: []u8, flags: Wstat, d: Dir) -> vx.Status {
 	w: [1 + 8 + 4 + 8 + 8 + 4 + 4 + 4 + 8]u8
 	w[0] = transmute(u8)flags
@@ -214,7 +214,7 @@ fb_wstat :: proc "contextless" (v: ^Vol, t: ^Tree, b: ^Fbatch, k: []u8, flags: W
 // upsert's slack): nil, NO_SPACE with nothing changed, if the volume has no
 // room for it (11 §6). One that frees may use more of the reserve, so a full
 // volume can still be emptied.
-@(private = "file")
+@(private = "file", require_results)
 fb_new :: proc "contextless" (v: ^Vol, blocks: u64, freeing: bool) -> (^Fbatch, vx.Status) {
 	if st := room(&v.fs, blocks, freeing); st != .Ok {
 		return nil, st
@@ -228,7 +228,7 @@ fb_new :: proc "contextless" (v: ^Vol, blocks: u64, freeing: bool) -> (^Fbatch, 
 	return &b[0], .Ok
 }
 
-@(private = "file")
+@(private = "file", require_results)
 fb_done :: proc "contextless" (v: ^Vol, t: ^Tree, b: ^Fbatch, st: vx.Status) -> vx.Status {
 	st := st
 	if st == .Ok && b.n > 0 {
@@ -242,12 +242,14 @@ fb_done :: proc "contextless" (v: ^Vol, t: ^Tree, b: ^Fbatch, st: vx.Status) -> 
 // --- Finding things ---
 
 // The root of tree t.
+@(require_results)
 root :: proc "contextless" (v: ^Vol, t: ^Tree) -> (File, vx.Status) {
 	k: [9]u8
 	return file_at(v, t, key_ent(k[:], 0, ""))
 }
 
 // Name in directory dir: an entry, ".", or "..".
+@(require_results)
 walk :: proc "contextless" (v: ^Vol, t: ^Tree, dir: ^File, name: string) -> (File, vx.Status) {
 	if !is_dir(dir) {
 		return {}, .Err_Invalid
@@ -281,6 +283,7 @@ walk :: proc "contextless" (v: ^Vol, t: ^Tree, dir: ^File, name: string) -> (Fil
 }
 
 // The entry whose qid is qid, by its Kup: an orphan's too.
+@(require_results)
 file_by_qid :: proc "contextless" (v: ^Vol, t: ^Tree, qid: u64) -> (f: File, st: vx.Status) {
 	k: [9]u8
 	buf: [INLMAX]u8
@@ -301,6 +304,7 @@ file_by_qid :: proc "contextless" (v: ^Vol, t: ^Tree, qid: u64) -> (f: File, st:
 }
 
 // A path from the root, '/'-separated.
+@(require_results)
 walk_path :: proc "contextless" (v: ^Vol, t: ^Tree, path: string) -> (f: File, st: vx.Status) {
 	f, st = root(v, t)
 	rest := cstring_of(path)
@@ -337,6 +341,7 @@ Dir_Entry :: struct {
 	d:    Dir,
 }
 
+@(require_results)
 readdir_start :: proc "contextless" (it: ^Dir_Iter, v: ^Vol, t: ^Tree, dir: ^File) -> vx.Status {
 	it^ = {v = v}
 	if !is_dir(dir) {
@@ -361,6 +366,7 @@ readdir_next :: proc "contextless" (it: ^Dir_Iter) -> (e: Dir_Entry, ok: bool) {
 	return {string(kv.key[9:]), unpack_dir(kv.val)}, true
 }
 
+@(require_results)
 readdir_end :: proc "contextless" (it: ^Dir_Iter) -> vx.Status {
 	if it.v == nil {
 		return .Err_Invalid
@@ -369,7 +375,7 @@ readdir_end :: proc "contextless" (it: ^Dir_Iter) -> vx.Status {
 	return it.bad ? .Err_Invalid : it.v.fs.err
 }
 
-@(private = "file")
+@(private = "file", require_results)
 dir_empty :: proc "contextless" (v: ^Vol, t: ^Tree, dir: ^File) -> (empty: bool, st: vx.Status) {
 	it: Dir_Iter
 	if st = readdir_start(&it, v, t, dir); st != .Ok {
@@ -416,6 +422,7 @@ mkroot :: proc "contextless" (v: ^Vol, t: ^Tree, mode, uid, gid: u32, now: i64) 
 // A new entry `name` in dir: a directory if mode has DMDIR, a symbolic link if
 // DMSYMLINK (its target written after), else a file. The directory's mtime
 // and ctime become now.
+@(require_results)
 create :: proc "contextless" (v: ^Vol, t: ^Tree, dir: ^File, name: string, mode, uid, gid: u32, now: i64) -> (f: File, st: vx.Status) {
 	if !is_dir(dir) {
 		return {}, .Err_Invalid
@@ -470,7 +477,7 @@ create :: proc "contextless" (v: ^Vol, t: ^Tree, dir: ^File, name: string, mode,
 // --- Data ---
 
 // Block `off` of file qid (BLKSZ bytes, zeros where it holds none).
-@(private = "file")
+@(private = "file", require_results)
 read_block :: proc "contextless" (v: ^Vol, t: ^Tree, qid, off: u64, buf: ^[BLKSZ]u8) -> vx.Status {
 	k: [17]u8
 	vbuf: [INLMAX]u8
@@ -499,6 +506,7 @@ read_block :: proc "contextless" (v: ^Vol, t: ^Tree, qid, off: u64, buf: ^[BLKSZ
 }
 
 // Up to len(buf) bytes of f from off; the count read (0 at or past the end).
+@(require_results)
 read :: proc "contextless" (v: ^Vol, t: ^Tree, f: ^File, off: u64, buf: []u8) -> (got: u64, st: vx.Status) {
 	if is_dir(f) {
 		return 0, .Err_Invalid
@@ -523,7 +531,7 @@ read :: proc "contextless" (v: ^Vol, t: ^Tree, f: ^File, off: u64, buf: []u8) ->
 }
 
 // Block `off` of f as `data`: a new data block, or inline if f is small.
-@(private = "file")
+@(private = "file", require_results)
 put_block :: proc "contextless" (v: ^Vol, t: ^Tree, b: ^Fbatch, f: ^File, off: u64, data: ^[BLKSZ]u8, n: u64) -> vx.Status {
 	k: [17]u8
 	val: [INLMAX]u8
@@ -612,7 +620,7 @@ write :: proc "contextless" (v: ^Vol, t: ^Tree, f: ^File, off: u64, data: []u8, 
 // Every Kdat key of qid at or past `from`, cleared: the blocks they name
 // freed. A chunk at a time, each flushed before the next is looked for, so a
 // file of any size needs no more memory than one chunk.
-@(private = "file")
+@(private = "file", require_results)
 clear_data :: proc "contextless" (v: ^Vol, t: ^Tree, b: ^Fbatch, qid, from: u64) -> vx.Status {
 	pfx: [9]u8
 	key_id(pfx[:], .Dat, qid)
@@ -839,6 +847,7 @@ reap :: proc "contextless" (v: ^Vol, t: ^Tree, qid: u64) -> vx.Status {
 
 // Every orphan in tree t reaped: what a crash left of files removed while
 // open, when the tree is first opened again. How many.
+@(require_results)
 reap_all :: proc "contextless" (v: ^Vol, t: ^Tree) -> (n: u32, st: vx.Status) {
 	for { // a few at a time: the tree changes as each goes
 		qid: [32]u64
@@ -955,6 +964,7 @@ rename :: proc "contextless" (v: ^Vol, t: ^Tree, from: ^File, name: string, to: 
 }
 
 // A symbolic link `name` in dir to target.
+@(require_results)
 symlink :: proc "contextless" (v: ^Vol, t: ^Tree, dir: ^File, name, target: string, uid, gid: u32, now: i64) -> (f: File, st: vx.Status) {
 	tgt := cstring_of(target)
 	if len(tgt) == 0 {

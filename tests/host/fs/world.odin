@@ -94,11 +94,6 @@ expect_digest :: proc(t: ^testing.T, what: string, bytes: []u8, want: u64, loc :
 	testing.expectf(t, got == want, "%s: digest %016x, upstream's %016x", what, got, want, loc = loc)
 }
 
-// For working digests out: prints what a run left.
-print_digest :: proc(what: string, bytes: []u8) {
-	fmt.printfln("%s %016x", what, fs.xxh64(bytes, 0))
-}
-
 report :: proc(c: ^fs.Check) -> string {
 	return fmt.tprintf("check: used %d trees %d other %d leaked %d unallocated %d shared %d damaged %d snaps %d lists %d", c.used, c.trees, c.other, c.leaked, c.unallocated, c.shared, c.damaged, c.bad_snaps, c.bad_lists)
 }

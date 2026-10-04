@@ -848,6 +848,7 @@ descend :: proc "contextless" (fs: ^Fs, t: ^Tree, k: []u8, p: ^Path) -> bool {
 
 // The value of key k, copied to buf: its bytes there and .Ok, NOT_FOUND, or
 // the volume's error.
+@(require_results)
 lookup :: proc "contextless" (fs: ^Fs, t: ^Tree, k: []u8, buf: ^[INLMAX]u8) -> ([]u8, vx.Status) {
 	if fs.err != .Ok {
 		return nil, fs.err

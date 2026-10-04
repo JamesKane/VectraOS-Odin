@@ -17,6 +17,7 @@ fail :: proc "contextless" (fs: ^Fs, st: vx.Status) -> bool {
 
 // n zeroed Ts from the caller's memory; NO_MEMORY (sticky) if there is none.
 // n == 0 gives an empty slice, which is not an error.
+@(require_results)
 mem_new :: proc "contextless" ($T: typeid, fs: ^Fs, n: int) -> (s: []T, ok: bool) {
 	if n <= 0 {
 		return nil, n == 0
@@ -51,6 +52,7 @@ items :: #force_inline proc "contextless" (v: ^Vec($T)) -> []T {
 }
 
 // Room for one more; false (NO_MEMORY) if there is none.
+@(require_results)
 vec_grow :: proc "contextless" (fs: ^Fs, v: ^Vec($T)) -> bool {
 	if v.n < len(v.buf) {
 		return true
@@ -65,6 +67,7 @@ vec_grow :: proc "contextless" (fs: ^Fs, v: ^Vec($T)) -> bool {
 	return true
 }
 
+@(require_results)
 vec_push :: proc "contextless" (fs: ^Fs, v: ^Vec($T), x: T) -> bool {
 	vec_grow(fs, v) or_return
 	v.buf[v.n] = x
@@ -73,6 +76,7 @@ vec_push :: proc "contextless" (fs: ^Fs, v: ^Vec($T), x: T) -> bool {
 }
 
 // x at index i, the rest moved up.
+@(require_results)
 vec_insert :: proc "contextless" (fs: ^Fs, v: ^Vec($T), i: int, x: T) -> bool {
 	vec_grow(fs, v) or_return
 	copy(v.buf[i + 1:v.n + 1], v.buf[i:v.n])

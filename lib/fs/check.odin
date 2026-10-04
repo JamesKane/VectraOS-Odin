@@ -184,6 +184,7 @@ find_snap :: proc "contextless" (s: []Snaprec, gen: Gen) -> ^Snaprec {
 
 // Checks the volume: .Ok if it is clean, INVALID if not; c says what was
 // found either way. Open branches' uncommitted trees count as reached.
+@(require_results)
 check_volume :: proc "contextless" (v: ^Vol, c: ^Check) -> vx.Status {
 	fs := &v.fs
 	c^ = {}
