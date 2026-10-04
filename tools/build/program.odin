@@ -55,11 +55,16 @@ PROGRAMS := []Program {
 	{name = "tail", dir = "cmd/tail", place = .Bootfs},
 	{name = "ping", dir = "cmd/ping", place = .Bootfs},
 	{name = "cs", dir = "cmd/cs", place = .Bootfs},
+	{name = "dbg", dir = "cmd/dbg", place = .Bootfs},
 	{name = "drv-uart-16550", dir = "drivers/drv-uart-16550", place = .Bootfs, only = {.X86_64}},
 	{name = "drv-uart-pl011", dir = "drivers/drv-uart-pl011", place = .Bootfs, only = {.AArch64}},
 	{name = "drv-virtio-net", dir = "drivers/drv-virtio-net", place = .Bootfs},
 	{name = "ctest", source = "tests/posix/ctest.c", place = .Tests, kind = .C},
 	{name = "sbasetest", source = "tests/posix/sbasetest.c", place = .Tests, kind = .C},
+	// dbg's fixture, as upstream builds it but against musl: its own
+	// functions are optnone, and the house flags give -g and frame pointers.
+	// Its lib/vx-rt/rt.c is this tree's stand-in for upstream's runtime.
+	{name = "dbgdemo", source = "tests/user/dbgdemo.c", place = .Tests, kind = .C},
 }
 
 program_path :: proc(a: ^Arch, mode: Mode, name: string) -> string {
