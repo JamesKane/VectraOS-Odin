@@ -10,15 +10,21 @@ import "vx:str"
 space: ns.Namespace
 buf: [4096]u8
 
+// The program ends with run's exit string, as upstream's programs return
+// theirs: empty for success (ADR-0010).
 @(export, link_name="vx_main")
 vx_main :: proc() -> int {
+	rt.exits(run())
+}
+
+run :: proc() -> string {
 	if procns.from_spawn(&space) != .Ok {
-		return 1
+		return "no namespace"
 	}
 	dir: ns.File
 	if ns.open(&space, "/proc", p9.OREAD, &dir) != .Ok {
-		rt.print("ps: cannot read /proc\n")
-		return 1
+		rt.eprint("ps: cannot read /proc\n")
+		return "no /proc"
 	}
 	for {
 		n, _ := ns.read(&dir, buf[:])
@@ -46,5 +52,5 @@ vx_main :: proc() -> int {
 		}
 	}
 	ns.close(&dir)
-	return 0
+	return ""
 }

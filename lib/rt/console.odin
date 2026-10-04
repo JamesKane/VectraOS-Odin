@@ -81,7 +81,7 @@ console_flush :: proc "contextless" () {
 	_ = debug_write(string(console.line[:n]))
 }
 
-@(private="file")
+@(private)
 console_print :: proc "contextless" (s: string) {
 	buffer_line(console.line[:], &console.len, s, console_flush)
 }

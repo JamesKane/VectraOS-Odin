@@ -26,26 +26,32 @@ print_file :: proc(name: string) -> vx.Status {
 	}
 }
 
+// The program ends with run's exit string, as upstream's programs return
+// theirs: empty for success (ADR-0010).
 @(export, link_name="vx_main")
 vx_main :: proc() -> int {
-	exit_status := 0
+	rt.exits(run())
+}
+
+run :: proc() -> string {
+	exit := ""
 	if len(rt.args()) == 0 {
 		for {
 			n, st := rt.read(buf[:])
 			if n <= 0 {
-				return st != .Ok ? 1 : 0
+				return st != .Ok ? "read error" : ""
 			}
 			rt.print(string(buf[:n]))
 		}
 	}
 	if procns.from_spawn(&space) != .Ok {
-		return 1
+		return "no namespace"
 	}
 	for name in rt.args() {
 		if st := print_file(name); st != .Ok {
-			rt.print("cat: ", name, ": ", p9.error_text(st), "\n")
-			exit_status = 1
+			rt.eprint("cat: ", name, ": ", p9.error_text(st), "\n")
+			exit = "error"
 		}
 	}
-	return exit_status
+	return exit
 }
