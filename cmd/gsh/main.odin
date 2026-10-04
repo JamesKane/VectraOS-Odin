@@ -284,7 +284,7 @@ spawn :: proc "contextless" (w: []Word, input, output: vx.Handle) -> (vx.Handle,
 		_ = ndb.end(&rec)
 	}
 	if st == .Ok {
-		st = procns.spawn_records(&space, &rec, handles[:vx.CHANNEL_MAX_HANDLES - 4], names[:], &count)
+		count, st = procns.spawn_records(&space, &rec, handles[:vx.CHANNEL_MAX_HANDLES - 4], names[:], count)
 	}
 	if st == .Ok && rt.console_connector() != 0 {
 		if h, dst := rt.handle_dup(rt.console_connector(), vx.RIGHTS_SAME); dst == .Ok {

@@ -23,7 +23,7 @@ take :: proc "contextless" (p: []u8) {
 main :: proc() -> int {
 	lines := u64(10)
 	arg := 0
-	if rt.spawn.argc > 0 && len(rt.spawn.args[0]) > 1 && rt.spawn.args[0][0] == '-' {
+	if len(rt.args()) > 0 && len(rt.spawn.args[0]) > 1 && rt.spawn.args[0][0] == '-' {
 		lines = 0
 		for c in transmute([]u8)rt.spawn.args[0][1:] {
 			if c < '0' || c > '9' || lines > 100000 {
@@ -34,7 +34,7 @@ main :: proc() -> int {
 		}
 		arg = 1
 	}
-	if arg < rt.spawn.argc {
+	if arg < len(rt.args()) {
 		f: ns.File
 		if procns.from_spawn(&space) != .Ok || ns.open(&space, rt.spawn.args[arg], p9.OREAD, &f) != .Ok {
 			rt.print("tail: cannot open it\n")

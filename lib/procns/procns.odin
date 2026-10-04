@@ -10,6 +10,7 @@ import vx "abi:vx"
 import "vx:ndb"
 import "vx:ns"
 import "vx:rt"
+import "vx:str"
 
 @(private="file")
 conns: [ns.MAX_CONNS]rt.Conn
@@ -36,6 +37,7 @@ scratch: [vx.CHANNEL_MAX_BYTES]u8
 
 // Replays the spawn message's namespace records in order. Stops at the first
 // that fails, and says which.
+@(require_results)
 from_spawn :: proc "contextless" (space: ^ns.Namespace) -> vx.Status {
 	r := ndb.Reader{src = rt.spawn.text, scratch = scratch[:]}
 	used := 0
@@ -48,46 +50,46 @@ from_spawn :: proc "contextless" (space: ^ns.Namespace) -> vx.Status {
 		if !mount && !ndb.has(&rec, "bind") {
 			continue
 		}
-		fv, _ := ndb.get(&rec, "flags")
-		flags, fok := parse_flags(fv)
-		st := fok ? vx.Status.Ok : vx.Status.Err_Invalid
-		if st == .Ok && mount {
-			name, _ := ndb.get(&rec, "handle")
-			connector := rt.spawn_take(name)
-			if connector == 0 || used == ns.MAX_CONNS {
-				st = .Err_Not_Found
-			}
-			if st == .Ok {
-				st = rt.p9_connect(connector, &conns[used])
-			}
-			if st == .Ok {
-				src, _ := ndb.get(&rec, "src")
-				aname, _ := ndb.get(&rec, "aname")
-				old, _ := ndb.get(&rec, "mount")
-				st = ns.mount(space, &conns[used].c, connector, src, aname, old, flags)
-			}
-			if st == .Ok {
-				used += 1
-			} else {
-				if used < ns.MAX_CONNS && conns[used].end != 0 {
-					rt.p9_disconnect(&conns[used])
-				}
-				if connector != 0 {
-					_ = rt.handle_close(connector)
-				}
-			}
-		} else if st == .Ok {
-			nw, _ := ndb.get(&rec, "new")
-			b, _ := ndb.get(&rec, "bind")
-			st = ns.bind(space, nw, b, flags)
-		}
-		if st != .Ok {
-			rt.print("vx-ns: cannot replay the record on line ")
-			rt.print_u64(u64(rec.line))
-			rt.print(" of the spawn message\n")
+		if st := replay(space, &rec, mount, &used); st != .Ok {
+			rt.print("vx-ns: cannot replay the record on line ", u64(rec.line), " of the spawn message\n")
 			return st
 		}
 	}
+	return .Ok
+}
+
+// One mount or bind record. A mount takes its connector from the spawn
+// message, and the next free connection; on failure it closes both.
+@(private="file", require_results)
+replay :: proc "contextless" (space: ^ns.Namespace, rec: ^ndb.Record, mount: bool, used: ^int) -> (st: vx.Status) {
+	fv, _ := ndb.get(rec, "flags")
+	flags, fok := parse_flags(fv)
+	if !fok {
+		return .Err_Invalid
+	}
+	if !mount {
+		nw, _ := ndb.get(rec, "new")
+		b, _ := ndb.get(rec, "bind")
+		return ns.bind(space, nw, b, flags)
+	}
+	name, _ := ndb.get(rec, "handle")
+	connector := rt.spawn_take(name)
+	defer if st != .Ok {
+		rt.close_all(connector)
+	}
+	if connector == vx.HANDLE_NONE || used^ == ns.MAX_CONNS {
+		return .Err_Not_Found
+	}
+	k := &conns[used^]
+	rt.p9_connect(connector, k) or_return // which disconnects again if it fails
+	src, _ := ndb.get(rec, "src")
+	aname, _ := ndb.get(rec, "aname")
+	old, _ := ndb.get(rec, "mount")
+	if st = ns.mount(space, &k.c, connector, src, aname, old, flags); st != .Ok {
+		rt.p9_disconnect(k)
+		return st
+	}
+	used^ += 1
 	return .Ok
 }
 
@@ -97,18 +99,29 @@ name_buf: [vx.CHANNEL_MAX_HANDLES][8]u8
 // Writes the namespace as spawn records for a child (a child gets a copy of
 // its parent's namespace), in the order ns.print uses: a mount record for
 // each mounted member, with a duplicate of its connection's connector added
-// to handles (named "ns.N"), and a bind record for the rest. The child
-// connects to each server itself. count is how many handles are already
-// there, and grows; on failure the handles this added are closed.
-spawn_records :: proc "contextless" (space: ^ns.Namespace, w: ^ndb.Writer, handles: []vx.Handle, names: []string, count: ^int) -> vx.Status {
-	first := count^
+// to handles (named "ns.NN", NN its index there), and a bind record for the
+// rest. The child connects to each server itself. handles[:first] are
+// taken already; count is how many are taken after. On failure to
+// duplicate, the handles this added are closed and count is first.
+@(require_results)
+spawn_records :: proc "contextless" (
+	space: ^ns.Namespace,
+	w: ^ndb.Writer,
+	handles: []vx.Handle,
+	names: []string,
+	first: int,
+) -> (
+	count: int,
+	st: vx.Status,
+) {
+	count = first
 	for &e in space.entries {
-		if e.path_len == 0 {
+		path := ns.entry_path(&e)
+		if path == "" {
 			continue
 		}
-		path := string(e.path[:e.path_len])
-		for &m, k in e.members[:e.count] {
-			from := string(m.from[:m.from_len])
+		for &m, k in e.members {
+			from := string(m.from[:])
 			flags: [2]u8
 			nf := 0
 			if k > 0 {
@@ -121,29 +134,24 @@ spawn_records :: proc "contextless" (space: ^ns.Namespace, w: ^ndb.Writer, handl
 			}
 			if m.mounted {
 				c := &space.conns[m.conn]
-				ok := count^ < len(handles) && count^ < vx.CHANNEL_MAX_HANDLES
+				ok := count < len(handles) && count < vx.CHANNEL_MAX_HANDLES
 				if ok {
-					h, st := rt.handle_dup(c.connector, vx.RIGHTS_SAME)
-					handles[count^] = h
-					ok = st == .Ok
+					h, dst := rt.handle_dup(c.connector, vx.RIGHTS_SAME)
+					handles[count] = h
+					ok = dst == .Ok
 				}
 				if !ok {
-					for h in handles[first:count^] {
-						_ = rt.handle_close(h)
-					}
-					count^ = first
-					return .Err_No_Memory
+					rt.close_all(..handles[first:count])
+					return first, .Err_No_Memory
 				}
-				n := &name_buf[count^]
-				n^ = {'n', 's', '.', u8('0' + count^ / 10), u8('0' + count^ % 10), 0, 0, 0}
-				names[count^] = string(n[:5])
+				names[count] = handle_name(count)
 				ndb.put(w, "mount", path)
-				ndb.put(w, "handle", names[count^])
+				ndb.put(w, "handle", names[count])
 				if from != "" {
 					ndb.put(w, "aname", from)
 				}
-				ndb.put(w, "src", string(c.src[:c.src_len]))
-				count^ += 1
+				ndb.put(w, "src", string(c.src[:]))
+				count += 1
 			} else {
 				ndb.put(w, "bind", path)
 				ndb.put(w, "new", from)
@@ -154,7 +162,16 @@ spawn_records :: proc "contextless" (space: ^ns.Namespace, w: ^ndb.Writer, handl
 			_ = ndb.end(w)
 		}
 	}
-	return w.failed ? .Err_Range : .Ok
+	return count, w.failed ? .Err_Range : .Ok
+}
+
+// "ns." and the index in two digits, as upstream names them: ns.03.
+@(private="file")
+handle_name :: proc "contextless" (index: int) -> string {
+	b := str.Buf{buf = name_buf[index][:]}
+	str.write_string(&b, index < 10 ? "ns.0" : "ns.")
+	str.write_u64(&b, u64(index))
+	return str.to_string(&b)
 }
 
 // The connection the spawn message's i-th mount record made, for a program

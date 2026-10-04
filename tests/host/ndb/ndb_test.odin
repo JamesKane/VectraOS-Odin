@@ -119,7 +119,7 @@ test_records :: proc(t: ^testing.T) {
 	p := parse("a=1 b=2 flag\n  c=3\nd=4")
 	testing.expect(t, p.error == "" && p.records == 2 && value_is(&p.last, "d", "4"))
 	p = parse("a=1 b=2 flag\n  c=3\n")
-	testing.expect(t, p.error == "" && p.records == 1 && p.last.count == 4 && value_is(&p.last, "c", "3"))
+	testing.expect(t, p.error == "" && p.records == 1 && len(p.last.tuples) == 4 && value_is(&p.last, "c", "3"))
 	testing.expect(t, ndb.has(&p.last, "flag") && ndb.is_flag(&p.last, "flag"))
 	p = parse("a=1\n\n  # comment\n  b=2\nc=3")
 	testing.expect(t, p.error == "" && p.records == 2)

@@ -15,32 +15,27 @@ import "vx:p9"
 console: struct {
 	connector: vx.Handle,
 	conn:      Conn,
-	fid:       u32,
+	fid:       p9.Fid,
 	open:      bool,
 	len:       int,
 	line:      [512]u8,
 }
 
 @(private="file")
-console_open :: proc "contextless" () -> vx.Status {
+console_open :: proc "contextless" () -> (st: vx.Status) {
 	if console.conn.end != 0 {
 		p9_disconnect(&console.conn)
 	}
 	console.open = false
-	st := p9_connect(console.connector, &console.conn)
-	root: u32
-	if st == .Ok {
-		root, st = p9.client_attach(&console.conn.c, "")
-	}
-	if st == .Ok {
-		console.fid, st = p9.client_walk(&console.conn.c, root, "cons")
-		_ = p9.client_clunk(&console.conn.c, root)
-	}
-	if st == .Ok {
-		st = p9.client_open(&console.conn.c, console.fid, p9.ORDWR)
-	}
-	console.open = st == .Ok
-	return st
+	defer console.open = st == .Ok
+	c := &console.conn.c
+	p9_connect(console.connector, &console.conn) or_return
+	root := p9.client_attach(c, "") or_return
+	fid, walked := p9.client_walk(c, root, "cons")
+	_ = p9.client_clunk(c, root) // here, not deferred: the server sees the clunk before the open
+	walked or_return
+	console.fid = fid
+	return p9.client_open(c, console.fid, p9.ORDWR)
 }
 
 @(private="file")
@@ -73,11 +68,18 @@ console_flush :: proc "contextless" () {
 
 @(private="file")
 console_print :: proc "contextless" (s: string) {
-	for i in 0 ..< len(s) {
-		console.line[console.len] = s[i]
-		console.len += 1
-		if s[i] == '\n' || console.len == len(console.line) {
-			console_flush()
+	buffer_line(console.line[:], &console.len, s, console_flush)
+}
+
+// Appends s to a line buffer holding n bytes, calling flush (which empties
+// it) after each newline and whenever the buffer fills.
+@(private)
+buffer_line :: proc "contextless" (line: []u8, n: ^int, s: string, flush: proc "contextless" ()) {
+	for c in transmute([]u8)s {
+		line[n^] = c
+		n^ += 1
+		if c == '\n' || n^ == len(line) {
+			flush()
 		}
 	}
 }
@@ -85,16 +87,16 @@ console_print :: proc "contextless" (s: string) {
 // Sends output to the console server behind `connector` (a /srv/cons
 // connector, which this keeps). Programs get one in their spawn message;
 // svcd calls this itself once it has started the console driver.
+@(require_results)
 console_attach :: proc "contextless" (connector: vx.Handle) -> vx.Status {
 	console.connector = connector
-	st := console_open()
-	if st == .Ok {
-		print_hook = console_print
-	}
-	return st
+	console_open() or_return
+	print_hook = console_print
+	return .Ok
 }
 
 // Reads what the console has: a line, in its cooked mode. 0 at end of file.
+@(require_results)
 console_read :: proc "contextless" (buf: []u8) -> (int, vx.Status) {
 	if console.len > 0 {
 		console_flush() // a prompt goes out before the wait

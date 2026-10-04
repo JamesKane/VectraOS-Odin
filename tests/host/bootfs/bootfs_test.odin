@@ -47,11 +47,12 @@ fake_syscall :: proc "c" (nr: vx.Syscall, a0, a1, a2, a3, a4, a5: u64) -> i64 {
 }
 
 loopback :: proc "contextless" (ctx: rawptr, req: []u8, resp: []u8) -> int {
-	return p9.serve((^p9.Server)(ctx), req, resp)
+	n, res := p9.serve((^p9.Server)(ctx), req, resp)
+	return res == .Reply ? n : 0 // a loopback cannot hold a request: a deferral ends it too
 }
 
 // The names a directory reads as, in order, joined by spaces.
-list :: proc(c: ^p9.Client, root: u32, path: string, out: []u8) -> string {
+list :: proc(c: ^p9.Client, root: p9.Fid, path: string, out: []u8) -> string {
 	f, e := p9.client_walk(c, root, path)
 	if e != .Ok {
 		return "(walk failed)"
@@ -81,7 +82,7 @@ list :: proc(c: ^p9.Client, root: u32, path: string, out: []u8) -> string {
 	return string(out[:used])
 }
 
-stat_of :: proc(c: ^p9.Client, root: u32, path: string, st: ^p9.Stat) -> vx.Status {
+stat_of :: proc(c: ^p9.Client, root: p9.Fid, path: string, st: ^p9.Stat) -> vx.Status {
 	f, e := p9.client_walk(c, root, path)
 	if e != .Ok {
 		return e
@@ -146,7 +147,7 @@ test_bootfs :: proc(t: ^testing.T) {
 
 	// Reads, at offsets and past the end.
 	buf: [64]u8
-	f: u32
+	f: p9.Fid
 	n: int
 	f, _ = p9.client_walk(&c, root, "boot/bin/hello")
 	testing.expect_value(t, p9.client_open(&c, f, p9.OREAD), vx.Status.Ok)
@@ -166,7 +167,7 @@ test_bootfs :: proc(t: ^testing.T) {
 	_ = p9.client_clunk(&c, f)
 
 	// Nothing opens for writing.
-	for mode in ([]u8{p9.OWRITE, p9.ORDWR, p9.OREAD | p9.OTRUNC, p9.OREAD | p9.ORCLOSE}) {
+	for mode in ([]p9.Open_Mode{p9.OWRITE, p9.ORDWR, p9.Open_Mode{access = .Read, trunc = true}, p9.Open_Mode{access = .Read, rclose = true}}) {
 		f, _ = p9.client_walk(&c, root, "boot/bin/hello")
 		testing.expect_value(t, p9.client_open(&c, f, mode), vx.Status.Err_Access)
 		_ = p9.client_clunk(&c, f)
@@ -187,7 +188,7 @@ test_bootfs :: proc(t: ^testing.T) {
 	_ = p9.client_clunk(&c, f)
 
 	// Attach names: below the root, directories only, no `.` or `..`.
-	sub: u32
+	sub: p9.Fid
 	sub, e = p9.client_attach(&c, "boot/bin")
 	testing.expect_value(t, e, vx.Status.Ok)
 	testing.expect_value(t, list(&c, sub, "", names[:]), "hello")

@@ -4,6 +4,7 @@
 // member, and nothing may be in a table that is not in its file.
 package p9_codec_test
 
+import "base:runtime"
 import "core:reflect"
 import "core:strconv"
 import "core:strings"
@@ -39,6 +40,19 @@ def_rows :: proc(src, macro: string) -> (rows: [dynamic][]string) {
 // spelled as an Odin enum member.
 odin_case :: proc(s: string) -> string {
 	return strings.concatenate({s[:1], strings.to_lower(s[1:], context.temp_allocator)}, context.temp_allocator)
+}
+
+// The type a Msg member is on the wire: a distinct type's base (a Fid is a
+// u32), or a bit_field's backing integer (an Open_Mode is a u8).
+wire_type :: proc(ti: ^runtime.Type_Info) -> typeid {
+	base := reflect.type_info_base(ti)
+	#partial switch v in base.variant {
+	case runtime.Type_Info_Integer:
+		return base.id
+	case runtime.Type_Info_Bit_Field:
+		return v.backing_type.id
+	}
+	return ti.id
 }
 
 // The Msg member type each wire kind is held in.
@@ -81,7 +95,7 @@ test_fields_def :: proc(t: ^testing.T) {
 		testing.expectf(t, reflect.enum_string(info.kind) == odin_case(row[1]), "%v is %v, fields.def says %s", f, info.kind, row[1])
 		testing.expectf(t, info.member == row[2], "%v is held in %s, fields.def says %s", f, info.member, row[2])
 		member := reflect.struct_field_by_name(p9.Msg, row[2])
-		testing.expectf(t, member.type != nil && member.type.id == kind_type(info.kind), "Msg.%s does not hold a %v", row[2], info.kind)
+		testing.expectf(t, member.type != nil && wire_type(member.type) == kind_type(info.kind), "Msg.%s does not hold a %v", row[2], info.kind)
 	}
 }
 

@@ -77,11 +77,11 @@ main :: proc() -> int {
 	if procns.from_spawn(&space) != .Ok {
 		return 1
 	}
-	if rt.spawn.argc == 0 {
+	if len(rt.args()) == 0 {
 		return ls("/") ? 0 : 1
 	}
 	exit_status := 0
-	for a in rt.spawn.args[:rt.spawn.argc] {
+	for a in rt.args() {
 		if !ls(a) {
 			exit_status = 1
 		}

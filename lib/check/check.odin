@@ -32,13 +32,18 @@ MAX_LOCALS :: 8
 BUFFER :: 8 // stores a thread can have waiting
 DEPTH :: 256 // steps before the checker gives up on a path
 
+// A store waiting in a thread's buffer.
+Store :: struct {
+	var:   u8,
+	value: i64,
+}
+
 Thread :: struct {
-	pc:           u32,
-	done:         bool,
-	buffered:     u8,
-	buffer_var:   [BUFFER]u8,
-	buffer_value: [BUFFER]i64,
-	local:        [MAX_LOCALS]i64,
+	pc:       u32,
+	done:     bool,
+	buffered: u8,
+	buffer:   #soa[BUFFER]Store, // oldest first; as struct-of-arrays, no padding between the fields
+	local:    [MAX_LOCALS]i64,
 }
 
 // Fingerprinted byte for byte, padding included: every State starts zeroed
@@ -74,9 +79,9 @@ me :: proc(c: ^Ctx) -> ^Thread {
 
 load :: proc(c: ^Ctx, var: u32) -> i64 {
 	t := me(c)
-	for i := int(t.buffered) - 1; i >= 0; i -= 1 {
-		if u32(t.buffer_var[i]) == var {
-			return t.buffer_value[i] // its own newest store
+	#reverse for b in t.buffer[:t.buffered] {
+		if u32(b.var) == var {
+			return b.value // its own newest store
 		}
 	}
 	return c.s.mem[var]
@@ -88,8 +93,7 @@ store :: proc(c: ^Ctx, var: u32, value: i64) {
 		c.blocked = true
 		return
 	}
-	t.buffer_var[t.buffered] = u8(var)
-	t.buffer_value[t.buffered] = value
+	t.buffer[t.buffered] = {u8(var), value}
 	t.buffered += 1
 }
 
@@ -134,9 +138,7 @@ Action :: struct {
 @(private="file")
 Search :: struct {
 	m:          ^Model,
-	seen:       []u64, // fingerprints, two words each, 0 0 meaning empty
-	seen_cap:   u64,
-	seen_count: u64,
+	seen:       map[[2]u64]struct{}, // fingerprints of the states reached
 	states:     u64,
 	finals:     u64,
 	truncated:  u64,
@@ -153,40 +155,17 @@ fingerprint :: proc(s: ^State) -> (fp: [2]u64) {
 		b = (b ~ u64(byte)) * 0x9e3779b97f4a7c15
 		b ~= b >> 29
 	}
-	return {a | 1, b} // never 0: 0 0 marks an empty slot
+	return {a, b}
 }
 
 // True if the state was new (and is now remembered).
 @(private="file")
 remember :: proc(r: ^Search, s: ^State) -> bool {
-	if r.seen_count * 2 >= r.seen_cap { // grow at half full
-		old_cap, old := r.seen_cap, r.seen
-		r.seen_cap = old_cap * 2 if old_cap != 0 else 1 << 16
-		r.seen = make([]u64, r.seen_cap * 2)
-		for i in 0 ..< old_cap {
-			if old[2 * i] == 0 {
-				continue
-			}
-			j := old[2 * i] & (r.seen_cap - 1)
-			for r.seen[2 * j] != 0 {
-				j = (j + 1) & (r.seen_cap - 1)
-			}
-			r.seen[2 * j] = old[2 * i]
-			r.seen[2 * j + 1] = old[2 * i + 1]
-		}
-		delete(old)
-	}
 	fp := fingerprint(s)
-	j := fp[0] & (r.seen_cap - 1)
-	for r.seen[2 * j] != 0 {
-		if r.seen[2 * j] == fp[0] && r.seen[2 * j + 1] == fp[1] {
-			return false
-		}
-		j = (j + 1) & (r.seen_cap - 1)
+	if fp in r.seen {
+		return false
 	}
-	r.seen[2 * j] = fp[0]
-	r.seen[2 * j + 1] = fp[1]
-	r.seen_count += 1
+	r.seen[fp] = {}
 	return true
 }
 
@@ -199,13 +178,12 @@ apply :: proc(r: ^Search, s: ^State, a: Action, out: ^State) -> bool {
 		if t.buffered == 0 {
 			return false
 		}
-		out.mem[t.buffer_var[0]] = t.buffer_value[0]
+		out.mem[t.buffer[0].var] = t.buffer[0].value
 		t.buffered -= 1
-		n := int(t.buffered)
-		copy(t.buffer_var[:n], t.buffer_var[1:n + 1])
-		copy(t.buffer_value[:n], t.buffer_value[1:n + 1])
-		t.buffer_var[n] = 0 // keep fingerprints canonical
-		t.buffer_value[n] = 0
+		for i in 0 ..< t.buffered {
+			t.buffer[i] = t.buffer[i + 1]
+		}
+		t.buffer[t.buffered] = {} // keep fingerprints canonical
 		return true
 	}
 	if t.done {

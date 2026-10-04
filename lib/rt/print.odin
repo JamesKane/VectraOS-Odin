@@ -1,5 +1,7 @@
 package rt
 
+import "vx:str"
+
 // Output. To the console driver once start has connected to it (the spawn
 // message's "console"), to stdout when the spawn message gives one, and to
 // the kernel log before that or without either (console.odin, stdio.odin).
@@ -17,9 +19,26 @@ put :: proc "contextless" (s: string) {
 	}
 }
 
-print :: proc "contextless" (args: ..string) {
-	for s in args {
-		put(s)
+// What print takes: text, and numbers in decimal. There is no `any` without
+// run-time type information, and a union needs none. An untyped integer
+// constant fits both number types, so give it one: u64(n).
+Print_Arg :: union {
+	string,
+	u64,
+	i64,
+}
+
+// rt.print("bootfs: serving ", u64(files), " files\n")
+print :: proc "contextless" (args: ..Print_Arg) {
+	for a in args {
+		switch v in a {
+		case string:
+			put(v)
+		case u64:
+			print_u64(v)
+		case i64:
+			print_i64(v)
+		}
 	}
 }
 
@@ -30,27 +49,13 @@ flush :: proc "contextless" () {
 }
 
 print_u64 :: proc "contextless" (v: u64) {
-	buf: [20]u8
-	i := len(buf)
-	n := v
-	for {
-		i -= 1
-		buf[i] = u8('0' + n % 10)
-		n /= 10
-		if n == 0 {
-			break
-		}
-	}
-	put(string(buf[i:]))
+	buf: [str.U64_DIGITS]u8
+	put(str.format_u64(buf[:], v))
 }
 
 print_i64 :: proc "contextless" (v: i64) {
-	if v < 0 {
-		put("-")
-		print_u64(u64(0) - u64(v))
-	} else {
-		print_u64(u64(v))
-	}
+	buf: [str.I64_DIGITS]u8
+	put(str.format_i64(buf[:], v))
 }
 
 // A duration in nanoseconds, as milliseconds with three decimals.

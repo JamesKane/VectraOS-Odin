@@ -13,7 +13,7 @@ space: ns.Namespace
 @(export, link_name="vx_main")
 main :: proc() -> int {
 	exit_status := 0
-	if rt.spawn.argc == 0 {
+	if len(rt.args()) == 0 {
 		for {
 			n, st := rt.read(buf[:])
 			if n <= 0 {
@@ -25,7 +25,7 @@ main :: proc() -> int {
 	if procns.from_spawn(&space) != .Ok {
 		return 1
 	}
-	for name in rt.spawn.args[:rt.spawn.argc] {
+	for name in rt.args() {
 		f: ns.File
 		st := ns.open(&space, name, p9.OREAD, &f)
 		opened := st == .Ok

@@ -1,4 +1,4 @@
-// 9P over a ring: 9px+shm, the local transpo
+// 9P over a ring: 9px+shm, the local transport.
 //
 // Connecting. A server reads a listen channel, which svcd posts as
 // /srv/NAME and hands out to clients. A client sends CONNECT there with
@@ -18,10 +18,12 @@
 package rt
 
 import vx "abi:vx"
+import "vx:memory"
 import "vx:p9"
 import "vx:ring"
 
 CONNECT :: u32(0x3970_6e63) // the listen channel's one ordinal: "cnp9"
+CONNECT_REFUSED :: u32(1) // a CONNECT reply's flags: no ring, and no handles
 RING_MSG :: u16(1) // the one submission opcode
 MSIZE :: 16 * 1024
 
@@ -36,10 +38,11 @@ PARAMS :: vx.Ring_Params {
 
 // Maps a ring's memory into this task and attaches to it as one side. The
 // mapping stays for the life of the task until as_unmap lands.
-map_ring :: proc "contextless" (memory: vx.Handle, client: bool, r: ^ring.Ring) -> vx.Status {
+@(require_results)
+map_ring :: proc "contextless" (mem: vx.Handle, side: ring.Side, r: ^ring.Ring) -> vx.Status {
 	layout := ring.layout(PARAMS) or_return
-	base := as_map(self, memory, 0, layout.size, {.Write}) or_return
-	return ring.attach(r, (cast([^]u8)uintptr(base))[:layout.size], client)
+	base := as_map(self, mem, 0, layout.size, {.Write}) or_return
+	return ring.attach(r, ([^]u8)(uintptr(base))[:layout.size], side)
 }
 
 @(private="file")
@@ -47,7 +50,9 @@ KEY_BELL :: 1
 @(private="file")
 KEY_CLOSED :: 2
 
-// One connection: a 9P client over its own ring.
+// One connection: a 9P client over its own ring. Its client points back
+// into it (ctx, tbuf, rbuf), so a Conn stays where p9_connect filled it in:
+// never copy or move one.
 Conn :: struct {
 	c:    p9.Client,
 	ring: ring.Ring,
@@ -58,13 +63,9 @@ Conn :: struct {
 	rbuf: [MSIZE]u8,
 }
 
-bytes_of :: #force_inline proc "contextless" (p: ^$T) -> []u8 {
-	return (cast([^]u8)p)[:size_of(T)]
-}
-
 @(private="file")
 rpc :: proc "contextless" (ctx: rawptr, req, resp: []u8) -> int {
-	k := cast(^Conn)ctx
+	k := (^Conn)(ctx)
 	arena := ring.arena(&k.ring)
 	if k.dead || len(req) > len(arena) {
 		k.dead = true
@@ -77,13 +78,13 @@ rpc :: proc "contextless" (ctx: rawptr, req, resp: []u8) -> int {
 	}
 	copy(arena, req)
 	e := vx.Sqe{opcode = RING_MSG, len = u32(len(req))}
-	copy(slot, bytes_of(&e))
+	copy(slot, memory.ptr_to_bytes(&e))
 	if ring.produce(&k.ring) {
 		_ = ring_notify(k.end)
 	}
 	for {
 		c: vx.Cqe
-		st := ring.consume(&k.ring, bytes_of(&c))
+		st := ring.consume(&k.ring, memory.ptr_to_bytes(&c))
 		if st == .Ok {
 			if c.result <= 0 || u64(c.result) > u64(len(resp)) {
 				break
@@ -115,8 +116,12 @@ rpc :: proc "contextless" (ctx: rawptr, req, resp: []u8) -> int {
 // Opens a connection through a connector (a listen channel's client end,
 // which stays the caller's) and negotiates 9Px. The connection is ready to
 // attach.
-p9_connect :: proc "contextless" (connector: vx.Handle, k: ^Conn) -> vx.Status {
+@(require_results)
+p9_connect :: proc "contextless" (connector: vx.Handle, k: ^Conn) -> (st: vx.Status) {
 	k^ = {}
+	defer if st != .Ok {
+		p9_disconnect(k)
+	}
 	req := vx.Msg_Header{ordinal = CONNECT}
 	rep: vx.Msg_Header
 	got: [2]vx.Handle
@@ -128,40 +133,23 @@ p9_connect :: proc "contextless" (connector: vx.Handle, k: ^Conn) -> vx.Status {
 		rd_handles   = &got[0],
 		rd_count_cap = 2,
 	}
-	st := channel_call(connector, &call, clock_read() + 5_000_000_000)
+	st = channel_call(connector, &call, clock_read() + 5_000_000_000)
 	if st == .Ok && call.actual.handles != 2 {
 		st = .Err_Invalid
 	}
 	if st == .Ok {
-		st = map_ring(got[1], true, &k.ring)
+		st = map_ring(got[1], .Client, &k.ring)
 	}
-	if got[1] != 0 {
-		_ = handle_close(got[1]) // the mapping keeps the memory
-	}
+	close_all(got[1]) // the mapping keeps the memory
 	k.end = got[0]
-	if st == .Ok {
-		k.port, st = port_create()
-	}
-	if st == .Ok {
-		st = port_bind(k.port, k.end, .Peer_Closed, KEY_CLOSED)
-	}
-	if st == .Ok {
-		k.c = {rpc = rpc, ctx = k, tbuf = k.tbuf[:], rbuf = k.rbuf[:]}
-		st = p9.client_version(&k.c, MSIZE, {})
-	}
-	if st != .Ok {
-		p9_disconnect(k)
-	}
-	return st
+	st or_return
+	k.port = port_create() or_return
+	port_bind(k.port, k.end, .Peer_Closed, KEY_CLOSED) or_return
+	k.c = {rpc = rpc, ctx = k, tbuf = k.tbuf[:], rbuf = k.rbuf[:]}
+	return p9.client_version(&k.c, MSIZE, {})
 }
 
 p9_disconnect :: proc "contextless" (k: ^Conn) {
-	if k.end != 0 {
-		_ = handle_close(k.end)
-	}
-	if k.port != 0 {
-		_ = handle_close(k.port)
-	}
+	close_all(k.end, k.port)
 	k^ = {dead = true}
 }
-

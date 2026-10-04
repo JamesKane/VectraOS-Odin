@@ -16,7 +16,7 @@ import "core:testing"
 import "vx:p9"
 
 Ram_Node :: struct {
-	parent:  u64,
+	parent:  p9.Node,
 	name:    string,
 	dir:     bool,
 	data:    [64]u8,
@@ -26,7 +26,7 @@ Ram_Node :: struct {
 
 Ram :: struct {
 	nodes:   [16]Ram_Node,
-	count:   u64,
+	count:   p9.Node,
 	names:   [16][16]u8, // created nodes' names
 	not_yet: bool, // reads and writes answer Err_Should_Wait, as a console with nothing typed does
 }
@@ -43,11 +43,11 @@ ram_init :: proc(r: ^Ram) {
 	r.count = 6
 }
 
-ram_live :: proc "contextless" (r: ^Ram, n: u64) -> bool {
+ram_live :: proc "contextless" (r: ^Ram, n: p9.Node) -> bool {
 	return n != 0 && n < r.count && !r.nodes[n].removed
 }
 
-ram_attach :: proc "contextless" (ctx: rawptr, aname: string) -> (root: u64, st: vx.Status) {
+ram_attach :: proc "contextless" (ctx: rawptr, aname: string) -> (root: p9.Node, st: vx.Status) {
 	switch aname {
 	case "":
 		return 1, .Ok
@@ -57,7 +57,7 @@ ram_attach :: proc "contextless" (ctx: rawptr, aname: string) -> (root: u64, st:
 	return 0, .Err_Not_Found
 }
 
-ram_walk :: proc "contextless" (ctx: rawptr, dir: u64, name: string) -> (child: u64, st: vx.Status) {
+ram_walk :: proc "contextless" (ctx: rawptr, dir: p9.Node, name: string) -> (child: p9.Node, st: vx.Status) {
 	r := (^Ram)(ctx)
 	for i in 1 ..< r.count {
 		if ram_live(r, i) && r.nodes[i].parent == dir && r.nodes[i].name == name {
@@ -67,7 +67,7 @@ ram_walk :: proc "contextless" (ctx: rawptr, dir: u64, name: string) -> (child: 
 	return 0, .Err_Not_Found
 }
 
-ram_parent :: proc "contextless" (ctx: rawptr, node: u64) -> (parent: u64, st: vx.Status) {
+ram_parent :: proc "contextless" (ctx: rawptr, node: p9.Node) -> (parent: p9.Node, st: vx.Status) {
 	r := (^Ram)(ctx)
 	if !ram_live(r, node) || r.nodes[node].parent == 0 {
 		return 0, .Err_Not_Found
@@ -75,14 +75,14 @@ ram_parent :: proc "contextless" (ctx: rawptr, node: u64) -> (parent: u64, st: v
 	return r.nodes[node].parent, .Ok
 }
 
-ram_stat :: proc "contextless" (ctx: rawptr, node: u64, out: ^p9.Stat) -> vx.Status {
+ram_stat :: proc "contextless" (ctx: rawptr, node: p9.Node, out: ^p9.Stat) -> vx.Status {
 	r := (^Ram)(ctx)
 	if !ram_live(r, node) {
 		return .Err_Not_Found
 	}
 	n := &r.nodes[node]
 	out^ = {
-		qid = {n.dir ? p9.QTDIR : p9.QTFILE, 0, node},
+		qid = {n.dir ? p9.QTDIR : p9.QTFILE, 0, u64(node)},
 		mode = n.dir ? p9.DMDIR | 0o755 : 0o644,
 		length = n.dir ? 0 : u64(n.len),
 		name = n.name,
@@ -93,15 +93,15 @@ ram_stat :: proc "contextless" (ctx: rawptr, node: u64, out: ^p9.Stat) -> vx.Sta
 	return .Ok
 }
 
-ram_open :: proc "contextless" (ctx: rawptr, node: u64, mode: u8) -> vx.Status {
+ram_open :: proc "contextless" (ctx: rawptr, node: p9.Node, mode: p9.Open_Mode) -> vx.Status {
 	r := (^Ram)(ctx)
-	if mode & p9.OTRUNC != 0 {
+	if mode.trunc {
 		r.nodes[node].len = 0
 	}
 	return .Ok
 }
 
-ram_read :: proc "contextless" (ctx: rawptr, node: u64, offset: u64, buf: []u8) -> (count: u32, st: vx.Status) {
+ram_read :: proc "contextless" (ctx: rawptr, node: p9.Node, offset: u64, buf: []u8) -> (count: u32, st: vx.Status) {
 	r := (^Ram)(ctx)
 	if r.not_yet {
 		return 0, .Err_Should_Wait
@@ -115,7 +115,7 @@ ram_read :: proc "contextless" (ctx: rawptr, node: u64, offset: u64, buf: []u8) 
 	return got, .Ok
 }
 
-ram_readdir :: proc "contextless" (ctx: rawptr, dir: u64, index: u32) -> (child: u64, st: vx.Status) {
+ram_readdir :: proc "contextless" (ctx: rawptr, dir: p9.Node, index: u32) -> (child: p9.Node, st: vx.Status) {
 	r := (^Ram)(ctx)
 	index := index
 	for i in 1 ..< r.count {
@@ -130,7 +130,7 @@ ram_readdir :: proc "contextless" (ctx: rawptr, dir: u64, index: u32) -> (child:
 	return 0, .Err_Not_Found
 }
 
-ram_write :: proc "contextless" (ctx: rawptr, node: u64, offset: u64, data: []u8) -> (count: u32, st: vx.Status) {
+ram_write :: proc "contextless" (ctx: rawptr, node: p9.Node, offset: u64, data: []u8) -> (count: u32, st: vx.Status) {
 	r := (^Ram)(ctx)
 	if r.not_yet {
 		return 0, .Err_Should_Wait
@@ -145,7 +145,7 @@ ram_write :: proc "contextless" (ctx: rawptr, node: u64, offset: u64, data: []u8
 	return count, .Ok
 }
 
-ram_create :: proc "contextless" (ctx: rawptr, dir: u64, name: string, perm: u32, mode: u8) -> (node: u64, st: vx.Status) {
+ram_create :: proc "contextless" (ctx: rawptr, dir: p9.Node, name: string, perm: u32, mode: p9.Open_Mode) -> (node: p9.Node, st: vx.Status) {
 	r := (^Ram)(ctx)
 	if _, e := ram_walk(ctx, dir, name); e == .Ok {
 		return 0, .Err_Exists
@@ -160,7 +160,7 @@ ram_create :: proc "contextless" (ctx: rawptr, dir: u64, name: string, perm: u32
 	return node, .Ok
 }
 
-ram_remove :: proc "contextless" (ctx: rawptr, node: u64) -> vx.Status {
+ram_remove :: proc "contextless" (ctx: rawptr, node: p9.Node) -> vx.Status {
 	r := (^Ram)(ctx)
 	if _, e := ram_readdir(ctx, node, 0); r.nodes[node].dir && e == .Ok {
 		return .Err_Access // not empty
@@ -191,7 +191,8 @@ ram_server :: proc(s: ^p9.Server, r: ^Ram) {
 }
 
 loopback :: proc "contextless" (ctx: rawptr, req: []u8, resp: []u8) -> int {
-	return p9.serve((^p9.Server)(ctx), req, resp)
+	n, res := p9.serve((^p9.Server)(ctx), req, resp)
+	return res == .Reply ? n : 0 // a loopback cannot hold a request: a deferral ends it too
 }
 
 @(test)
@@ -207,7 +208,7 @@ test_client :: proc(t: ^testing.T) {
 
 	root, e := p9.client_attach(&c, "")
 	testing.expect(t, e == .Ok)
-	f: u32
+	f: p9.Fid
 	n: int
 	f, e = p9.client_walk(&c, root, "docs/a.txt")
 	testing.expect(t, e == .Ok)
@@ -281,8 +282,8 @@ raw :: proc(h: ^Hostile, t: p9.Msg) -> vx.Status {
 	if n == 0 {
 		return .Err_Too_Small
 	}
-	reply_len := p9.serve(h.server, req[:n], h.resp[:])
-	if reply_len <= 0 {
+	reply_len, res := p9.serve(h.server, req[:n], h.resp[:])
+	if res != .Reply {
 		return .Err_Peer_Closed // the server would hang up
 	}
 	if p9.decode(h.resp[:reply_len], &h.reply) != .Ok || h.reply.tag != t.tag {
@@ -291,7 +292,7 @@ raw :: proc(h: ^Hostile, t: p9.Msg) -> vx.Status {
 	return h.reply.type == .Rerror ? p9.error_status(h.reply.ename) : .Ok
 }
 
-walk_msg :: proc(fid, newfid: u32, names: ..string) -> p9.Msg {
+walk_msg :: proc(fid, newfid: p9.Fid, names: ..string) -> p9.Msg {
 	t := p9.Msg{type = .Twalk, tag = 1, fid = fid, newfid = newfid, nwname = u16(len(names))}
 	copy(t.wname[:], names)
 	return t
@@ -342,7 +343,7 @@ test_hostile_client :: proc(t: ^testing.T) {
 	testing.expect(t, raw(h, {type = .Tcreate, tag = 1, fid = 2, name = "..", mode = p9.OREAD}) == .Err_Invalid)
 	testing.expect(t, raw(h, {type = .Tcreate, tag = 1, fid = 2, name = "a/b", mode = p9.OREAD}) == .Err_Invalid)
 	made := 0
-	for fid in u32(100) ..< 100 + p9.MAX_FIDS {
+	for fid in p9.Fid(100) ..< 100 + p9.MAX_FIDS {
 		if raw(h, walk_msg(1, fid)) == ok {
 			made += 1
 		}
@@ -353,7 +354,8 @@ test_hostile_client :: proc(t: ^testing.T) {
 	// Messages that are not requests, or not messages at all, end the connection.
 	testing.expect(t, raw(h, {type = .Rclunk, tag = 1}) == .Err_Peer_Closed)
 	junk := [16]u8{16, 0, 0, 0, 120, 1, 0, 1, 2, 3, 0, 0, 0, 0, 0, 0}
-	testing.expect(t, p9.serve(&server, junk[:], h.resp[:]) == 0)
+	_, junk_res := p9.serve(&server, junk[:], h.resp[:])
+	testing.expect_value(t, junk_res, p9.Serve_Result.Hang_Up)
 	testing.expect(t, raw(h, {type = .Twstat, tag = 1, fid = 1, stat = junk[:4]}) == .Err_Unsupported)
 }
 
@@ -369,27 +371,30 @@ test_deferral :: proc(t: ^testing.T) {
 	req: [256]u8
 	resp: [16384]u8
 	n: int
-	serve := proc(s: ^p9.Server, req, resp: []u8, n: ^int, m: p9.Msg) -> int {
+	serve := proc(s: ^p9.Server, req, resp: []u8, n: ^int, m: p9.Msg) -> p9.Serve_Result {
 		m := m
 		n^ = p9.encode(&m, req)
-		return p9.serve(s, req[:n^], resp)
+		_, res := p9.serve(s, req[:n^], resp)
+		return res
 	}
 	m: p9.Msg
-	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Tversion, tag = p9.NOTAG, msize = 8192, version = "9P2000"}) > 0)
-	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Tattach, tag = 1, fid = 1, afid = p9.NOFID}) > 0)
-	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Twalk, tag = 1, fid = 1, newfid = 2, nwname = 1, wname = {0 = "b.txt"}}) > 0)
-	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Topen, tag = 1, fid = 2, mode = p9.ORDWR}) > 0)
+	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Tversion, tag = p9.NOTAG, msize = 8192, version = "9P2000"}) == .Reply)
+	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Tattach, tag = 1, fid = 1, afid = p9.NOFID}) == .Reply)
+	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Twalk, tag = 1, fid = 1, newfid = 2, nwname = 1, wname = {0 = "b.txt"}}) == .Reply)
+	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Topen, tag = 1, fid = 2, mode = p9.ORDWR}) == .Reply)
 	ram.not_yet = true
-	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Tread, tag = 9, fid = 2, count = 100}) == p9.DEFER)
+	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Tread, tag = 9, fid = 2, count = 100}) == .Defer)
 	held: [256]u8
 	held_len := n
 	copy(held[:], req[:n])
-	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Twrite, tag = 10, fid = 2, data = transmute([]u8)string("zz")}) == p9.DEFER)
-	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Tstat, tag = 11, fid = 2}) > 0) // everything else still completes
+	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Twrite, tag = 10, fid = 2, data = transmute([]u8)string("zz")}) == .Defer)
+	testing.expect(t, serve(&server, req[:], resp[:], &n, {type = .Tstat, tag = 11, fid = 2}) == .Reply) // everything else still completes
 	ram.not_yet = false
-	n = p9.serve(&server, held[:held_len], resp[:])
-	testing.expect(t, n > 0 && p9.decode(resp[:n], &m) == .Ok && m.type == .Rread && m.tag == 9 && m.count == 5)
+	reply_len, res := p9.serve(&server, held[:held_len], resp[:])
+	testing.expect(t, res == .Reply && p9.decode(resp[:reply_len], &m) == .Ok && m.type == .Rread && m.tag == 9 && m.count == 5)
 	// An unknown fid is an error, not a wait.
-	reply_len := serve(&server, req[:], resp[:], &n, {type = .Tread, tag = 12, fid = 77, count = 1})
-	testing.expect(t, reply_len > 0 && reply_len != p9.DEFER && p9.decode(resp[:reply_len], &m) == .Ok && m.type == .Rerror)
+	unknown := p9.Msg{type = .Tread, tag = 12, fid = 77, count = 1}
+	n = p9.encode(&unknown, req[:])
+	reply_len, res = p9.serve(&server, req[:n], resp[:])
+	testing.expect(t, res == .Reply && p9.decode(resp[:reply_len], &m) == .Ok && m.type == .Rerror)
 }

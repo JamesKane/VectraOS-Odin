@@ -83,8 +83,8 @@ test_queues :: proc(t: ^testing.T) {
 	}
 	defer free_ring(memory)
 	client, server: ring.Ring
-	testing.expect(t, ring.attach(&client, memory[:h.size], true) == .Ok)
-	testing.expect(t, ring.attach(&server, memory[:h.size], false) == .Ok)
+	testing.expect(t, ring.attach(&client, memory[:h.size], .Client) == .Ok)
+	testing.expect(t, ring.attach(&server, memory[:h.size], .Server) == .Ok)
 
 	// Three laps of the queue, filling it each time.
 	next, expect: u64
@@ -149,10 +149,10 @@ test_hostile_peer :: proc(t: ^testing.T) {
 	}
 	defer free_ring(memory)
 	client, server: ring.Ring
-	testing.expect(t, ring.attach(&server, memory[:h.size], false) == .Ok)
-	testing.expect(t, ring.attach(&server, memory[:h.size - 1], false) == .Err_Invalid) // mapping too small
+	testing.expect(t, ring.attach(&server, memory[:h.size], .Server) == .Ok)
+	testing.expect(t, ring.attach(&server, memory[:h.size - 1], .Server) == .Err_Invalid) // mapping too small
 	header(memory).cq_offset += 64 // a rewritten header
-	testing.expect(t, ring.attach(&client, memory[:h.size], true) == .Err_Invalid)
+	testing.expect(t, ring.attach(&client, memory[:h.size], .Client) == .Err_Invalid)
 	header(memory).cq_offset -= 64
 
 	// A client whose tail runs past what fits: the server marks the ring broken.
@@ -230,8 +230,8 @@ test_threads :: proc(t: ^testing.T) {
 	defer free_ring(memory)
 	s := new(Stress)
 	defer free(s)
-	testing.expect(t, ring.attach(&s.client, memory[:h.size], true) == .Ok)
-	testing.expect(t, ring.attach(&s.server, memory[:h.size], false) == .Ok)
+	testing.expect(t, ring.attach(&s.client, memory[:h.size], .Client) == .Ok)
+	testing.expect(t, ring.attach(&s.server, memory[:h.size], .Server) == .Ok)
 	posix.signal(.SIGALRM, alarm_fired)
 	posix.alarm(60)
 

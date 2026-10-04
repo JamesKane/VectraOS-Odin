@@ -60,7 +60,7 @@ cmd_vendor_check :: proc() -> bool {
 		}
 		// Unknown keys fail, as a verifier fails closed: `reviewed.by=A Name`
 		// unquoted would otherwise pass as reviewed.by=A plus a flag Name.
-		for t in rec.tuples[:rec.count] {
+		for t in rec.tuples {
 			if !slice.contains(VENDOR_KEYS, t.key) && !slice.contains(VENDOR_OPTIONAL_KEYS, t.key) {
 				fmt.eprintfln("  VENDOR %s: unknown key %s (line %d); quote values that hold spaces", name, t.key, rec.line)
 				ok = false

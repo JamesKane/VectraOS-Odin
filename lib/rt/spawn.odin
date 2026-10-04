@@ -2,7 +2,9 @@ package rt
 
 import "base:intrinsics"
 import vx "abi:vx"
+import "vx:memory"
 import "vx:ndb"
+import "vx:str"
 
 // Starting a program from an ELF image in memory. The ELF loader lives here,
 // in user space; the kernel loads only the root task.
@@ -25,12 +27,32 @@ Elf_Header :: struct {
 	flags:                                                u32,
 	ehsize, phentsize, phnum, shentsize, shnum, shstrndx: u16,
 }
+#assert(size_of(Elf_Header) == 64)
+
+// A segment's permissions: PF_X is bit 0, PF_W bit 1, PF_R bit 2.
+@(private="file")
+Elf_Pf :: enum u32 {
+	X,
+	W,
+	R,
+}
 
 @(private="file")
 Elf_Phdr :: struct {
-	type, flags:                                u32,
+	type:                                       u32,
+	flags:                                      bit_set[Elf_Pf;u32],
 	offset, vaddr, paddr, filesz, memsz, align: u64,
 }
+#assert(size_of(Elf_Phdr) == 56)
+
+@(private="file")
+ELFCLASS64 :: 2
+@(private="file")
+ELFDATA2LSB :: 1
+@(private="file")
+ET_EXEC :: 2
+@(private="file")
+PT_LOAD :: 1
 
 when ODIN_ARCH == .amd64 {
 	@(private="file")
@@ -46,52 +68,48 @@ USER_TOP :: u64(0x0000_8000_0000_0000)
 STACK_TOP :: u64(0x0000_7fff_ffff_0000)
 STACK_SIZE :: u64(256 * 1024)
 
-// Maps each loadable segment of the image into the task; returns the entry point.
+// Maps each loadable segment of the image into the task; returns the entry
+// point. Each header is read once, from wherever it lies: an image in
+// memory need not be aligned.
 @(private="file")
 elf_load :: proc "contextless" (task: vx.Handle, image: []u8) -> (entry: u64, st: vx.Status) {
-	eh: Elf_Header
-	if len(image) < size_of(eh) {
+	if len(image) < size_of(Elf_Header) {
 		return 0, .Err_Invalid
 	}
-	intrinsics.mem_copy_non_overlapping(&eh, raw_data(image), size_of(eh))
+	eh := intrinsics.unaligned_load((^Elf_Header)(raw_data(image)))
 	table, o1 := intrinsics.overflow_mul(u64(eh.phnum), size_of(Elf_Phdr))
 	table_end, o2 := intrinsics.overflow_add(table, eh.phoff)
-	if string(eh.ident[:4]) != "\x7fELF" || eh.ident[4] != 2 || eh.ident[5] != 1 || eh.type != 2 || eh.machine != ELF_MACHINE ||
-	   eh.phentsize != size_of(Elf_Phdr) || o1 || o2 || table_end > u64(len(image)) || eh.entry >= USER_TOP {
+	if string(eh.ident[:4]) != "\x7fELF" || eh.ident[4] != ELFCLASS64 || eh.ident[5] != ELFDATA2LSB || eh.type != ET_EXEC ||
+	   eh.machine != ELF_MACHINE || eh.phentsize != size_of(Elf_Phdr) || o1 || o2 || table_end > u64(len(image)) || eh.entry >= USER_TOP {
 		return 0, .Err_Invalid
 	}
 	for i in 0 ..< u64(eh.phnum) {
-		ph: Elf_Phdr
-		intrinsics.mem_copy_non_overlapping(&ph, &image[eh.phoff + i * size_of(Elf_Phdr)], size_of(ph))
-		if ph.type != 1 || ph.memsz == 0 { // PT_LOAD
+		ph := intrinsics.unaligned_load((^Elf_Phdr)(&image[eh.phoff + i * size_of(Elf_Phdr)]))
+		if ph.type != PT_LOAD || ph.memsz == 0 {
 			continue
 		}
 		file_end, o3 := intrinsics.overflow_add(ph.offset, ph.filesz)
 		mem_end, o4 := intrinsics.overflow_add(ph.vaddr, ph.memsz)
-		if ph.filesz > ph.memsz || o3 || file_end > u64(len(image)) || o4 || mem_end > STACK_TOP - STACK_SIZE - 4096 ||
-		   (ph.flags & 2 != 0 && ph.flags & 1 != 0) { // PF_W and PF_X
+		if ph.filesz > ph.memsz || o3 || file_end > u64(len(image)) || o4 || mem_end > STACK_TOP - STACK_SIZE - memory.PAGE_SIZE ||
+		   ph.flags >= {.W, .X} {
 			return 0, .Err_Invalid
 		}
-		base := ph.vaddr &~ 4095
-		map_size := ((mem_end + 4095) &~ 4095) - base
+		base := memory.page_trunc(ph.vaddr)
+		top, _ := memory.page_round(mem_end) // below STACK_TOP, so it cannot overflow
+		map_size := top - base
 		vmo := vmo_create(map_size) or_return
+		defer close_all(vmo) // the mapping keeps it
 		if ph.filesz > 0 {
-			st = vmo_write(vmo, ph.vaddr - base, image[ph.offset:file_end])
+			vmo_write(vmo, ph.vaddr - base, image[ph.offset:file_end]) or_return
 		}
-		if st == .Ok {
-			flags: vx.Map_Options
-			if ph.flags & 2 != 0 {
-				flags += {.Write}
-			}
-			if ph.flags & 1 != 0 {
-				flags += {.Exec}
-			}
-			_, st = as_map(task, vmo, 0, map_size, flags, base)
+		flags: vx.Map_Options
+		if .W in ph.flags {
+			flags += {.Write}
 		}
-		_ = handle_close(vmo) // the mapping keeps it
-		if st != .Ok {
-			return 0, st
+		if .X in ph.flags {
+			flags += {.Exec}
 		}
+		_ = as_map(task, vmo, 0, map_size, flags, base) or_return
 	}
 	return eh.entry, .Ok
 }
@@ -104,27 +122,35 @@ Spawn_Args :: struct {
 	records:      string, // more ndb records for the spawn message: arg=, mount=, bind=
 }
 
+// The spawn message being built: its header, then its records.
 @(private="file")
-spawn_out: [vx.CHANNEL_MAX_BYTES]u8
-
-@(private="file")
-close_all :: proc "contextless" (handles: []vx.Handle) {
-	for h in handles {
-		if h != 0 {
-			_ = handle_close(h)
-		}
-	}
+spawn_out: struct {
+	header:  vx.Msg_Header,
+	records: [vx.CHANNEL_MAX_BYTES - size_of(vx.Msg_Header)]u8,
 }
+#assert(size_of(spawn_out) == vx.CHANNEL_MAX_BYTES)
 
 // Builds and starts the child; returns the parent's handle to it, to watch
 // (.Exit) or kill.
 spawn_elf :: proc "contextless" (a: ^Spawn_Args) -> (task: vx.Handle, st: vx.Status) {
+	t, me, stack, thread, ours, theirs: vx.Handle
+	given := false // a.handles are in the child's message
+	// On the way out, in this order: the caller's handles, unless they
+	// reached the message; ours, which the child does not need (it reads its
+	// message after our end is gone); and, on failure, the child.
+	defer if st != .Ok && t != vx.HANDLE_NONE {
+		_ = task_kill(t, -1)
+		_ = handle_close(t)
+	}
+	defer close_all(stack, me, thread, ours, theirs)
+	defer if !given {
+		close_all(..a.handles)
+	}
+
 	if len(a.handles) >= vx.CHANNEL_MAX_HANDLES {
-		close_all(a.handles)
 		return 0, .Err_Range
 	}
-	// The spawn message: the header, then its records.
-	w := ndb.Writer{buf = spawn_out[size_of(vx.Msg_Header):]}
+	w := ndb.Writer{buf = spawn_out.records[:]}
 	ndb.put(&w, "spawn", a.name)
 	_ = ndb.end(&w)
 	ndb.put(&w, "handle", "self")
@@ -135,61 +161,25 @@ spawn_elf :: proc "contextless" (a: ^Spawn_Args) -> (task: vx.Handle, st: vx.Sta
 		ndb.put_u64(&w, "index", u64(i + 1))
 		_ = ndb.end(&w)
 	}
-	if !w.failed && len(a.records) <= len(w.buf) - w.len {
-		copy(w.buf[w.len:], a.records)
-		w.len += len(a.records)
-	} else {
-		w.failed = true
-	}
+	str.write_string(&w, a.records)
 	if w.failed {
-		close_all(a.handles)
 		return 0, .Err_Range
 	}
-	(cast(^vx.Msg_Header)&spawn_out[0])^ = {ordinal = vx.SPAWN}
+	spawn_out.header = {ordinal = vx.SPAWN}
 
-	t, me, stack, thread, ours, theirs: vx.Handle
-	entry: u64
-	t, st = task_create(a.name)
-	if st == .Ok {
-		entry, st = elf_load(t, a.image)
-	}
-	if st == .Ok {
-		stack, st = vmo_create(STACK_SIZE)
-	}
-	if st == .Ok {
-		_, st = as_map(t, stack, 0, STACK_SIZE, {.Write}, STACK_TOP - STACK_SIZE)
-	}
-	if st == .Ok {
-		me, st = handle_dup(t, vx.ALL_RIGHTS)
-	}
-	if st == .Ok {
-		ours, theirs, st = channel_create()
-	}
-	if st == .Ok {
-		given: [vx.CHANNEL_MAX_HANDLES]vx.Handle
-		given[0] = me
-		copy(given[1:], a.handles)
-		st = channel_write(ours, spawn_out[:size_of(vx.Msg_Header) + w.len], given[:len(a.handles) + 1])
-		me = 0 // moved, whatever happened
-	} else {
-		close_all(a.handles)
-	}
-	if st == .Ok {
-		thread, st = thread_create(t)
-	}
-	if st == .Ok {
-		st = thread_start(thread, entry, STACK_TOP, theirs, 0)
-	}
-	if st == .Ok {
-		theirs = 0 // moved into the child
-	}
-	close_all({stack, me, thread, ours, theirs}) // the child reads its message after our end is gone
-	if st != .Ok {
-		if t != 0 {
-			_ = task_kill(t, -1)
-			_ = handle_close(t)
-		}
-		return 0, st
-	}
+	t = task_create(a.name) or_return
+	entry := elf_load(t, a.image) or_return
+	stack = vmo_create(STACK_SIZE) or_return
+	_ = as_map(t, stack, 0, STACK_SIZE, {.Write}, STACK_TOP - STACK_SIZE) or_return
+	me = handle_dup(t, vx.ALL_RIGHTS) or_return
+	ours, theirs = channel_create() or_return
+	handles: [vx.CHANNEL_MAX_HANDLES]vx.Handle
+	handles[0] = me
+	copy(handles[1:], a.handles)
+	me, given = vx.HANDLE_NONE, true // moved, whatever happens
+	channel_write(ours, memory.ptr_to_bytes(&spawn_out)[:size_of(vx.Msg_Header) + w.len], handles[:len(a.handles) + 1]) or_return
+	thread = thread_create(t) or_return
+	thread_start(thread, entry, STACK_TOP, theirs, 0) or_return
+	theirs = vx.HANDLE_NONE // moved into the child
 	return t, .Ok
 }

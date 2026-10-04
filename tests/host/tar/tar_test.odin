@@ -47,12 +47,12 @@ test_round_trip :: proc(t: ^testing.T) {
 	testing.expect(t, n == tar.BLOCK * (1 + 1 + 2 + 1 + 3 + 2 + 2)) // dirs, files with their data, the end
 	r := tar.open(image[:n])
 	e: tar.Entry
-	testing.expect(t, tar.next(&r, &e) == .Ok && e.dir && len(e.path) == 4 && e.mode == 0o755)
-	testing.expect(t, tar.next(&r, &e) == .Ok && e.dir && len(e.path) == 8)
+	testing.expect(t, tar.next(&r, &e) == .Ok && e.dir && len(tar.entry_path(&e)) == 4 && e.mode == 0o755)
+	testing.expect(t, tar.next(&r, &e) == .Ok && e.dir && len(tar.entry_path(&e)) == 8)
 	testing.expect(t, tar.next(&r, &e) == .Ok && !e.dir && len(e.data) == 15 && data_is(&e, "service=bootfs\n"))
 	testing.expect(t, tar.next(&r, &e) == .Ok && len(e.data) == 0 && raw_data(e.data) != nil)
 	testing.expect(t, tar.next(&r, &e) == .Ok && len(e.data) == 1000 && e.data[999] == 'x' && e.mode == 0o755)
-	testing.expect(t, tar.next(&r, &e) == .Ok && len(e.path) == 150 && e.path[80] == '/' && data_is(&e, "long"))
+	testing.expect(t, tar.next(&r, &e) == .Ok && len(tar.entry_path(&e)) == 150 && tar.entry_path(&e)[80] == '/' && data_is(&e, "long"))
 	testing.expect(t, tar.next(&r, &e) == .Err_Not_Found)
 	testing.expect(t, tar.next(&r, &e) == .Err_Not_Found)
 

@@ -21,46 +21,52 @@ package p9
 // reply, sends what comes back, and calls hang_up when the connection goes,
 // so the file server hears every node let go. A read or write the file server
 // cannot do yet (a console with no input typed) answers Err_Should_Wait;
-// serve then returns DEFER, without a reply, and the transport holds the
+// serve then returns .Defer, without a reply, and the transport holds the
 // request and serves it again when the file server's device has done
 // something (upstream's ring transport does this). Everything else completes
 // as it arrives, so Tflush has nothing to cancel.
 
 import "base:intrinsics"
 import "abi:vx"
+import "vx:str"
+
+// A file server's own name for one of its files, which it chooses; the
+// framework only stores and compares them.
+Node :: distinct u64
 
 // The file server's side. Strings a call is given point into the request and
 // last only for the call. Stat's strings must last until the next call.
 Fs :: struct {
 	ctx:     rawptr,
-	attach:  proc "contextless" (ctx: rawptr, aname: string) -> (root: u64, st: vx.Status),
+	attach:  proc "contextless" (ctx: rawptr, aname: string) -> (root: Node, st: vx.Status),
 	// Never ".", "..", or a name with '/'.
-	walk:    proc "contextless" (ctx: rawptr, dir: u64, name: string) -> (child: u64, st: vx.Status),
+	walk:    proc "contextless" (ctx: rawptr, dir: Node, name: string) -> (child: Node, st: vx.Status),
 	// Only asked below an attach root.
-	parent:  proc "contextless" (ctx: rawptr, node: u64) -> (parent: u64, st: vx.Status),
-	stat:    proc "contextless" (ctx: rawptr, node: u64, out: ^Stat) -> vx.Status,
-	open:    proc "contextless" (ctx: rawptr, node: u64, mode: u8) -> vx.Status,
+	parent:  proc "contextless" (ctx: rawptr, node: Node) -> (parent: Node, st: vx.Status),
+	stat:    proc "contextless" (ctx: rawptr, node: Node, out: ^Stat) -> vx.Status,
+	open:    proc "contextless" (ctx: rawptr, node: Node, mode: Open_Mode) -> vx.Status,
 	// Files: up to len(buf) bytes at offset; or Err_Should_Wait.
-	read:    proc "contextless" (ctx: rawptr, node: u64, offset: u64, buf: []u8) -> (count: u32, st: vx.Status),
+	read:    proc "contextless" (ctx: rawptr, node: Node, offset: u64, buf: []u8) -> (count: u32, st: vx.Status),
 	// The index-th entry of a directory; Err_Not_Found past the end.
-	readdir: proc "contextless" (ctx: rawptr, dir: u64, index: u32) -> (child: u64, st: vx.Status),
+	readdir: proc "contextless" (ctx: rawptr, dir: Node, index: u32) -> (child: Node, st: vx.Status),
 	// May write less than it is given; or nil.
-	write:   proc "contextless" (ctx: rawptr, node: u64, offset: u64, data: []u8) -> (count: u32, st: vx.Status),
+	write:   proc "contextless" (ctx: rawptr, node: Node, offset: u64, data: []u8) -> (count: u32, st: vx.Status),
 	// Or nil.
-	create:  proc "contextless" (ctx: rawptr, dir: u64, name: string, perm: u32, mode: u8) -> (node: u64, st: vx.Status),
+	create:  proc "contextless" (ctx: rawptr, dir: Node, name: string, perm: u32, mode: Open_Mode) -> (node: Node, st: vx.Status),
 	// Or nil.
-	remove:  proc "contextless" (ctx: rawptr, node: u64) -> vx.Status,
+	remove:  proc "contextless" (ctx: rawptr, node: Node) -> vx.Status,
 	// Optional: a fid let the node go.
-	clunk:   proc "contextless" (ctx: rawptr, node: u64),
+	clunk:   proc "contextless" (ctx: rawptr, node: Node),
 }
 
 MAX_FIDS :: 256 // per connection, for now
 
-Fid :: struct {
-	fid:        u32,
+// What a fid refers to, on the server's side.
+Fid_Entry :: struct {
+	fid:        Fid,
 	used, open: bool,
-	mode:       u8,
-	node, root: u64, // root: where it was attached; `..` stops there
+	mode:       Open_Mode,
+	node, root: Node, // root: where it was attached; `..` stops there
 	qid:        Qid,
 	dir_offset: u64, // a directory read continues only from here
 	dir_index:  u32, // the next entry to read
@@ -75,14 +81,17 @@ Server :: struct {
 	msize:      u32, // negotiated; 0 until Tversion
 	dialect:    Dialect,
 	extensions: Extensions, // negotiated
-	fids:       [MAX_FIDS]Fid,
+	fids:       [MAX_FIDS]Fid_Entry,
 	version:    [96]u8, // Rversion's string
 	stat:       [1024]u8, // Rstat's entry
 }
 
-// serve's answer when there is no reply yet: hold the request and serve it
-// again later.
-DEFER :: -1
+// What serve made of a request.
+Serve_Result :: enum u8 {
+	Reply, // send the reply it wrote
+	Defer, // no reply yet: hold the request and serve it again later
+	Hang_Up, // the request was too broken to answer: end the connection
+}
 
 // The size of Rread's header: size, type, tag, count. Read data goes straight
 // after it in the reply buffer, where Rread carries it.
@@ -90,7 +99,7 @@ DEFER :: -1
 RREAD_HDR :: 4 + 1 + 2 + 4
 
 @(private="file")
-fid_find :: proc "contextless" (s: ^Server, fid: u32) -> ^Fid {
+fid_find :: proc "contextless" (s: ^Server, fid: Fid) -> ^Fid_Entry {
 	for &f in s.fids {
 		if f.used && f.fid == fid {
 			return &f
@@ -100,7 +109,7 @@ fid_find :: proc "contextless" (s: ^Server, fid: u32) -> ^Fid {
 }
 
 @(private="file")
-fid_new :: proc "contextless" (s: ^Server, fid: u32) -> ^Fid {
+fid_new :: proc "contextless" (s: ^Server, fid: Fid) -> ^Fid_Entry {
 	if fid == NOFID || fid_find(s, fid) != nil {
 		return nil
 	}
@@ -114,7 +123,7 @@ fid_new :: proc "contextless" (s: ^Server, fid: u32) -> ^Fid {
 }
 
 @(private="file")
-fid_drop :: proc "contextless" (s: ^Server, f: ^Fid) {
+fid_drop :: proc "contextless" (s: ^Server, f: ^Fid_Entry) {
 	if s.fs.clunk != nil {
 		s.fs.clunk(s.fs.ctx, f.node)
 	}
@@ -133,33 +142,22 @@ hang_up :: proc "contextless" (s: ^Server) {
 	s.msize = 0
 }
 
-@(private="file")
-qid_of :: proc "contextless" (s: ^Server, node: u64, qid: ^Qid) -> vx.Status {
+@(private="file", require_results)
+qid_of :: proc "contextless" (s: ^Server, node: Node) -> (Qid, vx.Status) {
 	st: Stat
 	e := s.fs.stat(s.fs.ctx, node, &st)
-	if e == .Ok {
-		qid^ = st.qid
-	}
-	return e
+	return st.qid, e
 }
 
 // A name the file server may see: not empty, not ".", no '/'.
 @(private="file")
 good_name :: proc "contextless" (n: string) -> bool {
-	if len(n) == 0 || n == "." {
-		return false
-	}
-	for c in transmute([]u8)n {
-		if c == '/' {
-			return false
-		}
-	}
-	return true
+	return len(n) > 0 && n != "." && str.index_byte(n, '/') < 0
 }
 
 // Walks one step from node, keeping inside root.
 @(private="file", require_results)
-step :: proc "contextless" (s: ^Server, root, node: u64, name: string) -> (next: u64, e: vx.Status) {
+step :: proc "contextless" (s: ^Server, root, node: Node, name: string) -> (next: Node, e: vx.Status) {
 	if name == ".." {
 		if node == root {
 			return root, .Ok // `..` at the attach root is the root
@@ -175,7 +173,7 @@ step :: proc "contextless" (s: ^Server, root, node: u64, name: string) -> (next:
 // Fills out with whole stat entries from a directory fid. Returns how many
 // bytes it used.
 @(private="file")
-read_dir :: proc "contextless" (s: ^Server, f: ^Fid, offset: u64, out: []u8) -> (count: u32, e: vx.Status) {
+read_dir :: proc "contextless" (s: ^Server, f: ^Fid_Entry, offset: u64, out: []u8) -> (count: u32, e: vx.Status) {
 	if offset == 0 {
 		f.dir_index, f.dir_offset = 0, 0
 	} else if offset != f.dir_offset {
@@ -215,20 +213,20 @@ read_dir :: proc "contextless" (s: ^Server, f: ^Fid, offset: u64, out: []u8) -> 
 }
 
 // Handles one request (one whole message) and writes the reply into resp.
-// Returns the reply's length; 0 if the request was too broken to answer, in
-// which case the transport should hang up; or DEFER.
-serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> int {
+// Returns the reply's length with .Reply; otherwise the length is 0.
+@(require_results)
+serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: int, res: Serve_Result) {
 	t, r: Msg
 	if decode(req, &t) != .Ok {
-		return 0
+		return 0, .Hang_Up
 	}
 	if u8(t.type) % 2 != 0 || t.type == .Rerror {
-		return 0 // only T-messages come to a server
+		return 0, .Hang_Up // only T-messages come to a server
 	}
 	r.type = Type(u8(t.type) + 1)
 	r.tag = t.tag
 	e := vx.Status.Ok
-	f: ^Fid
+	f: ^Fid_Entry
 
 	if t.type != .Tversion && s.msize == 0 {
 		e = .Err_Bad_State // nothing before Tversion
@@ -257,7 +255,7 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> int {
 			} else if f = fid_new(s, t.fid); f == nil {
 				e = .Err_Bad_State
 			} else if f.node, e = s.fs.attach(s.fs.ctx, t.aname); e == .Ok {
-				e = qid_of(s, f.node, &r.qid)
+				r.qid, e = qid_of(s, f.node)
 			}
 			if e == .Ok {
 				f.root, f.qid = f.node, r.qid
@@ -278,7 +276,7 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> int {
 			for i in 0 ..< int(t.nwname) {
 				next, se := step(s, f.root, node, t.wname[i])
 				if se == .Ok {
-					se = qid_of(s, next, &qid)
+					qid, se = qid_of(s, next)
 				}
 				if se != .Ok {
 					if i == 0 {
@@ -313,8 +311,8 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> int {
 				break
 			}
 			if t.type == .Tcreate {
-				node: u64
-				if f.qid.type & QTDIR == 0 || !good_name(t.name) || t.name == ".." {
+				node: Node
+				if .Dir not_in f.qid.type || !good_name(t.name) || t.name == ".." {
 					e = .Err_Invalid
 				} else if s.fs.create == nil {
 					e = .Err_Access
@@ -326,11 +324,13 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> int {
 						s.fs.clunk(s.fs.ctx, f.node)
 					}
 					f.node = node
-					e = qid_of(s, node, &f.qid)
+					qid: Qid
+					if qid, e = qid_of(s, node); e == .Ok {
+						f.qid = qid
+					}
 				}
 			} else {
-				writes := t.mode & 3 == OWRITE || t.mode & 3 == ORDWR || t.mode & OTRUNC != 0
-				if f.qid.type & QTDIR != 0 && writes {
+				if .Dir in f.qid.type && (writes(t.mode) || t.mode.trunc) {
 					e = .Err_Access // directories are only read
 				} else {
 					e = s.fs.open(s.fs.ctx, f.node, t.mode)
@@ -348,13 +348,13 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> int {
 				e = .Err_Bad_Handle
 				break
 			}
-			if !f.open || f.mode & 3 == OWRITE {
+			if !f.open || f.mode.access == .Write {
 				e = .Err_Access
 				break
 			}
 			// The data goes straight where Rread carries it: size, type, tag, count.
 			if len(resp) < RREAD_HDR {
-				return 0
+				return 0, .Hang_Up
 			}
 			room := s.msize - IOHDRSZ
 			if u64(len(resp) - RREAD_HDR) < u64(room) {
@@ -362,7 +362,7 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> int {
 			}
 			count := min(t.count, room)
 			out := resp[RREAD_HDR:][:count]
-			if f.qid.type & QTDIR != 0 {
+			if .Dir in f.qid.type {
 				count, e = read_dir(s, f, t.offset, out)
 			} else {
 				count, e = s.fs.read(s.fs.ctx, f.node, t.offset, out)
@@ -375,7 +375,7 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> int {
 		case .Twrite:
 			if f = fid_find(s, t.fid); f == nil {
 				e = .Err_Bad_Handle
-			} else if !f.open || (f.mode & 3 != OWRITE && f.mode & 3 != ORDWR) || s.fs.write == nil {
+			} else if !f.open || !writes(f.mode) || s.fs.write == nil {
 				e = .Err_Access
 			} else if t.count > s.msize - IOHDRSZ {
 				e = .Err_Too_Small
@@ -405,14 +405,17 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> int {
 		case .Twstat:
 			e = .Err_Unsupported // renames and chmod come with fsd
 		case:
-			return 0
+			return 0, .Hang_Up
 		}
 	}
 	if e == .Err_Should_Wait && (t.type == .Tread || t.type == .Twrite) {
-		return DEFER
+		return 0, .Defer
 	}
 	if e != .Ok {
 		r = {type = .Rerror, tag = t.tag, ename = error_text(e)}
 	}
-	return encode(&r, resp)
+	if reply_len = encode(&r, resp); reply_len == 0 {
+		return 0, .Hang_Up
+	}
+	return reply_len, .Reply
 }
