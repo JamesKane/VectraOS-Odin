@@ -48,6 +48,7 @@ PROGRAMS := []Program {
 	{name = "devmgr", dir = "servers/devmgr", place = .Bootfs},
 	{name = "netd", dir = "servers/netd", place = .Bootfs},
 	{name = "gsh", dir = "cmd/gsh", place = .Bootfs},
+	{name = "install", dir = "cmd/install", place = .Bootfs, cports = {"monocypher"}},
 	{name = "ls", dir = "cmd/ls", place = .Bootfs},
 	{name = "cat", dir = "cmd/cat", place = .Bootfs},
 	{name = "echo", dir = "cmd/echo", place = .Bootfs},

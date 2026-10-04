@@ -107,7 +107,7 @@ object :: proc "contextless" (name: store.Hash) -> (data: []u8, st: vx.Status) {
 		}
 	}
 	victim := 0
-	for c, i in cache {
+	for &c, i in cache {
 		if !c.valid || c.last < cache[victim].last {
 			victim = i
 		}
@@ -131,11 +131,6 @@ object :: proc "contextless" (name: store.Hash) -> (data: []u8, st: vx.Status) {
 		return nil, .Err_Range // larger than any object distd reads whole
 	}
 	tick += 1
-	c^ = {
-		name = name,
-		len  = u32(n),
-		last = tick,
-	} if false else c^ // (the data stays where it was read)
 	c.valid = false // until it is checked
 	c.name, c.len, c.last = name, u32(n), tick
 	return c.data[:n], .Ok
@@ -226,11 +221,15 @@ rescan :: proc "contextless" () {
 				continue
 			}
 			path, _ := str.join(path_buf[:], "/n/records/", e.name)
-			r: Release
 			f: ns.File
 			if ns.open(&space, path, p9.OREAD, &f) != .Ok {
 				continue
 			}
+			// Read in place, in the next slot (never a Release on the stack:
+			// LLVM's SROA takes minutes over a local of 16 KiB of bytes).
+			resize(&releases, len(releases) + 1) // room: checked above
+			r := &releases[len(releases) - 1]
+			r^ = {}
 			resize(&r.record, RECORD_MAX)
 			got, _ := ns.read_all(&f, r.record[:])
 			resize(&r.record, got)
@@ -251,8 +250,8 @@ rescan :: proc "contextless" () {
 					r.tree, have_tree = store.parse(tree)
 				}
 			}
-			if have_seq && have_tree {
-				_ = append(&releases, r) // room: checked above
+			if !have_seq || !have_tree {
+				resize(&releases, len(releases) - 1)
 			}
 		}
 	}
@@ -308,19 +307,27 @@ MAX_NODES :: 8192
 @(private="file")
 nodes: [dynamic; MAX_NODES]Node // 0 is no node
 
+// The node with this kind, parent, release, name and store path, found, or
+// made in place (a Node is never a local: LLVM's SROA takes minutes over
+// one); made says which. 0 if the table is full, or name or path too long.
 @(private="file")
-add_node :: proc "contextless" (n: Node) -> u32 {
-	n := n
+add_node :: proc "contextless" (kind: Kind, parent: u32, seq: u64, name: string, path := "") -> (id: u32, made: bool) {
 	for i in 1 ..< len(nodes) {
 		x := &nodes[i]
-		if x.kind == n.kind && x.parent == n.parent && x.seq == n.seq && string(x.name[:]) == string(n.name[:]) && string(x.path[:]) == string(n.path[:]) {
-			return u32(i)
+		if x.kind == kind && x.parent == parent && x.seq == seq && string(x.name[:]) == name && string(x.path[:]) == path {
+			return u32(i), false
 		}
 	}
-	if append(&nodes, n) == 0 {
-		return 0
+	if len(name) > NAME_MAX || len(path) > STORE_PATH_MAX || len(nodes) == MAX_NODES {
+		return 0, false
 	}
-	return u32(len(nodes) - 1)
+	resize(&nodes, len(nodes) + 1)
+	n := &nodes[len(nodes) - 1]
+	n^ = {}
+	n.kind, n.parent, n.seq = kind, parent, seq
+	_ = append(&n.name, name)
+	_ = append(&n.path, path)
+	return u32(len(nodes) - 1), true
 }
 
 @(private="file")
@@ -330,9 +337,8 @@ node_of :: proc "contextless" (id: p9.Node) -> ^Node {
 
 @(private="file")
 fixed :: proc "contextless" (kind: Kind, parent: u32, seq: u64, name: string) -> u32 {
-	n := Node{kind = kind, parent = parent, seq = seq}
-	_ = append(&n.name, name) // the names here are short
-	return add_node(n)
+	id, _ := add_node(kind, parent, seq, name)
+	return id
 }
 
 // A tree entry as a node under parent; 0 if its name or link is too long.
@@ -341,11 +347,14 @@ tree_node :: proc "contextless" (parent: u32, seq: u64, e: store.Entry) -> u32 {
 	if len(e.name) > NAME_MAX || len(e.link) > NAME_MAX {
 		return 0
 	}
-	n := Node{kind = .Tree, parent = parent, seq = seq, e = e}
-	_ = append(&n.name, e.name)
-	_ = append(&n.target, e.link)
-	n.e.name, n.e.link = "", "" // they pointed into a scratch buffer
-	return add_node(n)
+	id, made := add_node(.Tree, parent, seq, e.name)
+	if made {
+		n := &nodes[id]
+		n.e = e
+		_ = append(&n.target, e.link)
+		n.e.name, n.e.link = "", "" // they pointed into a scratch buffer
+	}
+	return id
 }
 
 @(private="file")
@@ -440,7 +449,10 @@ fs_walk :: proc "contextless" (ctx: rawptr, dir: p9.Node, name: string) -> (chil
 			id = fixed(.Release_Status, u32(dir), d.seq, name)
 		case "tree":
 			if r := release_of(d.seq); r != nil {
-				id = add_node({kind = .Tree, parent = u32(dir), seq = d.seq, e = {mode = 0o040555, hash = r.tree}})
+				made: bool
+				if id, made = add_node(.Tree, u32(dir), d.seq, ""); made {
+					nodes[id].e = {mode = 0o040555, hash = r.tree}
+				}
 			}
 		}
 	case .Tree:
@@ -452,25 +464,20 @@ fs_walk :: proc "contextless" (ctx: rawptr, dir: p9.Node, name: string) -> (chil
 		id = tree_node(u32(dir), d.seq, e)
 	case .Store:
 		// b2, then two hex digits, then the object's 64: as the store has them.
-		n := Node{kind = .Store, parent = u32(dir)}
 		plen := len(d.path)
 		if plen + 1 + len(name) >= STORE_PATH_MAX + 1 {
 			return 0, .Err_Not_Found
 		}
-		_ = append(&n.path, string(d.path[:]))
-		if plen > 0 {
-			_ = append(&n.path, '/')
-		}
-		_ = append(&n.path, name)
-		_ = append(&n.name, name)
-		if len(n.path) - len(name) == 6 { // under "b2/xx/"
-			n.kind = .Object
-		}
 		full_buf: [3 + STORE_PATH_MAX]u8
-		full, _ := str.join(full_buf[:], "/n/", string(n.path[:]))
+		full, _ := str.join(full_buf[:], "/n/", string(d.path[:]), plen > 0 ? "/" : "", name)
+		path := full[len("/n/"):]
+		kind := Kind.Store
+		if len(path) - len(name) == 6 { // under "b2/xx/"
+			kind = .Object
+		}
 		c, fid := ns.walk(&space, full) or_return
 		_ = p9.client_clunk(c, fid)
-		id = add_node(n)
+		id, _ = add_node(kind, u32(dir), 0, name, path)
 	}
 	if id == 0 {
 		return 0, .Err_Not_Found
@@ -1139,8 +1146,8 @@ server := p9ring.Server {
 // from; what distd says it serves. Not file-private: tests/host starts
 // distd here, with its own namespace.
 start :: proc "contextless" () {
-	clear(&nodes)
-	_ = append(&nodes, Node{}) // 0 is no node
+	resize(&nodes, 1) // 0 is no node
+	nodes[0] = {}
 	root_id = fixed(.Root, 0, 0, "")
 	status_id = fixed(.Status, root_id, 0, "status")
 	ctl_id = fixed(.Ctl, root_id, 0, "ctl")
