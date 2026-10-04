@@ -528,7 +528,7 @@ run_line :: proc "contextless" (line: string) {
 }
 
 @(export, link_name="vx_main")
-main :: proc() -> int {
+vx_main :: proc() -> int {
 	if procns.from_spawn(&space) != .Ok {
 		rt.print("gsh: the namespace is incomplete\n")
 	}

@@ -27,7 +27,7 @@ print_file :: proc(name: string) -> vx.Status {
 }
 
 @(export, link_name="vx_main")
-main :: proc() -> int {
+vx_main :: proc() -> int {
 	exit_status := 0
 	if len(rt.args()) == 0 {
 		for {

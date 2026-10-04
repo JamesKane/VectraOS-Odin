@@ -747,7 +747,7 @@ test_devices :: proc "contextless" () {
 }
 
 @(export, link_name="vx_main")
-main :: proc() -> int {
+vx_main :: proc() -> int {
 	test_spawn_message()
 	test_m1_basics()
 	test_channel_basics()

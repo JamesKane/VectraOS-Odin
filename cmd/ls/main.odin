@@ -69,7 +69,7 @@ ls :: proc(path: string) -> bool {
 }
 
 @(export, link_name="vx_main")
-main :: proc() -> int {
+vx_main :: proc() -> int {
 	if procns.from_spawn(&space) != .Ok {
 		return 1
 	}

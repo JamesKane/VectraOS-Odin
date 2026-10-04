@@ -144,7 +144,7 @@ test_confinement :: proc "contextless" () {
 }
 
 @(export, link_name="vx_main")
-main :: proc() -> int {
+vx_main :: proc() -> int {
 	test_spawn()
 	st := procns.from_spawn(&space)
 	check(st == .Ok)

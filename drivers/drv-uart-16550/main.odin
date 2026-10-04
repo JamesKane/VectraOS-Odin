@@ -106,7 +106,7 @@ map_ports :: proc "contextless" (io: vx.Handle) -> bool {
 }
 
 @(export, link_name="vx_main")
-main :: proc() -> int {
+vx_main :: proc() -> int {
 	io := rt.spawn_take("ioport")
 	irq = rt.spawn_take("irq")
 	server.listen = rt.spawn_take("listen")

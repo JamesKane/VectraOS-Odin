@@ -8,7 +8,7 @@ package constest
 import "vx:rt"
 
 @(export, link_name="vx_main")
-main :: proc() -> int {
+vx_main :: proc() -> int {
 	rt.print("constest: ready\n")
 	line: [300]u8
 	for {

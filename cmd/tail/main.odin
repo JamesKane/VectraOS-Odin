@@ -21,7 +21,7 @@ take :: proc "contextless" (p: []u8) {
 }
 
 @(export, link_name="vx_main")
-main :: proc() -> int {
+vx_main :: proc() -> int {
 	args := rt.args()
 	lines := u64(10)
 	if len(args) > 0 && len(args[0]) > 1 && args[0][0] == '-' {

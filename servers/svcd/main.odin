@@ -416,7 +416,7 @@ skipped :: proc "contextless" (name: string) -> bool {
 }
 
 @(export, link_name="vx_main")
-main :: proc() -> int {
+vx_main :: proc() -> int {
 	info, _ := rt.task_info(rt.self)
 	say("hello from user space (task ", info.id, ")\n")
 	pst: vx.Status

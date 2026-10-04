@@ -85,7 +85,7 @@ event :: proc "contextless" (ctx: rawptr, pk: ^vx.Packet) {
 }
 
 @(export, link_name="vx_main")
-main :: proc() -> int {
+vx_main :: proc() -> int {
 	mmio := rt.spawn_take("mmio")
 	irq = rt.spawn_take("irq")
 	server.listen = rt.spawn_take("listen")
