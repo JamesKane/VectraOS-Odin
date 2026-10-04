@@ -46,25 +46,37 @@ unmap_memory :: proc "contextless" (base, size: u64) {
 	_ = vx_syscall(.As_Unmap, u64(self), base, size)
 }
 
-// Opens a session through `connector` (a post's client end, which stays the
-// caller's), asking with `ordinal`. Returns this side's ring end.
+// Asks `connector` for a session with the request `req` (a vx.Msg_Header,
+// perhaps with a body the protocol defines), waiting until `deadline`. On
+// success got[0] is the client's ring end and got[1] the ring's memory,
+// neither mapped; on a refusal, the server's status (from the reply's flags,
+// when it gives one) or .Err_Access.
 @(require_results)
-session_dial :: proc "contextless" (connector: vx.Handle, ordinal: u32, params: vx.Ring_Params, r: ^ring.Ring) -> (end: vx.Handle, st: vx.Status) {
-	req := vx.Msg_Header{ordinal = ordinal}
+session_ask_raw :: proc "contextless" (connector: vx.Handle, req: []u8, deadline: vx.Instant) -> (got: [2]vx.Handle, st: vx.Status) {
 	rep: vx.Msg_Header
-	got: [2]vx.Handle
 	call := vx.Call {
-		wr_bytes     = &req,
-		wr_len       = size_of(req),
+		wr_bytes     = raw_data(req),
+		wr_len       = u32(len(req)),
 		rd_bytes     = &rep,
 		rd_cap       = size_of(rep),
 		rd_handles   = &got[0],
 		rd_count_cap = 2,
 	}
-	st = channel_call(connector, &call, clock_read() + 5_000_000_000)
+	st = channel_call(connector, &call, deadline)
 	if st == .Ok && call.actual.handles != 2 {
-		st = .Err_Access // refused
+		close_all(..got[:call.actual.handles])
+		got = {}
+		why := i32(rep.flags) // a negative status, or 1: refused, no reason given
+		st = call.actual.bytes == size_of(rep) && why < 0 ? vx.Status(why) : .Err_Access
 	}
+	return
+}
+
+// Opens a session with the request `req`. Returns this side's ring end.
+@(require_results)
+session_dial_with :: proc "contextless" (connector: vx.Handle, req: []u8, params: vx.Ring_Params, r: ^ring.Ring) -> (end: vx.Handle, st: vx.Status) {
+	got: [2]vx.Handle
+	got, st = session_ask_raw(connector, req, clock_read() + 5_000_000_000)
 	if st == .Ok {
 		st = session_map(got[1], .Client, params, r)
 	}
@@ -76,11 +88,28 @@ session_dial :: proc "contextless" (connector: vx.Handle, ordinal: u32, params: 
 	return got[0], .Ok
 }
 
+// Opens a session through `connector` (a post's client end, which stays the
+// caller's), asking with `ordinal`. Returns this side's ring end.
+@(require_results)
+session_dial :: proc "contextless" (connector: vx.Handle, ordinal: u32, params: vx.Ring_Params, r: ^ring.Ring) -> (end: vx.Handle, st: vx.Status) {
+	req := vx.Msg_Header{ordinal = ordinal}
+	return session_dial_with(connector, memory.ptr_to_bytes(&req), params, r)
+}
+
+// Refuses one request read from `listen`, with a status the client is told.
+session_refuse :: proc "contextless" (listen: vx.Handle, req: vx.Msg_Header, why: vx.Status) {
+	rep := vx.Msg_Header{txid = req.txid, ordinal = req.ordinal, flags = u32(i32(why))}
+	_ = channel_write(listen, memory.ptr_to_bytes(&rep))
+}
+
 // Answers one request read from `listen` (req is its header): a new ring
 // with these parameters, mapped and attached as the server, whose server end
-// it returns. On failure the request is refused, with a reply without handles.
+// it returns. On failure the request is refused, with a reply without
+// handles. With keep, the server keeps a handle to the ring's memory too (a
+// driver that gives the client's arena to its device, as the block class's
+// do), returned as mem.
 @(require_results)
-session_accept :: proc "contextless" (listen: vx.Handle, req: vx.Msg_Header, params: vx.Ring_Params, r: ^ring.Ring) -> (end: vx.Handle, st: vx.Status) {
+session_accept_keep :: proc "contextless" (listen: vx.Handle, req: vx.Msg_Header, params: vx.Ring_Params, r: ^ring.Ring, keep := true) -> (end, mem: vx.Handle, st: vx.Status) {
 	rep := vx.Msg_Header{txid = req.txid, ordinal = req.ordinal}
 	p := params
 	h: vx.Ring_Handles
@@ -88,18 +117,29 @@ session_accept :: proc "contextless" (listen: vx.Handle, req: vx.Msg_Header, par
 	if st == .Ok {
 		st = session_map(h.memory, .Server, params, r)
 	}
+	if st == .Ok && keep {
+		mem, st = handle_dup(h.memory, vx.RIGHTS_SAME)
+	}
 	if st == .Ok {
 		give := [2]vx.Handle{h.client, h.memory}
 		st = channel_write(listen, memory.ptr_to_bytes(&rep), give[:])
 		h.client, h.memory = vx.HANDLE_NONE, vx.HANDLE_NONE // moved, whatever happened
 	}
 	if st == .Ok {
-		return h.server, .Ok
+		return h.server, mem, .Ok
 	}
-	close_all(h.client, h.server, h.memory)
+	close_all(h.client, h.server, h.memory, mem)
+	session_unmap(r)
 	rep.flags = SESSION_REFUSED
 	_ = channel_write(listen, memory.ptr_to_bytes(&rep))
-	return vx.HANDLE_NONE, st
+	return vx.HANDLE_NONE, vx.HANDLE_NONE, st
+}
+
+// session_accept_keep, keeping nothing.
+@(require_results)
+session_accept :: proc "contextless" (listen: vx.Handle, req: vx.Msg_Header, params: vx.Ring_Params, r: ^ring.Ring) -> (end: vx.Handle, st: vx.Status) {
+	end, _, st = session_accept_keep(listen, req, params, r, keep = false)
+	return
 }
 
 // Dialling without waiting, for a client that cannot stall on a server that
