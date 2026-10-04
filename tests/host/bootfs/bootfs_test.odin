@@ -17,6 +17,7 @@ import "vx:p9"
 import "vx:rt"
 import "vx:tar"
 import bootfs "../../../servers/bootfs"
+import "../p9test"
 
 IMAGE :: vx.Handle(0x201)
 LISTEN :: vx.Handle(0x202)
@@ -46,51 +47,6 @@ fake_syscall :: proc "c" (nr: vx.Syscall, a0, a1, a2, a3, a4, a5: u64) -> i64 {
 	return i64(vx.Status.Err_Unsupported) // port_create among them: vx_main returns
 }
 
-loopback :: proc "contextless" (ctx: rawptr, req: []u8, resp: []u8) -> int {
-	n, res := p9.serve((^p9.Server)(ctx), req, resp)
-	return res == .Reply ? n : 0 // a loopback cannot hold a request: a deferral ends it too
-}
-
-// The names a directory reads as, in order, joined by spaces.
-list :: proc(c: ^p9.Client, root: p9.Fid, path: string, out: []u8) -> string {
-	f, e := p9.client_walk(c, root, path)
-	if e != .Ok {
-		return "(walk failed)"
-	}
-	defer _ = p9.client_clunk(c, f)
-	if p9.client_open(c, f, p9.OREAD) != .Ok {
-		return "(open failed)"
-	}
-	dir: [4096]u8
-	n, re := p9.client_read(c, f, 0, dir[:])
-	if re != .Ok {
-		return "(read failed)"
-	}
-	used := 0
-	for off := 0; off + 2 <= n; {
-		length := int(dir[off]) | int(dir[off + 1]) << 8
-		st: p9.Stat
-		if p9.stat_decode(dir[off:][:length + 2], &st) != .Ok {
-			return "(bad entry)"
-		}
-		if used > 0 {
-			used += copy(out[used:], " ")
-		}
-		used += copy(out[used:], st.name)
-		off += length + 2
-	}
-	return string(out[:used])
-}
-
-stat_of :: proc(c: ^p9.Client, root: p9.Fid, path: string, st: ^p9.Stat) -> vx.Status {
-	f, e := p9.client_walk(c, root, path)
-	if e != .Ok {
-		return e
-	}
-	defer _ = p9.client_clunk(c, f)
-	return p9.client_stat(c, f, st)
-}
-
 @(test)
 test_bootfs :: proc(t: ^testing.T) {
 	// The image: directories and files in an order of their own, a path whose
@@ -116,34 +72,47 @@ test_bootfs :: proc(t: ^testing.T) {
 
 	srv := p9.Server{fs = bootfs.server.fs, max_msize = 8192}
 	tbuf, rbuf: [8192]u8
-	c := p9.Client{rpc = loopback, ctx = &srv, tbuf = tbuf[:], rbuf = rbuf[:]}
+	c := p9.Client{rpc = p9test.loopback, ctx = &srv, tbuf = tbuf[:], rbuf = rbuf[:]}
 	testing.expect_value(t, p9.client_version(&c, 8192, {}), vx.Status.Ok)
 	root, e := p9.client_attach(&c, "")
 	testing.expect_value(t, e, vx.Status.Ok)
 
 	// The tree, children in the archive's order.
-	names: [256]u8
-	testing.expect_value(t, list(&c, root, "", names[:]), "boot x")
-	testing.expect_value(t, list(&c, root, "boot", names[:]), "bin readme")
-	testing.expect_value(t, list(&c, root, "boot/bin", names[:]), "hello")
-	testing.expect_value(t, list(&c, root, "x/y", names[:]), "z.txt")
+	testing.expect_value(t, p9test.list(&c, root, ""), "boot x")
+	testing.expect_value(t, p9test.list(&c, root, "boot"), "bin readme")
+	testing.expect_value(t, p9test.list(&c, root, "boot/bin"), "hello")
+	testing.expect_value(t, p9test.list(&c, root, "x/y"), "z.txt")
 
 	// Stats: qids are node numbers in the order nodes were made; modes are
 	// read-only; implied directories are 0555.
 	st: p9.Stat
-	testing.expect_value(t, stat_of(&c, root, "", &st), vx.Status.Ok)
-	testing.expect(t, st.name == "/" && st.mode == p9.DMDIR | 0o555 && st.qid == {type = p9.QTDIR, path = 1} && st.length == 0)
-	testing.expect(t, st.uid == "boot" && st.gid == "boot" && st.muid == "boot")
-	_ = stat_of(&c, root, "boot/bin/hello", &st)
-	testing.expect(t, st.name == "hello" && st.mode == 0o555 && st.qid == {type = p9.QTFILE, path = 4} && st.length == 13)
-	_ = stat_of(&c, root, "x", &st)
-	testing.expect(t, st.mode == p9.DMDIR | 0o500 && st.qid == {type = p9.QTDIR, path = 5})
-	_ = stat_of(&c, root, "x/y", &st)
-	testing.expect(t, st.mode == p9.DMDIR | 0o555 && st.qid == {type = p9.QTDIR, path = 6})
-	_ = stat_of(&c, root, "x/y/z.txt", &st)
-	testing.expect(t, st.mode == 0o400 && st.qid == {type = p9.QTFILE, path = 7} && st.length == 3)
-	_ = stat_of(&c, root, "boot/readme", &st)
-	testing.expect(t, st.mode == 0o444 && st.qid == {type = p9.QTFILE, path = 8} && st.length == 0)
+	testing.expect_value(t, p9test.stat_of(&c, root, "", &st), vx.Status.Ok)
+	testing.expect_value(t, st.name, "/")
+	testing.expect_value(t, st.mode, p9.DMDIR | 0o555)
+	testing.expect_value(t, st.qid, p9.Qid{type = p9.QTDIR, path = 1})
+	testing.expect_value(t, st.length, 0)
+	testing.expect_value(t, st.uid, "boot")
+	testing.expect_value(t, st.gid, "boot")
+	testing.expect_value(t, st.muid, "boot")
+	_ = p9test.stat_of(&c, root, "boot/bin/hello", &st)
+	testing.expect_value(t, st.name, "hello")
+	testing.expect_value(t, st.mode, 0o555)
+	testing.expect_value(t, st.qid, p9.Qid{type = p9.QTFILE, path = 4})
+	testing.expect_value(t, st.length, 13)
+	_ = p9test.stat_of(&c, root, "x", &st)
+	testing.expect_value(t, st.mode, p9.DMDIR | 0o500)
+	testing.expect_value(t, st.qid, p9.Qid{type = p9.QTDIR, path = 5})
+	_ = p9test.stat_of(&c, root, "x/y", &st)
+	testing.expect_value(t, st.mode, p9.DMDIR | 0o555)
+	testing.expect_value(t, st.qid, p9.Qid{type = p9.QTDIR, path = 6})
+	_ = p9test.stat_of(&c, root, "x/y/z.txt", &st)
+	testing.expect_value(t, st.mode, 0o400)
+	testing.expect_value(t, st.qid, p9.Qid{type = p9.QTFILE, path = 7})
+	testing.expect_value(t, st.length, 3)
+	_ = p9test.stat_of(&c, root, "boot/readme", &st)
+	testing.expect_value(t, st.mode, 0o444)
+	testing.expect_value(t, st.qid, p9.Qid{type = p9.QTFILE, path = 8})
+	testing.expect_value(t, st.length, 0)
 
 	// Reads, at offsets and past the end.
 	buf: [64]u8
@@ -152,18 +121,23 @@ test_bootfs :: proc(t: ^testing.T) {
 	f, _ = p9.client_walk(&c, root, "boot/bin/hello")
 	testing.expect_value(t, p9.client_open(&c, f, p9.OREAD), vx.Status.Ok)
 	n, e = p9.client_read(&c, f, 0, buf[:])
-	testing.expect(t, e == .Ok && string(buf[:n]) == "hello, world\n")
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect_value(t, string(buf[:n]), "hello, world\n")
 	n, e = p9.client_read(&c, f, 7, buf[:3])
-	testing.expect(t, e == .Ok && string(buf[:n]) == "wor")
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect_value(t, string(buf[:n]), "wor")
 	n, e = p9.client_read(&c, f, 13, buf[:])
-	testing.expect(t, e == .Ok && n == 0)
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect_value(t, n, 0)
 	n, e = p9.client_read(&c, f, 1 << 40, buf[:])
-	testing.expect(t, e == .Ok && n == 0)
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect_value(t, n, 0)
 	_ = p9.client_clunk(&c, f)
 	f, _ = p9.client_walk(&c, root, "boot/readme")
 	_ = p9.client_open(&c, f, p9.OREAD)
 	n, e = p9.client_read(&c, f, 0, buf[:])
-	testing.expect(t, e == .Ok && n == 0)
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect_value(t, n, 0)
 	_ = p9.client_clunk(&c, f)
 
 	// Nothing opens for writing.
@@ -191,7 +165,7 @@ test_bootfs :: proc(t: ^testing.T) {
 	sub: p9.Fid
 	sub, e = p9.client_attach(&c, "boot/bin")
 	testing.expect_value(t, e, vx.Status.Ok)
-	testing.expect_value(t, list(&c, sub, "", names[:]), "hello")
+	testing.expect_value(t, p9test.list(&c, sub, ""), "hello")
 	f, e = p9.client_walk(&c, sub, "..")
 	testing.expect_value(t, e, vx.Status.Ok)
 	_ = p9.client_stat(&c, f, &st)

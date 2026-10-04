@@ -8,9 +8,11 @@
 package ns_test
 
 import "abi:vx"
+import "core:strings"
 import "core:testing"
 import "vx:ns"
 import "vx:p9"
+import "../p9test"
 
 Tnode :: struct {
 	parent: p9.Node,
@@ -109,20 +111,15 @@ make_server :: proc(s: ^p9.Server, t: ^[]Tnode) {
 	}
 }
 
-loopback :: proc "contextless" (ctx: rawptr, req: []u8, resp: []u8) -> int {
-	n, res := p9.serve((^p9.Server)(ctx), req, resp)
-	return res == .Reply ? n : 0 // a loopback cannot hold a request: a deferral ends it too
-}
-
 // A client of s whose buffers are tbuf and rbuf.
-connect :: proc(t: ^testing.T, c: ^p9.Client, s: ^p9.Server, tbuf, rbuf: []u8) {
+connect :: proc(t: ^testing.T, c: ^p9.Client, s: ^p9.Server, tbuf, rbuf: []u8, loc := #caller_location) {
 	c^ = {
-		rpc  = loopback,
+		rpc  = p9test.loopback,
 		ctx  = s,
 		tbuf = tbuf,
 		rbuf = rbuf,
 	}
-	testing.expect(t, p9.client_version(c, 8192, {}) == .Ok)
+	testing.expect_value(t, p9.client_version(c, 8192, {}), vx.Status.Ok, loc)
 }
 
 exists :: proc(space: ^ns.Namespace, path: string) -> bool {
@@ -134,58 +131,62 @@ exists :: proc(space: ^ns.Namespace, path: string) -> bool {
 	return true
 }
 
+expect_exists :: proc(t: ^testing.T, space: ^ns.Namespace, path: string, want := true, loc := #caller_location) {
+	testing.expectf(t, exists(space, path) == want, "exists(%q) is %v", path, !want, loc = loc)
+}
+
 // The names in a directory, as "a b c", reading through the namespace.
-list :: proc(space: ^ns.Namespace, path: string, out: []u8) -> string {
-	n := 0
+// Allocates from the temp allocator.
+list :: proc(space: ^ns.Namespace, path: string) -> string {
 	f: ns.File
 	if ns.open(space, path, p9.OREAD, &f) != .Ok {
 		return "(cannot open)"
 	}
+	defer ns.close(&f)
+	b := strings.builder_make(context.temp_allocator)
 	buf: [2048]u8
-	got: int
-	e: vx.Status
 	for {
-		got, e = ns.read(&f, buf[:])
-		if e != .Ok || got == 0 {
+		got, e := ns.read(&f, buf[:])
+		if e != .Ok {
+			return "(read failed)"
+		}
+		if got == 0 {
 			break
 		}
-		for off := 0; off + 2 <= got; {
-			size := int(buf[off]) | int(buf[off + 1]) << 8
-			st: p9.Stat
-			if p9.stat_decode(buf[off:][:size + 2], &st) != .Ok {
-				return "(bad stat)"
-			}
-			if n > 0 {
-				out[n] = ' '
-				n += 1
-			}
-			copy(out[n:], st.name)
-			n += len(st.name)
-			off += size + 2
+		chunk, ok := p9test.names(buf[:got])
+		if !ok {
+			return "(bad stat)"
 		}
+		if len(chunk) > 0 && strings.builder_len(b) > 0 {
+			strings.write_byte(&b, ' ')
+		}
+		strings.write_string(&b, chunk)
 	}
-	ns.close(&f)
-	return e != .Ok ? "(read failed)" : string(out[:n])
-}
-
-clean_is :: proc(in_: string, want: string) -> bool {
-	out: [64]u8
-	got := ns.clean(in_, out[:])
-	return len(got) > 0 && got == want
+	return strings.to_string(b)
 }
 
 @(test)
 test_clean :: proc(t: ^testing.T) {
-	testing.expect(t, clean_is("/", "/"))
-	testing.expect(t, clean_is("//a//b/", "/a/b"))
-	testing.expect(t, clean_is("/a/./b/../c", "/a/c"))
-	testing.expect(t, clean_is("/../../x", "/x"))
-	testing.expect(t, clean_is("/a/..", "/"))
-	testing.expect(t, clean_is("/..", "/"))
-	out: [8]u8
-	testing.expect(t, ns.clean("relative", out[:]) == "")
-	testing.expect(t, ns.clean("", out[:]) == "")
-	testing.expect(t, ns.clean("/abcdefghij", out[:]) == "") // does not fit
+	Case :: struct {
+		in_, want: string,
+		room:      int, // the size of the output buffer
+	}
+	cases := []Case {
+		{"/", "/", 64},
+		{"//a//b/", "/a/b", 64},
+		{"/a/./b/../c", "/a/c", 64},
+		{"/../../x", "/x", 64},
+		{"/a/..", "/", 64},
+		{"/..", "/", 64},
+		{"relative", "", 8},
+		{"", "", 8},
+		{"/abcdefghij", "", 8}, // does not fit
+	}
+	for c in cases {
+		out: [64]u8
+		got := ns.clean(c.in_, out[:c.room])
+		testing.expectf(t, got == c.want, "clean(%q) is %q, want %q", c.in_, got, c.want)
+	}
 }
 
 @(test)
@@ -203,40 +204,48 @@ test_namespace :: proc(t: ^testing.T) {
 	boot_c, dev_c: p9.Client
 	connect(t, &boot_c, boot_srv, bufs[0][:], bufs[1][:])
 	connect(t, &dev_c, dev_srv, bufs[2][:], bufs[3][:])
-	names: [256]u8
 
-	testing.expect(t, !exists(space, "/")) // empty
-	testing.expect(t, ns.mount(space, &boot_c, vx.HANDLE_NONE, "/srv/bootfs", "", "/bin", {}) == .Err_Not_Found) // nothing at /bin to mount on yet
-	testing.expect(t, ns.mount(space, &boot_c, vx.HANDLE_NONE, "/srv/bootfs", "", "/", {}) == .Ok)
-	testing.expect(t, list(space, "/", names[:]) == "bin boot dev readme")
-	testing.expect(t, exists(space, "/boot/bin/ls") && !exists(space, "/bin/ls"))
-	testing.expect(t, exists(space, "/bin/../boot/bin/../../readme")) // lexical ..
-	testing.expect(t, exists(space, "/../../../readme"))
+	expect_exists(t, space, "/", false) // empty
+	testing.expect_value(t, ns.mount(space, &boot_c, vx.HANDLE_NONE, "/srv/bootfs", "", "/bin", {}), vx.Status.Err_Not_Found) // nothing at /bin to mount on yet
+	testing.expect_value(t, ns.mount(space, &boot_c, vx.HANDLE_NONE, "/srv/bootfs", "", "/", {}), vx.Status.Ok)
+	testing.expect_value(t, list(space, "/"), "bin boot dev readme")
+	expect_exists(t, space, "/boot/bin/ls")
+	expect_exists(t, space, "/bin/ls", false)
+	expect_exists(t, space, "/bin/../boot/bin/../../readme") // lexical ..
+	expect_exists(t, space, "/../../../readme")
 
 	// bind -a: the union of what was at /bin, then /boot/bin.
-	testing.expect(t, ns.bind(space, "/boot/bin", "/bin", {.After}) == .Ok)
-	testing.expect(t, exists(space, "/bin/ls") && exists(space, "/bin/cat"))
-	testing.expect(t, list(space, "/bin", names[:]) == "ls cat") // the old /bin is empty
-	testing.expect(t, !exists(space, "/binary") && !exists(space, "/bin/nope"))
+	testing.expect_value(t, ns.bind(space, "/boot/bin", "/bin", {.After}), vx.Status.Ok)
+	expect_exists(t, space, "/bin/ls")
+	expect_exists(t, space, "/bin/cat")
+	testing.expect_value(t, list(space, "/bin"), "ls cat") // the old /bin is empty
+	expect_exists(t, space, "/binary", false)
+	expect_exists(t, space, "/bin/nope", false)
 
 	// Reading a file through a bind.
 	f: ns.File
 	text: [16]u8
-	testing.expect(t, ns.open(space, "/bin/cat", p9.OREAD, &f) == .Ok)
+	testing.expect_value(t, ns.open(space, "/bin/cat", p9.OREAD, &f), vx.Status.Ok)
 	n1, e1 := ns.read(&f, text[:2])
 	n2, e2 := ns.read(&f, text[2:12])
 	n3, e3 := ns.read(&f, text[:10])
-	testing.expect(t, e1 == .Ok && n1 == 2 && e2 == .Ok && n2 == 2 && e3 == .Ok && n3 == 0)
-	testing.expect(t, string(text[:4]) == "cat!")
+	testing.expect_value(t, e1, vx.Status.Ok)
+	testing.expect_value(t, n1, 2)
+	testing.expect_value(t, e2, vx.Status.Ok)
+	testing.expect_value(t, n2, 2)
+	testing.expect_value(t, e3, vx.Status.Ok)
+	testing.expect_value(t, n3, 0)
+	testing.expect_value(t, string(text[:4]), "cat!")
 	ns.close(&f)
-	testing.expect(t, ns.open(space, "/bin/cat", p9.OWRITE, &f) == .Err_Access)
+	testing.expect_value(t, ns.open(space, "/bin/cat", p9.OWRITE, &f), vx.Status.Err_Access)
 
 	// A second server, after what is at /dev; then one before it.
-	testing.expect(t, ns.mount(space, &dev_c, vx.HANDLE_NONE, "/srv/cons", "", "/dev", {.After}) == .Ok)
-	testing.expect(t, exists(space, "/dev/cons") && list(space, "/dev", names[:]) == "cons null")
-	testing.expect(t, ns.bind(space, "/boot", "/dev", {.Before}) == .Ok)
-	testing.expect(t, list(space, "/dev", names[:]) == "bin cons null")
-	testing.expect(t, exists(space, "/dev/bin/ls"))
+	testing.expect_value(t, ns.mount(space, &dev_c, vx.HANDLE_NONE, "/srv/cons", "", "/dev", {.After}), vx.Status.Ok)
+	expect_exists(t, space, "/dev/cons")
+	testing.expect_value(t, list(space, "/dev"), "cons null")
+	testing.expect_value(t, ns.bind(space, "/boot", "/dev", {.Before}), vx.Status.Ok)
+	testing.expect_value(t, list(space, "/dev"), "bin cons null")
+	expect_exists(t, space, "/dev/bin/ls")
 
 	out: [512]u8
 	n := ns.print(space, out[:])
@@ -247,19 +256,21 @@ test_namespace :: proc(t: ^testing.T) {
 		"bind /boot /dev\n" +
 		"bind -a /dev /dev\n" +
 		"mount -a /srv/cons /dev\n"
-	testing.expect(t, string(out[:n]) == want)
-	testing.expect(t, ns.print(space, out[:10]) == 0)
+	testing.expect_value(t, string(out[:n]), want)
+	testing.expect_value(t, ns.print(space, out[:10]), 0)
 
 	// unmount one member, then a whole entry; replace with a plain bind.
-	testing.expect(t, ns.unmount(space, "/boot/bin", "/bin") == .Ok)
-	testing.expect(t, !exists(space, "/bin/ls") && exists(space, "/bin"))
-	testing.expect(t, ns.unmount(space, "/nothing", "/bin") == .Err_Not_Found)
-	testing.expect(t, ns.unmount(space, "", "/dev") == .Ok)
-	testing.expect(t, !exists(space, "/dev/cons") && list(space, "/dev", names[:]) == "")
-	testing.expect(t, ns.bind(space, "/boot/bin", "/dev", ns.REPLACE) == .Ok)
-	testing.expect(t, list(space, "/dev", names[:]) == "ls cat")
-	testing.expect(t, ns.bind(space, "/missing", "/dev", {}) == .Err_Not_Found)
-	testing.expect(t, ns.bind(space, "relative", "/dev", {}) == .Err_Invalid)
+	testing.expect_value(t, ns.unmount(space, "/boot/bin", "/bin"), vx.Status.Ok)
+	expect_exists(t, space, "/bin/ls", false)
+	expect_exists(t, space, "/bin")
+	testing.expect_value(t, ns.unmount(space, "/nothing", "/bin"), vx.Status.Err_Not_Found)
+	testing.expect_value(t, ns.unmount(space, "", "/dev"), vx.Status.Ok)
+	expect_exists(t, space, "/dev/cons", false)
+	testing.expect_value(t, list(space, "/dev"), "")
+	testing.expect_value(t, ns.bind(space, "/boot/bin", "/dev", ns.REPLACE), vx.Status.Ok)
+	testing.expect_value(t, list(space, "/dev"), "ls cat")
+	testing.expect_value(t, ns.bind(space, "/missing", "/dev", {}), vx.Status.Err_Not_Found)
+	testing.expect_value(t, ns.bind(space, "relative", "/dev", {}), vx.Status.Err_Invalid)
 
 	// Every fid the namespace dropped was clunked: only the members' own remain.
 	live := 0
@@ -270,5 +281,5 @@ test_namespace :: proc(t: ^testing.T) {
 	for &e in space.entries {
 		members += len(e.members)
 	}
-	testing.expect(t, live == members)
+	testing.expect_value(t, live, members)
 }

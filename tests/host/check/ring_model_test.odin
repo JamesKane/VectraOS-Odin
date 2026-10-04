@@ -30,10 +30,18 @@ SAW_FLAG :: 1
 HEAD :: 0 // consumer locals
 SEEN_BELL :: 1
 
-// The variant under check. The step procedures take no user data, so these
-// are globals, and the variants run one after another in one test.
-entries: i64 // how many the producer publishes
-producer_fence, consumer_fence, bell_before_flag, recheck: bool
+Variant :: struct {
+	name:             string,
+	entries:          i64, // how many the producer publishes
+	producer_fence:   bool,
+	consumer_fence:   bool,
+	bell_before_flag: bool,
+	recheck:          bool,
+}
+
+// The variant under check. The step procedures take no user data, so it is
+// a global, and the variants run one after another in one test.
+current: Variant
 
 init :: proc(s: ^check.State) {}
 
@@ -41,13 +49,13 @@ producer_step :: proc(c: ^check.Ctx) {
 	t := check.me(c)
 	switch t.pc {
 	case 0: // write the entry, publish the tail
-		if t.local[PRODUCED] == entries {
+		if t.local[PRODUCED] == current.entries {
 			t.done = true
 			return
 		}
 		t.local[PRODUCED] += 1
 		check.store(c, TAIL, t.local[PRODUCED])
-		t.pc = 1 if producer_fence else 2
+		t.pc = 1 if current.producer_fence else 2
 	case 1:
 		check.fence(c)
 		t.pc = 2
@@ -68,23 +76,23 @@ consumer_step :: proc(c: ^check.Ctx) {
 	case 0: // drain
 		if check.load(c, TAIL) != t.local[HEAD] {
 			t.local[HEAD] += 1
-			if t.local[HEAD] == entries {
+			if t.local[HEAD] == current.entries {
 				t.done = true
 			}
 			return
 		}
-		t.pc = 1 if bell_before_flag else 2
+		t.pc = 1 if current.bell_before_flag else 2
 	case 1:
 		t.local[SEEN_BELL] = check.kernel_load(c, DOORBELL)
-		t.pc = 2 if bell_before_flag else 3
+		t.pc = 2 if current.bell_before_flag else 3
 	case 2: // NEED_WAKEUP
 		check.store(c, FLAG, 1)
-		t.pc = 3 if bell_before_flag else 1
+		t.pc = 3 if current.bell_before_flag else 1
 	case 3: // the fence (or straight on without one)
-		if consumer_fence {
+		if current.consumer_fence {
 			check.fence(c)
 		}
-		t.pc = 4 if recheck else 5
+		t.pc = 4 if current.recheck else 5
 	case 4: // recheck
 		t.pc = 6 if check.load(c, TAIL) != t.local[HEAD] else 5
 	case 5:
@@ -111,14 +119,10 @@ final_ok :: proc(s: ^check.State) -> (why: string, ok: bool) {
 	return "the consumer sleeps with entries waiting (a lost wake-up)", false
 }
 
-check_variant :: proc(name: string, n: i64, pfence, cfence, bell_first, check_again: bool) -> bool {
-	entries = n
-	producer_fence = pfence
-	consumer_fence = cfence
-	bell_before_flag = bell_first
-	recheck = check_again
+check_variant :: proc(variant: Variant) -> bool {
+	current = variant
 	m := check.Model {
-		name     = name,
+		name     = current.name,
 		threads  = 2,
 		init     = init,
 		step     = step,
@@ -129,12 +133,22 @@ check_variant :: proc(name: string, n: i64, pfence, cfence, bell_first, check_ag
 
 @(test)
 test_ring_model :: proc(t: ^testing.T) {
-	testing.expect(t, check_variant("ring wake protocol, 1 entry", 1, true, true, true, true))
-	testing.expect(t, check_variant("ring wake protocol, 3 entries", 3, true, true, true, true))
-	testing.expect(t, check_variant("doorbell read after the flag", 3, true, true, false, true))
+	holds := []Variant {
+		{name = "ring wake protocol, 1 entry", entries = 1, producer_fence = true, consumer_fence = true, bell_before_flag = true, recheck = true},
+		{name = "ring wake protocol, 3 entries", entries = 3, producer_fence = true, consumer_fence = true, bell_before_flag = true, recheck = true},
+		{name = "doorbell read after the flag", entries = 3, producer_fence = true, consumer_fence = true, bell_before_flag = false, recheck = true},
+	}
+	broken := []Variant {
+		{name = "no producer fence", entries = 2, producer_fence = false, consumer_fence = true, bell_before_flag = true, recheck = true},
+		{name = "no consumer fence", entries = 2, producer_fence = true, consumer_fence = false, bell_before_flag = true, recheck = true},
+		{name = "no fences", entries = 2, producer_fence = false, consumer_fence = false, bell_before_flag = true, recheck = true},
+		{name = "no recheck", entries = 2, producer_fence = true, consumer_fence = true, bell_before_flag = true, recheck = false},
+	}
+	for variant in holds {
+		testing.expectf(t, check_variant(variant), "%s: the checker found a violation", variant.name)
+	}
 	fmt.eprintf("vx-check: the next four are broken on purpose and must fail:\n")
-	testing.expect(t, !check_variant("no producer fence", 2, false, true, true, true))
-	testing.expect(t, !check_variant("no consumer fence", 2, true, false, true, true))
-	testing.expect(t, !check_variant("no fences", 2, false, false, true, true))
-	testing.expect(t, !check_variant("no recheck", 2, true, true, true, false))
+	for variant in broken {
+		testing.expectf(t, !check_variant(variant), "%s: the checker missed the violation", variant.name)
+	}
 }

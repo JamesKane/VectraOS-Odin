@@ -4,6 +4,7 @@
 // names, counts past the end, unknown types) are refused too.
 package p9_codec_test
 
+import vx "abi:vx"
 import "core:testing"
 import "vx:p9"
 
@@ -63,12 +64,18 @@ test_round_trips :: proc(t: ^testing.T) {
 			continue
 		}
 		types += 1
+		name := p9.MESSAGES[ty].name
 		m := full_message(p9.Type(ty), stat[:])
 		d: p9.Msg
 		n := p9.encode(&m, buf[:])
-		testing.expect(t, n >= 7)
-		testing.expect(t, p9.decode(buf[:n], &d) == .Ok && int(d.type) == ty && d.tag == 7)
-		testing.expect(t, p9.encode(&d, again[:]) == n && string(buf[:n]) == string(again[:n]))
+		testing.expectf(t, n >= 7, "%s encodes in %d bytes", name, n)
+		st := p9.decode(buf[:n], &d)
+		testing.expectf(t, st == .Ok, "%s does not decode: %v", name, st)
+		testing.expectf(t, int(d.type) == ty, "%s decodes as %v", name, d.type)
+		testing.expectf(t, d.tag == 7, "%s decodes with tag %d", name, d.tag)
+		again_n := p9.encode(&d, again[:])
+		testing.expectf(t, again_n == n, "%s re-encodes in %d bytes, not %d", name, again_n, n)
+		testing.expectf(t, string(buf[:n]) == string(again[:n]), "%s re-encodes differently", name)
 
 		// Every shorter length, with the size field saying so, is malformed.
 		for length in 0 ..< n {
@@ -77,25 +84,24 @@ test_round_trips :: proc(t: ^testing.T) {
 			if length >= 4 {
 				cut[0], cut[1], cut[2], cut[3] = u8(length), 0, 0, 0
 			}
-			if p9.decode(cut[:length], &d) == .Ok && length != n {
-				testing.expectf(t, false, "a truncated %s decoded", p9.MESSAGES[ty].name)
+			if !testing.expectf(t, p9.decode(cut[:length], &d) != .Ok, "a truncated %s (%d of %d bytes) decoded", name, length, n) {
 				break
 			}
 		}
 		// So is one byte too many.
 		buf[n] = 0
 		buf[0] = u8(n + 1)
-		testing.expect(t, p9.decode(buf[:n + 1], &d) == .Err_Invalid)
+		testing.expectf(t, p9.decode(buf[:n + 1], &d) == .Err_Invalid, "%s with a trailing byte decoded", name)
 		// So is a size field that disagrees with the length.
 		buf[0] = u8(n - 1)
-		testing.expect(t, p9.decode(buf[:n], &d) == .Err_Invalid)
+		testing.expectf(t, p9.decode(buf[:n], &d) == .Err_Invalid, "%s with a short size field decoded", name)
 	}
-	testing.expect(t, types == 27)
+	testing.expect_value(t, types, 27)
 	testing.expect(t, !p9.known(p9.Type(106))) // there is no Terror
 	m := p9.Msg{type = p9.Type(106)}
-	testing.expect(t, p9.encode(&m, buf[:]) == 0)
+	testing.expect_value(t, p9.encode(&m, buf[:]), 0)
 	m = p9.Msg{type = .Tclunk}
-	testing.expect(t, p9.encode(&m, buf[:6]) == 0) // does not fit
+	testing.expect_value(t, p9.encode(&m, buf[:6]), 0) // does not fit
 }
 
 // A hand-built Twalk with n names, and optionally a NUL in the last.
@@ -120,24 +126,25 @@ raw_walk :: proc(b: []u8, n: u16, nul: bool) -> []u8 {
 test_traps :: proc(t: ^testing.T) {
 	b, stat: [256]u8
 	d: p9.Msg
-	testing.expect(t, p9.decode(raw_walk(b[:], 16, false), &d) == .Ok && d.nwname == 16)
-	testing.expect(t, p9.decode(raw_walk(b[:], 17, false), &d) == .Err_Invalid) // more than MAXWELEM
-	testing.expect(t, p9.decode(raw_walk(b[:], 2, true), &d) == .Err_Invalid) // NUL in a name
+	testing.expect_value(t, p9.decode(raw_walk(b[:], 16, false), &d), vx.Status.Ok)
+	testing.expect_value(t, d.nwname, 16)
+	testing.expect_value(t, p9.decode(raw_walk(b[:], 17, false), &d), vx.Status.Err_Invalid) // more than MAXWELEM
+	testing.expect_value(t, p9.decode(raw_walk(b[:], 2, true), &d), vx.Status.Err_Invalid) // NUL in a name
 
 	// A Twrite whose count runs past the message.
 	w := full_message(.Twrite, stat[:])
 	n := p9.encode(&w, b[:])
 	b[4 + 1 + 2 + 4 + 8] = 200 // count's low byte
-	testing.expect(t, p9.decode(b[:n], &d) == .Err_Invalid)
+	testing.expect_value(t, p9.decode(b[:n], &d), vx.Status.Err_Invalid)
 
 	// Unknown types.
 	tiny := [7]u8{7, 0, 0, 0, 99, 0, 0}
-	testing.expect(t, p9.decode(tiny[:], &d) == .Err_Invalid)
+	testing.expect_value(t, p9.decode(tiny[:], &d), vx.Status.Err_Invalid)
 	tiny[4] = 106
-	testing.expect(t, p9.decode(tiny[:], &d) == .Err_Invalid)
+	testing.expect_value(t, p9.decode(tiny[:], &d), vx.Status.Err_Invalid)
 	tiny[4] = u8(p9.Type.Rflush)
-	testing.expect(t, p9.decode(tiny[:], &d) == .Ok)
-	testing.expect(t, p9.decode(tiny[:6], &d) == .Err_Invalid)
+	testing.expect_value(t, p9.decode(tiny[:], &d), vx.Status.Ok)
+	testing.expect_value(t, p9.decode(tiny[:6], &d), vx.Status.Err_Invalid)
 }
 
 @(test)
@@ -154,33 +161,39 @@ test_stat :: proc(t: ^testing.T) {
 	b: [128]u8
 	n := p9.stat_encode(&s, b[:])
 	d: p9.Stat
-	testing.expect(t, n == 2 + 39 + 4 * 3 && p9.stat_decode(b[:n], &d) == .Ok)
-	testing.expect(t, d.length == 10 && d.qid.path == 2 && len(d.name) == 1 && d.muid[0] == 'm')
-	testing.expect(t, p9.stat_decode(b[:n - 1], &d) == .Err_Invalid)
-	testing.expect(t, p9.stat_encode(&s, b[:20]) == 0)
+	testing.expect_value(t, n, 2 + 39 + 4 * 3)
+	testing.expect_value(t, p9.stat_decode(b[:n], &d), vx.Status.Ok)
+	testing.expect_value(t, d.length, 10)
+	testing.expect_value(t, d.qid.path, 2)
+	testing.expect_value(t, len(d.name), 1)
+	testing.expect_value(t, d.muid[0], 'm')
+	testing.expect_value(t, p9.stat_decode(b[:n - 1], &d), vx.Status.Err_Invalid)
+	testing.expect_value(t, p9.stat_encode(&s, b[:20]), 0)
 }
 
 @(test)
 test_versions :: proc(t: ^testing.T) {
 	d, ext := p9.version_parse("9P2000.x/1 +dref +map +future")
-	testing.expect(t, d == .P9_2000X)
-	testing.expect(t, ext == {.Dref, .Map})
+	testing.expect_value(t, d, p9.Dialect.P9_2000X)
+	testing.expect_value(t, ext, p9.Extensions{.Dref, .Map})
 	d, ext = p9.version_parse("9P2000.x/1")
-	testing.expect(t, d == .P9_2000X && ext == {})
+	testing.expect_value(t, d, p9.Dialect.P9_2000X)
+	testing.expect_value(t, ext, p9.Extensions{})
 	d, _ = p9.version_parse("9P2000")
-	testing.expect(t, d == .P9_2000)
+	testing.expect_value(t, d, p9.Dialect.P9_2000)
 	d, _ = p9.version_parse("9P2000.L")
-	testing.expect(t, d == .P9_2000)
+	testing.expect_value(t, d, p9.Dialect.P9_2000)
 	d, _ = p9.version_parse("9P1999")
-	testing.expect(t, d == .Unknown)
+	testing.expect_value(t, d, p9.Dialect.Unknown)
 	d, _ = p9.version_parse("")
-	testing.expect(t, d == .Unknown)
+	testing.expect_value(t, d, p9.Dialect.Unknown)
 	buf: [96]u8
 	n := p9.version_format(.P9_2000X, {.Dref, .Notify}, buf[:])
-	testing.expect(t, n == 24 && string(buf[:n]) == "9P2000.x/1 +dref +notify")
-	testing.expect(t, p9.version_format(.P9_2000, {}, buf[:]) == 6)
+	testing.expect_value(t, n, 24)
+	testing.expect_value(t, string(buf[:n]), "9P2000.x/1 +dref +notify")
+	testing.expect_value(t, p9.version_format(.P9_2000, {}, buf[:]), 6)
 
-	testing.expect(t, p9.error_status(p9.error_text(.Err_Not_Found)) == .Err_Not_Found)
-	testing.expect(t, p9.error_status(p9.error_text(.Err_Access)) == .Err_Access)
-	testing.expect(t, p9.error_status("something only plan 9 says") == .Err_Invalid)
+	testing.expect_value(t, p9.error_status(p9.error_text(.Err_Not_Found)), vx.Status.Err_Not_Found)
+	testing.expect_value(t, p9.error_status(p9.error_text(.Err_Access)), vx.Status.Err_Access)
+	testing.expect_value(t, p9.error_status("something only plan 9 says"), vx.Status.Err_Invalid)
 }
