@@ -62,7 +62,7 @@ node_at :: proc "contextless" (id: p9.Node) -> (n: ^Node, slot: u32) {
 
 @(private="file")
 now_seconds :: proc "contextless" () -> u32 {
-	return u32(rt.clock_read() / 1_000_000_000)
+	return u32(rt.clock_utc() / 1_000_000_000) // UTC once there is a wall clock (upstream ADR-0031)
 }
 
 // vx:rt's as_unmap wrapper comes with the kernel's M4 port; until then, the

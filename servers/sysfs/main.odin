@@ -6,8 +6,9 @@
 //                       cntfrq.hz=24000000 cntvct.invariant cntvct.user source=cntvct
 //                     so a program timing itself with rdtsc or cntvct_el0
 //                     (vx:prof's zones) need not calibrate (upstream 05 §9)
-//   /sys/clock/now    monotonic=NS realtime=NS: realtime counts from boot
-//                     until there is a wall clock (upstream docs/milestones.md)
+//   /sys/clock/now    monotonic=NS realtime=NS: realtime is UTC, ns since
+//                     1970, once a clock driver has set the kernel's wall
+//                     clock (upstream ADR-0031); from boot until then
 //
 // cpu/, mem/, power/ and the rest of upstream 02 §5.1 come with what
 // measures them.
@@ -130,7 +131,7 @@ fs_read :: proc "contextless" (ctx: rawptr, n: p9.Node, offset: u64, buf: []u8) 
 		_ = ndb.end(&w)
 	} else if f == .Now {
 		ndb.put_u64(&w, "monotonic", u64(now))
-		ndb.put_u64(&w, "realtime", u64(now)) // from boot: no wall clock yet
+		ndb.put_u64(&w, "realtime", u64(rt.clock_utc()))
 		_ = ndb.end(&w)
 	} else if is_dir(f) {
 		return 0, .Err_Invalid // read as a directory, through readdir
