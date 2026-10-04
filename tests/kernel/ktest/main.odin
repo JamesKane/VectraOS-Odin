@@ -97,12 +97,12 @@ test_handle_transfer :: proc "contextless" () {
 	check(got[0] != 0 && vst == .Ok && v == 5)
 
 	// A handle can be duplicated with fewer rights, never more.
-	weak, wst := rt.handle_dup(got[0], vx.right_bit(.Read))
+	weak, wst := rt.handle_dup(got[0], {.Read})
 	check(wst == .Ok)
 	v, vst = rt.counter_read(weak)
 	check(vst == .Ok && v == 5)
 	check(rt.counter_signal(weak, 9) == .Err_Access)
-	_, sst := rt.handle_dup(weak, vx.right_bit(.Read) | vx.right_bit(.Signal))
+	_, sst := rt.handle_dup(weak, {.Read, .Signal})
 	check(sst == .Err_Access)
 	_ = rt.handle_close(weak)
 	_ = rt.handle_close(got[0])
@@ -174,7 +174,7 @@ new_stack :: proc "contextless" () -> u64 {
 	if st != .Ok {
 		return 0
 	}
-	base, mst := rt.as_map(self, vmo, 0, 16 * 1024, vx.MAP_WRITE)
+	base, mst := rt.as_map(self, vmo, 0, 16 * 1024, {.Write})
 	_ = rt.handle_close(vmo) // the mapping keeps it
 	return mst == .Ok ? base + 16 * 1024 : 0
 }
@@ -362,13 +362,13 @@ start_child :: proc "contextless" (what: Child_Code) -> (task: vx.Handle, ok: bo
 	if text, st = rt.vmo_create(4096); st != .Ok || rt.vmo_write(text, 0, code[:n]) != .Ok {
 		return
 	}
-	if _, st = rt.as_map(task, text, 0, 4096, vx.MAP_EXEC, CHILD_CODE); st != .Ok {
+	if _, st = rt.as_map(task, text, 0, 4096, {.Exec}, CHILD_CODE); st != .Ok {
 		return
 	}
 	if stack, st = rt.vmo_create(4096); st != .Ok {
 		return
 	}
-	if _, st = rt.as_map(task, stack, 0, 4096, vx.MAP_WRITE, CHILD_STACK_TOP - 4096); st != .Ok {
+	if _, st = rt.as_map(task, stack, 0, 4096, {.Write}, CHILD_STACK_TOP - 4096); st != .Ok {
 		return
 	}
 	if th, st = rt.thread_create(task); st != .Ok {
@@ -543,7 +543,7 @@ test_rings :: proc "contextless" () {
 	h, st = rt.ring_create(&params)
 	check(st == .Ok)
 	layout, _ := ring.layout(params)
-	base, mst := rt.as_map(self, h.memory, 0, layout.size, vx.MAP_WRITE)
+	base, mst := rt.as_map(self, h.memory, 0, layout.size, {.Write})
 	check(mst == .Ok)
 	memory := (cast([^]u8)uintptr(base))[:layout.size]
 
@@ -644,7 +644,7 @@ test_m1_basics :: proc "contextless" () {
 
 	vmo, vst := rt.vmo_create(64 * 1024)
 	check(vst == .Ok)
-	addr, mst := rt.as_map(self, vmo, 0, 64 * 1024, vx.MAP_WRITE)
+	addr, mst := rt.as_map(self, vmo, 0, 64 * 1024, {.Write})
 	check(mst == .Ok)
 	words := cast([^]u64)uintptr(addr)
 	check(intrinsics.volatile_load(&words[0]) == 0 && intrinsics.volatile_load(&words[8191]) == 0)
@@ -692,7 +692,7 @@ when ODIN_ARCH == .amd64 {
 test_devices :: proc "contextless" () {
 	res := rt.spawn_take("resource")
 	check(res != vx.HANDLE_NONE)
-	weak, wst := rt.handle_dup(res, vx.right_bit(.Duplicate) | vx.right_bit(.Inspect))
+	weak, wst := rt.handle_dup(res, {.Duplicate, .Inspect})
 	check(wst == .Ok)
 
 	_, st := rt.irq_create(weak, SPARE_LINE)
@@ -732,7 +732,7 @@ test_devices :: proc "contextless" () {
 	check(st == .Ok)
 	word: [4]u8
 	check(rt.vmo_read(h, 0, word[:]) == .Err_Unsupported) // map it instead
-	at, mst := rt.as_map(self, h, 0, 4096, 0)
+	at, mst := rt.as_map(self, h, 0, 4096, {})
 	check(mst == .Ok)
 	value := intrinsics.volatile_load(cast(^u32)uintptr(at)) // HPET: capabilities and revision; PL031: the time
 	check(value != 0 && value != 0xffff_ffff)
@@ -743,9 +743,9 @@ test_devices :: proc "contextless" () {
 		check(st == .Err_Range)
 		h, st = rt.iorange_create(res, 0x2f8, 8) // COM2's ports
 		check(st == .Ok)
-		_, st = rt.as_map(self, h, 0, 4096, 0)
+		_, st = rt.as_map(self, h, 0, 4096, {})
 		check(st == .Err_Invalid)
-		_, st = rt.as_map(self, h, 0, 0, 0)
+		_, st = rt.as_map(self, h, 0, 0, {})
 		check(st == .Ok)
 		_ = rt.inb(0x2fd) // faults unless the port is ours
 		check(true)

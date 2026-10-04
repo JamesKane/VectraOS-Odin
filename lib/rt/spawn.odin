@@ -45,7 +45,6 @@ USER_TOP :: u64(0x0000_8000_0000_0000)
 // nothing mapped below it but what the program asks for.
 STACK_TOP :: u64(0x0000_7fff_ffff_0000)
 STACK_SIZE :: u64(256 * 1024)
-ALL_RIGHTS :: u32(1 << len(vx.Right) - 1)
 
 // Maps each loadable segment of the image into the task; returns the entry point.
 @(private="file")
@@ -80,7 +79,13 @@ elf_load :: proc "contextless" (task: vx.Handle, image: []u8) -> (entry: u64, st
 			st = vmo_write(vmo, ph.vaddr - base, image[ph.offset:file_end])
 		}
 		if st == .Ok {
-			flags := (ph.flags & 2 != 0 ? vx.MAP_WRITE : 0) | (ph.flags & 1 != 0 ? vx.MAP_EXEC : 0)
+			flags: vx.Map_Options
+			if ph.flags & 2 != 0 {
+				flags += {.Write}
+			}
+			if ph.flags & 1 != 0 {
+				flags += {.Exec}
+			}
 			_, st = as_map(task, vmo, 0, map_size, flags, base)
 		}
 		_ = handle_close(vmo) // the mapping keeps it
@@ -152,10 +157,10 @@ spawn_elf :: proc "contextless" (a: ^Spawn_Args) -> (task: vx.Handle, st: vx.Sta
 		stack, st = vmo_create(STACK_SIZE)
 	}
 	if st == .Ok {
-		_, st = as_map(t, stack, 0, STACK_SIZE, vx.MAP_WRITE, STACK_TOP - STACK_SIZE)
+		_, st = as_map(t, stack, 0, STACK_SIZE, {.Write}, STACK_TOP - STACK_SIZE)
 	}
 	if st == .Ok {
-		me, st = handle_dup(t, ALL_RIGHTS)
+		me, st = handle_dup(t, vx.ALL_RIGHTS)
 	}
 	if st == .Ok {
 		ours, theirs, st = channel_create()

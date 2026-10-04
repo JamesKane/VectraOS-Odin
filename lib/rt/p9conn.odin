@@ -38,7 +38,7 @@ PARAMS :: vx.Ring_Params {
 // mapping stays for the life of the task until as_unmap lands.
 map_ring :: proc "contextless" (memory: vx.Handle, client: bool, r: ^ring.Ring) -> vx.Status {
 	layout := ring.layout(PARAMS) or_return
-	base := as_map(self, memory, 0, layout.size, vx.MAP_WRITE) or_return
+	base := as_map(self, memory, 0, layout.size, {.Write}) or_return
 	return ring.attach(r, (cast([^]u8)uintptr(base))[:layout.size], client)
 }
 

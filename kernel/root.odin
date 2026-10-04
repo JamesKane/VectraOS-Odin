@@ -174,7 +174,7 @@ start_root_task :: proc "contextless" () {
 	if sst != .Ok {
 		kpanic("cannot give the root task a stack")
 	}
-	if _, mst := task_map(t, stack, 0, stack.size, vx.MAP_WRITE, USER_STACK_TOP - USER_STACK_SIZE); mst != .Ok {
+	if _, mst := task_map(t, stack, 0, stack.size, {.Write}, USER_STACK_TOP - USER_STACK_SIZE); mst != .Ok {
 		kpanic("cannot give the root task a stack") // the page below stays unmapped
 	}
 	object_release(&stack.obj)

@@ -43,7 +43,7 @@ task_of :: proc "contextless" (node: u64) -> u64 {
 @(private="file")
 task_exists :: proc "contextless" (id: u64) -> (info: vx.Task_Summary, ok: bool) {
 	st: vx.Status
-	info, st = rt.task_info(tasks, id, 0)
+	info, st = rt.task_info(tasks, id, {})
 	return info, st == .Ok && info.state != .Exited
 }
 
@@ -225,7 +225,7 @@ fs_readdir :: proc "contextless" (ctx: rawptr, dir: u64, index: u32) -> (child: 
 	id: u64
 	seen: u32
 	for {
-		info, ist := rt.task_info(tasks, id, vx.TASK_NEXT)
+		info, ist := rt.task_info(tasks, id, {.Next})
 		if ist != .Ok {
 			return 0, .Err_Not_Found
 		}

@@ -206,7 +206,7 @@ handles_take :: proc "contextless" (t: ^Task, values: []vx.Handle, forbidden: ^O
 		switch {
 		case e == nil:
 			return .Err_Bad_Handle
-		case e.rights & vx.right_bit(.Transfer) == 0:
+		case e.rights & (1 << u32(vx.Right.Transfer)) == 0:
 			return .Err_Access
 		case e.obj == forbidden:
 			return .Err_Invalid
@@ -365,8 +365,8 @@ task_name :: proc "contextless" (t: ^Task) -> string {
 // page-aligned and free. The mapping holds a reference on the VMO. W^X:
 // never writable and executable.
 @(require_results)
-task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: u32, want_va: u64) -> (u64, vx.Status) {
-	if flags & vx.MAP_WRITE != 0 && flags & vx.MAP_EXEC != 0 {
+task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.Map_Options, want_va: u64) -> (u64, vx.Status) {
+	if flags >= {.Write, .Exec} {
 		return 0, .Err_Access
 	}
 	vmo_end, overflow := intrinsics.overflow_add(offset, size)
@@ -374,10 +374,10 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: u32
 		return 0, .Err_Range
 	}
 	mf := Map_Flags{.User}
-	if flags & vx.MAP_WRITE != 0 {
+	if .Write in flags {
 		mf += {.Write}
 	}
-	if flags & vx.MAP_EXEC != 0 {
+	if .Exec in flags {
 		mf += {.Exec}
 	}
 	if v.physical {

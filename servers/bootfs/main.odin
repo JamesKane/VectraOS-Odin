@@ -218,7 +218,7 @@ vx_main :: proc() -> int {
 	if overflow {
 		fail("cannot map the boot image")
 	}
-	base, st := rt.as_map(rt.self, image, 0, padded &~ 4095, 0)
+	base, st := rt.as_map(rt.self, image, 0, padded &~ 4095, {})
 	if st != .Ok {
 		fail("cannot map the boot image")
 	}

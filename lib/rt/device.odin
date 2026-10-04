@@ -6,7 +6,7 @@ import vx "abi:vx"
 
 vmo_create_physical :: proc "contextless" (resource: vx.Handle, pa, size: u64) -> (vx.Handle, vx.Status) {
 	h: vx.Handle
-	r := vx_syscall(.Vmo_Create, size, u64(vx.VMO_PHYSICAL), u64(uintptr(&h)), u64(resource), pa)
+	r := vx_syscall(.Vmo_Create, size, u64(transmute(u32)vx.Vmo_Options{.Physical}), u64(uintptr(&h)), u64(resource), pa)
 	return h, r < 0 ? vx.Status(r) : .Ok
 }
 

@@ -90,7 +90,7 @@ main :: proc() -> int {
 	at: u64
 	st := vx.Status.Err_Invalid
 	if mmio != 0 && irq != 0 && server.listen != 0 {
-		at, st = rt.as_map(rt.self, mmio, 0, 4096, vx.MAP_WRITE)
+		at, st = rt.as_map(rt.self, mmio, 0, 4096, {.Write})
 	}
 	if st != .Ok {
 		rt.print("drv-uart-pl011: no registers, IRQ or listen channel\n")

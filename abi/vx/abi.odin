@@ -10,13 +10,10 @@ Instant :: i64 // the one monotonic clock, in nanoseconds
 HANDLE_NONE :: Handle(0)
 INFINITE :: Instant(max(i64)) // a deadline that never comes
 
-// What each right is worth as a bit, and handle_dup's "the rights the handle
-// has", which no right may collide with.
-right_bit :: #force_inline proc "contextless" (r: Right) -> u32 {
-	return 1 << u32(r)
-}
-
-RIGHTS_SAME :: u32(1) << 31
+// Every right, and handle_dup's "the rights the handle has": bit 31, which
+// no right may use. On the wire a Rights is the u32 whose bit i is Right(i).
+ALL_RIGHTS :: ~Rights{}
+RIGHTS_SAME :: transmute(Rights)(u32(1) << 31)
 
 #assert(len(Right) <= 31)
 #assert(Status.Ok == Status(0))
@@ -207,7 +204,7 @@ Cqe :: struct #align (32) { // the generic completion entry, 32 bytes
 // interrupt lines and I/O ports; svcd gets it, and makes narrower objects
 // from it for each driver:
 //
-//   vmo_create(size, VMO_PHYSICAL, &out, resource, physical_address)
+//   vmo_create(size, {.Physical}, &out, resource, physical_address)
 //       MMIO: uncached device memory, never RAM; mapped like any VMO
 //   irq_create(resource, line, 0, &out)
 //       x86_64: an ISA IRQ below 16 (through the firmware's overrides), or a
@@ -218,7 +215,10 @@ Cqe :: struct #align (32) { // the generic completion entry, 32 bytes
 //   iorange_create(resource, base, count, &out)
 //       x86_64 only: I/O ports, which a task may use once as_map has been
 //       called with the IoRange in place of a VMO (offset, size and flags 0)
-VMO_PHYSICAL :: u32(1)
+Vmo_Option :: enum u32 { // vmo_create
+	Physical,
+}
+Vmo_Options :: bit_set[Vmo_Option; u32]
 
 Vmo_Op :: enum u32 { // vmo_rw
 	Read  = 0,
@@ -246,10 +246,19 @@ Task_Summary :: struct { // what task_info returns
 
 // task_info(task, &summary, id, flags) and task_kill(task, status, id) act on
 // the task itself, or with an id, on that task if it is the task or one of
-// its descendants. With TASK_NEXT, task_info finds the one with the next id
+// its descendants. With .Next, task_info finds the one with the next id
 // after `id` instead, so a holder of a task handle can list its tree
 // (procfs). There is no other way to reach a task: no global lookup.
-TASK_NEXT :: u32(1)
+Task_Info_Option :: enum u32 {
+	Next,
+}
+Task_Info_Options :: bit_set[Task_Info_Option; u32]
 
-MAP_WRITE :: u32(1) // as_map; a mapping is always readable
-MAP_EXEC :: u32(2)
+Map_Option :: enum u32 { // as_map; a mapping is always readable
+	Write,
+	Exec,
+}
+Map_Options :: bit_set[Map_Option; u32]
+
+// On the wire, an option set is the u32 whose bit i is the option with value i.
+#assert(u32(Map_Option.Write) == 0 && u32(Map_Option.Exec) == 1)

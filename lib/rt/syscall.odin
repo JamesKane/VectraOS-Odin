@@ -42,10 +42,10 @@ task_kill :: proc "contextless" (task: vx.Handle, exit_status: i64, id: u64 = 0)
 }
 
 // The task itself; or with an id, that task in task's tree; or with
-// vx.TASK_NEXT, the next one after `id`.
-task_info :: proc "contextless" (task: vx.Handle, id: u64 = 0, flags: u32 = 0) -> (vx.Task_Summary, vx.Status) {
+// {.Next}, the next one after `id`.
+task_info :: proc "contextless" (task: vx.Handle, id: u64 = 0, flags: vx.Task_Info_Options = {}) -> (vx.Task_Summary, vx.Status) {
 	info: vx.Task_Summary
-	st := status(vx_syscall(.Task_Info, u64(task), addr(&info), id, u64(flags)))
+	st := status(vx_syscall(.Task_Info, u64(task), addr(&info), id, u64(transmute(u32)flags)))
 	return info, st
 }
 
@@ -97,9 +97,9 @@ vmo_create :: proc "contextless" (size: u64) -> (vx.Handle, vx.Status) {
 
 // Maps [offset, offset + size) of a VMO into a task. With at == 0 the
 // kernel chooses; the address used comes back.
-as_map :: proc "contextless" (task, vmo: vx.Handle, offset, size: u64, flags: u32, at: u64 = 0) -> (u64, vx.Status) {
+as_map :: proc "contextless" (task, vmo: vx.Handle, offset, size: u64, flags: vx.Map_Options, at: u64 = 0) -> (u64, vx.Status) {
 	va := at
-	st := status(vx_syscall(.As_Map, u64(task), u64(vmo), offset, size, u64(flags), addr(&va)))
+	st := status(vx_syscall(.As_Map, u64(task), u64(vmo), offset, size, u64(transmute(u32)flags), addr(&va)))
 	return va, st
 }
 
@@ -111,9 +111,9 @@ vmo_write :: proc "contextless" (vmo: vx.Handle, offset: u64, buf: []u8) -> vx.S
 	return status(vx_syscall(.Vmo_Rw, u64(vmo), u64(vx.Vmo_Op.Write), offset, addr(raw_data(buf)), u64(len(buf))))
 }
 
-handle_dup :: proc "contextless" (h: vx.Handle, rights: u32) -> (vx.Handle, vx.Status) {
+handle_dup :: proc "contextless" (h: vx.Handle, rights: vx.Rights) -> (vx.Handle, vx.Status) {
 	out: vx.Handle
-	st := status(vx_syscall(.Handle_Dup, u64(h), u64(rights), addr(&out)))
+	st := status(vx_syscall(.Handle_Dup, u64(h), u64(transmute(u32)rights), addr(&out)))
 	return out, st
 }
 

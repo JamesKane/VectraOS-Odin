@@ -44,8 +44,8 @@ MAX_RESTARTS :: 5 // in RESTART_WINDOW, then svcd gives up
 RESTART_WINDOW :: vx.Duration(10_000_000_000) // 10 s
 MAX_DEVICES :: 4 // device objects per driver
 
-BOOT_IMAGE_RIGHTS :: u32(1 << u32(vx.Right.Read) | 1 << u32(vx.Right.Map) | 1 << u32(vx.Right.Duplicate) | 1 << u32(vx.Right.Transfer) | 1 << u32(vx.Right.Inspect))
-CONNECTOR_RIGHTS :: u32(1 << u32(vx.Right.Read) | 1 << u32(vx.Right.Write) | 1 << u32(vx.Right.Wait) | 1 << u32(vx.Right.Duplicate) | 1 << u32(vx.Right.Transfer) | 1 << u32(vx.Right.Inspect))
+BOOT_IMAGE_RIGHTS :: vx.Rights{.Read, .Map, .Duplicate, .Transfer, .Inspect}
+CONNECTOR_RIGHTS :: vx.Rights{.Read, .Write, .Wait, .Duplicate, .Transfer, .Inspect}
 
 when ODIN_ARCH == .amd64 {
 	ARCH :: "x86_64"
@@ -261,7 +261,7 @@ start :: proc "contextless" (s: ^Service) -> vx.Status {
 		count += 1
 	}
 	if st == .Ok && ndb.has(&rec, "tasks") { // svcd's own task: the whole tree, for procfs
-		handles[count], st = rt.handle_dup(rt.self, vx.right_bit(.Inspect) | vx.right_bit(.Manage) | vx.right_bit(.Transfer))
+		handles[count], st = rt.handle_dup(rt.self, {.Inspect, .Manage, .Transfer})
 		handle_names[count] = "tasks"
 		count += 1
 	}
@@ -452,7 +452,7 @@ main :: proc() -> int {
 	if !ok {
 		fail("no boot image")
 	}
-	base, mst := rt.as_map(rt.self, image_vmo, 0, (size + 4095) &~ 4095, 0)
+	base, mst := rt.as_map(rt.self, image_vmo, 0, (size + 4095) &~ 4095, {})
 	if mst != .Ok {
 		fail("cannot map the boot image")
 	}

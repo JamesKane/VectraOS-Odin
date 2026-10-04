@@ -71,7 +71,7 @@ fake_syscall :: proc "c" (nr: vx.Syscall, a0, a1, a2, a3, a4, a5: u64) -> i64 {
 			return i64(vx.Status.Err_Bad_Handle)
 		}
 		t: ^Fake_Task
-		if u32(a3) & vx.TASK_NEXT != 0 {
+		if .Next in transmute(vx.Task_Info_Options)u32(a3) {
 			for &c in fake_tasks {
 				if c.id > a2 {
 					t = &c

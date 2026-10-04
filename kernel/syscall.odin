@@ -20,7 +20,14 @@ err :: #force_inline proc "contextless" (st: vx.Status) -> i64 {
 
 @(private="file")
 bit :: #force_inline proc "contextless" (r: vx.Right) -> u32 {
-	return vx.right_bit(r)
+	return 1 << u32(r)
+}
+
+// A syscall's options argument as its set, or false if it sets a bit that
+// no option uses.
+@(private="file")
+options_of :: proc "contextless" ($T: typeid, a: u64) -> (T, bool) where intrinsics.type_is_bit_set(T) {
+	return transmute(T)u32(a), a &~ u64(transmute(u32)~T{}) == 0
 }
 
 // User pointers are checked against the current task's page tables before
@@ -118,10 +125,11 @@ task_target :: proc "contextless" (h: vx.Handle, rights: u32, id: u64, next: boo
 
 @(private="file")
 sys_task_info :: proc "contextless" (h: vx.Handle, out, id, flags: u64) -> i64 {
-	if flags &~ u64(vx.TASK_NEXT) != 0 {
+	opts, valid := options_of(vx.Task_Info_Options, flags)
+	if !valid {
 		return err(.Err_Invalid)
 	}
-	t, st := task_target(h, bit(.Inspect), id, flags & u64(vx.TASK_NEXT) != 0)
+	t, st := task_target(h, bit(.Inspect), id, .Next in opts)
 	if t == nil {
 		return err(st)
 	}
@@ -224,13 +232,14 @@ sys_port_post :: proc "contextless" (h: vx.Handle, packet: u64) -> i64 {
 DEVICE_RIGHTS :: u32(1 << u32(vx.Right.Duplicate) | 1 << u32(vx.Right.Transfer) | 1 << u32(vx.Right.Inspect))
 
 // vmo_create(size, options, &out, resource, physical_address): anonymous
-// memory, or with VMO_PHYSICAL, device memory minted from a Resource.
+// memory, or with {.Physical}, device memory minted from a Resource.
 @(private="file")
 sys_vmo_create :: proc "contextless" (size, options, out: u64, rh: vx.Handle, pa: u64) -> i64 {
-	if options &~ u64(vx.VMO_PHYSICAL) != 0 {
+	opts, valid := options_of(vx.Vmo_Options, options)
+	if !valid {
 		return err(.Err_Invalid)
 	}
-	if options & u64(vx.VMO_PHYSICAL) != 0 {
+	if .Physical in opts {
 		r, st := handle_get(current_task(), rh, .Resource, bit(.Manage))
 		if r == nil {
 			return err(st)
@@ -317,7 +326,8 @@ sys_as_map :: proc "contextless" (th, vh: vx.Handle, offset, size, flags, addr_p
 		object_release(to)
 		return err(st)
 	}
-	if flags &~ u64(vx.MAP_WRITE | vx.MAP_EXEC) != 0 {
+	opts, valid := options_of(vx.Map_Options, flags)
+	if !valid {
 		return err(.Err_Invalid)
 	}
 	va: u64
@@ -329,15 +339,15 @@ sys_as_map :: proc "contextless" (th, vh: vx.Handle, offset, size, flags, addr_p
 		return err(tst)
 	}
 	need := bit(.Map) | bit(.Read)
-	if flags & u64(vx.MAP_WRITE) != 0 {
+	if .Write in opts {
 		need |= bit(.Write)
 	}
-	if flags & u64(vx.MAP_EXEC) != 0 {
+	if .Exec in opts {
 		need |= bit(.Exec)
 	}
 	vo, st := handle_get(current_task(), vh, .Vmo, need)
 	if vo != nil {
-		va, st = task_map(cast(^Task)to, cast(^Vmo)vo, offset, size, u32(flags), va)
+		va, st = task_map(cast(^Task)to, cast(^Vmo)vo, offset, size, opts, va)
 		object_release(vo)
 	}
 	object_release(to)
@@ -833,11 +843,11 @@ sys_handle_dup :: proc "contextless" (h: vx.Handle, rights, out: u64) -> i64 {
 	switch {
 	case e == nil:
 		st = .Err_Bad_Handle
-	case e.rights & bit(.Duplicate) == 0 || (rights != u64(vx.RIGHTS_SAME) && rights &~ u64(e.rights) != 0):
+	case e.rights & bit(.Duplicate) == 0 || (rights != u64(transmute(u32)vx.RIGHTS_SAME) && rights &~ u64(e.rights) != 0):
 		st = .Err_Access // needs DUPLICATE, and can only reduce rights
 	case:
 		obj = e.obj
-		if rights == u64(vx.RIGHTS_SAME) {
+		if rights == u64(transmute(u32)vx.RIGHTS_SAME) {
 			r = e.rights
 		}
 		object_ref(obj)

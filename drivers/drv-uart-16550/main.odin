@@ -90,7 +90,7 @@ main :: proc() -> int {
 		port, ok = ndb.get_u64(&rec, "ioport")
 	}
 	if ok {
-		_, st := rt.as_map(rt.self, io, 0, 0, 0)
+		_, st := rt.as_map(rt.self, io, 0, 0, {})
 		ok = port <= 0xfff8 && st == .Ok
 	}
 	if !ok {

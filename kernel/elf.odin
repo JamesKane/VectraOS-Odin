@@ -63,7 +63,13 @@ elf_load :: proc "contextless" (t: ^Task, image: []u8) -> (entry: u64, st: vx.St
 		base := p.vaddr &~ 4095
 		v := vmo_create(mem_end - base) or_return
 		vmo_write(v, p.vaddr - base, image[p.offset:file_end])
-		flags := (p.flags & PF_W != 0 ? vx.MAP_WRITE : 0) | (p.flags & PF_X != 0 ? vx.MAP_EXEC : 0)
+		flags: vx.Map_Options
+		if p.flags & PF_W != 0 {
+			flags += {.Write}
+		}
+		if p.flags & PF_X != 0 {
+			flags += {.Exec}
+		}
 		_, st = task_map(t, v, 0, v.size, flags, base)
 		object_release(&v.obj) // the mapping keeps it
 		if st != .Ok {
