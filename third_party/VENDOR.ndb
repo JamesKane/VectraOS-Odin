@@ -79,7 +79,7 @@ name=monocypher
     license="BSD-2-Clause or CC0-1.0 (taken as BSD-2-Clause)"
     adr=docs/adr/0011-monocypher.md
     port=ports/monocypher/port.ndb
-    reviewed.by=pending
+    reviewed.by="James Kane" reviewed.date=2026-10-04
 
 name=acpica
     version=20260930
@@ -90,4 +90,4 @@ name=acpica
     license="BSD-3-Clause or GPL-2.0-only (taken as BSD-3-Clause)"
     adr=docs/adr/0012-acpica.md
     port=ports/acpica/port.ndb
-    reviewed.by=pending
+    reviewed.by="James Kane" reviewed.date=2026-10-03
