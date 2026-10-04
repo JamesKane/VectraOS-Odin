@@ -22,13 +22,12 @@ Free_Block :: struct {
 phys: struct {
 	lock:        Spinlock,
 	lists:       [PHYS_MAX_ORDER + 1]^Free_Block,
-	frame_state: [^]u8, // one byte per 4 KiB frame below `frames`
-	frames:      u64,
+	frame_state: []u8, // one byte per 4 KiB frame
 	free_pages:  u64,
 }
 
 @(private="file")
-list_push :: proc "contextless" (order: uint, pa: u64) {
+list_push :: proc "contextless" (order: uint, pa: Paddr) {
 	b := cast(^Free_Block)phys_to_virt(pa)
 	b^ = {next = phys.lists[order]}
 	if b.next != nil {
@@ -38,7 +37,7 @@ list_push :: proc "contextless" (order: uint, pa: u64) {
 }
 
 @(private="file")
-list_remove :: proc "contextless" (order: uint, pa: u64) {
+list_remove :: proc "contextless" (order: uint, pa: Paddr) {
 	b := cast(^Free_Block)phys_to_virt(pa)
 	if b.prev != nil {
 		b.prev.next = b.next
@@ -50,29 +49,29 @@ list_remove :: proc "contextless" (order: uint, pa: u64) {
 	}
 }
 
-phys_free :: proc "contextless" (pa: u64, order: uint) {
+phys_free :: proc "contextless" (pa: Paddr, order: uint) {
 	spin_lock(&phys.lock)
 	phys.free_pages += 1 << order
-	frame := pa >> 12
+	frame := u64(pa) >> 12
 	o := order
 	for o < PHYS_MAX_ORDER {
 		buddy := frame ~ (1 << o)
-		if buddy + (1 << o) > phys.frames || phys.frame_state[buddy] != u8(FRAME_FREE_HEAD | o) {
+		if buddy + (1 << o) > u64(len(phys.frame_state)) || phys.frame_state[buddy] != u8(FRAME_FREE_HEAD | o) {
 			break
 		}
-		list_remove(o, buddy << 12)
+		list_remove(o, Paddr(buddy << 12))
 		phys.frame_state[buddy] = 0
 		frame &~= 1 << o
 		o += 1
 	}
 	phys.frame_state[frame] = u8(FRAME_FREE_HEAD | o)
-	list_push(o, frame << 12)
+	list_push(o, Paddr(frame << 12))
 	spin_unlock(&phys.lock)
 }
 
 // The physical address of 2^order free pages, or 0 if there are none.
 @(require_results)
-phys_alloc :: proc "contextless" (order: uint) -> u64 {
+phys_alloc :: proc "contextless" (order: uint) -> Paddr {
 	spin_lock(&phys.lock)
 	k := order
 	for k <= PHYS_MAX_ORDER && phys.lists[k] == nil {
@@ -82,12 +81,12 @@ phys_alloc :: proc "contextless" (order: uint) -> u64 {
 		spin_unlock(&phys.lock)
 		return 0
 	}
-	pa := u64(uintptr(phys.lists[k])) - boot.hhdm
+	pa := virt_to_phys(phys.lists[k])
 	list_remove(k, pa)
 	phys.frame_state[pa >> 12] = 0
 	for k > order { // return the upper halves
 		k -= 1
-		upper := pa + (4096 << k)
+		upper := pa + Paddr(4096 << k)
 		phys.frame_state[upper >> 12] = u8(FRAME_FREE_HEAD | k)
 		list_push(k, upper)
 	}
@@ -97,7 +96,7 @@ phys_alloc :: proc "contextless" (order: uint) -> u64 {
 }
 
 @(require_results)
-phys_alloc_zeroed :: proc "contextless" (order: uint) -> u64 {
+phys_alloc_zeroed :: proc "contextless" (order: uint) -> Paddr {
 	pa := phys_alloc(order)
 	if pa != 0 {
 		intrinsics.mem_zero(phys_to_virt(pa), int(4096 << order))
@@ -107,15 +106,15 @@ phys_alloc_zeroed :: proc "contextless" (order: uint) -> u64 {
 
 // Frees [start, end) in the largest aligned blocks that fit. Frame 0 is never
 // added: 0 is phys_alloc's "no memory", and Limine may report page 0 usable.
-phys_add_range :: proc "contextless" (lo, end: u64) {
+phys_add_range :: proc "contextless" (lo, end: Paddr) {
 	start := lo == 0 ? 4096 : lo
 	for start < end {
 		order := uint(PHYS_MAX_ORDER)
-		for order > 0 && ((start >> 12) & ((1 << order) - 1) != 0 || start + (4096 << order) > end) {
+		for order > 0 && ((start >> 12) & ((1 << order) - 1) != 0 || start + Paddr(4096 << order) > end) {
 			order -= 1
 		}
 		phys_free(start, order)
-		start += 4096 << order
+		start += Paddr(4096 << order)
 	}
 }
 
@@ -131,12 +130,12 @@ phys_init :: proc "contextless" () {
 			top = e.base + e.length
 		}
 	}
-	phys.frames = top >> 12
-	state_pa := early_alloc((phys.frames + 4095) / 4096)
+	frames := top >> 12
+	state_pa := early_alloc((frames + 4095) / 4096)
 	if state_pa == 0 {
 		kpanic("no memory for the page allocator")
 	}
-	phys.frame_state = cast([^]u8)phys_to_virt(state_pa)
+	phys.frame_state = (cast([^]u8)phys_to_virt(state_pa))[:frames]
 
 	taken_lo, taken_hi := early_next, early_top
 	early_limit = early_next // the early allocator is closed from here on
@@ -144,7 +143,7 @@ phys_init :: proc "contextless" () {
 		if e.type != .Usable {
 			continue
 		}
-		lo, hi := e.base, e.base + e.length
+		lo, hi := Paddr(e.base), Paddr(e.base + e.length)
 		if taken_lo >= lo && taken_hi <= hi {
 			phys_add_range(lo, taken_lo)
 			phys_add_range(taken_hi, hi)
@@ -164,7 +163,7 @@ reclaim_boot_memory :: proc "contextless" () {
 	n := 0
 	for e in mm.entries[:mm.entry_count] {
 		if e.type == .Bootloader_Reclaimable && n < len(ranges) {
-			ranges[n] = {e.base, e.base + e.length}
+			ranges[n] = {Paddr(e.base), Paddr(e.base + e.length)}
 			n += 1
 		}
 	}

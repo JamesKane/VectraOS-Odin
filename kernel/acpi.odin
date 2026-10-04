@@ -18,9 +18,9 @@ read64 :: proc "contextless" (p: [^]u8) -> u64 {
 }
 
 // Whether [pa, pa + length) is firmware or RAM memory, which the direct map covers.
-in_direct_map :: proc "contextless" (pa, length: u64) -> bool {
+in_direct_map :: proc "contextless" (pa: Paddr, length: u64) -> bool {
 	for r in boot.ram[:boot.ram_count] {
-		if pa >= r.base && pa < r.end && length <= r.end - pa {
+		if pa >= r.base && pa < r.end && length <= u64(r.end - pa) {
 			return true
 		}
 	}
@@ -34,7 +34,7 @@ acpi_table :: proc "contextless" (sig: string) -> [^]u8 {
 	}
 	rsdp := cast([^]u8)phys_to_virt(boot.rsdp)
 	xsdt := rsdp[15] >= 2
-	root := xsdt ? read64(rsdp[24:]) : u64(read32(rsdp[16:]))
+	root := Paddr(xsdt ? read64(rsdp[24:]) : u64(read32(rsdp[16:])))
 	if !in_direct_map(root, 36) {
 		return nil
 	}
@@ -44,7 +44,7 @@ acpi_table :: proc "contextless" (sig: string) -> [^]u8 {
 		return nil
 	}
 	for off := u32(36); off + entry <= length; off += entry {
-		pa := xsdt ? read64(sdt[off:]) : u64(read32(sdt[off:]))
+		pa := Paddr(xsdt ? read64(sdt[off:]) : u64(read32(sdt[off:])))
 		if !in_direct_map(pa, 36) {
 			continue
 		}

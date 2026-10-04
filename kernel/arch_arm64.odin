@@ -88,46 +88,46 @@ mp_info_id :: proc "contextless" (info: ^Mp_Info) -> u64 {
 // --- Page tables ---
 
 @(private="file")
-PTE_VALID :: u64(1) << 0
+PTE_VALID :: Pte(1) << 0
 @(private="file")
-PTE_TABLE :: u64(1) << 1 // a table at levels 0-2, a page at level 3
+PTE_TABLE :: Pte(1) << 1 // a table at levels 0-2, a page at level 3
 @(private="file")
-PTE_DEVICE :: u64(2) << 2 // MAIR index 2; index 0 is normal write-back memory
+PTE_DEVICE :: Pte(2) << 2 // MAIR index 2; index 0 is normal write-back memory
 @(private="file")
-PTE_USER :: u64(1) << 6 // AP[1]
+PTE_USER :: Pte(1) << 6 // AP[1]
 @(private="file")
-PTE_READ_ONLY :: u64(1) << 7 // AP[2]
+PTE_READ_ONLY :: Pte(1) << 7 // AP[2]
 @(private="file")
-PTE_SH_INNER :: u64(3) << 8
+PTE_SH_INNER :: Pte(3) << 8
 @(private="file")
-PTE_AF :: u64(1) << 10
+PTE_AF :: Pte(1) << 10
 @(private="file")
-PTE_NG :: u64(1) << 11 // not global: user mappings belong to one address space
+PTE_NG :: Pte(1) << 11 // not global: user mappings belong to one address space
 @(private="file")
-PTE_PXN :: u64(1) << 53
+PTE_PXN :: Pte(1) << 53
 @(private="file")
-PTE_UXN :: u64(1) << 54
+PTE_UXN :: Pte(1) << 54
 @(private="file")
-PTE_ADDR :: u64(0x0000_ffff_ffff_f000)
+PTE_ADDR :: Pte(0x0000_ffff_ffff_f000)
 
-arch_pte_valid :: proc "contextless" (e: u64) -> bool {
+arch_pte_valid :: proc "contextless" (e: Pte) -> bool {
 	return e & PTE_VALID != 0
 }
 
-arch_pte_is_table :: proc "contextless" (e: u64, level: int) -> bool {
+arch_pte_is_table :: proc "contextless" (e: Pte, level: int) -> bool {
 	return level < 3 && e & PTE_TABLE != 0
 }
 
-arch_pte_addr :: proc "contextless" (e: u64) -> u64 {
-	return e & PTE_ADDR
+arch_pte_addr :: proc "contextless" (e: Pte) -> Paddr {
+	return Paddr(e & PTE_ADDR)
 }
 
-arch_pte_table :: proc "contextless" (pa: u64) -> u64 {
-	return pa | PTE_TABLE | PTE_VALID
+arch_pte_table :: proc "contextless" (pa: Paddr) -> Pte {
+	return Pte(pa) | PTE_TABLE | PTE_VALID
 }
 
-arch_pte_leaf :: proc "contextless" (pa: u64, flags: Map_Flags, level: int) -> u64 {
-	e := pa | PTE_AF | PTE_VALID | (level == 3 ? PTE_TABLE : 0)
+arch_pte_leaf :: proc "contextless" (pa: Paddr, flags: Map_Flags, level: int) -> Pte {
+	e := Pte(pa) | PTE_AF | PTE_VALID | (level == 3 ? PTE_TABLE : 0)
 	e |= .Device in flags ? PTE_DEVICE : PTE_SH_INNER
 	if .Write not_in flags {
 		e |= PTE_READ_ONLY
@@ -152,16 +152,16 @@ arch_pte_publish :: proc "contextless" () {
 
 // The GICv3: the distributor, and one 128 KiB redistributor frame per CPU.
 @(private="file")
-GICD_PHYS :: u64(0x0800_0000)
+GICD_PHYS :: 0x0800_0000
 @(private="file")
 GICD_SIZE :: u64(0x1_0000)
 @(private="file")
-GICR_PHYS :: u64(0x080a_0000)
+GICR_PHYS :: 0x080a_0000
 @(private="file")
 GICR_FRAME_SIZE :: u64(0x2_0000)
 
 @(private="file")
-PL011_PHYS :: u64(0x0900_0000)
+PL011_PHYS :: 0x0900_0000
 @(private="file")
 PL011_DR :: 0x00 / 4 // data register, as a u32 index
 @(private="file")
@@ -172,7 +172,7 @@ PL011_FR_TXFF :: 1 << 5 // transmit FIFO full
 @(private="file")
 pl011: [^]u32
 
-arch_kernel_mappings :: proc "contextless" (root: u64) {
+arch_kernel_mappings :: proc "contextless" (root: Paddr) {
 	gicr_size := GICR_FRAME_SIZE * max(boot.cpu_count, 1)
 	if !map_range(root, boot.hhdm + PL011_PHYS, PL011_PHYS, 4096, {.Write, .Device}) ||
 	   !map_range(root, boot.hhdm + GICD_PHYS, GICD_PHYS, GICD_SIZE, {.Write, .Device}) ||
@@ -182,39 +182,39 @@ arch_kernel_mappings :: proc "contextless" (root: u64) {
 }
 
 @(private="file")
-empty_user_root: u64 // TTBR0 while a CPU runs no task, shared by all
+empty_user_root: Paddr // TTBR0 while a CPU runs no task, shared by all
 
 // Installs the kernel's tables in TTBR1, and an empty table in TTBR0 until
 // there is a user address space, then drops every cached translation.
 // The user half has its own tables in TTBR0; the kernel's stay in TTBR1.
-arch_new_user_root :: proc "contextless" () -> u64 {
+arch_new_user_root :: proc "contextless" () -> Paddr {
 	return phys_alloc_zeroed(0)
 }
 
 // Loads a task's tables into TTBR0, or with root 0 (no task, as for the idle
 // thread) the empty table.
-arch_switch_user_root :: proc "contextless" (root: u64) {
-	vx_switch_user_root(root != 0 ? root : empty_user_root)
+arch_switch_user_root :: proc "contextless" (root: Paddr) {
+	vx_switch_user_root(u64(root != 0 ? root : empty_user_root))
 }
 
 arch_user_top_slots :: proc "contextless" () -> int {
 	return 512
 }
 
-arch_pte_user_ok :: proc "contextless" (e: u64, write: bool) -> bool {
+arch_pte_user_ok :: proc "contextless" (e: Pte, write: bool) -> bool {
 	return e & PTE_VALID != 0 && e & PTE_USER != 0 && (!write || e & PTE_READ_ONLY == 0)
 }
 
-arch_switch_tables :: proc "contextless" (root: u64) {
+arch_switch_tables :: proc "contextless" (root: Paddr) {
 	if empty_user_root == 0 {
 		empty_user_root = phys_alloc_zeroed(0) // first on the boot CPU, before the others start
 	}
 	if empty_user_root == 0 {
 		kpanic("no memory for page tables")
 	}
-	ap_park_tables[0] = root // for ap_start and ap_park
-	ap_park_tables[1] = empty_user_root
-	vx_switch_tables(root, empty_user_root)
+	ap_park_tables[0] = u64(root) // for ap_start and ap_park
+	ap_park_tables[1] = u64(empty_user_root)
+	vx_switch_tables(u64(root), u64(empty_user_root))
 }
 
 // --- The console ---
@@ -225,7 +225,7 @@ arch_console_init :: proc "contextless" () {
 	}
 	vx_write_mair(vx_read_mair() &~ (0xff << 16)) // attribute 2 = 0x00: Device-nGnRnE
 	va := boot.hhdm + PL011_PHYS
-	if map_range(vx_read_ttbr1() & PTE_ADDR, va, PL011_PHYS, 4096, {.Write, .Device}) {
+	if map_range(Paddr(vx_read_ttbr1() & u64(PTE_ADDR)), va, PL011_PHYS, 4096, {.Write, .Device}) {
 		pl011 = cast([^]u32)uintptr(va)
 	}
 }
@@ -459,8 +459,8 @@ arch_context_switch :: proc "contextless" (save_sp: ^u64, load_sp: u64) {
 	vx_context_switch(save_sp, load_sp)
 }
 
-arch_enter_user :: proc "contextless" (entry, sp, arg, arg2, kstack_top: u64) -> ! {
-	vx_enter_user(entry, sp, arg, arg2, kstack_top)
+arch_enter_user :: proc "contextless" (entry, sp: Uva, arg, arg2, kstack_top: u64) -> ! {
+	vx_enter_user(u64(entry), u64(sp), arg, arg2, kstack_top)
 }
 
 // The frame entry.S builds: Trap_Frame, then q0-q31, FPCR and FPSR.

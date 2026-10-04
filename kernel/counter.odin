@@ -89,7 +89,7 @@ FUTEX_BUCKETS :: 64
 Futex_Waiter :: struct {
 	next:   ^Futex_Waiter,
 	thread: ^Thread,
-	key:    u64, // physical address of the word
+	key:    Paddr, // the word's
 }
 
 @(private="file")
@@ -102,14 +102,14 @@ Futex_Bucket :: struct {
 futex_buckets: [FUTEX_BUCKETS]Futex_Bucket
 
 @(private="file")
-futex_bucket :: proc "contextless" (key: u64) -> u32 {
-	return u32(((key >> 2) * 0x9e3779b97f4a7c15) >> 58)
+futex_bucket :: proc "contextless" (key: Paddr) -> u32 {
+	return u32(((u64(key) >> 2) * 0x9e3779b97f4a7c15) >> 58)
 }
 
 // Blocks while *word (a user address, in the current task) holds `expected`,
 // until futex_wake or the deadline. .Err_Bad_State if the word already differs.
 @(require_results)
-futex_wait :: proc "contextless" (word: u64, expected: u32, deadline: Instant) -> vx.Status {
+futex_wait :: proc "contextless" (word: Uva, expected: u32, deadline: Instant) -> vx.Status {
 	if word & 3 != 0 {
 		return .Err_Invalid
 	}
@@ -146,7 +146,7 @@ futex_wait :: proc "contextless" (word: u64, expected: u32, deadline: Instant) -
 
 // Wakes up to `count` threads waiting on *word. Returns how many it woke.
 @(require_results)
-futex_wake :: proc "contextless" (word: u64, count: u32) -> (woken: u32, st: vx.Status) {
+futex_wake :: proc "contextless" (word: Uva, count: u32) -> (woken: u32, st: vx.Status) {
 	if word & 3 != 0 {
 		return 0, .Err_Invalid
 	}

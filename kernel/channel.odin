@@ -113,7 +113,7 @@ msg_free :: proc "contextless" (m: ^Channel_Msg) {
 	for h in msg_handles(m) {
 		object_drop(h.obj)
 	}
-	phys_free(u64(uintptr(m)) - boot.hhdm, m.order)
+	phys_free(virt_to_phys(m), m.order)
 }
 
 @(private="file")

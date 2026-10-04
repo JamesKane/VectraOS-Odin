@@ -34,15 +34,16 @@ SMP_TEST_ROUNDS :: 4000
 @(private="file")
 smp_stress :: proc "contextless" (index: u32) {
 	Held :: struct {
-		pa, tag: u64,
-		order:   uint,
+		pa:    Paddr,
+		tag:   u64,
+		order: uint,
 	}
 	held: [8]Held
 	for r in u32(0) ..< SMP_TEST_ROUNDS {
 		h := &held[r % 8]
 		if h.pa != 0 {
 			first := cast(^u64)phys_to_virt(h.pa)
-			last := cast(^u64)phys_to_virt(h.pa + (4096 << h.order) - 8)
+			last := cast(^u64)phys_to_virt(h.pa + Paddr(4096 << h.order) - 8)
 			if intrinsics.volatile_load(first) != h.tag || intrinsics.volatile_load(last) != h.tag {
 				kpanic("selftest smp: a block was handed out twice")
 			}
@@ -54,7 +55,7 @@ smp_stress :: proc "contextless" (index: u32) {
 			kpanic("selftest smp: out of memory")
 		}
 		intrinsics.volatile_store(cast(^u64)phys_to_virt(h.pa), h.tag)
-		intrinsics.volatile_store(cast(^u64)phys_to_virt(h.pa + (4096 << order) - 8), h.tag)
+		intrinsics.volatile_store(cast(^u64)phys_to_virt(h.pa + Paddr(4096 << order) - 8), h.tag)
 	}
 	for h in held {
 		if h.pa != 0 {

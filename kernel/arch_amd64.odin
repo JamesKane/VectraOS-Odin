@@ -319,41 +319,41 @@ arch_cpu_init :: proc "contextless" (index: u32) {
 // --- Page tables ---
 
 @(private="file")
-X86_PRESENT :: u64(1) << 0
+X86_PRESENT :: Pte(1) << 0
 @(private="file")
-X86_WRITE :: u64(1) << 1
+X86_WRITE :: Pte(1) << 1
 @(private="file")
-X86_USER :: u64(1) << 2
+X86_USER :: Pte(1) << 2
 @(private="file")
-X86_PWT :: u64(1) << 3
+X86_PWT :: Pte(1) << 3
 @(private="file")
-X86_PCD :: u64(1) << 4
+X86_PCD :: Pte(1) << 4
 @(private="file")
-X86_LARGE :: u64(1) << 7 // a 2 MiB or 1 GiB leaf
+X86_LARGE :: Pte(1) << 7 // a 2 MiB or 1 GiB leaf
 @(private="file")
-X86_NX :: u64(1) << 63
+X86_NX :: Pte(1) << 63
 @(private="file")
-X86_ADDR :: u64(0x000f_ffff_ffff_f000)
+X86_ADDR :: Pte(0x000f_ffff_ffff_f000)
 
-arch_pte_valid :: proc "contextless" (e: u64) -> bool {
+arch_pte_valid :: proc "contextless" (e: Pte) -> bool {
 	return e & X86_PRESENT != 0
 }
 
-arch_pte_is_table :: proc "contextless" (e: u64, level: int) -> bool {
+arch_pte_is_table :: proc "contextless" (e: Pte, level: int) -> bool {
 	return level < 3 && e & X86_LARGE == 0
 }
 
-arch_pte_addr :: proc "contextless" (e: u64) -> u64 {
-	return e & X86_ADDR
+arch_pte_addr :: proc "contextless" (e: Pte) -> Paddr {
+	return Paddr(e & X86_ADDR)
 }
 
 // Tables allow everything; the leaf decides.
-arch_pte_table :: proc "contextless" (pa: u64) -> u64 {
-	return pa | X86_USER | X86_WRITE | X86_PRESENT
+arch_pte_table :: proc "contextless" (pa: Paddr) -> Pte {
+	return Pte(pa) | X86_USER | X86_WRITE | X86_PRESENT
 }
 
-arch_pte_leaf :: proc "contextless" (pa: u64, flags: Map_Flags, level: int) -> u64 {
-	e := pa | X86_PRESENT
+arch_pte_leaf :: proc "contextless" (pa: Paddr, flags: Map_Flags, level: int) -> Pte {
+	e := Pte(pa) | X86_PRESENT
 	if .Write in flags {
 		e |= X86_WRITE
 	}
@@ -380,7 +380,7 @@ arch_pte_publish :: proc "contextless" () {
 // 256 upper entries, so they must exist before the first task: fill them now
 // with empty tables (1 MiB in all), and later kernel mappings land in tables
 // every task already shares. COM1 is an I/O port: nothing else to map.
-arch_kernel_mappings :: proc "contextless" (root: u64) {
+arch_kernel_mappings :: proc "contextless" (root: Paddr) {
 	top := table_at(root)
 	for i in 256 ..< 512 {
 		if arch_pte_valid(top[i]) {
@@ -396,31 +396,31 @@ arch_kernel_mappings :: proc "contextless" (root: u64) {
 
 // Every task's top table shares the kernel's upper half by copying its 256
 // upper entries (arch_kernel_mappings made them all).
-arch_new_user_root :: proc "contextless" () -> u64 {
+arch_new_user_root :: proc "contextless" () -> Paddr {
 	root := phys_alloc_zeroed(0)
 	if root != 0 {
-		copy(table_at(root)[256:512], table_at(kernel_root)[256:512])
+		copy(table_at(root)[256:], table_at(kernel_root)[256:])
 	}
 	return root
 }
 
 // Loads a task's tables, or with root 0 (no task, as for the idle thread)
 // the kernel's.
-arch_switch_user_root :: proc "contextless" (root: u64) {
-	vx_write_cr3(root != 0 ? root : kernel_root)
+arch_switch_user_root :: proc "contextless" (root: Paddr) {
+	vx_write_cr3(u64(root != 0 ? root : kernel_root))
 }
 
 arch_user_top_slots :: proc "contextless" () -> int {
 	return 256
 }
 
-arch_pte_user_ok :: proc "contextless" (e: u64, write: bool) -> bool {
+arch_pte_user_ok :: proc "contextless" (e: Pte, write: bool) -> bool {
 	return e & X86_PRESENT != 0 && e & X86_USER != 0 && (!write || e & X86_WRITE != 0)
 }
 
-arch_switch_tables :: proc "contextless" (root: u64) {
-	ap_park_tables[0] = root // for ap_start and ap_park
-	vx_switch_tables(root)
+arch_switch_tables :: proc "contextless" (root: Paddr) {
+	ap_park_tables[0] = u64(root) // for ap_start and ap_park
+	vx_switch_tables(u64(root))
 }
 
 // --- The clock and the timer ---
@@ -621,10 +621,10 @@ arch_context_switch :: proc "contextless" (save_sp: ^u64, load_sp: u64) {
 
 // As if called (thread_start): a zero return address below sp. If it cannot
 // be written, the thread faults on its first use of its stack.
-arch_enter_user :: proc "contextless" (entry, sp, arg, arg2, kstack_top: u64) -> ! {
+arch_enter_user :: proc "contextless" (entry, sp: Uva, arg, arg2, kstack_top: u64) -> ! {
 	zero: u64
-	_ = copy_to_user(sp - 8, &zero, size_of(zero))
-	vx_enter_user(entry, sp - 8, arg, arg2, kstack_top)
+	_ = copy_out(sp - 8, &zero)
+	vx_enter_user(u64(entry), u64(sp - 8), arg, arg2, kstack_top)
 }
 
 @(export, link_name="x86_trap")
@@ -781,13 +781,13 @@ arch_devices_init :: proc "contextless" () {
 	for off := u32(44); off + 2 <= length && madt[off + 1] >= 2 && off + u32(madt[off + 1]) <= length; off += u32(madt[off + 1]) {
 		e := madt[off:]
 		if e[0] == 1 && e[1] >= 12 && ioapic_count < len(ioapics) {
-			pa := u64(read32(e[4:]))
-			if !map_range(kernel_root, boot.hhdm + pa, pa, 4096, {.Write, .Device}) {
+			pa := Paddr(read32(e[4:]))
+			if !map_range(kernel_root, boot.hhdm + u64(pa), pa, 4096, {.Write, .Device}) {
 				kpanic("cannot map an IOAPIC")
 			}
 			a := &ioapics[ioapic_count]
 			ioapic_count += 1
-			a.regs = cast([^]u32)uintptr(boot.hhdm + pa)
+			a.regs = cast([^]u32)phys_to_virt(pa)
 			a.gsi_base = read32(e[8:])
 			a.count = (ioapic_read(a, 1) >> 16 & 0xff) + 1
 			for i in 0 ..< a.count {

@@ -14,7 +14,7 @@ import vx "abi:vx"
 Vmo :: struct {
 	using obj:  Object,
 	size:       u64, // bytes, a multiple of 4096
-	pages:      [^]u64, // physical address of each page, through the direct map
+	pages:      []Paddr, // each page, in a block of its own through the direct map
 	list_order: uint, // the page list's allocation order
 	physical:   bool, // device memory: its pages are not RAM, and are never freed
 }
@@ -53,13 +53,13 @@ vmo_create :: proc "contextless" (want: u64) -> (^Vmo, vx.Status) {
 	}
 	object_init(&v.obj, .Vmo)
 	v.size = size
-	v.pages = cast([^]u64)phys_to_virt(list)
+	v.pages = (cast([^]Paddr)phys_to_virt(list))[:count]
 	v.list_order = order
-	for i in 0 ..< count {
-		v.pages[i] = phys_alloc_zeroed(0)
-		if v.pages[i] == 0 {
-			for k in 0 ..< i {
-				phys_free(v.pages[k], 0)
+	for &pa, i in v.pages {
+		pa = phys_alloc_zeroed(0)
+		if pa == 0 {
+			for k in v.pages[:i] {
+				phys_free(k, 0)
 			}
 			phys_free(list, order)
 			pool_free(&vmo_pool, v)
@@ -71,11 +71,11 @@ vmo_create :: proc "contextless" (want: u64) -> (^Vmo, vx.Status) {
 
 vmo_destroy :: proc "contextless" (v: ^Vmo) {
 	if !v.physical {
-		for i in 0 ..< v.size / 4096 {
-			phys_free(v.pages[i], 0)
+		for pa in v.pages {
+			phys_free(pa, 0)
 		}
 	}
-	phys_free(u64(uintptr(v.pages)) - boot.hhdm, v.list_order)
+	phys_free(virt_to_phys(raw_data(v.pages)), v.list_order)
 	pool_free(&vmo_pool, v)
 }
 

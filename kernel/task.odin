@@ -8,10 +8,10 @@ import vx "abi:vx"
 // A task is an address space plus a handle table. Its user half is its own
 // page tables; the kernel half is shared (arch_new_user_root).
 
-USER_TOP :: u64(0x0000_8000_0000_0000) // first address past the lower half
-USER_MAP_BASE :: u64(0x0000_1000_0000_0000) // where as_map puts mappings it places
-USER_STACK_TOP :: u64(0x0000_7fff_ffff_0000)
-USER_STACK_SIZE :: u64(256 * 1024)
+USER_TOP :: Uva(0x0000_8000_0000_0000) // first address past the lower half
+USER_MAP_BASE :: Uva(0x0000_1000_0000_0000) // where as_map puts mappings it places
+USER_STACK_TOP :: Uva(0x0000_7fff_ffff_0000)
+USER_STACK_SIZE :: 256 * 1024
 TASK_MAX_IO :: 4 // I/O port ranges per task
 
 // I/O ports [base, base + count). The count is a u32 because one range may
@@ -41,8 +41,9 @@ HANDLE_SLOTS :: 4096 / size_of(Handle_Entry)
 // A mapping in a task's address space: [va, va + size) shows the VMO from
 // `offset`. It holds a reference on the VMO.
 Mapping :: struct {
-	va, size, offset: u64,
-	vmo:              ^Vmo,
+	va:           Uva,
+	size, offset: u64,
+	vmo:          ^Vmo,
 }
 
 TASK_MAX_MAPPINGS :: 4096 / size_of(Mapping)
@@ -53,10 +54,10 @@ Task :: struct {
 	using obj:       Object,
 	lock:            Spinlock,
 	id:              u64,
-	root:            u64, // physical address of the address space's top table; 0 once torn down
-	map_next:        u64, // the next address as_map places at
-	handles:         [^]Handle_Entry, // HANDLE_SLOTS entries
-	maps:            [^]Mapping, // TASK_MAX_MAPPINGS entries; size 0 is a free slot
+	root:            Paddr, // the address space's top table; 0 once torn down
+	map_next:        Uva, // the next address as_map places at
+	handles:         ^[HANDLE_SLOTS]Handle_Entry, // nil once torn down
+	maps:            ^[TASK_MAX_MAPPINGS]Mapping, // size 0 is a free slot
 	mapped:          u64, // bytes
 	threads:         ^Thread, // started and not yet reaped, through task_next
 	live_threads:    u32,
@@ -91,8 +92,8 @@ Thread :: struct {
 	task_next:    ^Thread, // in its task's list, under the task's lock
 	kernel_sp:    u64, // saved by the context switch
 	kstack:       u64, // the kernel stack's lowest byte (kstack.odin); 0 for CPU 0's idle thread
-	user_entry:   u64,
-	user_sp:      u64,
+	user_entry:   Uva,
+	user_sp:      Uva,
 	user_arg:     u64,
 	user_arg2:    u64,
 	intent:       vx.Intent,
@@ -383,8 +384,8 @@ task_create :: proc "contextless" (name: string, parent_id: u64) -> (^Task, vx.S
 	t.id = intrinsics.atomic_add_explicit(&next_task_id, 1, .Relaxed)
 	t.root = root
 	t.map_next = USER_MAP_BASE
-	t.handles = cast([^]Handle_Entry)phys_to_virt(handles)
-	t.maps = cast([^]Mapping)phys_to_virt(maps)
+	t.handles = cast(^[HANDLE_SLOTS]Handle_Entry)phys_to_virt(handles)
+	t.maps = cast(^[TASK_MAX_MAPPINGS]Mapping)phys_to_virt(maps)
 	copy(t.name[:len(t.name) - 1], name)
 	t.parent_id = parent_id
 	spin_lock(&all_tasks_lock)
@@ -407,7 +408,7 @@ task_name :: proc "contextless" (t: ^Task) -> string {
 // page-aligned and free. The mapping holds a reference on the VMO. W^X:
 // never writable and executable.
 @(require_results)
-task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.Map_Options, want_va: u64) -> (u64, vx.Status) {
+task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.Map_Options, want_va: Uva) -> (Uva, vx.Status) {
 	if flags >= {.Write, .Exec} {
 		return 0, .Err_Access
 	}
@@ -428,12 +429,14 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 	spin_lock(&t.lock)
 	defer spin_unlock(&t.lock)
 	at := want_va != 0 ? want_va : t.map_next
-	end, end_overflow := intrinsics.overflow_add(at, size)
+	end, end_overflow := intrinsics.overflow_add(at, Uva(size))
 	slot: ^Mapping
-	for i in 0 ..< TASK_MAX_MAPPINGS {
-		if t.maps != nil && t.maps[i].size == 0 {
-			slot = &t.maps[i]
-			break
+	if t.maps != nil {
+		for &m in t.maps {
+			if m.size == 0 {
+				slot = &m
+				break
+			}
 		}
 	}
 	st := vx.Status.Ok
@@ -447,13 +450,13 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 	}
 	done: u64
 	for ; st == .Ok && done < size; done += 4096 {
-		if !map_range(t.root, at + done, v.pages[(offset + done) / 4096], 4096, mf) {
+		if !map_range(t.root, u64(at) + done, v.pages[(offset + done) / 4096], 4096, mf) {
 			st = .Err_No_Memory
 		}
 	}
 	if st != .Ok {
 		for off := u64(0); off + 4096 <= done; off += 4096 {
-			unmap_page(t.root, at + off)
+			unmap_page(t.root, u64(at) + off)
 		}
 		return 0, st
 	}

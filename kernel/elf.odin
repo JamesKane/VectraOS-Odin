@@ -38,7 +38,7 @@ when ODIN_ARCH == .amd64 {
 }
 
 @(require_results)
-elf_load :: proc "contextless" (t: ^Task, image: []u8) -> (entry: u64, st: vx.Status) {
+elf_load :: proc "contextless" (t: ^Task, image: []u8) -> (entry: Uva, st: vx.Status) {
 	size := u64(len(image))
 	if size < size_of(Elf64_Header) {
 		return 0, .Err_Invalid
@@ -57,7 +57,7 @@ elf_load :: proc "contextless" (t: ^Task, image: []u8) -> (entry: u64, st: vx.St
 		}
 		file_end, o3 := intrinsics.overflow_add(p.offset, p.filesz)
 		mem_end, o4 := intrinsics.overflow_add(p.vaddr, p.memsz)
-		if p.filesz > p.memsz || o3 || file_end > size || o4 || mem_end > USER_TOP || (p.flags & PF_W != 0 && p.flags & PF_X != 0) {
+		if p.filesz > p.memsz || o3 || file_end > size || o4 || Uva(mem_end) > USER_TOP || (p.flags & PF_W != 0 && p.flags & PF_X != 0) {
 			return 0, .Err_Invalid
 		}
 		base := p.vaddr &~ 4095
@@ -70,11 +70,11 @@ elf_load :: proc "contextless" (t: ^Task, image: []u8) -> (entry: u64, st: vx.St
 		if p.flags & PF_X != 0 {
 			flags += {.Exec}
 		}
-		_, st = task_map(t, v, 0, v.size, flags, base)
+		_, st = task_map(t, v, 0, v.size, flags, Uva(base))
 		object_release(&v.obj) // the mapping keeps it
 		if st != .Ok {
 			return 0, st
 		}
 	}
-	return eh.entry, .Ok
+	return Uva(eh.entry), .Ok
 }

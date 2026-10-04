@@ -26,11 +26,11 @@ options_of :: proc "contextless" ($T: typeid, a: u64) -> (T, bool) where intrins
 // the kernel touches them. Mappings are only ever removed when a task ends,
 // so nothing can unmap a range between the check and the copy; with as_unmap
 // these become copies that recover from a fault.
-user_range_ok :: proc "contextless" (addr, length: u64, write: bool) -> bool {
+user_range_ok :: proc "contextless" (addr: Uva, length: u64, write: bool) -> bool {
 	if length == 0 {
 		return true
 	}
-	end, overflow := intrinsics.overflow_add(addr, length)
+	end, overflow := intrinsics.overflow_add(addr, Uva(length))
 	if overflow || end > USER_TOP {
 		return false
 	}
@@ -43,7 +43,7 @@ user_range_ok :: proc "contextless" (addr, length: u64, write: bool) -> bool {
 }
 
 @(require_results)
-copy_from_user :: proc "contextless" (dst: rawptr, src: u64, length: u64) -> vx.Status {
+copy_from_user :: proc "contextless" (dst: rawptr, src: Uva, length: u64) -> vx.Status {
 	if !user_range_ok(src, length, false) {
 		return .Err_Invalid
 	}
@@ -52,7 +52,7 @@ copy_from_user :: proc "contextless" (dst: rawptr, src: u64, length: u64) -> vx.
 }
 
 @(require_results)
-copy_to_user :: proc "contextless" (dst: u64, src: rawptr, length: u64) -> vx.Status {
+copy_to_user :: proc "contextless" (dst: Uva, src: rawptr, length: u64) -> vx.Status {
 	if !user_range_ok(dst, length, true) {
 		return .Err_Invalid
 	}
@@ -62,29 +62,29 @@ copy_to_user :: proc "contextless" (dst: u64, src: rawptr, length: u64) -> vx.St
 
 // Typed copies, whose length comes from the type or the slice.
 @(require_results)
-copy_in :: proc "contextless" (dst: ^$T, src: u64) -> vx.Status {
+copy_in :: proc "contextless" (dst: ^$T, src: Uva) -> vx.Status {
 	return copy_from_user(dst, src, size_of(T))
 }
 
 @(require_results)
-copy_out :: proc "contextless" (dst: u64, src: ^$T) -> vx.Status {
+copy_out :: proc "contextless" (dst: Uva, src: ^$T) -> vx.Status {
 	return copy_to_user(dst, src, size_of(T))
 }
 
 @(require_results)
-copy_in_slice :: proc "contextless" (dst: []$T, src: u64) -> vx.Status {
+copy_in_slice :: proc "contextless" (dst: []$T, src: Uva) -> vx.Status {
 	return copy_from_user(raw_data(dst), src, u64(len(dst)) * size_of(T))
 }
 
 @(require_results)
-copy_out_slice :: proc "contextless" (dst: u64, src: []$T) -> vx.Status {
+copy_out_slice :: proc "contextless" (dst: Uva, src: []$T) -> vx.Status {
 	return copy_to_user(dst, raw_data(src), u64(len(src)) * size_of(T))
 }
 
 // Writes a new handle's value to user memory, or closes the handle if it
 // cannot.
 @(private="file", require_results)
-handle_out :: proc "contextless" (h: vx.Handle, out: u64) -> vx.Status {
+handle_out :: proc "contextless" (h: vx.Handle, out: Uva) -> vx.Status {
 	value := h
 	st := copy_out(out, &value)
 	if st != .Ok {
@@ -95,7 +95,7 @@ handle_out :: proc "contextless" (h: vx.Handle, out: u64) -> vx.Status {
 
 // Gives the current task a handle to a new object, dropping the creator's reference.
 @(private="file", require_results)
-return_handle :: proc "contextless" (obj: ^Object, rights: vx.Rights, out: u64) -> vx.Status {
+return_handle :: proc "contextless" (obj: ^Object, rights: vx.Rights, out: Uva) -> vx.Status {
 	h, st := handle_add(current_task(), obj, rights)
 	object_release(obj)
 	if st != .Ok {
@@ -105,7 +105,7 @@ return_handle :: proc "contextless" (obj: ^Object, rights: vx.Rights, out: u64) 
 }
 
 @(private="file", require_results)
-sys_debug_write :: proc "contextless" (ptr, length: u64) -> vx.Status {
+sys_debug_write :: proc "contextless" (ptr: Uva, length: u64) -> vx.Status {
 	if !current_task().may_debug_write {
 		return .Err_Access
 	}
@@ -116,7 +116,7 @@ sys_debug_write :: proc "contextless" (ptr, length: u64) -> vx.Status {
 		copy_in_slice(buf[:n], p) or_return
 		self := this_cpu().current
 		console_user_write(string(buf[:n]), self.console_buf[:], &self.console_len)
-		p += n
+		p += Uva(n)
 		left -= n
 	}
 	return .Ok
@@ -139,7 +139,7 @@ task_target :: proc "contextless" (h: vx.Handle, rights: vx.Rights, id: u64, nex
 }
 
 @(private="file", require_results)
-sys_task_info :: proc "contextless" (h: vx.Handle, out, id, flags: u64) -> vx.Status {
+sys_task_info :: proc "contextless" (h: vx.Handle, out: Uva, id, flags: u64) -> vx.Status {
 	opts, valid := options_of(vx.Task_Info_Options, flags)
 	if !valid {
 		return .Err_Invalid
@@ -165,7 +165,7 @@ sys_task_info :: proc "contextless" (h: vx.Handle, out, id, flags: u64) -> vx.St
 }
 
 @(private="file", require_results)
-sys_port_create :: proc "contextless" (options, out: u64) -> vx.Status {
+sys_port_create :: proc "contextless" (options: u64, out: Uva) -> vx.Status {
 	if options != 0 {
 		return .Err_Invalid
 	}
@@ -177,7 +177,7 @@ sys_port_create :: proc "contextless" (options, out: u64) -> vx.Status {
 // blocks. The reference handle_get took keeps the port alive through the
 // wait, even if another thread closes the handle meanwhile.
 @(private="file", require_results)
-port_wait_on :: proc "contextless" (p: ^Port, deadline, leeway: Instant, out, max_packets: u64) -> (count: int, st: vx.Status) {
+port_wait_on :: proc "contextless" (p: ^Port, deadline, leeway: Instant, out: Uva, max_packets: u64) -> (count: int, st: vx.Status) {
 	for {
 		got: [PORT_CAPACITY]vx.Packet
 		n := port_take(p, got[:max_packets])
@@ -200,7 +200,7 @@ port_wait_on :: proc "contextless" (p: ^Port, deadline, leeway: Instant, out, ma
 }
 
 @(private="file", require_results)
-sys_port_wait :: proc "contextless" (h: vx.Handle, deadline, leeway: i64, out, max_packets: u64) -> (count: int, st: vx.Status) {
+sys_port_wait :: proc "contextless" (h: vx.Handle, deadline, leeway: i64, out: Uva, max_packets: u64) -> (count: int, st: vx.Status) {
 	if max_packets == 0 || max_packets > PORT_CAPACITY || leeway < 0 {
 		return 0, .Err_Invalid
 	}
@@ -213,7 +213,7 @@ sys_port_wait :: proc "contextless" (h: vx.Handle, deadline, leeway: i64, out, m
 }
 
 @(private="file", require_results)
-sys_port_post :: proc "contextless" (h: vx.Handle, packet: u64) -> vx.Status {
+sys_port_post :: proc "contextless" (h: vx.Handle, packet: Uva) -> vx.Status {
 	pk: vx.Packet
 	copy_in(&pk, packet) or_return
 	p := handle_get_as(current_task(), h, Port, {.Signal}) or_return
@@ -232,7 +232,7 @@ DEVICE_RIGHTS :: vx.Rights{.Duplicate, .Transfer, .Inspect}
 // vmo_create(size, options, &out, resource, physical_address): anonymous
 // memory, or with {.Physical}, device memory minted from a Resource.
 @(private="file", require_results)
-sys_vmo_create :: proc "contextless" (size, options, out: u64, rh: vx.Handle, pa: u64) -> vx.Status {
+sys_vmo_create :: proc "contextless" (size, options: u64, out: Uva, rh: vx.Handle, pa: Paddr) -> vx.Status {
 	opts, valid := options_of(vx.Vmo_Options, options)
 	if !valid {
 		return .Err_Invalid
@@ -255,7 +255,7 @@ sys_vmo_create :: proc "contextless" (size, options, out: u64, rh: vx.Handle, pa
 // --- Devices (device.odin) ---
 
 @(private="file", require_results)
-sys_irq_create :: proc "contextless" (rh: vx.Handle, line, options, out: u64) -> vx.Status {
+sys_irq_create :: proc "contextless" (rh: vx.Handle, line, options: u64, out: Uva) -> vx.Status {
 	if options != 0 || line > u64(max(u32)) {
 		return .Err_Invalid
 	}
@@ -275,7 +275,7 @@ sys_irq_ack :: proc "contextless" (h: vx.Handle) -> vx.Status {
 }
 
 @(private="file", require_results)
-sys_iorange_create :: proc "contextless" (rh: vx.Handle, base, count, out: u64) -> vx.Status {
+sys_iorange_create :: proc "contextless" (rh: vx.Handle, base, count: u64, out: Uva) -> vx.Status {
 	r := handle_get_as(current_task(), rh, Resource, {.Manage}) or_return
 	io, st := iorange_create(base, count)
 	object_release(&r.obj)
@@ -289,7 +289,7 @@ sys_iorange_create :: proc "contextless" (rh: vx.Handle, base, count, out: u64) 
 // an IoRange in place of the VMO (and the rest 0), it lets the task use those
 // I/O ports instead.
 @(private="file", require_results)
-sys_as_map :: proc "contextless" (th, vh: vx.Handle, offset, size, flags, addr_ptr: u64) -> vx.Status {
+sys_as_map :: proc "contextless" (th, vh: vx.Handle, offset, size, flags: u64, addr_ptr: Uva) -> vx.Status {
 	if io, _ := handle_get_as(current_task(), vh, Iorange, {.Map}); io != nil {
 		defer object_release(&io.obj)
 		if offset | size | flags != 0 {
@@ -303,7 +303,7 @@ sys_as_map :: proc "contextless" (th, vh: vx.Handle, offset, size, flags, addr_p
 	if !valid {
 		return .Err_Invalid
 	}
-	va: u64
+	va: Uva
 	copy_in(&va, addr_ptr) or_return
 	target := handle_get_as(current_task(), th, Task, {.Manage}) or_return
 	defer object_release(&target.obj)
@@ -326,7 +326,7 @@ sys_as_map :: proc "contextless" (th, vh: vx.Handle, offset, size, flags, addr_p
 // --- Channels ---
 
 @(private="file", require_results)
-sys_channel_create :: proc "contextless" (options, out: u64) -> vx.Status {
+sys_channel_create :: proc "contextless" (options: u64, out: Uva) -> vx.Status {
 	if options != 0 {
 		return .Err_Invalid
 	}
@@ -354,7 +354,7 @@ sys_channel_create :: proc "contextless" (options, out: u64) -> vx.Status {
 // Builds a message from user memory: the body copied in, the handles moved
 // out of the caller's table (gone whatever happens next, as with every write).
 @(private="file", require_results)
-msg_from_user :: proc "contextless" (bytes: u64, body_len: u32, handles: u64, count: u32, forbidden: ^Object) -> (m: ^Channel_Msg, st: vx.Status) {
+msg_from_user :: proc "contextless" (bytes: Uva, body_len: u32, handles: Uva, count: u32, forbidden: ^Object) -> (m: ^Channel_Msg, st: vx.Status) {
 	if body_len < size_of(vx.Msg_Header) || body_len > vx.CHANNEL_MAX_BYTES || count > vx.CHANNEL_MAX_HANDLES {
 		return nil, .Err_Invalid
 	}
@@ -379,7 +379,7 @@ msg_from_user :: proc "contextless" (bytes: u64, body_len: u32, handles: u64, co
 // Gives the caller a message: the body copied out, the handles installed.
 // The caller has checked the user ranges. The message is freed either way.
 @(private="file", require_results)
-msg_to_user :: proc "contextless" (m: ^Channel_Msg, bytes, handles: u64) -> vx.Status {
+msg_to_user :: proc "contextless" (m: ^Channel_Msg, bytes, handles: Uva) -> vx.Status {
 	values: [vx.CHANNEL_MAX_HANDLES]vx.Handle
 	st := copy_out_slice(bytes, msg_body(m))
 	if st == .Ok {
@@ -393,7 +393,7 @@ msg_to_user :: proc "contextless" (m: ^Channel_Msg, bytes, handles: u64) -> vx.S
 }
 
 @(private="file", require_results)
-sys_channel_write :: proc "contextless" (h: vx.Handle, bytes, length, handles, count: u64) -> vx.Status {
+sys_channel_write :: proc "contextless" (h: vx.Handle, bytes: Uva, length: u64, handles: Uva, count: u64) -> vx.Status {
 	c := handle_get_as(current_task(), h, Channel, {.Write}) or_return
 	defer object_release(&c.obj)
 	m := msg_from_user(bytes, u32(min(length, u64(max(u32)))), handles, u32(min(count, u64(max(u32)))), &c.obj) or_return
@@ -405,7 +405,7 @@ sys_channel_write :: proc "contextless" (h: vx.Handle, bytes, length, handles, c
 }
 
 @(private="file", require_results)
-sys_channel_read :: proc "contextless" (h: vx.Handle, bytes, cap_bytes, handles, count_cap, actual: u64) -> vx.Status {
+sys_channel_read :: proc "contextless" (h: vx.Handle, bytes: Uva, cap_bytes: u64, handles: Uva, count_cap: u64, actual: Uva) -> vx.Status {
 	if cap_bytes > vx.CHANNEL_MAX_BYTES || count_cap > vx.CHANNEL_MAX_HANDLES {
 		return .Err_Invalid
 	}
@@ -425,18 +425,18 @@ sys_channel_read :: proc "contextless" (h: vx.Handle, bytes, cap_bytes, handles,
 }
 
 @(private="file", require_results)
-sys_channel_call :: proc "contextless" (h: vx.Handle, args_ptr: u64, deadline: i64) -> vx.Status {
+sys_channel_call :: proc "contextless" (h: vx.Handle, args_ptr: Uva, deadline: i64) -> vx.Status {
 	args: vx.Call
 	copy_in(&args, args_ptr) or_return
 	if args.rd_cap > vx.CHANNEL_MAX_BYTES || args.rd_count_cap > vx.CHANNEL_MAX_HANDLES {
 		return .Err_Invalid
 	}
-	rd_bytes, rd_handles := u64(uintptr(args.rd_bytes)), u64(uintptr(args.rd_handles))
+	rd_bytes, rd_handles := Uva(uintptr(args.rd_bytes)), Uva(uintptr(args.rd_handles))
 	if !user_range_ok(rd_bytes, u64(args.rd_cap), true) || !user_range_ok(rd_handles, u64(args.rd_count_cap) * size_of(vx.Handle), true) {
 		return .Err_Invalid
 	}
 	c := handle_get_as(current_task(), h, Channel, {.Read, .Write}) or_return
-	request, st := msg_from_user(u64(uintptr(args.wr_bytes)), args.wr_len, u64(uintptr(args.wr_handles)), args.wr_count, &c.obj)
+	request, st := msg_from_user(Uva(uintptr(args.wr_bytes)), args.wr_len, Uva(uintptr(args.wr_handles)), args.wr_count, &c.obj)
 	reply: ^Channel_Msg
 	if st == .Ok {
 		sent: bool
@@ -450,7 +450,7 @@ sys_channel_call :: proc "contextless" (h: vx.Handle, args_ptr: u64, deadline: i
 		return st
 	}
 	args.actual = {reply.len, reply.count}
-	_ = copy_out(args_ptr + u64(offset_of(vx.Call, actual)), &args.actual)
+	_ = copy_out(args_ptr + Uva(offset_of(vx.Call, actual)), &args.actual)
 	if reply.len > args.rd_cap || reply.count > args.rd_count_cap {
 		msg_free(reply)
 		return .Err_Too_Small
@@ -461,7 +461,7 @@ sys_channel_call :: proc "contextless" (h: vx.Handle, args_ptr: u64, deadline: i
 // --- Counters, bindings, futexes ---
 
 @(private="file", require_results)
-sys_counter_create :: proc "contextless" (initial, out: u64) -> vx.Status {
+sys_counter_create :: proc "contextless" (initial: u64, out: Uva) -> vx.Status {
 	c := counter_create(initial) or_return
 	return return_handle(&c.obj, {.Read, .Signal, .Wait, .Duplicate, .Transfer, .Inspect}, out)
 }
@@ -539,7 +539,7 @@ sys_port_bind :: proc "contextless" (ph, sh: vx.Handle, trigger, key, threshold:
 // --- Rings ---
 
 @(private="file", require_results)
-sys_ring_create :: proc "contextless" (params_ptr, out: u64) -> vx.Status {
+sys_ring_create :: proc "contextless" (params_ptr, out: Uva) -> vx.Status {
 	MEMORY_RIGHTS :: vx.Rights{.Read, .Write, .Map, .Duplicate, .Transfer, .Inspect}
 	p: vx.Ring_Params
 	copy_in(&p, params_ptr) or_return
@@ -583,7 +583,7 @@ sys_ring_notify :: proc "contextless" (h: vx.Handle) -> vx.Status {
 // ring_xfer_handles(ring, PUT, handles, count, 0) -> slot;
 // ring_xfer_handles(ring, TAKE, handles out, capacity, slot) -> count.
 @(private="file", require_results)
-sys_ring_xfer :: proc "contextless" (h: vx.Handle, op, handles, count, slot: u64) -> (result: u32, st: vx.Status) {
+sys_ring_xfer :: proc "contextless" (h: vx.Handle, op: u64, handles: Uva, count, slot: u64) -> (result: u32, st: vx.Status) {
 	if op != u64(vx.Ring_Xfer.Put) && op != u64(vx.Ring_Xfer.Take) {
 		return 0, .Err_Invalid
 	}
@@ -630,7 +630,7 @@ sys_ring_xfer :: proc "contextless" (h: vx.Handle, op, handles, count, slot: u64
 // --- Tasks and threads ---
 
 @(private="file", require_results)
-sys_task_create :: proc "contextless" (name_ptr, name_len, out: u64) -> vx.Status {
+sys_task_create :: proc "contextless" (name_ptr: Uva, name_len: u64, out: Uva) -> vx.Status {
 	name: [24]u8
 	if name_len >= len(name) {
 		return .Err_Range
@@ -642,7 +642,7 @@ sys_task_create :: proc "contextless" (name_ptr, name_len, out: u64) -> vx.Statu
 }
 
 @(private="file", require_results)
-sys_thread_create :: proc "contextless" (th: vx.Handle, out: u64) -> vx.Status {
+sys_thread_create :: proc "contextless" (th: vx.Handle, out: Uva) -> vx.Status {
 	t := handle_get_as(current_task(), th, Task, {.Manage}) or_return
 	spin_lock(&t.lock)
 	ending := t.ending || t.killed
@@ -663,7 +663,7 @@ sys_thread_create :: proc "contextless" (th: vx.Handle, out: u64) -> vx.Status {
 // from the caller to the thread's task, and the thread gets its value there
 // as its first argument.
 @(private="file", require_results)
-sys_thread_start :: proc "contextless" (h: vx.Handle, entry, sp: u64, arg: vx.Handle, arg2: u64) -> vx.Status {
+sys_thread_start :: proc "contextless" (h: vx.Handle, entry, sp: Uva, arg: vx.Handle, arg2: u64) -> vx.Status {
 	th := handle_get_as(current_task(), h, Thread, {.Manage}) or_return
 	defer object_release(&th.obj)
 	moved: vx.Handle
@@ -699,7 +699,7 @@ sys_task_kill :: proc "contextless" (h: vx.Handle, status, id: u64) -> vx.Status
 // vmo_rw(vmo, op, offset, buffer, size): copies between a VMO and the
 // caller's memory.
 @(private="file", require_results)
-sys_vmo_rw :: proc "contextless" (h: vx.Handle, op, offset, buf, size: u64) -> vx.Status {
+sys_vmo_rw :: proc "contextless" (h: vx.Handle, op, offset: u64, buf: Uva, size: u64) -> vx.Status {
 	if op != u64(vx.Vmo_Op.Read) && op != u64(vx.Vmo_Op.Write) {
 		return .Err_Invalid
 	}
@@ -721,7 +721,7 @@ sys_vmo_rw :: proc "contextless" (h: vx.Handle, op, offset, buf, size: u64) -> v
 		in_page := at & 4095
 		n := min(4096 - in_page, size - done)
 		page := rawptr(uintptr(u64(uintptr(phys_to_virt(v.pages[at / 4096]))) + in_page))
-		user := rawptr(uintptr(buf + done))
+		user := rawptr(uintptr(buf + Uva(done)))
 		if reading {
 			intrinsics.mem_copy(user, page, int(n))
 		} else {
@@ -733,7 +733,7 @@ sys_vmo_rw :: proc "contextless" (h: vx.Handle, op, offset, buf, size: u64) -> v
 }
 
 @(private="file", require_results)
-sys_handle_dup :: proc "contextless" (h: vx.Handle, rights, out: u64) -> vx.Status {
+sys_handle_dup :: proc "contextless" (h: vx.Handle, rights: u64, out: Uva) -> vx.Status {
 	want: Maybe(vx.Rights) // nil: RIGHTS_SAME
 	if rights != u64(transmute(u32)vx.RIGHTS_SAME) {
 		// Bits above the u32 are rights no handle has, as bit 31 is: either
@@ -757,67 +757,67 @@ syscall_dispatch :: proc "contextless" (nr: u64, a: [6]u64) -> i64 {
 	}
 	#partial switch vx.Syscall(nr) {
 	case .Debug_Write:
-		return i64(sys_debug_write(a[0], a[1]))
+		return i64(sys_debug_write(Uva(a[0]), a[1]))
 	case .Clock_Read:
 		return i64(clock_now())
 	case .Task_Create:
-		return i64(sys_task_create(a[0], a[1], a[2]))
+		return i64(sys_task_create(Uva(a[0]), a[1], Uva(a[2])))
 	case .Task_Kill:
 		return i64(sys_task_kill(vx.Handle(a[0]), a[1], a[2]))
 	case .Task_Info:
-		return i64(sys_task_info(vx.Handle(a[0]), a[1], a[2], a[3]))
+		return i64(sys_task_info(vx.Handle(a[0]), Uva(a[1]), a[2], a[3]))
 	case .Thread_Create:
-		return i64(sys_thread_create(vx.Handle(a[0]), a[1]))
+		return i64(sys_thread_create(vx.Handle(a[0]), Uva(a[1])))
 	case .Thread_Start:
-		return i64(sys_thread_start(vx.Handle(a[0]), a[1], a[2], vx.Handle(a[3]), a[4]))
+		return i64(sys_thread_start(vx.Handle(a[0]), Uva(a[1]), Uva(a[2]), vx.Handle(a[3]), a[4]))
 	case .Thread_Exit:
 		thread_exit_current(i64(a[0]))
 	case .Port_Create:
-		return i64(sys_port_create(a[0], a[1]))
+		return i64(sys_port_create(a[0], Uva(a[1])))
 	case .Port_Bind:
 		return i64(sys_port_bind(vx.Handle(a[0]), vx.Handle(a[1]), a[2], a[3], a[4]))
 	case .Port_Wait:
-		return result(sys_port_wait(vx.Handle(a[0]), i64(a[1]), i64(a[2]), a[3], a[4]))
+		return result(sys_port_wait(vx.Handle(a[0]), i64(a[1]), i64(a[2]), Uva(a[3]), a[4]))
 	case .Port_Post:
-		return i64(sys_port_post(vx.Handle(a[0]), a[1]))
+		return i64(sys_port_post(vx.Handle(a[0]), Uva(a[1])))
 	case .Counter_Create:
-		return i64(sys_counter_create(a[0], a[1]))
+		return i64(sys_counter_create(a[0], Uva(a[1])))
 	case .Counter_Signal:
 		return i64(sys_counter_signal(vx.Handle(a[0]), a[1]))
 	case .Counter_Read:
 		return result(sys_counter_read(vx.Handle(a[0])))
 	case .Futex_Wait:
-		return i64(futex_wait(a[0], u32(a[1]), Instant(a[2])))
+		return i64(futex_wait(Uva(a[0]), u32(a[1]), Instant(a[2])))
 	case .Futex_Wake:
-		return result(futex_wake(a[0], u32(a[1])))
+		return result(futex_wake(Uva(a[0]), u32(a[1])))
 	case .Channel_Create:
-		return i64(sys_channel_create(a[0], a[1]))
+		return i64(sys_channel_create(a[0], Uva(a[1])))
 	case .Channel_Write:
-		return i64(sys_channel_write(vx.Handle(a[0]), a[1], a[2], a[3], a[4]))
+		return i64(sys_channel_write(vx.Handle(a[0]), Uva(a[1]), a[2], Uva(a[3]), a[4]))
 	case .Channel_Read:
-		return i64(sys_channel_read(vx.Handle(a[0]), a[1], a[2], a[3], a[4], a[5]))
+		return i64(sys_channel_read(vx.Handle(a[0]), Uva(a[1]), a[2], Uva(a[3]), a[4], Uva(a[5])))
 	case .Channel_Call:
-		return i64(sys_channel_call(vx.Handle(a[0]), a[1], i64(a[2])))
+		return i64(sys_channel_call(vx.Handle(a[0]), Uva(a[1]), i64(a[2])))
 	case .Ring_Create:
-		return i64(sys_ring_create(a[0], a[1]))
+		return i64(sys_ring_create(Uva(a[0]), Uva(a[1])))
 	case .Ring_Notify:
 		return i64(sys_ring_notify(vx.Handle(a[0])))
 	case .Ring_Xfer_Handles:
-		return result(sys_ring_xfer(vx.Handle(a[0]), a[1], a[2], a[3], a[4]))
+		return result(sys_ring_xfer(vx.Handle(a[0]), a[1], Uva(a[2]), a[3], a[4]))
 	case .Vmo_Create:
-		return i64(sys_vmo_create(a[0], a[1], a[2], vx.Handle(a[3]), a[4]))
+		return i64(sys_vmo_create(a[0], a[1], Uva(a[2]), vx.Handle(a[3]), Paddr(a[4])))
 	case .Irq_Create:
-		return i64(sys_irq_create(vx.Handle(a[0]), a[1], a[2], a[3]))
+		return i64(sys_irq_create(vx.Handle(a[0]), a[1], a[2], Uva(a[3])))
 	case .Irq_Ack:
 		return i64(sys_irq_ack(vx.Handle(a[0])))
 	case .Iorange_Create:
-		return i64(sys_iorange_create(vx.Handle(a[0]), a[1], a[2], a[3]))
+		return i64(sys_iorange_create(vx.Handle(a[0]), a[1], a[2], Uva(a[3])))
 	case .Vmo_Rw:
-		return i64(sys_vmo_rw(vx.Handle(a[0]), a[1], a[2], a[3], a[4]))
+		return i64(sys_vmo_rw(vx.Handle(a[0]), a[1], a[2], Uva(a[3]), a[4]))
 	case .As_Map:
-		return i64(sys_as_map(vx.Handle(a[0]), vx.Handle(a[1]), a[2], a[3], a[4], a[5]))
+		return i64(sys_as_map(vx.Handle(a[0]), vx.Handle(a[1]), a[2], a[3], a[4], Uva(a[5])))
 	case .Handle_Dup:
-		return i64(sys_handle_dup(vx.Handle(a[0]), a[1], a[2]))
+		return i64(sys_handle_dup(vx.Handle(a[0]), a[1], Uva(a[2])))
 	case .Handle_Close:
 		return i64(handle_close(current_task(), vx.Handle(a[0])))
 	}
