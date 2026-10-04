@@ -40,3 +40,7 @@ P9_FIELD(HOLDS,   U32,    holds)      // Tshare's: joins to keep the open file f
 P9_FIELD(TOKEN,   TOKEN,  token)      // 16 bytes
 P9_FIELD(WHENCE,  U8,     whence)     // Tseek's: set 0, current 1, end 2
 P9_FIELD(DESCFLAGS, U32,  desc_flags) // Tdesc's: append 1
+// 9Px's map extension (docs/proto/map.md)
+P9_FIELD(PROT,    U32,    prot)       // Tmap's: read 1, write 2, exec 4
+// 9Px's dref extension (docs/proto/dref.md)
+P9_FIELD(ROFFSET, U64,    roffset)    // where in the request's VMO the data is, or goes
