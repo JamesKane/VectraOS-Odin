@@ -55,6 +55,7 @@ PROGRAMS := []Program {
 	{name = "tail", dir = "cmd/tail", place = .Bootfs},
 	{name = "ping", dir = "cmd/ping", place = .Bootfs},
 	{name = "cs", dir = "cmd/cs", place = .Bootfs},
+	{name = "dbg", dir = "cmd/dbg", place = .Bootfs},
 	{name = "drv-uart-16550", dir = "drivers/drv-uart-16550", place = .Bootfs, only = {.X86_64}},
 	{name = "drv-uart-pl011", dir = "drivers/drv-uart-pl011", place = .Bootfs, only = {.AArch64}},
 	{name = "drv-virtio-net", dir = "drivers/drv-virtio-net", place = .Bootfs},
