@@ -27,7 +27,7 @@ main :: proc() {
 		os.exit(2)
 	}
 	command := os.args[1]
-	arches := make([dynamic]^Arch, context.temp_allocator)
+	chosen: bit_set[Arch_Kind] // by --arch; none means all
 	names := make([dynamic]string, context.temp_allocator)
 	mode := Mode.Debug
 	for i := 2; i < len(os.args); i += 1 {
@@ -43,7 +43,7 @@ main :: proc() {
 				fmt.eprintln("build: --arch takes x86_64 or aarch64")
 				os.exit(2)
 			}
-			append(&arches, a)
+			chosen += {a.kind}
 		case "--release":
 			mode = .Release
 		case "-v":
@@ -56,8 +56,9 @@ main :: proc() {
 			append(&names, arg)
 		}
 	}
-	if len(arches) == 0 {
-		for &a in ARCHES {
+	arches := make([dynamic]^Arch, context.temp_allocator)
+	for &a in ARCHES {
+		if chosen == {} || a.kind in chosen {
 			append(&arches, &a)
 		}
 	}

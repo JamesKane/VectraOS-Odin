@@ -9,7 +9,8 @@ import "core:strings"
 // makes the objects with a frame pointer in every function; clang assembles
 // the entry stubs; ld.lld links them with the linker script.
 
-KERNEL_ODIN_FLAGS := []string {
+// The kernel's and every program's flags for odin.
+IR_ODIN_FLAGS :: []string {
 	"-build-mode:llvm-ir",
 	"-no-crt",
 	"-default-to-nil-allocator",
@@ -31,38 +32,38 @@ KERNEL_ODIN_FLAGS := []string {
 	"-thread-count:1",
 }
 
-build_kernel :: proc(a: ^Arch, mode: Mode) -> (elf: string, ok: bool) {
-	out := fmt.tprintf("%s/kernel", out_dir(a, mode))
+// Compiles an Odin package to objects: odin to IR, scrub_ir, llc per
+// module, and clang for each .S file under asm_dir. out (emptied first)
+// holds the ir and obj directories. Returns the objects in link order.
+compile_ir :: proc(a: ^Arch, mode: Mode, pkg, asm_dir, out: string, odin_flags, llc_flags: []string) -> (objs: [dynamic]string, ok: bool) {
 	ir := fmt.tprintf("%s/ir", out)
 	obj := fmt.tprintf("%s/obj", out)
-	elf = fmt.tprintf("%s/kernel.elf", out_dir(a, mode))
+	objs = make([dynamic]string, context.temp_allocator)
 	_ = os.remove_all(out)
 	make_dirs(ir) or_return
 	make_dirs(obj) or_return
 
-	fmt.eprintfln("  KERN  %s %s", a.name, mode == .Release ? "release" : "debug")
-	oc := cmd_make(ODIN, "build", "kernel", fmt.tprintf("-target:%s", a.odin_target), fmt.tprintf("-out:%s", ir))
-	append(&oc, ..KERNEL_ODIN_FLAGS)
-	append(&oc, ..a.odin_flags)
-	append(&oc, mode == .Release ? "-o:speed" : "-o:minimal")
+	oc := cmd_make(ODIN, "build", pkg, fmt.tprintf("-target:%s", a.odin_target), fmt.tprintf("-out:%s", ir))
+	append(&oc, ..IR_ODIN_FLAGS)
+	append(&oc, ..odin_flags)
+	append(&oc, MODES[mode].odin_opt)
 	run(oc[:]) or_return
 	scrub_ir(ir) or_return
 
 	cmds := make([dynamic][]string, context.temp_allocator)
-	objs := make([dynamic]string, context.temp_allocator)
 	lls := tree_files(ir) or_return
 	for ll in lls {
 		if !strings.has_suffix(ll, ".ll") {
 			continue
 		}
 		o := fmt.tprintf("%s/%s.o", obj, filepath.stem(ll))
-		l := cmd_make(LLC, "--frame-pointer=all", mode == .Release ? "-O2" : "-O1", "-relocation-model=static", "-filetype=obj")
-		append(&l, ..a.llc_flags)
+		l := cmd_make(LLC, "--frame-pointer=all", MODES[mode].llc_opt, "-relocation-model=static", "-filetype=obj")
+		append(&l, ..llc_flags)
 		append(&l, ll, "-o", o)
 		append(&cmds, l[:])
 		append(&objs, o)
 	}
-	asm_files := tree_files(fmt.tprintf("kernel/arch/%s", a.name)) or_return
+	asm_files := tree_files(asm_dir) or_return
 	for s in asm_files {
 		if !strings.has_suffix(s, ".S") {
 			continue
@@ -73,6 +74,14 @@ build_kernel :: proc(a: ^Arch, mode: Mode) -> (elf: string, ok: bool) {
 		append(&objs, o)
 	}
 	run_parallel(cmds[:]) or_return
+	return objs, true
+}
+
+build_kernel :: proc(a: ^Arch, mode: Mode) -> (elf: string, ok: bool) {
+	out := fmt.tprintf("%s/kernel", out_dir(a, mode))
+	elf = fmt.tprintf("%s/kernel.elf", out_dir(a, mode))
+	fmt.eprintfln("  KERN  %s %s", a.name, MODES[mode].name)
+	objs := compile_ir(a, mode, "kernel", fmt.tprintf("kernel/arch/%s", a.name), out, a.kernel_odin_flags, a.kernel_llc_flags) or_return
 
 	// Link twice: first with an empty symbol map, to learn the addresses, then
 	// with the real one, which panic backtraces read. The map is last in

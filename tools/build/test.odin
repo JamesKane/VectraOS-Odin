@@ -29,7 +29,7 @@ Scenario :: struct {
 	timeout: f64,
 	cmdline: string,
 	with:    string, // test programs for bootfs, comma-separated (tests/user/)
-	only:    string, // arch=: run on this architecture only
+	only:    ^Arch, // arch=: run on this architecture only; nil for all
 	needs:   string, // a feature this tree's build cannot provide yet
 	expects: [dynamic]Expect,
 	fails:   [dynamic]string,
@@ -58,7 +58,14 @@ load_scenario :: proc(name: string, a: ^Arch) -> (sc: Scenario, ok: bool) {
 			sc.timeout = t
 			sc.cmdline = val(rec, "cmdline")
 			sc.with = val(rec, "with")
-			sc.only = val(rec, "arch")
+			if arch := val(rec, "arch"); arch != "" {
+				only, known := arch_by_name(arch)
+				if !known {
+					fmt.eprintfln("%s:%d: arch=%s is not x86_64 or aarch64", path, rec.line, arch)
+					return sc, false
+				}
+				sc.only = only
+			}
 			for feature in ([]string{"iso", "disk", "volume", "iommu", "bus"}) {
 				if ndb.has(rec, feature) {
 					sc.needs = feature
@@ -100,8 +107,8 @@ load_scenario :: proc(name: string, a: ^Arch) -> (sc: Scenario, ok: bool) {
 run_scenario :: proc(a: ^Arch, mode: Mode, name: string) -> bool {
 	sc := load_scenario(name, a) or_return
 	label := fmt.tprintf("  TEST  %-16s %-8s", name, a.name)
-	if sc.only != "" && sc.only != a.name {
-		fmt.eprintfln("%s skipped (%s only)", label, sc.only)
+	if sc.only != nil && sc.only != a {
+		fmt.eprintfln("%s skipped (%s only)", label, sc.only.name)
 		return true
 	}
 	if sc.needs != "" {
