@@ -171,6 +171,14 @@ vx_mfence:
     mfence
     ret
 
+// (p: rawptr): the cache line holding p written back and invalidated, for
+// a device that reads memory without snooping (VT-d's tables).
+    .globl vx_clflush
+    .type vx_clflush, @function
+vx_clflush:
+    clflush (%rdi)
+    ret
+
     .globl vx_write_cr3
     .type vx_write_cr3, @function
 vx_write_cr3:

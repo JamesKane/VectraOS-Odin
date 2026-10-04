@@ -79,14 +79,6 @@ format :: proc "contextless" (h: ^Header, counter_hz: u64) {
 	}
 }
 
-// /sys/clock/info's half of clock_read (the clock and the cycle counter it
-// is made from), which vx:rt does not wrap yet.
-@(private="file")
-Clock_Info :: struct {
-	counter_hz:      u64,
-	flags, reserved: u32,
-}
-
 // Makes the ring and gives it to procfs (connector: to its listen channel).
 @(require_results)
 init :: proc "contextless" (connector: vx.Handle) -> vx.Status {
@@ -103,8 +95,7 @@ init :: proc "contextless" (connector: vx.Handle) -> vx.Status {
 	if st != .Ok {
 		return st
 	}
-	clock: Clock_Info
-	_ = rt.vx_syscall(.Clock_Read, u64(uintptr(&clock)))
+	clock, _ := rt.clock_info() // /sys/clock/info's: the clock and the cycle counter it is made from
 	h := (^Header)(uintptr(at))
 	format(h, clock.counter_hz)
 	me, _ := rt.task_info(rt.self)

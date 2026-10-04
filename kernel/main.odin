@@ -53,6 +53,7 @@ kernel_main_on_kstack :: proc "c" () -> ! {
 	kput_u64(u64(online))
 	kput(online == 1 ? " cpu\n" : " cpus\n")
 
+	iommu_init() // deny-all from here: no device reaches memory until devmgr gives it a domain
 	find_root_module()
 	reclaim_boot_memory() // every CPU is on the kernel's tables and stacks, and the responses are read
 	selftests() // after the reclaim, so the allocator tests cover that memory too, and before

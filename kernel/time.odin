@@ -68,6 +68,19 @@ clock_now :: proc "contextless" () -> Instant {
 	return Instant(counter_to_ns(arch_counter()))
 }
 
+// The wall clock: UTC's offset from the monotonic clock, set by clock_set
+// (upstream's ADR-0031). Read with the flag, each atomically: a reader sees
+// an offset that was set, or none.
+wall_clock: struct {
+	utc_offset: i64,
+	utc_set:    bool,
+}
+
+clock_set_utc :: proc "contextless" (utc: i64) {
+	intrinsics.atomic_store(&wall_clock.utc_offset, utc - i64(clock_now()))
+	intrinsics.atomic_store(&wall_clock.utc_set, true)
+}
+
 // Arms this CPU's timer for an absolute deadline on the monotonic clock.
 timer_arm :: proc "contextless" (deadline: Instant) {
 	count := ns_to_counter(u64(deadline))

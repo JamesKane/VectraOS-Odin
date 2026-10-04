@@ -1,7 +1,7 @@
 // lib/note against upstream's vx-note. Upstream has no host test of its own
 // for it; upstream.txt is what upstream's vx_trap_note and vx_note_buf print
-// for the same inputs, from a harness built with clang against M4's headers
-// (the P4 cross-check), and each line here must match it.
+// for the same inputs, from a harness built with clang against M5's headers
+// (the P4 cross-check; the trap lines made again at M5, for .Pager_Timeout), and each line here must match it.
 package note_test
 
 import "core:fmt"

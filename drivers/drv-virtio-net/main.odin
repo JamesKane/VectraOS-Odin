@@ -89,7 +89,7 @@ make_buffers :: proc "contextless" (pages: []u64) -> []u8 {
 		at, st = rt.as_map(rt.self, vmo, 0, SIZE, {.Write})
 	}
 	if st == .Ok {
-		st = rt.dma_map(dev.dma, vmo, 0, SIZE, pages)
+		_, st = rt.dma_map(dev.dma, vmo, 0, SIZE, {.Read, .Write}, pages) // the mapping's handle kept as long as the driver lives
 	}
 	rt.close_all(vmo) // the mapping and the domain keep it
 	if st != .Ok {

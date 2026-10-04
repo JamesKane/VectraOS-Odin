@@ -24,6 +24,7 @@ Trap :: enum u32 {
 	Interrupt, // thread_interrupt
 	Step, // one instruction done
 	Watchpoint, // a watched address touched
+	Pager_Timeout, // a pager-backed page not supplied in time; code as Page_Fault's
 }
 
 // A string under construction in a caller's buffer, cut off at its capacity
@@ -107,6 +108,9 @@ trap_note :: proc "contextless" (kind: Trap, code: u32, address, pc: u64, out: ^
 		put(&b, "sys: trap: fp disabled")
 	case .Step:
 		put(&b, "sys: trap: step")
+	case .Pager_Timeout: // its pager did not supply the page in time
+		put(&b, "sys: trap: page not supplied")
+		has_address = true
 	case:
 		put(&b, "sys: trap: general fault")
 	}

@@ -32,12 +32,26 @@ clock_read :: proc "contextless" () -> vx.Instant {
 	return vx.Instant(vx_syscall(.Clock_Read))
 }
 
-// The cycle counter the clock is made from (/sys/clock/info).
+// The cycle counter the clock is made from (/sys/clock/info), and the wall
+// clock's offset.
 @(require_results)
 clock_info :: proc "contextless" () -> (vx.Clock_Info, vx.Status) {
 	info: vx.Clock_Info
 	st := status(vx_syscall(.Clock_Read, addr(&info)))
 	return info, st
+}
+
+// UTC, in ns since 1970: the monotonic clock until there is a wall clock.
+clock_utc :: proc "contextless" () -> i64 {
+	info: vx.Clock_Info
+	now := vx_syscall(.Clock_Read, addr(&info))
+	return now < 0 ? i64(clock_read()) : now + info.utc_offset
+}
+
+// The wall clock set to utc (ns since 1970), with the root Resource.
+@(require_results)
+clock_set :: proc "contextless" (resource: vx.Handle, utc: i64) -> vx.Status {
+	return status(vx_syscall(.Clock_Set, u64(resource), u64(utc)))
 }
 
 @(require_results)

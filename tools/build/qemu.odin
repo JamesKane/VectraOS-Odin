@@ -7,13 +7,34 @@ Qemu_Opts :: struct {
 	share: string, // the directory vx9pserve serves at 10.0.2.100!5640
 	u9fs:  string, // the root u9fs serves at 10.0.2.101!564, and its log; "" for none
 	cdrom: string, // boot this ISO as a CD, with no disk
+	iommu: Iommu_Mode,
+}
+
+// The machine's IOMMU (upstream's M5 steps 6c, 6d): VT-d on q35, SMMUv3 on
+// virt. Upstream's runner has it on for every scenario from M5; here the
+// m5/ scenarios have it (test.odin), and M4's run as M4's runner ran them.
+Iommu_Mode :: enum {
+	Off,
+	On,
+	Caching, // VT-d's caching mode (CAP.CM): what is not present may be cached too
 }
 
 // QEMU's command line for booting an image. Devices arrive as the kernel
 // learns to drive them: M3 brought networking; M5 brings more disks.
 qemu_cmd :: proc(a: ^Arch, image: string, o: Qemu_Opts) -> []string {
 	c := make(Cmd, context.temp_allocator)
-	append(&c, a.qemu, "-machine", a.machine, "-cpu", "max")
+	machine := a.machine
+	if o.iommu != .Off && a.kind == .AArch64 {
+		machine = fmt.tprintf("%s,iommu=smmuv3", machine)
+	}
+	append(&c, a.qemu, "-machine", machine, "-cpu", "max")
+	if o.iommu != .Off && a.kind == .X86_64 {
+		// No interrupt remapping yet. Virtio devices go through the IOMMU only
+		// with iommu_platform=on (below), and then their drivers must accept
+		// VIRTIO_F_ACCESS_PLATFORM.
+		append(&c, "-device", o.iommu == .Caching ? "intel-iommu,intremap=off,caching-mode=on" : "intel-iommu,intremap=off")
+	}
+	platform := o.iommu != .Off ? ",iommu_platform=on" : ""
 	append(&c, "-drive", fmt.tprintf("if=pflash,format=raw,unit=0,readonly=on,file=%s", a.firmware))
 	append(&c, "-m", "512M", "-smp", "4", "-display", "none", "-no-reboot")
 	if o.cdrom != "" {
@@ -23,7 +44,7 @@ qemu_cmd :: proc(a: ^Arch, image: string, o: Qemu_Opts) -> []string {
 	} else {
 		// A test never writes the image, so several can boot one image at once.
 		append(&c, "-drive", fmt.tprintf("if=none,id=disk,format=raw,file=%s%s", image, o.test ? ",snapshot=on" : ""))
-		append(&c, "-device", "virtio-blk-pci,drive=disk,disable-legacy=on")
+		append(&c, "-device", fmt.tprintf("virtio-blk-pci,drive=disk,disable-legacy=on%s", platform))
 	}
 	// QEMU's user networking: the guest is 10.0.2.15, the host 10.0.2.2.
 	// Each connection to 10.0.2.100!7 gets a `cat` on the host of its own (an
@@ -40,7 +61,7 @@ qemu_cmd :: proc(a: ^Arch, image: string, o: Qemu_Opts) -> []string {
 		}
 	}
 	append(&c, "-netdev", fmt.tprintf("user,id=net0,guestfwd=tcp:10.0.2.100:7-cmd:cat,guestfwd=tcp:10.0.2.100:5640-cmd:%s --stdio %s%s", VX9PSERVE, o.share, u9fs))
-	append(&c, "-device", "virtio-net-pci,netdev=net0,disable-legacy=on")
+	append(&c, "-device", fmt.tprintf("virtio-net-pci,netdev=net0,disable-legacy=on%s", platform))
 	if o.test {
 		append(&c, "-serial", "stdio", "-monitor", "none")
 	} else {

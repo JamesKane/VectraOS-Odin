@@ -8,8 +8,10 @@ import "vx:ndb"
 // `vx.root=NAME` on the kernel command line names (ktest, for the kernel's
 // own tests). It gets the debug-write capability, and starts like every task,
 // with a bootstrap channel holding its spawn message (abi:vx): a handle to
-// itself, the boot image (the bootfs.tar module, copied into a VMO), the root
-// Resource (device.odin) and the kernel command line.
+// itself, the boot image (the bootfs.tar module, copied into a VMO), the
+// store image when there is one (the store.tar module, likewise: an install
+// medium's objects, upstream's docs/06 §8), the ACPI tables (acpi.odin), the
+// root Resource (device.odin) and the kernel command line.
 
 @(private="file")
 Limine_File :: struct {
@@ -52,6 +54,7 @@ root_module: struct {
 	image:  []u8,
 	name:   string, // a literal, or in the kernel's copy of the command line
 	bootfs: []u8, // empty if the image has no bootfs.tar
+	store:  []u8, // empty if it has no store.tar
 }
 
 // The value of `key=value` on the kernel command line, or "".
@@ -79,13 +82,16 @@ find_root_module :: proc "contextless" () {
 	if b := find_module("bootfs.tar"); b != nil {
 		root_module.bootfs = b.address[:b.size]
 	}
+	if s := find_module("store.tar"); s != nil {
+		root_module.store = s.address[:s.size]
+	}
 }
 
 // A channel end's rights, and a ring end's.
 CHANNEL_END_RIGHTS :: vx.Rights{.Read, .Write, .Wait, .Signal, .Duplicate, .Transfer, .Inspect}
 
 @(private="file")
-ROOT_RESOURCE_RIGHTS :: vx.Rights{.Manage, .Duplicate, .Transfer, .Inspect}
+ROOT_RESOURCE_RIGHTS :: vx.Rights{.Manage, .Pager, .Duplicate, .Transfer, .Inspect}
 @(private="file")
 READ_ONLY_RIGHTS :: vx.Rights{.Read, .Map, .Duplicate, .Transfer, .Inspect} // the boot image and the ACPI tables
 
@@ -93,32 +99,40 @@ READ_ONLY_RIGHTS :: vx.Rights{.Read, .Map, .Duplicate, .Transfer, .Inspect} // t
 spawn_text: [1024]u8
 
 // Writes the root task's spawn message into a new channel and returns the
-// end it reads from: a handle to itself, the boot image, the ACPI tables, the
-// root Resource, and the command line. The message holds the references.
+// end it reads from: a handle to itself, the boot image, the store image, the
+// ACPI tables, the root Resource, and the command line. The message holds the
+// references.
 @(private="file")
 root_spawn_message :: proc "contextless" (t: ^Task) -> ^Channel {
 	w := ndb.Writer{buf = spawn_text[:]}
-	given: [dynamic; 4]Moved_Handle
-	give :: proc "contextless" (w: ^ndb.Writer, given: ^[dynamic; 4]Moved_Handle, name: string, h: Moved_Handle) {
+	given: [dynamic; 5]Moved_Handle
+	give :: proc "contextless" (w: ^ndb.Writer, given: ^[dynamic; 5]Moved_Handle, name: string, h: Moved_Handle) {
 		ndb.put(w, "handle", name)
 		ndb.put_u64(w, "index", u64(len(given)))
 		_ = ndb.end(w)
-		_ = append(given, h) // four at most, and there are four
+		_ = append(given, h) // five at most, and there are five
+	}
+	// A module copied into a read-only VMO, with its record: NAME size=N.
+	give_image :: proc "contextless" (w: ^ndb.Writer, given: ^[dynamic; 5]Moved_Handle, name: string, image: []u8) {
+		v, st := vmo_create(u64(len(image)))
+		if st != .Ok {
+			kpanic(name == "bootimage" ? "no memory for the boot image" : "no memory for the store image")
+		}
+		vmo_write(v, 0, image)
+		give(w, given, name, {&v.obj, READ_ONLY_RIGHTS})
+		ndb.flag(w, name)
+		ndb.put_u64(w, "size", u64(len(image)))
+		_ = ndb.end(w)
 	}
 	ndb.put(&w, "spawn", root_module.name)
 	_ = ndb.end(&w)
 	object_ref(&t.obj)
 	give(&w, &given, "self", {&t.obj, vx.ALL_RIGHTS})
 	if len(root_module.bootfs) > 0 {
-		image, st := vmo_create(u64(len(root_module.bootfs)))
-		if st != .Ok {
-			kpanic("no memory for the boot image")
-		}
-		vmo_write(image, 0, root_module.bootfs)
-		give(&w, &given, "bootimage", {&image.obj, READ_ONLY_RIGHTS})
-		ndb.flag(&w, "bootimage")
-		ndb.put_u64(&w, "size", u64(len(root_module.bootfs)))
-		_ = ndb.end(&w)
+		give_image(&w, &given, "bootimage", root_module.bootfs)
+	}
+	if len(root_module.store) > 0 {
+		give_image(&w, &given, "storeimage", root_module.store)
 	}
 	if acpi, acpi_size, ok := acpi_export(); ok {
 		give(&w, &given, "acpi", {&acpi.obj, READ_ONLY_RIGHTS})
