@@ -1123,8 +1123,9 @@ set_cluster :: proc "contextless" (v: ^Vol, d: ^Dir_Entry, c: u32) {
 	d.cluster_lo = u16le(c & 0xffff)
 }
 
-// An entry's cluster, size, attributes and times, written to its short slot.
-@(private="file", require_results)
+// An entry's cluster, size, attributes and times, written to its short slot
+// (dosfs's chmod and utimes change them in an Entry, then put it).
+@(require_results)
 put_entry :: proc "contextless" (v: ^Vol, e: ^Entry) -> vx.Status {
 	if e.node == ROOT {
 		return .Ok // the root has no entry
