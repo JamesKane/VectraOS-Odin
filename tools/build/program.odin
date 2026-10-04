@@ -26,6 +26,7 @@ Program :: struct {
 	kind:   Program_Kind,
 	place:  Program_Place,
 	only:   bit_set[Arch_Kind], // built for these architectures only; none means all
+	cports: []string, // native ports whose archives it links (cobj.odin)
 }
 
 PROGRAMS := []Program {
@@ -80,6 +81,8 @@ build_program :: proc(a: ^Arch, mode: Mode, p: Program) -> (elf: string, ok: boo
 
 	ld := cmd_make(LLD, "-nostdlib", "-static", "-z", "max-page-size=0x1000", "--build-id", "-T", fmt.tprintf("lib/rt/linker/%s.ld", a.name), "-o", elf)
 	append(&ld, ..objs[:])
+	libs := cobj_program_archives(p, a) or_return
+	append(&ld, ..libs[:])
 	run(ld[:]) or_return
 	return elf, true
 }

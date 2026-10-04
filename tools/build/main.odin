@@ -203,7 +203,16 @@ cmd_check :: proc() -> bool {
 		}
 		ran += 1
 		fmt.eprintfln("  HOST  %s", d.name)
-		c := cmd_make(ODIN, "test", fmt.tprintf("tests/host/%s", d.name), "-collection:vx=lib", "-collection:abi=abi", "-vet", "-strict-style", "-warnings-as-errors", "-sanitize:address", fmt.tprintf("-out:out/host/%s", d.name))
+		dir := fmt.tprintf("tests/host/%s", d.name)
+		c := cmd_make(ODIN, "test", dir, "-collection:vx=lib", "-collection:abi=abi", "-vet", "-strict-style", "-warnings-as-errors", "-sanitize:address", fmt.tprintf("-out:out/host/%s", d.name))
+		// The vendored C a suite says it links (cobj.odin).
+		ports, found := cobj_host_links(dir)
+		links, built := cobj_host_link_flags(ports[:])
+		if !found || !built {
+			ok = false
+			continue
+		}
+		append(&c, ..links[:])
 		make_dirs("out/host") or_return
 		ok = run(c[:]) && ok
 	}
