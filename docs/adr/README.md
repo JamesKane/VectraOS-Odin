@@ -7,3 +7,4 @@
 | [0003](0003-odin-house-subset.md) | Odin and the house subset | proposed |
 | [0004](0004-kernel-vector-state.md) | Vector state in the kernel | proposed |
 | [0005](0005-limine.md) | Limine | proposed |
+| [0006](0006-u9fs.md) | u9fs, vendored as a host test tool | proposed (import review pending) |

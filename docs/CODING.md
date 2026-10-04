@@ -108,8 +108,10 @@ Most of the "Idiomatic Odin" section below came out of the October 2026 review o
 odin test tests/host/<name> -collection:vx=lib -collection:abi=abi -vet -strict-style -warnings-as-errors -sanitize:address
 odin check lib/<name> -no-entry-point -target:freestanding_arm64 -collection:vx=lib -collection:abi=abi -vet -strict-style -warnings-as-errors
 ./build check
-# The P1+P2 gate, both architectures (plain `./build test` also runs later
-# milestones' scenarios, which are expected to fail until their phase):
+# The gate, both architectures: P1's scenarios and the M3-era ones (plain
+# `./build test` also runs later milestones' scenarios, which are expected to
+# fail until their phase; m3/u9fs needs Linux user namespaces):
 ./build test boot ktest panic phys timer smp lower-half stack-overflow \
-  write-text write-text-alias simd m2/boot m2/cons m2/ktest m2/ns m2/shell
+  write-text write-text-alias simd m3/boot m3/cons m3/ktest m3/ns m3/shell \
+  m3/pci m3/net m3/netd m3/tcp m3/mount m3/iso m3/u9fs
 ```
