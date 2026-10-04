@@ -224,7 +224,7 @@ build_port_target :: proc(p: ^Port, target: string) -> (result: string, ok: bool
 
 		if pass == 1 {
 			write_symbol_map(fmt.tprintf("%s/limine_nomap.elf", outdir), map_s, ".section .full_map", "full_map") or_return
-			run(concat({CLANG}, cflags, cppflags, {config_inc, "-c", map_s, "-o", map_o}), src) or_return
+			run(concat({CLANG}, cflags, cppflags, {config_inc, prefix_map, "-c", map_s, "-o", map_o}), src) or_return
 		}
 
 		ld := cmd_make(LLD, fmt.tprintf("-T%s", script))

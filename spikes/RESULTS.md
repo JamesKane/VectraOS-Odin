@@ -28,7 +28,7 @@ _2026-10-03, macOS host (Apple M4 Max), Odin `dev-2026-09:a2fb372b7`, LLVM 22.1.
 
 ## Found during P0's foundation
 
-- **Odin's IR is not reproducible by default.** The threaded checker numbers entities and orders debug metadata differently from run to run, and the debug info records the wall-clock time as `ODIN_COMPILE_TIMESTAMP` (ignoring `SOURCE_DATE_EPOCH`). `build` passes `-no-threaded-checker -thread-count:1` and rewrites that one constant to `SOURCE_DATE_EPOCH` in the IR before `llc`. Kernels and disk images are then byte-identical between builds.
+- **Odin's IR is not reproducible by default.** The threaded checker numbers entities and orders debug metadata differently from run to run, and the debug info records the wall-clock time as `ODIN_COMPILE_TIMESTAMP` (ignoring `SOURCE_DATE_EPOCH`). `build` passes `-no-threaded-checker -thread-count:1` and rewrites that one constant to `SOURCE_DATE_EPOCH` in the IR before `llc`. Kernels and disk images are then byte-identical between builds. (Not reliably: see P4.)
 - **`core:os` process API:** a `nil` `stdin` in `Process_Desc` closes the child's input rather than inheriting it; pass `os.stdin` to inherit. Slice literals appended inside a loop alias one stack array: build command lines with an allocated `[dynamic]string`.
 
 ## Found during P1
@@ -47,6 +47,14 @@ _2026-10-03, macOS host (Apple M4 Max), Odin `dev-2026-09:a2fb372b7`, LLVM 22.1.
 
 - **A package that another imports cannot have `main :: proc() -> int`** (Odin's rule for the main package). Programs that host tests import name the entry `vx_main` directly (`@(export, link_name="vx_main") vx_main :: proc() -> int`); the rest may call it `main`, exported under the same link name.
 - **Parallel porting worked.** Five libraries and two servers were ported by agents in their own worktrees against the frozen M2 snapshot, each checked against upstream's C compiled with clang (byte-identical 9P sessions and tar output, identical model-checker results, identical namespace results over ~475,000 lines of random operations). They found one upstream bug (a 256-byte ustar path overruns `vx_tar_entry` by one byte).
+
+## Found during P4
+
+- **`-thread-count:1` still checks on two threads.** Odin's thread pool always has the main thread plus thread-count workers, and the main thread runs tasks while it waits, so files' entities are collected in a racy order. That order reaches the IR: polymorphic instances (`obj_type_of(T)`) change places (the sort meant to order procedures ties on them), and with them the numbered names (`csbs$pkg$N`, `proc-.state-N`, `_proclit$anon-N`), the compile unit's constant list and the metadata numbering. Seven or eight different kernels in ten builds. No flag fixes it: `scrub_ir` canonicalizes every module instead (tools/build/ircanon.odin), and ten builds then hash identically, IR included.
+- **A polymorphic instance's DISubprogram carries a wrong line,** that of the call site that instantiated it first, in another file (`rt::thread_state(..., ^Regs)` at syscall.odin:782 in a 345-line file). LLVM puts that line in the line table at the procedure's entry. `scrub_ir` gives it its first parameter's line, which is the generic's declaration.
+- **Odin has no `-ffile-prefix-map`.** Its DWARF and its source-location strings (bounds-check messages, `#caller_location`) name files by absolute path. `scrub_ir` maps the repository root to `/src`, as clang's `-ffile-prefix-map` does for the C side, fixing each string's length where it is used; two checkouts at different paths then give identical images, kernels, programs and libraries.
+- **`-o:speed` makes a single module,** written as `ir/.ll`, and in it lib/rt's foreign declaration of `vx_main` hides the program's exported definition, so `_start` calls an undefined symbol. `build` passes `-use-separate-modules` in every mode.
+- **LLVM 22's loop-idiom pass emits `strlen`** at `-o:speed` (the kernel's symbol-map scan), and Odin's freestanding runtime defines memset, memcpy and memmove but not strlen; Odin has no `-fno-builtin`. `scrub_ir` gives a module that calls strlen without defining it a weak byte-loop definition.
 
 ## Not yet covered
 

@@ -47,6 +47,12 @@ compile_ir :: proc(a: ^Arch, mode: Mode, pkg, asm_dir, out: string, odin_flags, 
 	append(&oc, ..IR_ODIN_FLAGS)
 	append(&oc, ..odin_flags)
 	append(&oc, MODES[mode].odin_opt)
+	// One module per package in every mode, as -o:minimal makes by default.
+	// -o:speed alone makes a single module, written as ir/.ll (so its object
+	// was obj/.o), and in it a program's exported vx_main and lib/rt's
+	// foreign declaration of it share one LLVM name: odin emits only the
+	// declaration, and _start calls an undefined vx_main.
+	append(&oc, "-use-separate-modules")
 	run(oc[:]) or_return
 	scrub_ir(ir) or_return
 
@@ -63,13 +69,14 @@ compile_ir :: proc(a: ^Arch, mode: Mode, pkg, asm_dir, out: string, odin_flags, 
 		append(&cmds, l[:])
 		append(&objs, o)
 	}
+	prefix_map := file_prefix_map() or_return
 	asm_files := tree_files(asm_dir) or_return
 	for s in asm_files {
 		if !strings.has_suffix(s, ".S") {
 			continue
 		}
 		o := fmt.tprintf("%s/%s_S.o", obj, filepath.stem(s))
-		c := cmd_make(CLANG, fmt.tprintf("--target=%s", a.clang_target), "-g", "-c", s, "-o", o)
+		c := cmd_make(CLANG, fmt.tprintf("--target=%s", a.clang_target), "-g", prefix_map, "-c", s, "-o", o)
 		append(&cmds, c[:])
 		append(&objs, o)
 	}
@@ -100,74 +107,37 @@ build_kernel :: proc(a: ^Arch, mode: Mode) -> (elf: string, ok: bool) {
 	return elf, true
 }
 
-// Makes Odin's IR reproducible, so one commit always gives the same kernel:
+// Makes Odin's IR reproducible, so one commit always gives the same kernel
+// and programs, wherever the tree is checked out:
+//  - ir_canonicalize (ircanon.odin) puts what Odin emits in an order and
+//    numbering that does not vary from run to run, and maps the repository
+//    root to /src in the debug info and source-location strings;
 //  - Odin writes the wall-clock time into the debug info as the value of
 //    ODIN_COMPILE_TIMESTAMP, ignoring SOURCE_DATE_EPOCH; SOURCE_DATE_EPOCH
 //    goes there instead. Nothing first-party uses it in code.
-//  - Procedure-local statics are named after an entity number that varies
-//    from run to run (`proc-.state-4433`). They are internal to their module,
-//    so they are renumbered by order of first appearance.
 scrub_ir :: proc(ir: string) -> bool {
 	epoch := os.get_env("SOURCE_DATE_EPOCH", context.temp_allocator)
 	stamp := fmt.tprintf("%s000000000", epoch == "" ? "0" : epoch)
-	files := tree_files(ir) or_return
-	for f in files {
-		if !strings.has_suffix(f, ".ll") {
-			continue
+	root, err := os.get_working_directory(context.temp_allocator)
+	if err != nil {
+		fmt.eprintfln("build: cannot find the working directory: %v", err)
+		return false
+	}
+	all := tree_files(ir) or_return
+	paths := make([dynamic]string, context.temp_allocator)
+	texts := make([dynamic]string, context.temp_allocator)
+	for f in all {
+		if strings.has_suffix(f, ".ll") {
+			append(&paths, f)
+			append(&texts, read_file(f) or_return)
 		}
-		text := read_file(f) or_return
-		renamed, renumbered := renumber_statics(text)
-		stamped, restamped := scrub_timestamp(renamed, stamp)
-		if renumbered || restamped {
-			write_file(f, stamped) or_return
-		}
+	}
+	canon := ir_canonicalize(paths[:], texts[:], root) or_return
+	for f, i in paths {
+		stamped, _ := scrub_timestamp(canon[i], stamp)
+		write_file(f, stamped) or_return
 	}
 	return true
-}
-
-// Renames every @"...-.name-DIGITS" global to @"...-.name-K", K counting from
-// 0 in order of first appearance in the module.
-@(private="file")
-renumber_statics :: proc(text: string) -> (string, bool) {
-	b := strings.builder_make(context.temp_allocator)
-	seen := make(map[string]int, allocator = context.temp_allocator)
-	changed := false
-	rest := text
-	for {
-		i := strings.index(rest, `@"`)
-		if i < 0 {
-			break
-		}
-		strings.write_string(&b, rest[:i + 2])
-		rest = rest[i + 2:]
-		end := strings.index_byte(rest, '"')
-		if end < 0 {
-			break
-		}
-		name := rest[:end]
-		dash := strings.last_index_byte(name, '-')
-		digits := dash >= 0 ? name[dash + 1:] : ""
-		is_static := dash > 0 && len(digits) > 0 && strings.contains(name[:dash], "-.")
-		for c in digits {
-			if c < '0' || c > '9' {
-				is_static = false
-			}
-		}
-		if is_static {
-			k, ok := seen[name]
-			if !ok {
-				k = len(seen)
-				seen[name] = k
-			}
-			fmt.sbprintf(&b, "%s-%d", name[:dash], k)
-			changed = true
-		} else {
-			strings.write_string(&b, name)
-		}
-		rest = rest[end:]
-	}
-	strings.write_string(&b, rest)
-	return strings.to_string(b), changed
 }
 
 @(private="file")
