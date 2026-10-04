@@ -10,7 +10,7 @@
 // to it, up to the next service=.
 //
 //   service=NAME program=/boot/bin/PROG [post=SRV] [bootimage] [console] [tasks]
-//           [resource] [acpi] [restart] [arch=A]
+//           [resource] [pager] [acpi] [restart] [arch=A]
 //   arg=VALUE                                  an argument, in order
 //   env=NAME=VALUE                             an environment variable
 //   mount=OLD srv=SRV [aname=A] [flags=abc]    a mount in its namespace
@@ -22,6 +22,8 @@
 //   connect=SRV                                a connector to the post, as "srv:SRV"
 //   ns=NAME                                    the namespace template /lib/ns/NAME, a
 //                                              namespace(6) file (upstream ADR-0009), here
+//   user=NAME                                  who it runs as (upstream docs/11 §9), which
+//                                              its attaches name; else none
 //
 // post=SRV: svcd makes a listen channel, gives the service its server end
 // ("listen") and keeps the client end as /srv/SRV, for mounts. It keeps a
@@ -34,7 +36,8 @@
 // ambient authority. resource and acpi: the root Resource and the ACPI
 // tables, which only devmgr needs. entropy: a seed of its own for a random
 // generator, from svcd's, which the kernel seeded from the bootloader's
-// entropy (vx:drbg).
+// entropy (vx:drbg). pager: a handle to the root Resource with .Pager alone,
+// "pager", which makes pagers and nothing else (fsd: upstream docs/11 §8).
 //
 // Drivers, the services with ioport, mmio or irq records, start first. svcd
 // mints their device objects from the root Resource once, keeps them, and
@@ -390,6 +393,7 @@ start :: proc "contextless" (index: int) -> vx.Status {
 		rt.close_all(..g.handles[:])
 	}
 	w := ndb.Writer{buf = records_buf[:]}
+	user: [dynamic; 64]u8 // user=NAME
 
 	r := manifest_reader(s.manifest, s.at)
 	rec: ndb.Record
@@ -424,6 +428,9 @@ start :: proc "contextless" (index: int) -> vx.Status {
 	}
 	if ndb.has(&rec, "resource") && resource != vx.HANDLE_NONE { // root authority over devices: devmgr
 		grant(&g, "resource", rt.handle_dup(resource, vx.RIGHTS_SAME)) or_return
+	}
+	if ndb.has(&rec, "pager") && resource != vx.HANDLE_NONE { // pagers and nothing else: fsd
+		grant(&g, "pager", rt.handle_dup(resource, {.Pager, .Transfer, .Inspect})) or_return
 	}
 	if ndb.has(&rec, "acpi") && acpi_vmo != vx.HANDLE_NONE {
 		grant(&g, "acpi", rt.handle_dup(acpi_vmo, vx.RIGHTS_SAME)) or_return
@@ -491,6 +498,14 @@ start :: proc "contextless" (index: int) -> vx.Status {
 			nw, _ := ndb.get(&rec, "new")
 			flags, _ := ndb.get(&rec, "flags")
 			put_bind(&w, nw, old, flags)
+		case ndb.has(&rec, "user"):
+			// Copied: the reader's values last one record.
+			u, _ := ndb.get(&rec, "user")
+			if len(u) == 0 || len(u) > cap(user) {
+				return .Err_Invalid
+			}
+			clear(&user)
+			_ = append(&user, u)
 		}
 	}
 	if w.failed {
@@ -503,6 +518,7 @@ start :: proc "contextless" (index: int) -> vx.Status {
 		handles      = g.handles[:],
 		handle_names = g.names[:],
 		records      = ndb.written(&w),
+		user         = string(user[:]),
 		// Registered with procfs before it runs (ADR-0011): in a session and
 		// note group of its own, as Plan 9's daemons run (RFNOTEG), so a note
 		// to one group never reaches the rest of the system; svcd watches its

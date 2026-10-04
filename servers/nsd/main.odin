@@ -20,10 +20,12 @@ import "vx:rt"
 
 MAX_GROUPS :: 32
 MAX_MEMBERS :: 128
-MAX_CONNECTORS :: 8 // as a namespace's connections (ns.MAX_CONNS)
+// A group's connectors: 8, as upstream's nsd keeps them, though M5 gave a
+// namespace 16 connections (ns.MAX_CONNS) for fsd's branches.
+MAX_CONNECTORS :: 8
 SRC_MAX :: 64 // a connector's source is shorter
 
-#assert(MAX_CONNECTORS == ns.MAX_CONNS)
+#assert(MAX_CONNECTORS <= ns.MAX_CONNS)
 
 @(private="file")
 PAGE_BYTES :: (size_of(ns.Nsd_Page) + memory.PAGE_SIZE - 1) / memory.PAGE_SIZE * memory.PAGE_SIZE
