@@ -10,7 +10,7 @@
 // to it, up to the next service=.
 //
 //   service=NAME program=/boot/bin/PROG [post=SRV] [bootimage] [console] [tasks]
-//           [resource] [acpi] [restart] [arch=A]
+//           [resource] [acpi] [cmdline] [restart] [arch=A]
 //   arg=VALUE                                  an argument, in order
 //   env=NAME=VALUE                             an environment variable
 //   mount=OLD srv=SRV [aname=A] [flags=abc]    a mount in its namespace
@@ -20,6 +20,8 @@
 //   irq=LINE                                   a driver's interrupt
 //   claim=SRV                                  the post's server end, as "claim:SRV"
 //   connect=SRV                                a connector to the post, as "srv:SRV"
+//   part=SRV type=GUID|name=NAME               passed on as it is, for partd (upstream's
+//                                              docs/proto/block.md §6)
 //   ns=NAME                                    the namespace template /lib/ns/NAME, a
 //                                              namespace(6) file (upstream ADR-0009), here
 //
@@ -34,7 +36,8 @@
 // ambient authority. resource and acpi: the root Resource and the ACPI
 // tables, which only devmgr needs. entropy: a seed of its own for a random
 // generator, from svcd's, which the kernel seeded from the bootloader's
-// entropy (vx:drbg).
+// entropy (vx:drbg). cmdline: the kernel command line, as svcd's own spawn
+// message has it (devmgr, which gives it to drivers for their options).
 //
 // Drivers, the services with ioport, mmio or irq records, start first. svcd
 // mints their device objects from the root Resource once, keeps them, and
@@ -431,6 +434,10 @@ start :: proc "contextless" (index: int) -> vx.Status {
 		ndb.put_u64(&w, "size", acpi_size)
 		_ = ndb.end(&w)
 	}
+	if ndb.has(&rec, "cmdline") && rt.spawn.cmdline != "" { // the kernel's, for devmgr
+		ndb.put(&w, "cmdline", rt.spawn.cmdline)
+		_ = ndb.end(&w)
+	}
 	if ndb.has(&rec, "tasks") { // svcd's own task: the whole tree, for procfs
 		grant(&g, "tasks", rt.handle_dup(rt.self, {.Inspect, .Manage, .Transfer})) or_return
 	}
@@ -477,7 +484,7 @@ start :: proc "contextless" (index: int) -> vx.Status {
 			}
 			handle, _ := str.join(handle_name_buf[len(g.handles)][:], claim ? "claim:" : "srv:", string(p.name[:]))
 			grant(&g, handle, rt.handle_dup(claim ? p.server : p.client, CONNECTOR_RIGHTS)) or_return
-		case is_device_record(&rec): // passed on as they are, for the driver to read
+		case is_device_record(&rec) || ndb.has(&rec, "part"): // passed on as they are: a driver's device, partd's partitions
 			for t in rec.tuples {
 				if t.flag {
 					ndb.flag(&w, t.key)
