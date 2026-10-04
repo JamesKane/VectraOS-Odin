@@ -12,6 +12,7 @@
 //   service=NAME program=/boot/bin/PROG [post=SRV] [bootimage] [console] [tasks]
 //           [resource] [acpi] [restart] [arch=A]
 //   arg=VALUE                                  an argument, in order
+//   env=NAME=VALUE                             an environment variable
 //   mount=OLD srv=SRV [aname=A] [flags=abc]    a mount in its namespace
 //   bind=OLD new=NEW [flags=abc]               a bind in its namespace
 //   ioport=BASE count=N                        a driver's I/O ports (x86_64)
@@ -19,6 +20,8 @@
 //   irq=LINE                                   a driver's interrupt
 //   claim=SRV                                  the post's server end, as "claim:SRV"
 //   connect=SRV                                a connector to the post, as "srv:SRV"
+//   ns=NAME                                    the namespace template /lib/ns/NAME, a
+//                                              namespace(6) file (upstream ADR-0009), here
 //
 // post=SRV: svcd makes a listen channel, gives the service its server end
 // ("listen") and keeps the client end as /srv/SRV, for mounts. It keeps a
@@ -29,7 +32,9 @@
 // only on that architecture. vx.skip=NAME,... on the kernel command line
 // leaves services out. A service gets nothing that is not named here: no
 // ambient authority. resource and acpi: the root Resource and the ACPI
-// tables, which only devmgr needs.
+// tables, which only devmgr needs. entropy: a seed of its own for a random
+// generator, from svcd's, which the kernel seeded from the bootloader's
+// entropy (vx:drbg).
 //
 // Drivers, the services with ioport, mmio or irq records, start first. svcd
 // mints their device objects from the root Resource once, keeps them, and
@@ -43,14 +48,16 @@
 package svcd
 
 import vx "abi:vx"
+import "vx:drbg"
 import "vx:memory"
 import "vx:ndb"
+import "vx:ns"
 import "vx:p9"
 import "vx:rt"
 import "vx:str"
 import "vx:tar"
 
-MAX_SERVICES :: 16
+MAX_SERVICES :: 32
 MAX_RESTARTS :: 5 // in RESTART_WINDOW, then svcd gives up
 RESTART_WINDOW :: vx.Duration(10_000_000_000) // 10 s
 MAX_DEVICES :: 4 // device objects per driver
@@ -96,6 +103,7 @@ image: []u8
 image_vmo, port, resource, acpi_vmo: vx.Handle
 acpi_size: u64
 console_attached: bool
+randomness: drbg.Drbg // seeded from the kernel's entropy; each service that asks gets a seed from it
 
 name_of :: proc "contextless" (s: ^Service) -> string {
 	return string(s.name[:])
@@ -284,6 +292,92 @@ ns_name :: proc "contextless" (index: int) -> string {
 	return str.to_string(&b)
 }
 
+// A mount of the post /srv/SRV at old: a connector to it, and the record
+// that names it (lib/procns replays it).
+@(require_results)
+put_mount :: proc "contextless" (s: ^Service, g: ^Grants, w: ^ndb.Writer, old, srv, aname, flags: string) -> vx.Status {
+	p := find_post(srv)
+	if p == nil || len(g.handles) == cap(g.handles) {
+		say(name_of(s), ": cannot mount /srv/", srv, "\n")
+		return .Err_Not_Found
+	}
+	handle := ns_name(len(g.handles))
+	grant(g, handle, rt.handle_dup(p.client, CONNECTOR_RIGHTS)) or_return
+	src_buf: [len("/srv/") + MAX_NAME]u8
+	src, _ := str.join(src_buf[:], "/srv/", string(p.name[:]))
+	ndb.put(w, "mount", old)
+	ndb.put(w, "handle", handle)
+	if aname != "" {
+		ndb.put(w, "aname", aname)
+	}
+	if flags != "" {
+		ndb.put(w, "flags", flags)
+	}
+	ndb.put(w, "src", src)
+	_ = ndb.end(w)
+	return .Ok
+}
+
+put_bind :: proc "contextless" (w: ^ndb.Writer, new, old, flags: string) {
+	ndb.put(w, "bind", old)
+	ndb.put(w, "new", new)
+	if flags != "" {
+		ndb.put(w, "flags", flags)
+	}
+	_ = ndb.end(w)
+}
+
+@(private="file")
+script: ns.Script
+
+// The namespace template /lib/ns/NAME in the boot image, a namespace(6) file
+// (upstream ADR-0009), as the child's mount and bind records: a mount's
+// service is a post, /srv/NAME.
+@(require_results)
+put_template :: proc "contextless" (s: ^Service, g: ^Grants, w: ^ndb.Writer, name: string) -> vx.Status {
+	DIR :: "lib/ns/"
+	path_buf: [64]u8
+	t: tar.Entry
+	path, fits := str.join(path_buf[:], DIR, name)
+	if name == "" || !fits || tar.find(image, path, &t) != .Ok || t.dir {
+		say(name_of(s), ": no namespace template ", name, "\n")
+		return .Err_Not_Found
+	}
+	script = {text = string(t.data)}
+	op: ns.Op
+	st: vx.Status
+	for st = ns.script_next(&script, &op); st == .Ok; st = ns.script_next(&script, &op) {
+		letters: [dynamic; 3]u8
+		if .After in op.flags {
+			_ = append(&letters, 'a')
+		}
+		if .Before in op.flags {
+			_ = append(&letters, 'b')
+		}
+		if .Create in op.flags {
+			_ = append(&letters, 'c')
+		}
+		flags := string(letters[:])
+		SRV :: "/srv/"
+		if op.kind == .Mount && len(op.args[0]) > len(SRV) && str.has_prefix(op.args[0], SRV) {
+			st = put_mount(s, g, w, op.args[1], op.args[0][len(SRV):], len(op.args) > 2 ? op.args[2] : "", flags)
+		} else if op.kind == .Bind {
+			put_bind(w, op.args[0], op.args[1], flags)
+		} else {
+			st = .Err_Unsupported // a template only mounts posts and binds, so far
+		}
+		if st != .Ok {
+			say(name_of(s), ": namespace template ", name, ": cannot do line ", u64(op.line), "\n")
+			return st
+		}
+	}
+	if st == .Err_Not_Found {
+		return .Ok // the end of the file
+	}
+	say(name_of(s), ": namespace template ", name, ": no operation on line ", u64(op.line), "\n")
+	return st
+}
+
 // Builds the spawn message's records and handles for a service, and starts it.
 @(require_results)
 start :: proc "contextless" (index: int) -> vx.Status {
@@ -337,36 +431,37 @@ start :: proc "contextless" (index: int) -> vx.Status {
 	if ndb.has(&rec, "tasks") { // svcd's own task: the whole tree, for procfs
 		grant(&g, "tasks", rt.handle_dup(rt.self, {.Inspect, .Manage, .Transfer})) or_return
 	}
+	if ndb.has(&rec, "entropy") && randomness.seeded {
+		seed: [32]u8
+		drbg.read(&randomness, seed[:])
+		ndb.put(&w, "entropy", string(seed[:]))
+		_ = ndb.end(&w)
+	}
 	for d in s.devices {
 		grant(&g, d.name, rt.handle_dup(d.handle, vx.RIGHTS_SAME)) or_return
 	}
 
+	// The manifest's records, and a namespace template's lines where it
+	// names one (ns=NAME: /lib/ns/NAME, a namespace(6) file).
 	for ndb.next(&r, &rec) == .Record && !ndb.has(&rec, "service") {
 		switch {
+		case ndb.has(&rec, "ns"):
+			name, _ := ndb.get(&rec, "ns")
+			put_template(s, &g, &w, name) or_return
 		case ndb.has(&rec, "arg"):
 			v, _ := ndb.get(&rec, "arg")
 			ndb.put(&w, "arg", v)
+			_ = ndb.end(&w)
+		case ndb.has(&rec, "env"):
+			v, _ := ndb.get(&rec, "env")
+			ndb.put(&w, "env", v)
+			_ = ndb.end(&w)
 		case ndb.has(&rec, "mount"):
+			old, _ := ndb.get(&rec, "mount")
 			srv_name, _ := ndb.get(&rec, "srv")
-			p := find_post(srv_name)
-			if p == nil || len(g.handles) == cap(g.handles) {
-				say(name_of(s), ": cannot mount /srv/", srv_name, "\n")
-				return .Err_Not_Found
-			}
-			handle := ns_name(len(g.handles))
-			grant(&g, handle, rt.handle_dup(p.client, CONNECTOR_RIGHTS)) or_return
-			src_buf: [len("/srv/") + MAX_NAME]u8
-			src, _ := str.join(src_buf[:], "/srv/", string(p.name[:]))
-			v, _ := ndb.get(&rec, "mount")
-			ndb.put(&w, "mount", v)
-			ndb.put(&w, "handle", handle)
-			if a, ok := ndb.get(&rec, "aname"); ok {
-				ndb.put(&w, "aname", a)
-			}
-			if f, ok := ndb.get(&rec, "flags"); ok {
-				ndb.put(&w, "flags", f)
-			}
-			ndb.put(&w, "src", src)
+			aname, _ := ndb.get(&rec, "aname")
+			flags, _ := ndb.get(&rec, "flags")
+			put_mount(s, &g, &w, old, srv_name, aname, flags) or_return
 		case ndb.has(&rec, "claim") || ndb.has(&rec, "connect"):
 			// claim=NAME: the post's server end, to hand on (devmgr gives it to
 			// a driver); connect=NAME: a connector to it. As handles
@@ -379,7 +474,6 @@ start :: proc "contextless" (index: int) -> vx.Status {
 			}
 			handle, _ := str.join(handle_name_buf[len(g.handles)][:], claim ? "claim:" : "srv:", string(p.name[:]))
 			grant(&g, handle, rt.handle_dup(claim ? p.server : p.client, CONNECTOR_RIGHTS)) or_return
-			continue
 		case is_device_record(&rec): // passed on as they are, for the driver to read
 			for t in rec.tuples {
 				if t.flag {
@@ -388,18 +482,13 @@ start :: proc "contextless" (index: int) -> vx.Status {
 					ndb.put(&w, t.key, t.value)
 				}
 			}
+			_ = ndb.end(&w)
 		case ndb.has(&rec, "bind"):
-			b, _ := ndb.get(&rec, "bind")
+			old, _ := ndb.get(&rec, "bind")
 			nw, _ := ndb.get(&rec, "new")
-			ndb.put(&w, "bind", b)
-			ndb.put(&w, "new", nw)
-			if f, ok := ndb.get(&rec, "flags"); ok {
-				ndb.put(&w, "flags", f)
-			}
-		case:
-			continue
+			flags, _ := ndb.get(&rec, "flags")
+			put_bind(&w, nw, old, flags)
 		}
-		_ = ndb.end(&w)
 	}
 	if w.failed {
 		return .Err_Range
@@ -480,6 +569,16 @@ vx_main :: proc() -> int {
 	pst: vx.Status
 	if port, pst = rt.port_create(); pst != .Ok {
 		fail("port_create")
+	}
+	seed: ndb.Record
+	bytes: string
+	if rt.spawn_record("entropy", &seed) {
+		bytes, _ = ndb.get(&seed, "entropy")
+	}
+	if len(bytes) >= 16 {
+		drbg.mix(&randomness, transmute([]u8)bytes, true)
+	} else {
+		say("no entropy from the kernel: services get none\n")
 	}
 
 	resource = rt.spawn_take("resource")
