@@ -33,30 +33,33 @@ SMP_TEST_ROUNDS :: 4000
 // handed to two CPUs at once would show up as a wrong stamp.
 @(private="file")
 smp_stress :: proc "contextless" (index: u32) {
-	held, tags: [8]u64
-	orders: [8]uint
+	Held :: struct {
+		pa:    Paddr,
+		tag:   u64,
+		order: uint,
+	}
+	held: [8]Held
 	for r in u32(0) ..< SMP_TEST_ROUNDS {
-		slot, order := r % 8, uint(r % 4)
-		if held[slot] != 0 {
-			first := cast(^u64)phys_to_virt(held[slot])
-			last := cast(^u64)phys_to_virt(held[slot] + (4096 << orders[slot]) - 8)
-			if intrinsics.volatile_load(first) != tags[slot] || intrinsics.volatile_load(last) != tags[slot] {
+		h := &held[r % 8]
+		if h.pa != 0 {
+			first := cast(^u64)phys_to_virt(h.pa)
+			last := cast(^u64)phys_to_virt(h.pa + Paddr(PAGE_SIZE << h.order) - 8)
+			if intrinsics.volatile_load(first) != h.tag || intrinsics.volatile_load(last) != h.tag {
 				kpanic("selftest smp: a block was handed out twice")
 			}
-			phys_free(held[slot], orders[slot])
+			phys_free(h.pa, h.order)
 		}
-		held[slot] = phys_alloc(order)
-		if held[slot] == 0 {
+		order := uint(r % 4)
+		h^ = {pa = phys_alloc(order), tag = u64(index) << 32 | u64(r), order = order}
+		if h.pa == 0 {
 			kpanic("selftest smp: out of memory")
 		}
-		orders[slot] = order
-		tags[slot] = u64(index) << 32 | u64(r)
-		intrinsics.volatile_store(cast(^u64)phys_to_virt(held[slot]), tags[slot])
-		intrinsics.volatile_store(cast(^u64)phys_to_virt(held[slot] + (4096 << order) - 8), tags[slot])
+		intrinsics.volatile_store(cast(^u64)phys_to_virt(h.pa), h.tag)
+		intrinsics.volatile_store(cast(^u64)phys_to_virt(h.pa + Paddr(PAGE_SIZE << order) - 8), h.tag)
 	}
-	for slot in 0 ..< 8 {
-		if held[slot] != 0 {
-			phys_free(held[slot], orders[slot])
+	for h in held {
+		if h.pa != 0 {
+			phys_free(h.pa, h.order)
 		}
 	}
 }
@@ -111,9 +114,11 @@ smp_init :: proc "contextless" () {
 		cpus[index].index = index
 		cpus[index].arch_id = id
 		cpus[index].idle_stack = stack
-		top := cast([^]u64)uintptr(stack + KSTACK_SIZE)
-		(top[-1:])[0] = u64(index)
-		info.extra_argument = u64(uintptr(rawptr(&(top[-2:])[0]))) // ap_start: sp = this, and its index just above
+		// ap_start sets sp to the stack's last 16 bytes, and finds its index in
+		// the upper eight.
+		top := cast(^[2]u64)uintptr(stack + KSTACK_SIZE - 16)
+		top[1] = u64(index)
+		info.extra_argument = u64(uintptr(top))
 		intrinsics.atomic_store_explicit(&info.goto_address, rawptr(ap_start), .Release)
 	}
 	give_up := clock_now() + 1_000_000_000

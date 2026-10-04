@@ -14,11 +14,13 @@ Counter :: struct {
 	obs:       Observers,
 }
 
-counter_pool := Pool{size = (size_of(Counter) + 15) &~ 15}
+#assert(offset_of(Counter, obj) == 0) // objects are cast from ^Object
+
+counter_pool: Pool(Counter)
 
 @(require_results)
 counter_create :: proc "contextless" (initial: u64) -> (^Counter, vx.Status) {
-	c := cast(^Counter)pool_alloc(&counter_pool)
+	c := pool_alloc(&counter_pool)
 	if c == nil {
 		return nil, .Err_No_Memory
 	}
@@ -87,7 +89,7 @@ FUTEX_BUCKETS :: 64
 Futex_Waiter :: struct {
 	next:   ^Futex_Waiter,
 	thread: ^Thread,
-	key:    u64, // physical address of the word
+	key:    Paddr, // the word's
 }
 
 @(private="file")
@@ -100,27 +102,28 @@ Futex_Bucket :: struct {
 futex_buckets: [FUTEX_BUCKETS]Futex_Bucket
 
 @(private="file")
-futex_bucket :: proc "contextless" (key: u64) -> u32 {
-	return u32(((key >> 2) * 0x9e3779b97f4a7c15) >> 58)
+futex_bucket :: proc "contextless" (key: Paddr) -> u32 {
+	return u32(((u64(key) >> 2) * 0x9e3779b97f4a7c15) >> 58)
 }
 
 // Blocks while *word (a user address, in the current task) holds `expected`,
 // until futex_wake or the deadline. .Err_Bad_State if the word already differs.
-futex_wait :: proc "contextless" (word: u64, expected: u32, deadline: Instant) -> i64 {
+@(require_results)
+futex_wait :: proc "contextless" (word: Uva, expected: u32, deadline: Instant) -> vx.Status {
 	if word & 3 != 0 {
-		return i64(vx.Status.Err_Invalid)
+		return .Err_Invalid
 	}
 	t := this_cpu().current
 	key := user_page_pa(t.task.root, word)
 	if key == 0 {
-		return i64(vx.Status.Err_Invalid)
+		return .Err_Invalid
 	}
 	b := &futex_buckets[futex_bucket(key)]
 	w := Futex_Waiter{thread = t, key = key}
 	spin_lock(&b.lock)
 	if intrinsics.atomic_load_explicit(cast(^u32)phys_to_virt(key), .Acquire) != expected {
 		spin_unlock(&b.lock)
-		return i64(vx.Status.Err_Bad_State)
+		return .Err_Bad_State
 	}
 	t.wait_token = &w
 	w.next = b.head
@@ -128,30 +131,25 @@ futex_wait :: proc "contextless" (word: u64, expected: u32, deadline: Instant) -
 	spin_unlock(&b.lock)
 
 	woke := thread_block(deadline, 0)
-	if woke != i64(vx.Status.Ok) { // timed out or killed: leave the bucket if a waker has not taken us
+	if woke != .Ok { // timed out or killed: leave the bucket if a waker has not taken us
 		spin_lock(&b.lock)
-		for link := &b.head; link^ != nil; link = &link^.next {
-			if link^ == &w {
-				link^ = w.next
-				break
-			}
-		}
+		unlink(&b.head, &w, "next")
 		spin_unlock(&b.lock)
 	}
 	return woke
 }
 
 // Wakes up to `count` threads waiting on *word. Returns how many it woke.
-futex_wake :: proc "contextless" (word: u64, count: u32) -> i64 {
+@(require_results)
+futex_wake :: proc "contextless" (word: Uva, count: u32) -> (woken: u32, st: vx.Status) {
 	if word & 3 != 0 {
-		return i64(vx.Status.Err_Invalid)
+		return 0, .Err_Invalid
 	}
 	key := user_page_pa(this_cpu().current.task.root, word)
 	if key == 0 {
-		return i64(vx.Status.Err_Invalid)
+		return 0, .Err_Invalid
 	}
 	b := &futex_buckets[futex_bucket(key)]
-	woken := u32(0)
 	spin_lock(&b.lock)
 	link := &b.head
 	for link^ != nil && woken < count {
@@ -161,10 +159,10 @@ futex_wake :: proc "contextless" (word: u64, count: u32) -> i64 {
 			continue
 		}
 		link^ = w.next
-		if thread_wake_token(w.thread, w, i64(vx.Status.Ok)) {
+		if thread_wake_token(w.thread, w, .Ok) {
 			woken += 1
 		}
 	}
 	spin_unlock(&b.lock)
-	return i64(woken)
+	return woken, .Ok
 }

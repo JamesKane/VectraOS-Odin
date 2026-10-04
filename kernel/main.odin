@@ -79,10 +79,10 @@ selftest_recurse :: proc "contextless" (depth: u64) -> u64 {
 selftest_phys :: proc "contextless" () {
 	before := phys.free_pages
 	taken: u64
-	pa: [PHYS_MAX_ORDER + 1]u64
+	pa: [PHYS_MAX_ORDER + 1]Paddr
 	for o in uint(0) ..= PHYS_MAX_ORDER {
 		pa[o] = phys_alloc(o)
-		if pa[o] == 0 || pa[o] & ((4096 << o) - 1) != 0 {
+		if pa[o] == 0 || pa[o] & ((PAGE_SIZE << o) - 1) != 0 {
 			kpanic("selftest phys: bad block")
 		}
 		taken += 1 << o
@@ -169,7 +169,7 @@ selftests :: proc "contextless" () {
 	}
 	if cmdline_has("vx.selftest=write-text-alias") {
 		// And so is its other mapping, in the direct map.
-		pa := u64(uintptr(rawptr(kernel_main))) - boot.kernel_virt + boot.kernel_phys
+		pa := Paddr(u64(uintptr(rawptr(kernel_main))) - boot.kernel_virt) + boot.kernel_phys
 		intrinsics.volatile_store(cast(^u8)phys_to_virt(pa), 0)
 	}
 	if cmdline_has("vx.selftest=simd") {

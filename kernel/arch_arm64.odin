@@ -88,46 +88,46 @@ mp_info_id :: proc "contextless" (info: ^Mp_Info) -> u64 {
 // --- Page tables ---
 
 @(private="file")
-PTE_VALID :: u64(1) << 0
+PTE_VALID :: Pte(1) << 0
 @(private="file")
-PTE_TABLE :: u64(1) << 1 // a table at levels 0-2, a page at level 3
+PTE_TABLE :: Pte(1) << 1 // a table at levels 0-2, a page at level 3
 @(private="file")
-PTE_DEVICE :: u64(2) << 2 // MAIR index 2; index 0 is normal write-back memory
+PTE_DEVICE :: Pte(2) << 2 // MAIR index 2; index 0 is normal write-back memory
 @(private="file")
-PTE_USER :: u64(1) << 6 // AP[1]
+PTE_USER :: Pte(1) << 6 // AP[1]
 @(private="file")
-PTE_READ_ONLY :: u64(1) << 7 // AP[2]
+PTE_READ_ONLY :: Pte(1) << 7 // AP[2]
 @(private="file")
-PTE_SH_INNER :: u64(3) << 8
+PTE_SH_INNER :: Pte(3) << 8
 @(private="file")
-PTE_AF :: u64(1) << 10
+PTE_AF :: Pte(1) << 10
 @(private="file")
-PTE_NG :: u64(1) << 11 // not global: user mappings belong to one address space
+PTE_NG :: Pte(1) << 11 // not global: user mappings belong to one address space
 @(private="file")
-PTE_PXN :: u64(1) << 53
+PTE_PXN :: Pte(1) << 53
 @(private="file")
-PTE_UXN :: u64(1) << 54
+PTE_UXN :: Pte(1) << 54
 @(private="file")
-PTE_ADDR :: u64(0x0000_ffff_ffff_f000)
+PTE_ADDR :: Pte(0x0000_ffff_ffff_f000)
 
-arch_pte_valid :: proc "contextless" (e: u64) -> bool {
+arch_pte_valid :: proc "contextless" (e: Pte) -> bool {
 	return e & PTE_VALID != 0
 }
 
-arch_pte_is_table :: proc "contextless" (e: u64, level: int) -> bool {
+arch_pte_is_table :: proc "contextless" (e: Pte, level: int) -> bool {
 	return level < 3 && e & PTE_TABLE != 0
 }
 
-arch_pte_addr :: proc "contextless" (e: u64) -> u64 {
-	return e & PTE_ADDR
+arch_pte_addr :: proc "contextless" (e: Pte) -> Paddr {
+	return Paddr(e & PTE_ADDR)
 }
 
-arch_pte_table :: proc "contextless" (pa: u64) -> u64 {
-	return pa | PTE_TABLE | PTE_VALID
+arch_pte_table :: proc "contextless" (pa: Paddr) -> Pte {
+	return Pte(pa) | PTE_TABLE | PTE_VALID
 }
 
-arch_pte_leaf :: proc "contextless" (pa: u64, flags: Map_Flags, level: int) -> u64 {
-	e := pa | PTE_AF | PTE_VALID | (level == 3 ? PTE_TABLE : 0)
+arch_pte_leaf :: proc "contextless" (pa: Paddr, flags: Map_Flags, level: int) -> Pte {
+	e := Pte(pa) | PTE_AF | PTE_VALID | (level == 3 ? PTE_TABLE : 0)
 	e |= .Device in flags ? PTE_DEVICE : PTE_SH_INNER
 	if .Write not_in flags {
 		e |= PTE_READ_ONLY
@@ -152,29 +152,90 @@ arch_pte_publish :: proc "contextless" () {
 
 // The GICv3: the distributor, and one 128 KiB redistributor frame per CPU.
 @(private="file")
-GICD_PHYS :: u64(0x0800_0000)
+GICD_PHYS :: 0x0800_0000
 @(private="file")
 GICD_SIZE :: u64(0x1_0000)
 @(private="file")
-GICR_PHYS :: u64(0x080a_0000)
+GICR_PHYS :: 0x080a_0000
 @(private="file")
 GICR_FRAME_SIZE :: u64(0x2_0000)
 
+// The distributor's registers that the kernel uses.
 @(private="file")
-PL011_PHYS :: u64(0x0900_0000)
+Gicd :: struct {
+	ctlr:       u32,
+	typer:      u32,
+	_:          [30]u32,
+	igroupr:    [32]u32,
+	isenabler:  [32]u32,
+	icenabler:  [32]u32,
+	_:          [128]u32, // pending and active
+	ipriorityr: [1024]u8,
+	_:          [1024]u8, // targets, unused with affinity routing
+	icfgr:      [64]u32,
+	_:          [(0x6000 - 0xd00) / 4]u32,
+	irouter:    [1020]u64, // from INTID 32; the first 32 are reserved
+}
+
+#assert(offset_of(Gicd, igroupr) == 0x080)
+#assert(offset_of(Gicd, isenabler) == 0x100)
+#assert(offset_of(Gicd, icenabler) == 0x180)
+#assert(offset_of(Gicd, ipriorityr) == 0x400)
+#assert(offset_of(Gicd, icfgr) == 0xc00)
+#assert(offset_of(Gicd, irouter) == 0x6000)
+#assert(size_of(Gicd) <= GICD_SIZE)
+
+// A redistributor's registers that the kernel uses: its RD frame, then its
+// SGI and PPI frame.
 @(private="file")
-PL011_DR :: 0x00 / 4 // data register, as a u32 index
+Gicr :: struct {
+	ctlr:       u32,
+	iidr:       u32,
+	typer:      u64,
+	statusr:    u32,
+	waker:      u32,
+	_:          [(0x1_0000 - 0x18) / 4]u32,
+	_:          [32]u32,
+	igroupr0:   u32,
+	_:          [31]u32,
+	isenabler0: u32,
+	_:          [191]u32,
+	ipriorityr: [32]u8, // SGIs and PPIs
+}
+
+#assert(offset_of(Gicr, typer) == 0x08)
+#assert(offset_of(Gicr, waker) == 0x14)
+#assert(offset_of(Gicr, igroupr0) == 0x1_0080)
+#assert(offset_of(Gicr, isenabler0) == 0x1_0100)
+#assert(offset_of(Gicr, ipriorityr) == 0x1_0400)
+#assert(size_of(Gicr) <= GICR_FRAME_SIZE)
+
 @(private="file")
-PL011_FR :: 0x18 / 4 // flag register
+gicd :: #force_inline proc "contextless" () -> ^Gicd {
+	return cast(^Gicd)uintptr(boot.hhdm + GICD_PHYS)
+}
+
+@(private="file")
+PL011_PHYS :: 0x0900_0000
+
+@(private="file")
+Pl011 :: struct {
+	dr: u32, // data
+	_:  [5]u32,
+	fr: u32, // flags
+}
+
+#assert(offset_of(Pl011, fr) == 0x18)
+
 @(private="file")
 PL011_FR_TXFF :: 1 << 5 // transmit FIFO full
 
 @(private="file")
-pl011: [^]u32
+pl011: ^Pl011
 
-arch_kernel_mappings :: proc "contextless" (root: u64) {
+arch_kernel_mappings :: proc "contextless" (root: Paddr) {
 	gicr_size := GICR_FRAME_SIZE * max(boot.cpu_count, 1)
-	if !map_range(root, boot.hhdm + PL011_PHYS, PL011_PHYS, 4096, {.Write, .Device}) ||
+	if !map_range(root, boot.hhdm + PL011_PHYS, PL011_PHYS, PAGE_SIZE, {.Write, .Device}) ||
 	   !map_range(root, boot.hhdm + GICD_PHYS, GICD_PHYS, GICD_SIZE, {.Write, .Device}) ||
 	   !map_range(root, boot.hhdm + GICR_PHYS, GICR_PHYS, gicr_size, {.Write, .Device}) {
 		kpanic("cannot map the UART and the GIC")
@@ -182,39 +243,39 @@ arch_kernel_mappings :: proc "contextless" (root: u64) {
 }
 
 @(private="file")
-empty_user_root: u64 // TTBR0 while a CPU runs no task, shared by all
+empty_user_root: Paddr // TTBR0 while a CPU runs no task, shared by all
 
 // Installs the kernel's tables in TTBR1, and an empty table in TTBR0 until
 // there is a user address space, then drops every cached translation.
 // The user half has its own tables in TTBR0; the kernel's stay in TTBR1.
-arch_new_user_root :: proc "contextless" () -> u64 {
+arch_new_user_root :: proc "contextless" () -> Paddr {
 	return phys_alloc_zeroed(0)
 }
 
 // Loads a task's tables into TTBR0, or with root 0 (no task, as for the idle
 // thread) the empty table.
-arch_switch_user_root :: proc "contextless" (root: u64) {
-	vx_switch_user_root(root != 0 ? root : empty_user_root)
+arch_switch_user_root :: proc "contextless" (root: Paddr) {
+	vx_switch_user_root(u64(root != 0 ? root : empty_user_root))
 }
 
 arch_user_top_slots :: proc "contextless" () -> int {
 	return 512
 }
 
-arch_pte_user_ok :: proc "contextless" (e: u64, write: bool) -> bool {
+arch_pte_user_ok :: proc "contextless" (e: Pte, write: bool) -> bool {
 	return e & PTE_VALID != 0 && e & PTE_USER != 0 && (!write || e & PTE_READ_ONLY == 0)
 }
 
-arch_switch_tables :: proc "contextless" (root: u64) {
+arch_switch_tables :: proc "contextless" (root: Paddr) {
 	if empty_user_root == 0 {
 		empty_user_root = phys_alloc_zeroed(0) // first on the boot CPU, before the others start
 	}
 	if empty_user_root == 0 {
 		kpanic("no memory for page tables")
 	}
-	ap_park_tables[0] = root // for ap_start and ap_park
-	ap_park_tables[1] = empty_user_root
-	vx_switch_tables(root, empty_user_root)
+	ap_park_tables[0] = u64(root) // for ap_start and ap_park
+	ap_park_tables[1] = u64(empty_user_root)
+	vx_switch_tables(u64(root), u64(empty_user_root))
 }
 
 // --- The console ---
@@ -225,8 +286,8 @@ arch_console_init :: proc "contextless" () {
 	}
 	vx_write_mair(vx_read_mair() &~ (0xff << 16)) // attribute 2 = 0x00: Device-nGnRnE
 	va := boot.hhdm + PL011_PHYS
-	if map_range(vx_read_ttbr1() & PTE_ADDR, va, PL011_PHYS, 4096, {.Write, .Device}) {
-		pl011 = cast([^]u32)uintptr(va)
+	if map_range(Paddr(vx_read_ttbr1() & u64(PTE_ADDR)), va, PL011_PHYS, PAGE_SIZE, {.Write, .Device}) {
+		pl011 = cast(^Pl011)uintptr(va)
 	}
 }
 
@@ -244,8 +305,8 @@ arch_console_write :: proc "contextless" (s: string) {
 
 @(private="file")
 uart_putc :: proc "contextless" (c: u8) {
-	for intrinsics.volatile_load(&pl011[PL011_FR]) & PL011_FR_TXFF != 0 {}
-	intrinsics.volatile_store(&pl011[PL011_DR], u32(c))
+	for intrinsics.volatile_load(&pl011.fr) & PL011_FR_TXFF != 0 {}
+	intrinsics.volatile_store(&pl011.dr, u32(c))
 }
 
 // --- CPUs ---
@@ -310,17 +371,16 @@ arch_counter_hz :: proc "contextless" () -> u64 {
 // this CPU's redistributor with the timer's PPI enabled, then its interface.
 arch_timer_init :: proc "contextless" () {
 	if arch_cpu_index() == 0 {
-		gicd := cast(^u32)uintptr(boot.hhdm + GICD_PHYS)
-		intrinsics.volatile_store(gicd, 1 << 4 | 1 << 1 | 1 << 0) // GICD_CTLR: affinity routing, both groups
+		intrinsics.volatile_store(&gicd().ctlr, 1 << 4 | 1 << 1 | 1 << 0) // affinity routing, both groups
 	}
 
 	// Find this CPU's redistributor by its affinity.
 	mpidr := vx_read_mpidr()
 	aff := u32((mpidr >> 32 & 0xff) << 24 | (mpidr & 0xffffff))
-	rd: u64
+	rd: ^Gicr
 	for i in 0 ..< max(boot.cpu_count, 1) {
-		frame := boot.hhdm + GICR_PHYS + i * GICR_FRAME_SIZE
-		typer := intrinsics.volatile_load(cast(^u64)uintptr(frame + 0x08))
+		frame := cast(^Gicr)uintptr(boot.hhdm + GICR_PHYS + i * GICR_FRAME_SIZE)
+		typer := intrinsics.volatile_load(&frame.typer)
 		if u32(typer >> 32) == aff {
 			rd = frame
 			break
@@ -329,22 +389,19 @@ arch_timer_init :: proc "contextless" () {
 			break // the last redistributor
 		}
 	}
-	if rd == 0 {
+	if rd == nil {
 		kpanic("no GIC redistributor for this CPU")
 	}
 
-	waker := cast(^u32)uintptr(rd + 0x14)
-	intrinsics.volatile_store(waker, intrinsics.volatile_load(waker) &~ (1 << 1)) // clear ProcessorSleep
-	for intrinsics.volatile_load(waker) & (1 << 2) != 0 {} // wait for ChildrenAsleep to clear
+	intrinsics.volatile_store(&rd.waker, intrinsics.volatile_load(&rd.waker) &~ (1 << 1)) // clear ProcessorSleep
+	for intrinsics.volatile_load(&rd.waker) & (1 << 2) != 0 {} // wait for ChildrenAsleep to clear
 
-	sgi := rd + 0x1_0000 // the SGI and PPI frame
 	ppi := timer_ppi()
-	group := cast(^u32)uintptr(sgi + 0x080) // GICR_IGROUPR0: group 1
 	lines := u32(1) << ppi | 1 << INTID_RESCHED
-	intrinsics.volatile_store(group, intrinsics.volatile_load(group) | lines)
-	intrinsics.volatile_store(cast(^u8)uintptr(sgi + 0x400 + u64(ppi)), 0x80) // priorities
-	intrinsics.volatile_store(cast(^u8)uintptr(sgi + 0x400 + INTID_RESCHED), 0x80)
-	intrinsics.volatile_store(cast(^u32)uintptr(sgi + 0x100), lines) // GICR_ISENABLER0
+	intrinsics.volatile_store(&rd.igroupr0, intrinsics.volatile_load(&rd.igroupr0) | lines) // group 1
+	intrinsics.volatile_store(&rd.ipriorityr[ppi], 0x80)
+	intrinsics.volatile_store(&rd.ipriorityr[INTID_RESCHED], 0x80)
+	intrinsics.volatile_store(&rd.isenabler0, lines)
 	vx_gic_cpu_init()
 }
 
@@ -387,23 +444,51 @@ Trap_Frame :: struct { // the layout entry.S builds, below the vector state
 @(private="file")
 VECTOR_KINDS := [4]string{"synchronous exception", "IRQ", "FIQ", "SError"}
 
+// The exception syndrome register, and the exception classes the kernel
+// tells apart.
+@(private="file")
+Exception_Class :: enum u8 {
+	Svc64      = 0x15,
+	Iabt_Lower = 0x20, // an instruction abort from EL0
+	Iabt_Same  = 0x21,
+	Dabt_Lower = 0x24, // a data abort from EL0
+	Dabt_Same  = 0x25,
+	Brk        = 0x3c,
+}
+
+@(private="file")
+Esr :: bit_field u64 {
+	iss: u32             | 25, // the syndrome, which the class defines
+	il:  bool            | 1,
+	ec:  Exception_Class | 6,
+}
+
+// A data abort's ISS: write, not read (WnR), and the fault status code,
+// which is a translation fault at some level when its bits 5-2 are 0b0001.
+@(private="file")
+DABT_WNR :: 1 << 6
+@(private="file")
+DABT_FSC_LEVEL_MASK :: 0x3c
+@(private="file")
+DABT_FSC_TRANSLATION :: 0x04
+
 // Describes an exception: "page fault at 0x... (read, not present, user)", say.
 @(private="file")
 kput_exception :: proc "contextless" (f: ^Trap_Frame, index: u64) {
-	ec := u32(f.esr >> 26) & 0x3f
-	iss := u32(f.esr) & 0x1ffffff
+	esr := transmute(Esr)f.esr
+	sync := index & 3 == 0
 	switch {
-	case index & 3 == 0 && (ec == 0x24 || ec == 0x25): // data abort
+	case sync && (esr.ec == .Dabt_Lower || esr.ec == .Dabt_Same):
 		kput("page fault at ")
 		kput_hex(f.far)
-		kput(iss & (1 << 6) != 0 ? " (write, " : " (read, ")
-		kput(iss & 0x3c == 0x04 ? "not present" : "protection")
-		kput(ec == 0x24 ? ", user)" : ", kernel)")
-	case index & 3 == 0 && (ec == 0x20 || ec == 0x21):
+		kput(esr.iss & DABT_WNR != 0 ? " (write, " : " (read, ")
+		kput(esr.iss & DABT_FSC_LEVEL_MASK == DABT_FSC_TRANSLATION ? "not present" : "protection")
+		kput(esr.ec == .Dabt_Lower ? ", user)" : ", kernel)")
+	case sync && (esr.ec == .Iabt_Lower || esr.ec == .Iabt_Same):
 		kput("page fault at ")
 		kput_hex(f.far)
 		kput(" (execute)")
-	case index & 3 == 0 && ec == 0x3c && iss & 0xffff == 1:
+	case sync && esr.ec == .Brk && esr.iss & 0xffff == 1:
 		// brk #1: Odin's runtime trap. A bounds check or an assertion failed;
 		// its message went to a stderr that freestanding builds do not have.
 		kput("Odin runtime trap (a bounds check or assertion failed)")
@@ -445,38 +530,47 @@ arch_send_resched :: proc "contextless" (c: ^Cpu) {
 // thread's kernel stack whenever it runs in user mode: nothing to set.
 arch_set_kernel_stack :: proc "contextless" (top: u64) {}
 
-// A new thread's stack, as the context switch will pop it: x19 to x30, then
-// d8 to d15, with x19 carrying the thread and x30 returning into
-// thread_trampoline. It starts below the frame vx_enter_user builds at the top.
+// What vx_context_switch (entry.S) pops, lowest address first.
+@(private="file")
+Switch_Frame :: struct {
+	x19, x20, x21, x22, x23, x24, x25, x26, x27, x28: u64,
+	x29, x30:                                         u64, // the frame pointer and the return address
+	d:                                                [8]u64, // d8 to d15
+}
+
+#assert(size_of(Switch_Frame) == 160)
+
+// A new thread's stack, as the context switch will pop it: x19 carrying the
+// thread, and x30 returning into thread_trampoline. It starts below the
+// frame vx_enter_user builds at the top.
 arch_thread_initial_sp :: proc "contextless" (th: ^Thread) -> u64 {
-	sp := cast([^]u64)uintptr(thread_kstack_top(th) - TRAP_FRAME_SIZE - 160)
-	sp[0] = u64(uintptr(th)) // x19
-	sp[11] = u64(uintptr(rawptr(thread_trampoline))) // x30
-	return u64(uintptr(sp))
+	f := cast(^Switch_Frame)uintptr(thread_kstack_top(th) - TRAP_FRAME_SIZE - size_of(Switch_Frame))
+	f^ = {
+		x19 = u64(uintptr(th)),
+		x30 = u64(uintptr(rawptr(thread_trampoline))),
+	}
+	return u64(uintptr(f))
 }
 
 arch_context_switch :: proc "contextless" (save_sp: ^u64, load_sp: u64) {
 	vx_context_switch(save_sp, load_sp)
 }
 
-arch_enter_user :: proc "contextless" (entry, sp, arg, arg2, kstack_top: u64) -> ! {
-	vx_enter_user(entry, sp, arg, arg2, kstack_top)
+arch_enter_user :: proc "contextless" (entry, sp: Uva, arg, arg2, kstack_top: u64) -> ! {
+	vx_enter_user(u64(entry), u64(sp), arg, arg2, kstack_top)
 }
 
 // The frame entry.S builds: Trap_Frame, then q0-q31, FPCR and FPSR.
 TRAP_FRAME_SIZE :: size_of(Trap_Frame) + 32 * 16 + 16
 
-@(private="file")
-EC_SVC64 :: 0x15
-
 @(export, link_name="aarch64_trap")
 aarch64_trap :: proc "c" (f: ^Trap_Frame, index: u64) {
 	from_user := index >= 8
-	ec := u32(f.esr >> 26) & 0x3f
+	esr := transmute(Esr)f.esr
 	switch {
 	case index & 3 == 1: // IRQ
 		aarch64_irq()
-	case from_user && index & 3 == 0 && ec == EC_SVC64:
+	case from_user && index & 3 == 0 && esr.ec == .Svc64:
 		f.x[0] = u64(syscall_dispatch(f.x[8], {f.x[0], f.x[1], f.x[2], f.x[3], f.x[4], f.x[5]}))
 	case from_user:
 		task_fault_start()
@@ -518,13 +612,8 @@ arch_clobber_vregs :: proc "contextless" () {
 @(private="file")
 gic_lines: u32 // INTIDs below this exist
 
-@(private="file")
-gicd_reg :: proc "contextless" (off: u64) -> ^u32 {
-	return cast(^u32)uintptr(boot.hhdm + GICD_PHYS + off)
-}
-
 arch_devices_init :: proc "contextless" () {
-	n := 32 * ((intrinsics.volatile_load(gicd_reg(0x004)) & 0x1f) + 1) // GICD_TYPER.ITLinesNumber
+	n := 32 * ((intrinsics.volatile_load(&gicd().typer) & 0x1f) + 1) // ITLinesNumber
 	gic_lines = min(n, 1020)
 }
 
@@ -533,12 +622,13 @@ arch_has_io_ports :: proc "contextless" () -> bool {
 }
 
 arch_console_device :: proc "contextless" (io: bool, base, size: u64) -> bool {
-	return !io && base < PL011_PHYS + 4096 && PL011_PHYS < base + size
+	return !io && base < PL011_PHYS + PAGE_SIZE && PL011_PHYS < base + size
 }
 
 arch_io_switch :: proc "contextless" (t: ^Task) {}
 
 // SPIs only: SGIs and PPIs are the kernel's.
+@(require_results)
 arch_irq_canonical :: proc "contextless" (line: u32) -> (u32, vx.Status) {
 	if line < 32 || line >= gic_lines {
 		return 0, .Err_Range
@@ -546,16 +636,17 @@ arch_irq_canonical :: proc "contextless" (line: u32) -> (u32, vx.Status) {
 	return line, .Ok
 }
 
+@(require_results)
 arch_irq_route :: proc "contextless" (line: u32) -> (level: bool, st: vx.Status) {
+	d := gicd()
 	bit := u32(1) << (line % 32)
-	g := gicd_reg(0x080 + 4 * u64(line / 32)) // GICD_IGROUPR: group 1
+	g := &d.igroupr[line / 32] // group 1
 	intrinsics.volatile_store(g, intrinsics.volatile_load(g) | bit)
-	intrinsics.volatile_store(cast(^u8)uintptr(boot.hhdm + GICD_PHYS + 0x400 + u64(line)), 0x80) // GICD_IPRIORITYR
-	c := gicd_reg(0xc00 + 4 * u64(line / 16)) // GICD_ICFGR: level-triggered
+	intrinsics.volatile_store(&d.ipriorityr[line], 0x80)
+	c := &d.icfgr[line / 16] // level-triggered
 	intrinsics.volatile_store(c, intrinsics.volatile_load(c) &~ (2 << (line % 16 * 2)))
-	route := cast(^u64)uintptr(boot.hhdm + GICD_PHYS + 0x6000 + 8 * u64(line)) // GICD_IROUTER
-	intrinsics.volatile_store(route, cpus[0].arch_id & 0xff_00ff_ffff)
-	intrinsics.volatile_store(gicd_reg(0x100 + 4 * u64(line / 32)), bit) // GICD_ISENABLER
+	intrinsics.volatile_store(&d.irouter[line], cpus[0].arch_id & 0xff_00ff_ffff)
+	intrinsics.volatile_store(&d.isenabler[line / 32], bit)
 	return true, .Ok
 }
 
@@ -563,6 +654,7 @@ arch_irq_mask :: proc "contextless" (line: u32, masked: bool) {
 	if line < 32 || line >= gic_lines {
 		return
 	}
-	off: u64 = masked ? 0x180 : 0x100 // GICD_ICENABLER or GICD_ISENABLER
-	intrinsics.volatile_store(gicd_reg(off + 4 * u64(line / 32)), u32(1) << (line % 32))
+	d := gicd()
+	reg := masked ? &d.icenabler[line / 32] : &d.isenabler[line / 32]
+	intrinsics.volatile_store(reg, u32(1) << (line % 32))
 }

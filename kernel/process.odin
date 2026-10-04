@@ -40,21 +40,21 @@ task_bind :: proc "contextless" (t: ^Task, b: ^Binding) -> vx.Status {
 // address space.
 @(private="file")
 task_teardown :: proc "contextless" (t: ^Task) {
-	for i in 1 ..< HANDLE_SLOTS { // no one adds to an ending task's table
-		obj := t.handles[i].obj
-		t.handles[i].obj = nil
+	for &e in t.handles { // no one adds to an ending task's table
+		obj := e.obj
+		e.obj = nil
 		if obj != nil {
 			object_drop(obj)
 		}
 	}
-	for i in 0 ..< TASK_MAX_MAPPINGS {
-		if t.maps[i].size != 0 {
-			object_drop(&t.maps[i].vmo.obj)
+	for m in t.maps {
+		if m.size != 0 {
+			object_drop(&m.vmo.obj)
 		}
 	}
 	free_user_tables(t.root)
-	phys_free(u64(uintptr(t.maps)) - boot.hhdm, 0)
-	phys_free(u64(uintptr(t.handles)) - boot.hhdm, 0)
+	phys_free(virt_to_phys(t.maps), 0)
+	phys_free(virt_to_phys(t.handles), 0)
 	spin_lock(&t.lock)
 	t.root = 0
 	t.maps = nil
@@ -68,23 +68,23 @@ task_teardown :: proc "contextless" (t: ^Task) {
 // Starts a thread that has not started: user mode at entry, with sp and two
 // arguments. The thread holds a reference to itself until it is reaped.
 @(require_results)
-thread_start :: proc "contextless" (th: ^Thread, entry, sp, arg, arg2: u64) -> vx.Status {
+thread_start :: proc "contextless" (th: ^Thread, entry, sp: Uva, arg, arg2: u64) -> vx.Status {
 	t := th.task
-	spin_lock(&t.lock)
-	if th.state != .New || th.user_entry != 0 || t.ending || t.killed {
-		spin_unlock(&t.lock)
-		return .Err_Bad_State
+	{
+		spin_guard(&t.lock)
+		if th.state != .New || th.user_entry != 0 || t.ending || t.killed {
+			return .Err_Bad_State
+		}
+		th.user_entry = entry
+		th.user_sp = sp
+		th.user_arg = arg
+		th.user_arg2 = arg2
+		t.live_threads += 1
+		t.state = .Running
+		th.task_next = t.threads
+		t.threads = th
+		object_ref(&th.obj)
 	}
-	th.user_entry = entry
-	th.user_sp = sp
-	th.user_arg = arg
-	th.user_arg2 = arg2
-	t.live_threads += 1
-	t.state = .Running
-	th.task_next = t.threads
-	t.threads = th
-	object_ref(&th.obj)
-	spin_unlock(&t.lock)
 	sched_start_thread(th)
 	return .Ok
 }
@@ -113,12 +113,7 @@ thread_reap :: proc "contextless" (th: ^Thread) {
 	th.kstack = 0
 	t := th.task
 	spin_lock(&t.lock)
-	for link := &t.threads; link^ != nil; link = &link^.task_next {
-		if link^ == th {
-			link^ = th.task_next
-			break
-		}
-	}
+	unlink(&t.threads, th, "task_next")
 	spin_unlock(&t.lock)
 	if th.last_of_task {
 		task_teardown(t)

@@ -11,13 +11,10 @@ import "base:intrinsics"
 // of the latest output.
 
 @(private="file")
-Line :: struct {
-	buf: [512]u8,
-	len: int,
-}
+console_line: [MAX_CPUS][dynamic; 512]u8
 
-@(private="file")
-console_line: [MAX_CPUS]Line
+// A user thread's line of debug_write output (console_user_write).
+User_Line :: [dynamic; 160]u8
 
 @(private="file")
 console_lock: Spinlock
@@ -50,37 +47,35 @@ console_flush :: proc "contextless" () {
 	line := &console_line[arch_cpu_index()]
 	spin_lock(&console_lock)
 	kput_stamp()
-	console_emit(string(line.buf[:line.len]))
+	console_emit(string(line[:]))
 	spin_unlock(&console_lock)
-	line.len = 0
+	clear(line)
 }
 
 kput :: proc "contextless" (s: string) {
 	line := &console_line[arch_cpu_index()]
-	for i in 0 ..< len(s) {
-		line.buf[line.len] = s[i]
-		line.len += 1
-		if s[i] == '\n' || line.len == len(line.buf) {
+	for c in transmute([]u8)s {
+		append(line, c)
+		if c == '\n' || len(line) == cap(line) {
 			console_flush()
 		}
 	}
 }
 
-// One debug_write call's bytes, into the writing thread's line buffer. User
-// threads can move between CPUs between two calls, so each has a buffer of
-// its own, and a line goes out whole when it ends (or fills the buffer).
-console_user_write :: proc "contextless" (s: string, buf: []u8, length: ^int) {
-	for i in 0 ..< len(s) {
-		buf[length^] = s[i]
-		length^ += 1
-		if s[i] != '\n' && length^ < len(buf) {
+// One debug_write call's bytes, into the writing thread's line. User threads
+// can move between CPUs between two calls, so each has a line of its own,
+// which goes out whole when it ends (or fills).
+console_user_write :: proc "contextless" (s: string, line: ^User_Line) {
+	for c in transmute([]u8)s {
+		append(line, c)
+		if c != '\n' && len(line) < cap(line) {
 			continue
 		}
 		spin_lock(&console_lock)
 		kput_stamp()
-		console_emit(string(buf[:length^]))
+		console_emit(string(line[:]))
 		spin_unlock(&console_lock)
-		length^ = 0
+		clear(line)
 	}
 }
 
@@ -126,21 +121,12 @@ foreign _ {
 	vx_symbols :: proc "c" () ---
 }
 
-@(private="file")
-read_u64_unaligned :: proc "contextless" (p: [^]u8) -> u64 {
-	v: u64
-	for i := 7; i >= 0; i -= 1 {
-		v = v << 8 | u64(p[i])
-	}
-	return v
-}
-
 // The function containing pc, or "" if there is none.
 @(private="file")
 symbol_for :: proc "contextless" (pc: u64) -> (name: string, offset: u64) {
 	p := cast([^]u8)rawptr(vx_symbols)
 	for {
-		addr := read_u64_unaligned(p)
+		addr := intrinsics.unaligned_load(cast(^u64)p)
 		if addr == max(u64) || addr > pc {
 			break
 		}
@@ -200,7 +186,7 @@ panic_start :: proc "contextless" () {
 	if intrinsics.atomic_exchange(&panicking, true) {
 		arch_halt() // a fault inside a panic, or two CPUs at once: stop
 	}
-	if console_line[arch_cpu_index()].len > 0 {
+	if len(console_line[arch_cpu_index()]) > 0 {
 		kput("\n")
 	}
 	kput("vx: panic: ")

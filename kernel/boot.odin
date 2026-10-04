@@ -114,8 +114,15 @@ response :: proc "contextless" (r: ^Request($R)) -> ^R {
 	return intrinsics.volatile_load(&r.response)
 }
 
+// Addresses the kernel keeps apart by type: a physical address is never
+// dereferenced (phys_to_virt gives its direct-map alias), and a user address
+// only through copy_from_user and copy_to_user (syscall.odin). Kernel
+// virtual addresses are pointers.
+Paddr :: distinct u64
+Uva :: distinct u64
+
 Phys_Range :: struct {
-	base, end: u64,
+	base, end: Paddr,
 }
 
 MAX_RAM_RANGES :: 128
@@ -127,10 +134,10 @@ Boot_Info :: struct {
 	usable_bytes:   u64,
 	cpu_count:      u64,
 	cmdline:        string, // from limine.conf; empty if there is none
-	kernel_phys:    u64, // where the kernel image is loaded, physically contiguous
+	kernel_phys:    Paddr, // where the kernel image is loaded, physically contiguous
 	kernel_virt:    u64,
 	tsc_hz:         u64, // x86_64: the TSC's frequency, from Limine
-	rsdp:           u64, // the ACPI RSDP's physical address, or 0
+	rsdp:           Paddr, // the ACPI RSDP's physical address, or 0
 	// Every range of RAM and firmware memory, whatever it is used for.
 	ram:            [MAX_RAM_RANGES]Phys_Range,
 	ram_count:      int,
@@ -142,23 +149,28 @@ boot: Boot_Info
 @(private="file")
 boot_cmdline: [256]u8
 
-phys_to_virt :: #force_inline proc "contextless" (pa: u64) -> rawptr {
-	return rawptr(uintptr(pa + boot.hhdm))
+phys_to_virt :: #force_inline proc "contextless" (pa: Paddr) -> rawptr {
+	return rawptr(uintptr(u64(pa) + boot.hhdm))
+}
+
+// The physical address behind a pointer into the direct map.
+virt_to_phys :: #force_inline proc "contextless" (p: rawptr) -> Paddr {
+	return Paddr(u64(uintptr(p)) - boot.hhdm)
 }
 
 // Early pages, before the physical allocator exists: taken from the top of
 // the largest usable region, downwards, and never returned. phys_init hands
 // the allocator that region minus [early_next, early_top), then closes this
 // one by setting early_limit to early_next.
-early_next, early_limit, early_top: u64
+early_next, early_limit, early_top: Paddr
 
 // The physical address of `pages` zeroed, contiguous 4 KiB pages, or 0.
-early_alloc :: proc "contextless" (pages: u64) -> u64 {
-	if early_next == 0 || early_next - early_limit < pages * 4096 {
+early_alloc :: proc "contextless" (pages: u64) -> Paddr {
+	if early_next == 0 || u64(early_next - early_limit) < pages * PAGE_SIZE {
 		return 0
 	}
-	early_next -= pages * 4096
-	intrinsics.mem_zero(phys_to_virt(early_next), int(pages * 4096))
+	early_next -= Paddr(pages * PAGE_SIZE)
+	intrinsics.mem_zero(phys_to_virt(early_next), int(pages * PAGE_SIZE))
 	return early_next
 }
 
@@ -175,7 +187,7 @@ boot_read :: proc "contextless" () -> bool {
 		return false
 	}
 	boot.hhdm = hh.offset
-	boot.kernel_phys = addr.physical_base
+	boot.kernel_phys = Paddr(addr.physical_base)
 	boot.kernel_virt = addr.virtual_base
 
 	largest: u64
@@ -183,7 +195,7 @@ boot_read :: proc "contextless" () -> bool {
 		#partial switch e.type {
 		case .Usable, .Bootloader_Reclaimable, .Executable_And_Modules, .Acpi_Reclaimable, .Acpi_Nvs, .Reserved_Mapped:
 			if boot.ram_count < MAX_RAM_RANGES {
-				boot.ram[boot.ram_count] = {e.base, e.base + e.length}
+				boot.ram[boot.ram_count] = {Paddr(e.base), Paddr(e.base + e.length)}
 				boot.ram_count += 1
 			} else {
 				boot.ram_incomplete = true
@@ -195,8 +207,8 @@ boot_read :: proc "contextless" () -> bool {
 		boot.usable_bytes += e.length
 		if e.length > largest {
 			largest = e.length
-			early_limit = e.base
-			early_next = e.base + e.length
+			early_limit = Paddr(e.base)
+			early_next = Paddr(e.base + e.length)
 			early_top = early_next
 		}
 	}
@@ -206,7 +218,7 @@ boot_read :: proc "contextless" () -> bool {
 		boot.cpu_count = mp.cpu_count
 	}
 	if r := response(&rsdp_request); r != nil && r.address != 0 {
-		boot.rsdp = r.address - boot.hhdm // the response is in memory reclaim_boot_memory frees
+		boot.rsdp = Paddr(r.address - boot.hhdm) // the response is in memory reclaim_boot_memory frees
 	}
 	if tsc := response(&tsc_request); tsc != nil {
 		boot.tsc_hz = tsc.frequency
@@ -224,19 +236,27 @@ boot_read :: proc "contextless" () -> bool {
 	return true
 }
 
+// The next space-separated word of rest^, which moves past it:
+// `for w in cmdline_word(&rest)`.
+cmdline_word :: proc "contextless" (rest: ^string) -> (word: string, ok: bool) {
+	s := rest^
+	i := 0
+	for i < len(s) && s[i] == ' ' {
+		i += 1
+	}
+	start := i
+	for i < len(s) && s[i] != ' ' {
+		i += 1
+	}
+	rest^ = s[i:]
+	return s[start:i], start < i
+}
+
 // Whether the kernel command line holds this word.
 cmdline_has :: proc "contextless" (word: string) -> bool {
-	c := boot.cmdline
-	i := 0
-	for i < len(c) {
-		for i < len(c) && c[i] == ' ' {
-			i += 1
-		}
-		start := i
-		for i < len(c) && c[i] != ' ' {
-			i += 1
-		}
-		if c[start:i] == word {
+	rest := boot.cmdline
+	for w in cmdline_word(&rest) {
+		if w == word {
 			return true
 		}
 	}

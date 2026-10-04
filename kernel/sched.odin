@@ -18,6 +18,7 @@ import vx "abi:vx"
 // before its registers are saved.
 
 TIME_SLICE :: Instant(10_000_000)
+INFINITE :: Instant(vx.INFINITE) // a deadline that never comes
 
 Cpu :: struct {
 	index:      u32, // 0 is the boot CPU
@@ -34,9 +35,8 @@ Cpu :: struct {
 @(private="file")
 sched: struct {
 	lock:      Spinlock,
-	run_head:  ^Thread,
-	run_tail:  ^Thread,
-	idle_mask: u64, // bit i: CPU i is running its idle thread
+	run_queue: Fifo(Thread),
+	idle:      bit_set[0 ..< MAX_CPUS; u64], // CPUs running their idle threads
 }
 
 this_cpu :: #force_inline proc "contextless" () -> ^Cpu {
@@ -59,26 +59,7 @@ reap_after_switch :: proc "contextless" () {
 @(private="file")
 run_enqueue :: proc "contextless" (t: ^Thread) {
 	t.state = .Ready
-	t.next = nil
-	if sched.run_tail != nil {
-		sched.run_tail.next = t
-	} else {
-		sched.run_head = t
-	}
-	sched.run_tail = t
-}
-
-@(private="file")
-run_dequeue :: proc "contextless" () -> ^Thread {
-	t := sched.run_head
-	if t != nil {
-		sched.run_head = t.next
-		if sched.run_head == nil {
-			sched.run_tail = nil
-		}
-		t.next = nil
-	}
-	return t
+	fifo_push(&sched.run_queue, t)
 }
 
 @(private="file")
@@ -86,12 +67,7 @@ sleep_remove :: proc "contextless" (t: ^Thread) {
 	if t.sleep_cpu == nil {
 		return
 	}
-	for link := &t.sleep_cpu.sleepers; link^ != nil; link = &link^.sleep_next {
-		if link^ == t {
-			link^ = t.sleep_next
-			break
-		}
-	}
+	unlink(&t.sleep_cpu.sleepers, t, "sleep_next")
 	t.sleep_next = nil
 	t.sleep_cpu = nil
 }
@@ -104,16 +80,14 @@ make_ready :: proc "contextless" (t: ^Thread) {
 	sleep_remove(t)
 	run_enqueue(t)
 	self := this_cpu()
-	if sched.idle_mask & (1 << self.index) != 0 {
+	if int(self.index) in sched.idle {
 		self.resched = true
 		return
 	}
-	for i in 0 ..< cpu_total {
-		if sched.idle_mask & (1 << i) != 0 {
-			sched.idle_mask &~= 1 << i // one interrupt per wake is enough
-			arch_send_resched(&cpus[i])
-			return
-		}
+	for i in sched.idle {
+		sched.idle -= {i} // one interrupt per wake is enough
+		arch_send_resched(&cpus[i])
+		return
 	}
 }
 
@@ -127,15 +101,15 @@ schedule_locked :: proc "contextless" () {
 	if prev.state == .Running && prev != &c.idle {
 		run_enqueue(prev)
 	}
-	next := run_dequeue()
+	next := fifo_pop(&sched.run_queue)
 	if next == nil {
 		next = &c.idle
 	}
 	c.resched = false
 	if next == &c.idle {
-		sched.idle_mask |= 1 << c.index
+		sched.idle += {int(c.index)}
 	} else {
-		sched.idle_mask &~= 1 << c.index
+		sched.idle -= {int(c.index)}
 		c.slice_end = clock_now() + TIME_SLICE
 	}
 	if next != prev {
@@ -176,7 +150,7 @@ schedule :: proc "contextless" () {
 // stopped waiting (its deadline passed first, or it is being killed). A
 // thread between joining a list and blocking keeps the wake for thread_block
 // to find. Returns whether it woke.
-thread_wake_token :: proc "contextless" (t: ^Thread, token: rawptr, result: i64) -> bool {
+thread_wake_token :: proc "contextless" (t: ^Thread, token: rawptr, result: vx.Status) -> bool {
 	spin_lock(&sched.lock)
 	defer spin_unlock(&sched.lock)
 	if token == nil || t.wait_token != token {
@@ -195,7 +169,8 @@ thread_wake_token :: proc "contextless" (t: ^Thread, token: rawptr, result: i64)
 // Blocks the current thread until it is woken, or until the deadline (plus
 // up to `leeway`, which lets one timer interrupt serve several waits).
 // Returns the wait's result: .Err_Timed_Out if the deadline passed.
-thread_block :: proc "contextless" (deadline: Instant, leeway: Instant) -> i64 {
+@(require_results)
+thread_block :: proc "contextless" (deadline: Instant, leeway: Instant) -> vx.Status {
 	c := this_cpu()
 	t := c.current
 	spin_lock(&sched.lock)
@@ -205,9 +180,9 @@ thread_block :: proc "contextless" (deadline: Instant, leeway: Instant) -> i64 {
 		return t.wait_result
 	}
 	t.state = .Blocked
-	if deadline != Instant(vx.INFINITE) {
+	if deadline != INFINITE {
 		t.wake_at = deadline
-		t.wake_late = leeway > 0 && deadline <= Instant(vx.INFINITE) - leeway ? deadline + leeway : deadline
+		t.wake_late = leeway > 0 && deadline <= INFINITE - leeway ? deadline + leeway : deadline
 		t.sleep_cpu = c
 		link := &c.sleepers
 		for link^ != nil && link^.wake_at <= deadline {
@@ -224,14 +199,14 @@ thread_block :: proc "contextless" (deadline: Instant, leeway: Instant) -> i64 {
 // sleeper's latest acceptable wake-up, or the end of the running thread's slice.
 @(private="file")
 sched_arm_timer :: proc "contextless" (c: ^Cpu) {
-	next := Instant(vx.INFINITE)
+	next := INFINITE
 	for t := c.sleepers; t != nil; t = t.sleep_next {
 		next = min(next, t.wake_late)
 	}
 	if c.current != &c.idle {
 		next = min(next, c.slice_end)
 	}
-	if next != Instant(vx.INFINITE) {
+	if next != INFINITE {
 		timer_arm(next)
 	}
 }
@@ -248,7 +223,7 @@ sched_timer :: proc "contextless" () {
 	for c.sleepers != nil && c.sleepers.wake_at <= now {
 		t := c.sleepers
 		t.wait_token = nil // a waker that finds it later skips it
-		t.wait_result = i64(vx.Status.Err_Timed_Out)
+		t.wait_result = .Err_Timed_Out
 		make_ready(t)
 	}
 	if now >= c.slice_end {
@@ -256,7 +231,7 @@ sched_timer :: proc "contextless" () {
 		// running thread another one. (Re-arming the old, expired end would
 		// fire at once, for ever, and the thread would never get back to user
 		// mode.)
-		if sched.run_head != nil {
+		if sched.run_queue.head != nil {
 			c.resched = true
 		} else {
 			c.slice_end = now + TIME_SLICE
@@ -330,14 +305,14 @@ sched_kick_for_kill :: proc "contextless" (t: ^Thread) {
 	defer spin_unlock(&sched.lock)
 	if t.state == .Blocked {
 		t.wait_token = nil
-		t.wait_result = i64(vx.Status.Err_Killed)
+		t.wait_result = .Err_Killed
 		make_ready(t)
 	} else if t.state != .Dead {
 		// Ready, or running here or elsewhere: if it is about to block, the
 		// block returns at once; if it is in user mode on another CPU,
 		// interrupt it.
 		t.wake_pending = true
-		t.wait_result = i64(vx.Status.Err_Killed)
+		t.wait_result = .Err_Killed
 		if t.state == .Running && t.cpu != nil && t.cpu != this_cpu() {
 			arch_send_resched(t.cpu)
 		}

@@ -29,6 +29,33 @@ Object :: struct {
 	dying_next: ^Object, // on its CPU's list of objects to destroy (object_drop)
 }
 
+// The Obj_Type of an object struct.
+obj_type_of :: #force_inline proc "contextless" ($T: typeid) -> Obj_Type {
+	when T == Task {
+		return .Task
+	} else when T == Thread {
+		return .Thread
+	} else when T == Vmo {
+		return .Vmo
+	} else when T == Port {
+		return .Port
+	} else when T == Channel {
+		return .Channel
+	} else when T == Counter {
+		return .Counter
+	} else when T == Ring_End {
+		return .Ring
+	} else when T == Resource {
+		return .Resource
+	} else when T == Irq {
+		return .Irq
+	} else when T == Iorange {
+		return .Iorange
+	} else {
+		#panic("not a kernel object")
+	}
+}
+
 object_init :: proc "contextless" (o: ^Object, type: Obj_Type) {
 	o.type = type
 	intrinsics.atomic_store_explicit(&o.refs, 1, .Relaxed)
@@ -105,7 +132,9 @@ object_release :: proc "contextless" (o: ^Object) {
 // The last reference is gone: the type's destructor.
 @(private="file")
 object_destroy :: proc "contextless" (o: ^Object) {
-	#partial switch o.type {
+	switch o.type {
+	case .None:
+		kpanic("destroying an untyped object")
 	case .Vmo:
 		vmo_destroy(cast(^Vmo)o)
 	case .Port:
@@ -121,53 +150,68 @@ object_destroy :: proc "contextless" (o: ^Object) {
 	case .Thread:
 		thread_destroy(cast(^Thread)o)
 	case .Resource:
-		pool_free(&resource_pool, o)
+		pool_free(&resource_pool, cast(^Resource)o)
 	case .Irq:
 		irq_destroy(cast(^Irq)o)
 	case .Iorange:
-		pool_free(&iorange_pool, o)
+		pool_free(&iorange_pool, cast(^Iorange)o)
 	}
 }
 
-// A pool hands out zeroed objects of one size, carved from whole pages.
-Pool :: struct {
+// A pool hands out zeroed objects of one type, carved from whole pages, each
+// rounded up to 16 bytes. The zero value is an empty pool: `x_pool: Pool(X)`.
+Pool :: struct($T: typeid) {
 	lock: Spinlock,
-	size: int, // rounded up to 16 bytes
-	free: rawptr, // free list, through each free object's first word
+	free: ^Pool_Link, // free list, through each free object's first word
 }
 
-// A pool's size is set in its declaration, as a constant expression:
-// `x_pool := Pool{size = (size_of(X) + 15) &~ 15}`. (A global initialised by
-// a procedure call would need Odin's startup code, which the kernel does not
-// run: -disable-non-constant-globals refuses one.)
+Pool_Link :: struct {
+	next: ^Pool_Link,
+}
 
 @(require_results)
-pool_alloc :: proc "contextless" (p: ^Pool) -> rawptr {
-	spin_lock(&p.lock)
-	if p.free == nil {
-		pa := phys_alloc(0)
-		if pa == 0 {
-			spin_unlock(&p.lock)
-			return nil
+pool_alloc :: proc "contextless" (p: ^Pool($T)) -> ^T {
+	SIZE :: (size_of(T) + 15) &~ 15
+	#assert(SIZE <= PAGE_SIZE) // an object fits in a page
+	link: ^Pool_Link
+	{
+		spin_guard(&p.lock)
+		if p.free == nil {
+			pa := phys_alloc(0)
+			if pa == 0 {
+				return nil
+			}
+			page := page_bytes(pa)
+			for off := 0; off + SIZE <= len(page); off += SIZE {
+				l := cast(^Pool_Link)&page[off]
+				l.next = p.free
+				p.free = l
+			}
 		}
-		page := cast([^]u8)phys_to_virt(pa)
-		for off := 0; off + p.size <= 4096; off += p.size {
-			(cast(^rawptr)&page[off])^ = p.free
-			p.free = &page[off]
-		}
+		link = p.free
+		p.free = link.next
 	}
-	o := p.free
-	p.free = (cast(^rawptr)o)^
-	spin_unlock(&p.lock)
-	intrinsics.mem_zero(o, p.size)
-	return o
+	intrinsics.mem_zero(link, SIZE)
+	return cast(^T)link
 }
 
-pool_free :: proc "contextless" (p: ^Pool, o: rawptr) {
+pool_free :: proc "contextless" (p: ^Pool($T), o: ^T) {
+	link := cast(^Pool_Link)o
 	spin_lock(&p.lock)
-	(cast(^rawptr)o)^ = p.free
-	p.free = o
+	link.next = p.free
+	p.free = link
 	spin_unlock(&p.lock)
+}
+
+// The two ends of a channel or a ring. A ring's are its client and server; a
+// channel's ends are alike, and the names only tell them apart.
+Side :: enum u8 {
+	Client,
+	Server,
+}
+
+peer_side :: #force_inline proc "contextless" (s: Side) -> Side {
+	return s == .Client ? .Server : .Client
 }
 
 // A source's port bindings that have not fired (port.odin), under the

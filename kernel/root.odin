@@ -48,25 +48,15 @@ find_module :: proc "contextless" (want: string) -> ^Limine_File {
 // (they are in memory reclaim_boot_memory frees; the image itself is not).
 @(private="file")
 root_module: struct {
-	image:    []u8,
-	name:     [24]u8,
-	name_len: int,
-	bootfs:   []u8, // empty if the image has no bootfs.tar
+	image:  []u8,
+	name:   string, // a literal, or in the kernel's copy of the command line
+	bootfs: []u8, // empty if the image has no bootfs.tar
 }
 
 // The value of `key=value` on the kernel command line, or "".
 cmdline_value :: proc "contextless" (key: string) -> string {
-	c := boot.cmdline
-	i := 0
-	for i < len(c) {
-		for i < len(c) && c[i] == ' ' {
-			i += 1
-		}
-		start := i
-		for i < len(c) && c[i] != ' ' {
-			i += 1
-		}
-		word := c[start:i]
+	rest := boot.cmdline
+	for word in cmdline_word(&rest) {
 		if len(word) > len(key) && word[len(key)] == '=' && word[:len(key)] == key {
 			return word[len(key) + 1:]
 		}
@@ -84,20 +74,19 @@ find_root_module :: proc "contextless" () {
 		kpanic("no module for the root task")
 	}
 	root_module.image = m.address[:m.size]
-	copy(root_module.name[:], name)
-	root_module.name_len = len(name)
+	root_module.name = name
 	if b := find_module("bootfs.tar"); b != nil {
 		root_module.bootfs = b.address[:b.size]
 	}
 }
 
-ALL_RIGHTS :: u32(1 << len(vx.Right) - 1)
-CHANNEL_END_RIGHTS :: u32(1 << u32(vx.Right.Read) | 1 << u32(vx.Right.Write) | 1 << u32(vx.Right.Wait) | 1 << u32(vx.Right.Signal) | 1 << u32(vx.Right.Duplicate) | 1 << u32(vx.Right.Transfer) | 1 << u32(vx.Right.Inspect))
+// A channel end's rights, and a ring end's.
+CHANNEL_END_RIGHTS :: vx.Rights{.Read, .Write, .Wait, .Signal, .Duplicate, .Transfer, .Inspect}
 
 @(private="file")
-ROOT_RESOURCE_RIGHTS :: u32(1 << u32(vx.Right.Manage) | 1 << u32(vx.Right.Duplicate) | 1 << u32(vx.Right.Transfer) | 1 << u32(vx.Right.Inspect))
+ROOT_RESOURCE_RIGHTS :: vx.Rights{.Manage, .Duplicate, .Transfer, .Inspect}
 @(private="file")
-BOOT_IMAGE_RIGHTS :: u32(1 << u32(vx.Right.Read) | 1 << u32(vx.Right.Map) | 1 << u32(vx.Right.Duplicate) | 1 << u32(vx.Right.Transfer) | 1 << u32(vx.Right.Inspect))
+BOOT_IMAGE_RIGHTS :: vx.Rights{.Read, .Map, .Duplicate, .Transfer, .Inspect}
 
 @(private="file")
 spawn_text: [1024]u8
@@ -107,7 +96,7 @@ spawn_text: [1024]u8
 @(private="file")
 root_spawn_message :: proc "contextless" (t: ^Task) -> ^Channel {
 	w := ndb.Writer{buf = spawn_text[:]}
-	ndb.put(&w, "spawn", string(root_module.name[:root_module.name_len]))
+	ndb.put(&w, "spawn", root_module.name)
 	_ = ndb.end(&w)
 	ndb.put(&w, "handle", "self")
 	ndb.put_u64(&w, "index", 0)
@@ -146,7 +135,7 @@ root_spawn_message :: proc "contextless" (t: ^Task) -> ^Channel {
 	copy(msg_body(m)[size_of(vx.Msg_Header):], text)
 	handles := msg_handles(m)
 	object_ref(&t.obj)
-	handles[0] = {&t.obj, ALL_RIGHTS}
+	handles[0] = {&t.obj, vx.ALL_RIGHTS}
 	if image != nil {
 		handles[1] = {&image.obj, BOOT_IMAGE_RIGHTS} // the message takes our reference
 	}
@@ -159,7 +148,7 @@ root_spawn_message :: proc "contextless" (t: ^Task) -> ^Channel {
 }
 
 start_root_task :: proc "contextless" () {
-	t, st := task_create(string(root_module.name[:root_module.name_len]), 0)
+	t, st := task_create(root_module.name, 0)
 	if st != .Ok {
 		kpanic("cannot create the root task")
 	}

@@ -14,15 +14,30 @@ Map_Flag :: enum u32 {
 
 Map_Flags :: bit_set[Map_Flag; u32] // a mapping is always readable
 
-kernel_root: u64 // physical address of the kernel's top-level table
+PAGE_SIZE :: 4096
 
-table_at :: #force_inline proc "contextless" (pa: u64) -> [^]u64 {
-	return cast([^]u64)phys_to_virt(pa)
+// A page's bytes, through the direct map.
+page_bytes :: #force_inline proc "contextless" (pa: Paddr) -> []u8 {
+	return (cast([^]u8)phys_to_virt(pa))[:PAGE_SIZE]
+}
+
+// A page-table entry, in the architecture's format (arch_pte_*).
+Pte :: distinct u64
+
+kernel_root: Paddr // the kernel's top-level table
+
+table_at :: #force_inline proc "contextless" (pa: Paddr) -> ^[512]Pte {
+	return cast(^[512]Pte)phys_to_virt(pa)
+}
+
+// The index of va's entry in its level's table.
+pt_index :: #force_inline proc "contextless" (va: u64, level: int) -> u64 {
+	return (va >> uint(39 - 9 * level)) & 511
 }
 
 // Pages for new tables: from the early allocator until phys_init has run.
 @(private="file")
-table_page :: proc "contextless" () -> u64 {
+table_page :: proc "contextless" () -> Paddr {
 	return phys.frame_state != nil ? phys_alloc_zeroed(0) : early_alloc(1)
 }
 
@@ -30,19 +45,19 @@ table_page :: proc "contextless" () -> u64 {
 // alignment allows. Fails without undoing anything if a table cannot be
 // allocated or the range is already mapped; callers treat that as fatal.
 @(require_results)
-map_range :: proc "contextless" (root, va_start, pa_start, length: u64, flags: Map_Flags) -> bool {
+map_range :: proc "contextless" (root: Paddr, va_start: u64, pa_start: Paddr, length: u64, flags: Map_Flags) -> bool {
 	va, pa, size := va_start, pa_start, length
 	for size > 0 {
 		level := 3
-		step := u64(4096)
-		if (va | pa) & (1 << 30 - 1) == 0 && size >= 1 << 30 {
+		step := u64(PAGE_SIZE)
+		if (va | u64(pa)) & (1 << 30 - 1) == 0 && size >= 1 << 30 {
 			level, step = 1, 1 << 30
-		} else if (va | pa) & (1 << 21 - 1) == 0 && size >= 1 << 21 {
+		} else if (va | u64(pa)) & (1 << 21 - 1) == 0 && size >= 1 << 21 {
 			level, step = 2, 1 << 21
 		}
 		t := table_at(root)
 		for l in 0 ..< level {
-			idx := (va >> uint(39 - 9 * l)) & 511
+			idx := pt_index(va, l)
 			if !arch_pte_valid(t[idx]) {
 				page := table_page()
 				if page == 0 {
@@ -55,13 +70,13 @@ map_range :: proc "contextless" (root, va_start, pa_start, length: u64, flags: M
 			}
 			t = table_at(arch_pte_addr(t[idx]))
 		}
-		idx := (va >> uint(39 - 9 * level)) & 511
+		idx := pt_index(va, level)
 		if arch_pte_valid(t[idx]) {
 			return false
 		}
 		t[idx] = arch_pte_leaf(pa, flags, level)
 		va += step
-		pa += step
+		pa += Paddr(step)
 		size -= step
 	}
 	arch_pte_publish()
@@ -82,14 +97,14 @@ foreign _ {
 }
 
 page_up :: #force_inline proc "contextless" (v: u64) -> u64 {
-	return (v + 4095) &~ 4095
+	return (v + PAGE_SIZE - 1) &~ (PAGE_SIZE - 1)
 }
 
 @(private="file")
 map_image_part :: proc "contextless" (start, end: proc "c" (), flags: Map_Flags) {
 	va := u64(uintptr(rawptr(start)))
 	size := page_up(u64(uintptr(rawptr(end)))) - va
-	if !map_range(kernel_root, va, va - boot.kernel_virt + boot.kernel_phys, size, flags) {
+	if !map_range(kernel_root, va, Paddr(va - boot.kernel_virt) + boot.kernel_phys, size, flags) {
 		kpanic("cannot map the kernel image")
 	}
 }
@@ -128,7 +143,7 @@ paging_init :: proc "contextless" () {
 			case:
 				continue
 			}
-			lo = e.base &~ 4095
+			lo = e.base &~ (PAGE_SIZE - 1)
 			hi = page_up(e.base + e.length)
 			if run_hi != 0 && lo <= run_hi && flags == run_flags { // the map is sorted: extend the run
 				if hi > run_hi {
@@ -140,7 +155,7 @@ paging_init :: proc "contextless" () {
 				lo = run_hi // a page shared with the run before: that run has it
 			}
 		}
-		if run_hi != 0 && !map_range(kernel_root, boot.hhdm + run_lo, run_lo, run_hi - run_lo, run_flags) {
+		if run_hi != 0 && !map_range(kernel_root, boot.hhdm + run_lo, Paddr(run_lo), run_hi - run_lo, run_flags) {
 			kpanic("cannot build the direct map")
 		}
 		run_lo, run_hi, run_flags = lo, hi, flags
@@ -152,10 +167,10 @@ paging_init :: proc "contextless" () {
 
 // The leaf entry mapping va in root, and its level, or nil if there is none.
 @(private="file")
-leaf_entry :: proc "contextless" (root, va: u64) -> (^u64, int) {
+leaf_entry :: proc "contextless" (root: Paddr, va: u64) -> (^Pte, int) {
 	t := table_at(root)
 	for level in 0 ..= 3 {
-		e := &t[(va >> uint(39 - 9 * level)) & 511]
+		e := &t[pt_index(va, level)]
 		if !arch_pte_valid(e^) {
 			return nil, 0
 		}
@@ -169,25 +184,25 @@ leaf_entry :: proc "contextless" (root, va: u64) -> (^u64, int) {
 
 // The physical address behind user address va in root, or 0 if it is not
 // mapped for user access. Futexes are keyed on it.
-user_page_pa :: proc "contextless" (root, va: u64) -> u64 {
-	e, level := leaf_entry(root, va)
+user_page_pa :: proc "contextless" (root: Paddr, va: Uva) -> Paddr {
+	e, level := leaf_entry(root, u64(va))
 	if e == nil || !arch_pte_user_ok(e^, false) {
 		return 0
 	}
 	page := u64(1) << uint(39 - 9 * level)
-	return arch_pte_addr(e^) + (va & (page - 1))
+	return arch_pte_addr(e^) + Paddr(u64(va) & (page - 1))
 }
 
 // Whether va is mapped in root for user access, and writable if asked.
-user_page_ok :: proc "contextless" (root, va: u64, write: bool) -> bool {
-	e, _ := leaf_entry(root, va)
+user_page_ok :: proc "contextless" (root: Paddr, va: Uva, write: bool) -> bool {
+	e, _ := leaf_entry(root, u64(va))
 	return e != nil && arch_pte_user_ok(e^, write)
 }
 
 // Clears a 4 KiB page's entry. Its translation may still be cached on a CPU
 // that has the tables loaded; nothing unmaps a page another thread may still
 // use until as_unmap brings shootdowns.
-unmap_page :: proc "contextless" (root, va: u64) {
+unmap_page :: proc "contextless" (root: Paddr, va: u64) {
 	e, level := leaf_entry(root, va)
 	if e != nil && level == 3 {
 		e^ = 0
@@ -197,7 +212,7 @@ unmap_page :: proc "contextless" (root, va: u64) {
 // Frees the user half's page tables and the top table itself. The leaves are
 // VMO pages, which their VMOs free. No CPU may be using the address space.
 // Three nested loops rather than recursion.
-free_user_tables :: proc "contextless" (root: u64) {
+free_user_tables :: proc "contextless" (root: Paddr) {
 	top := table_at(root)
 	for i in 0 ..< arch_user_top_slots() {
 		if !arch_pte_valid(top[i]) || !arch_pte_is_table(top[i], 0) {

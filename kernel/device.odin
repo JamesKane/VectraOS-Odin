@@ -25,6 +25,8 @@ Resource :: struct {
 	using obj: Object,
 }
 
+#assert(offset_of(Resource, obj) == 0) // objects are cast from ^Object
+
 Irq :: struct {
 	using obj: Object,
 	lock:      Spinlock,
@@ -36,15 +38,18 @@ Irq :: struct {
 	obs:       Observers, // IRQ bindings
 }
 
+#assert(offset_of(Irq, obj) == 0) // objects are cast from ^Object
+
 Iorange :: struct {
 	using obj: Object,
-	base:      u16,
-	count:     u16,
+	range:     Io_Range,
 }
 
-resource_pool := Pool{size = (size_of(Resource) + 15) &~ 15}
-irq_pool := Pool{size = (size_of(Irq) + 15) &~ 15}
-iorange_pool := Pool{size = (size_of(Iorange) + 15) &~ 15}
+#assert(offset_of(Iorange, obj) == 0) // objects are cast from ^Object
+
+resource_pool: Pool(Resource)
+irq_pool: Pool(Irq)
+iorange_pool: Pool(Iorange)
 
 MAX_IRQ_LINES :: 1024
 
@@ -63,7 +68,7 @@ console_hand_off :: proc "contextless" () {
 }
 
 root_resource :: proc "contextless" () -> ^Resource {
-	r := cast(^Resource)pool_alloc(&resource_pool)
+	r := pool_alloc(&resource_pool)
 	if r == nil {
 		kpanic("no memory for the root resource")
 	}
@@ -76,9 +81,9 @@ root_resource :: proc "contextless" () -> ^Resource {
 // A VMO over [pa, pa + size) of device memory, which may not overlap RAM or
 // firmware memory.
 @(require_results)
-vmo_create_physical :: proc "contextless" (pa, size: u64) -> (^Vmo, vx.Status) {
-	end, overflow := intrinsics.overflow_add(pa, size)
-	if size == 0 || size > VMO_MAX_SIZE || (pa | size) & 4095 != 0 || overflow {
+vmo_create_physical :: proc "contextless" (pa: Paddr, size: u64) -> (vmo: ^Vmo, st: vx.Status) {
+	end, overflow := intrinsics.overflow_add(pa, Paddr(size))
+	if size == 0 || size > VMO_MAX_SIZE || (u64(pa) | size) & (PAGE_SIZE - 1) != 0 || overflow {
 		return nil, .Err_Range
 	}
 	if boot.ram_incomplete {
@@ -89,25 +94,12 @@ vmo_create_physical :: proc "contextless" (pa, size: u64) -> (^Vmo, vx.Status) {
 			return nil, .Err_Access
 		}
 	}
-	count := size / 4096
-	order := page_list_order(count)
-	v := cast(^Vmo)pool_alloc(&vmo_pool)
-	list := v != nil ? phys_alloc(order) : 0
-	if list == 0 {
-		if v != nil {
-			pool_free(&vmo_pool, v)
-		}
-		return nil, .Err_No_Memory
-	}
-	object_init(&v.obj, .Vmo)
-	v.size = size
-	v.pages = cast([^]u64)phys_to_virt(list)
-	v.list_order = order
+	v := vmo_alloc(size / PAGE_SIZE) or_return
 	v.physical = true
-	for i in 0 ..< count {
-		v.pages[i] = pa + i * 4096
+	for &page, i in v.pages {
+		page = pa + Paddr(i * PAGE_SIZE)
 	}
-	if arch_console_device(false, pa, size) {
+	if arch_console_device(false, u64(pa), size) {
 		console_hand_off()
 	}
 	return v, .Ok
@@ -120,7 +112,7 @@ irq_create :: proc "contextless" (line: u32) -> (^Irq, vx.Status) {
 	if line >= MAX_IRQ_LINES {
 		return nil, .Err_Range
 	}
-	q := cast(^Irq)pool_alloc(&irq_pool)
+	q := pool_alloc(&irq_pool)
 	if q == nil {
 		return nil, .Err_No_Memory
 	}
@@ -210,13 +202,12 @@ iorange_create :: proc "contextless" (base, count: u64) -> (^Iorange, vx.Status)
 	if count == 0 || overflow || end > 0x1_0000 {
 		return nil, .Err_Range
 	}
-	r := cast(^Iorange)pool_alloc(&iorange_pool)
+	r := pool_alloc(&iorange_pool)
 	if r == nil {
 		return nil, .Err_No_Memory
 	}
 	object_init(&r.obj, .Iorange)
-	r.base = u16(base)
-	r.count = u16(count)
+	r.range = {u16(base), u32(count)}
 	if arch_console_device(true, base, count) {
 		console_hand_off()
 	}
@@ -228,15 +219,13 @@ iorange_create :: proc "contextless" (base, count: u64) -> (^Iorange, vx.Status)
 @(require_results)
 task_enable_io :: proc "contextless" (t: ^Task, r: ^Iorange) -> vx.Status {
 	spin_lock(&t.lock)
-	st := t.io_ranges < TASK_MAX_IO ? vx.Status.Ok : vx.Status.Err_No_Memory
-	if st == .Ok {
-		t.io_base[t.io_ranges] = r.base
-		t.io_count[t.io_ranges] = r.count
-		t.io_ranges += 1
-	}
+	added := append(&t.io, r.range) == 1
 	spin_unlock(&t.lock)
-	if st == .Ok && t == this_cpu().current.task {
+	if !added {
+		return .Err_No_Memory
+	}
+	if t == this_cpu().current.task {
 		arch_io_switch(t)
 	}
-	return st
+	return .Ok
 }

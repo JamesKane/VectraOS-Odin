@@ -13,54 +13,57 @@ import vx "abi:vx"
 
 Vmo :: struct {
 	using obj:  Object,
-	size:       u64, // bytes, a multiple of 4096
-	pages:      [^]u64, // physical address of each page, through the direct map
+	size:       u64, // bytes, a multiple of PAGE_SIZE
+	pages:      []Paddr, // each page, in a block of its own through the direct map
 	list_order: uint, // the page list's allocation order
 	physical:   bool, // device memory: its pages are not RAM, and are never freed
 }
 
-vmo_pool := Pool{size = (size_of(Vmo) + 15) &~ 15}
+#assert(offset_of(Vmo, obj) == 0) // objects are cast from ^Object
+
+vmo_pool: Pool(Vmo)
 
 VMO_MAX_SIZE :: u64(256) << 20 // the list fits one order-7 block
 
-// The allocation order of a page list for `count` pages.
-page_list_order :: proc "contextless" (count: u64) -> uint {
-	order := uint(0)
-	for (4096 << order) < count * size_of(u64) {
-		order += 1
-	}
-	return order
-}
-
+// A VMO with a page list for `count` pages, not yet filled in.
 @(require_results)
-vmo_create :: proc "contextless" (want: u64) -> (^Vmo, vx.Status) {
-	if want == 0 || want > VMO_MAX_SIZE {
-		return nil, .Err_Range
-	}
-	size := page_up(want)
-	count := size / 4096
-	order := page_list_order(count)
-	v := cast(^Vmo)pool_alloc(&vmo_pool)
+vmo_alloc :: proc "contextless" (count: u64) -> (vmo: ^Vmo, st: vx.Status) {
+	v := pool_alloc(&vmo_pool)
 	if v == nil {
 		return nil, .Err_No_Memory
 	}
+	order := order_for(count * size_of(Paddr))
 	list := phys_alloc(order)
 	if list == 0 {
 		pool_free(&vmo_pool, v)
 		return nil, .Err_No_Memory
 	}
 	object_init(&v.obj, .Vmo)
-	v.size = size
-	v.pages = cast([^]u64)phys_to_virt(list)
+	v.size = count * PAGE_SIZE
+	v.pages = (cast([^]Paddr)phys_to_virt(list))[:count]
 	v.list_order = order
-	for i in 0 ..< count {
-		v.pages[i] = phys_alloc_zeroed(0)
-		if v.pages[i] == 0 {
-			for k in 0 ..< i {
-				phys_free(v.pages[k], 0)
+	return v, .Ok
+}
+
+// Gives back what vmo_alloc took, for a VMO that never got going.
+vmo_unalloc :: proc "contextless" (v: ^Vmo) {
+	phys_free(virt_to_phys(raw_data(v.pages)), v.list_order)
+	pool_free(&vmo_pool, v)
+}
+
+@(require_results)
+vmo_create :: proc "contextless" (want: u64) -> (vmo: ^Vmo, st: vx.Status) {
+	if want == 0 || want > VMO_MAX_SIZE {
+		return nil, .Err_Range
+	}
+	v := vmo_alloc(page_up(want) / PAGE_SIZE) or_return
+	for &pa, i in v.pages {
+		pa = phys_alloc_zeroed(0)
+		if pa == 0 {
+			for k in v.pages[:i] {
+				phys_free(k, 0)
 			}
-			phys_free(list, order)
-			pool_free(&vmo_pool, v)
+			vmo_unalloc(v)
 			return nil, .Err_No_Memory
 		}
 	}
@@ -69,24 +72,19 @@ vmo_create :: proc "contextless" (want: u64) -> (^Vmo, vx.Status) {
 
 vmo_destroy :: proc "contextless" (v: ^Vmo) {
 	if !v.physical {
-		for i in 0 ..< v.size / 4096 {
-			phys_free(v.pages[i], 0)
+		for pa in v.pages {
+			phys_free(pa, 0)
 		}
 	}
-	phys_free(u64(uintptr(v.pages)) - boot.hhdm, v.list_order)
-	pool_free(&vmo_pool, v)
+	vmo_unalloc(v)
 }
 
 // Copies kernel bytes into the VMO; the range has been checked.
 vmo_write :: proc "contextless" (v: ^Vmo, offset: u64, src: []u8) {
 	at := offset
-	s := src
-	for len(s) > 0 {
-		in_page := at & 4095
-		n := min(4096 - in_page, u64(len(s)))
-		page := cast([^]u8)phys_to_virt(v.pages[at / 4096])
-		intrinsics.mem_copy_non_overlapping(&page[in_page], raw_data(s), int(n))
-		at += n
+	for s := src; len(s) > 0; {
+		n := copy(page_bytes(v.pages[at / PAGE_SIZE])[at % PAGE_SIZE:], s)
+		at += u64(n)
 		s = s[n:]
 	}
 }
