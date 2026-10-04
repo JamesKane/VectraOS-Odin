@@ -392,19 +392,22 @@ pipeline :: proc "contextless" (words: []Word) {
 		return
 	}
 
-	file: ns.File
+	file: ns.File // closing it when it was never opened does nothing
 	if into != "" {
 		if st := ns.open(&space, into, p9.OWRITE, &file); st != .Ok {
 			report("cannot open the file", st)
 			return
 		}
 	}
-	tasks: [MAX_PIPELINE]vx.Handle
-	prev, sink: vx.Handle
+	defer ns.close(&file)
 	port, pst := rt.port_create()
 	if pst != .Ok {
 		return
 	}
+	defer _ = rt.handle_close(port)
+	tasks: [MAX_PIPELINE]vx.Handle
+	defer rt.close_all(..tasks[:stages])
+	prev, sink: vx.Handle
 	for s in 0 ..< stages {
 		output, other: vx.Handle
 		if s + 1 < stages || into != "" {
@@ -465,15 +468,6 @@ pipeline :: proc "contextless" (words: []Word) {
 	}
 	if broken {
 		rt.print("gsh: write error\n")
-	}
-	for t in tasks[:stages] {
-		if t != 0 {
-			_ = rt.handle_close(t)
-		}
-	}
-	_ = rt.handle_close(port)
-	if into != "" {
-		ns.close(&file)
 	}
 }
 
