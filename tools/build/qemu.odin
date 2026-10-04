@@ -40,6 +40,9 @@ qemu_cmd :: proc(a: ^Arch, image: string, o: Qemu_Opts) -> []string {
 	}
 	platform := o.iommu != .Off ? ",iommu_platform=on" : ""
 	append(&c, "-drive", fmt.tprintf("if=pflash,format=raw,unit=0,readonly=on,file=%s", a.firmware))
+	// The variable store, as upstream's runner gives it: without one the
+	// firmware keeps its variables in an NvVars file on the ESP.
+	append(&c, "-drive", fmt.tprintf("if=pflash,format=raw,unit=1,snapshot=on,file=%s", a.vars))
 	append(&c, "-m", "512M", "-smp", "4", "-display", "none", "-no-reboot")
 	if o.cdrom != "" {
 		// On virtio-scsi, which both architectures' firmware boots from.

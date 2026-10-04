@@ -24,6 +24,8 @@ when ODIN_OS == .Darwin {
 	QEMU_AARCH64 :: "/opt/homebrew/bin/qemu-system-aarch64"
 	FIRMWARE_X86_64 :: "/opt/homebrew/share/qemu/edk2-x86_64-code.fd"
 	FIRMWARE_AARCH64 :: "/opt/homebrew/share/qemu/edk2-aarch64-code.fd"
+	VARS_X86_64 :: "/opt/homebrew/share/qemu/edk2-i386-vars.fd" // the x86 firmware's variable store
+	VARS_AARCH64 :: "/opt/homebrew/share/qemu/edk2-arm-vars.fd"
 } else when ODIN_OS == .Linux {
 	ODIN :: "/opt/odin/odin"
 	CLANG :: "/usr/bin/clang"
@@ -41,6 +43,8 @@ when ODIN_OS == .Darwin {
 	QEMU_AARCH64 :: "/usr/bin/qemu-system-aarch64"
 	FIRMWARE_X86_64 :: "/usr/share/edk2/ovmf/OVMF_CODE.fd"
 	FIRMWARE_AARCH64 :: "/usr/share/edk2/aarch64/QEMU_EFI-pflash.raw"
+	VARS_X86_64 :: "/usr/share/edk2/ovmf/OVMF_VARS.fd"
+	VARS_AARCH64 :: "/usr/share/edk2/aarch64/vars-template-pflash.raw"
 } else {
 	#panic("build runs on macOS or Linux")
 }
@@ -102,6 +106,7 @@ Arch :: struct {
 	qemu:              string,
 	machine:           string, // QEMU's -machine
 	firmware:          string, // the UEFI firmware QEMU boots, as pflash
+	vars:              string, // its variable store, the second pflash (snapshot=on: never written)
 }
 
 ARCHES := [Arch_Kind]Arch {
@@ -117,6 +122,7 @@ ARCHES := [Arch_Kind]Arch {
 		qemu = QEMU_X86_64,
 		machine = "q35",
 		firmware = FIRMWARE_X86_64,
+		vars = VARS_X86_64,
 	},
 	.AArch64 = {
 		kind = .AArch64,
@@ -128,6 +134,7 @@ ARCHES := [Arch_Kind]Arch {
 		qemu = QEMU_AARCH64,
 		machine = "virt,gic-version=3",
 		firmware = FIRMWARE_AARCH64,
+		vars = VARS_AARCH64,
 	},
 }
 
