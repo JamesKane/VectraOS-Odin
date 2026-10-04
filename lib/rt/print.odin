@@ -1,33 +1,32 @@
 package rt
 
-// Console output. Until the console is a server (/srv/cons, P2's driver
-// step), output goes to the kernel log through debug_write, a line at a time
-// (or when the buffer fills), so lines from different programs do not
-// interleave.
+// Output. To the console driver once start has connected to it (the spawn
+// message's "console"), to stdout when the spawn message gives one, and to
+// the kernel log before that or without either (console.odin, stdio.odin).
+
+// Where print sends bytes: the console's or stdout's line buffer once one is
+// attached; until then, nil, and bytes go to the kernel log.
+print_hook: proc "contextless" (s: string)
 
 @(private="file")
-line: [512]u8
-@(private="file")
-line_len: int
-
-// Sends out what has been printed without a newline yet.
-flush :: proc "contextless" () {
-	if line_len > 0 {
-		_ = debug_write(string(line[:line_len]))
-		line_len = 0
+put :: proc "contextless" (s: string) {
+	if print_hook != nil {
+		print_hook(s)
+	} else {
+		_ = debug_write(s)
 	}
 }
 
 print :: proc "contextless" (args: ..string) {
 	for s in args {
-		for i in 0 ..< len(s) {
-			line[line_len] = s[i]
-			line_len += 1
-			if s[i] == '\n' || line_len == len(line) {
-				flush()
-			}
-		}
+		put(s)
 	}
+}
+
+// Sends out what has been printed without a newline yet.
+flush :: proc "contextless" () {
+	console_flush()
+	stdout_flush()
 }
 
 print_u64 :: proc "contextless" (v: u64) {
@@ -42,14 +41,22 @@ print_u64 :: proc "contextless" (v: u64) {
 			break
 		}
 	}
-	print(string(buf[i:]))
+	put(string(buf[i:]))
 }
 
 print_i64 :: proc "contextless" (v: i64) {
 	if v < 0 {
-		print("-")
+		put("-")
 		print_u64(u64(0) - u64(v))
 	} else {
 		print_u64(u64(v))
 	}
+}
+
+// A duration in nanoseconds, as milliseconds with three decimals.
+print_millis :: proc "contextless" (ns: u64) {
+	us := ns / 1000
+	frac := [4]u8{'.', u8('0' + us % 1000 / 100), u8('0' + us % 100 / 10), u8('0' + us % 10)}
+	print_u64(us / 1000)
+	put(string(frac[:]))
 }

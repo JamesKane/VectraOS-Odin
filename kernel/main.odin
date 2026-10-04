@@ -41,6 +41,7 @@ kernel_main :: proc "c" () -> ! {
 
 @(export, link_name="kernel_main_on_kstack")
 kernel_main_on_kstack :: proc "c" () -> ! {
+	arch_devices_init()
 	arch_timer_init()
 	sched_enter_cpu()
 	smp_init()

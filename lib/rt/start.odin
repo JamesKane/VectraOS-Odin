@@ -39,15 +39,29 @@ self: vx.Handle // the task itself, from the spawn message's "self"
 @(private="file")
 spawn_msg: [64 * 1024]u8
 @(private="file")
-spawn_scratch: [16 * 1024]u8
+spawn_scratch: [64 * 1024]u8 // decoded values, which never grow
 
 @(export, link_name="_start")
 start :: proc "c" (bootstrap: vx.Handle, arg2: u64) -> ! {
 	read_spawn(bootstrap)
+	stdio_init()
 	context = runtime.default_context()
 	exit_status := vx_main()
 	flush()
 	thread_exit(i64(exit_status))
+}
+
+// The first record of the spawn message that has `key`. Its values stay
+// valid until the next call.
+spawn_record :: proc "contextless" (key: string, out: ^ndb.Record) -> bool {
+	@(static) scratch: [vx.CHANNEL_MAX_BYTES]u8
+	r := ndb.Reader{src = spawn.text, scratch = scratch[:]}
+	for ndb.next(&r, out) == .Record {
+		if ndb.has(out, key) {
+			return true
+		}
+	}
+	return false
 }
 
 // The handle the spawn message names `name`, taken: a second call gets

@@ -677,6 +677,87 @@ test_spawn_message :: proc "contextless" () {
 	_ = rt.handle_close(image)
 }
 
+// Device objects from the root Resource. ktest stays away from the
+// console's own device, which would take the console from the kernel.
+when ODIN_ARCH == .amd64 {
+	SPARE_LINE :: 3 // ISA IRQ 3: COM2, which nothing uses
+	DEVICE :: u64(0xfed0_0000) // the HPET
+	RAM :: u64(0x10_0000) // RAM at 1 MiB
+} else {
+	SPARE_LINE :: 40 // an SPI no device has
+	DEVICE :: u64(0x0901_0000) // the PL031 RTC
+	RAM :: u64(0x4000_0000) // the start of RAM
+}
+
+test_devices :: proc "contextless" () {
+	res := rt.spawn_take("resource")
+	check(res != vx.HANDLE_NONE)
+	weak, wst := rt.handle_dup(res, vx.right_bit(.Duplicate) | vx.right_bit(.Inspect))
+	check(wst == .Ok)
+
+	_, st := rt.irq_create(weak, SPARE_LINE)
+	check(st == .Err_Access) // no MANAGE
+	_, st = rt.irq_create(res, 5000)
+	check(st == .Err_Range)
+	when ODIN_ARCH == .arm64 {
+		_, st = rt.irq_create(res, 27)
+		check(st == .Err_Range) // a PPI: the kernel's timer
+	}
+	h: vx.Handle
+	h, st = rt.irq_create(res, SPARE_LINE)
+	check(st == .Ok)
+	_, st = rt.irq_create(res, SPARE_LINE)
+	check(st == .Err_Exists) // one Irq a line
+	port, _ := rt.port_create()
+	pk: [1]vx.Packet
+	check(rt.port_bind(port, h, .Counter_Ge, 1, 1) == .Err_Invalid)
+	check(rt.port_bind(port, h, .Irq, 1) == .Ok)
+	_, st = rt.port_wait(port, after_ms(2), 0, pk[:])
+	check(st == .Err_Timed_Out) // nothing raises the line
+	check(rt.irq_ack(h) == .Ok)
+	check(rt.irq_ack(port) == .Err_Bad_Handle) // not an Irq
+	_ = rt.handle_close(port)
+	_ = rt.handle_close(h)
+	h, st = rt.irq_create(res, SPARE_LINE)
+	check(st == .Ok) // free again once its Irq is gone
+	_ = rt.handle_close(h)
+
+	_, st = rt.vmo_create_physical(res, RAM, 4096)
+	check(st == .Err_Access) // never RAM
+	_, st = rt.vmo_create_physical(res, DEVICE + 1, 4096)
+	check(st == .Err_Range)
+	_, st = rt.vmo_create_physical(weak, DEVICE, 4096)
+	check(st == .Err_Access)
+	h, st = rt.vmo_create_physical(res, DEVICE, 4096)
+	check(st == .Ok)
+	word: [4]u8
+	check(rt.vmo_read(h, 0, word[:]) == .Err_Unsupported) // map it instead
+	at, mst := rt.as_map(self, h, 0, 4096, 0)
+	check(mst == .Ok)
+	value := intrinsics.volatile_load(cast(^u32)uintptr(at)) // HPET: capabilities and revision; PL031: the time
+	check(value != 0 && value != 0xffff_ffff)
+	_ = rt.handle_close(h)
+
+	when ODIN_ARCH == .amd64 {
+		_, st = rt.iorange_create(res, 0xfff0, 0x20)
+		check(st == .Err_Range)
+		h, st = rt.iorange_create(res, 0x2f8, 8) // COM2's ports
+		check(st == .Ok)
+		_, st = rt.as_map(self, h, 0, 4096, 0)
+		check(st == .Err_Invalid)
+		_, st = rt.as_map(self, h, 0, 0, 0)
+		check(st == .Ok)
+		_ = rt.inb(0x2fd) // faults unless the port is ours
+		check(true)
+		_ = rt.handle_close(h)
+	} else {
+		_, st = rt.iorange_create(res, 0x2f8, 8)
+		check(st == .Err_Unsupported)
+	}
+	_ = rt.handle_close(weak)
+	_ = rt.handle_close(res)
+}
+
 @(export, link_name="vx_main")
 main :: proc() -> int {
 	self = rt.self
@@ -690,6 +771,7 @@ main :: proc() -> int {
 	test_nested_channels()
 	test_rings()
 	test_vmo_rw()
+	test_devices()
 	rt.print("ktest: ")
 	rt.print_u64(u64(checks))
 	rt.print(" checks, ")

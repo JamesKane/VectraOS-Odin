@@ -218,15 +218,29 @@ sys_port_post :: proc "contextless" (h: vx.Handle, packet: u64) -> i64 {
 	return err(st)
 }
 
+// What device objects carry besides the rights to use them: they can be
+// passed on, never widened.
+@(private="file")
+DEVICE_RIGHTS :: u32(1 << u32(vx.Right.Duplicate) | 1 << u32(vx.Right.Transfer) | 1 << u32(vx.Right.Inspect))
+
 // vmo_create(size, options, &out, resource, physical_address): anonymous
-// memory; device memory arrives with the drivers.
+// memory, or with VMO_PHYSICAL, device memory minted from a Resource.
 @(private="file")
 sys_vmo_create :: proc "contextless" (size, options, out: u64, rh: vx.Handle, pa: u64) -> i64 {
 	if options &~ u64(vx.VMO_PHYSICAL) != 0 {
 		return err(.Err_Invalid)
 	}
 	if options & u64(vx.VMO_PHYSICAL) != 0 {
-		return err(.Err_Unsupported)
+		r, st := handle_get(current_task(), rh, .Resource, bit(.Manage))
+		if r == nil {
+			return err(st)
+		}
+		pv, pst := vmo_create_physical(pa, size)
+		object_release(r)
+		if pst != .Ok {
+			return err(pst)
+		}
+		return return_handle(&pv.obj, bit(.Read) | bit(.Write) | bit(.Map) | DEVICE_RIGHTS, out)
 	}
 	v, st := vmo_create(size)
 	if st != .Ok {
@@ -237,9 +251,72 @@ sys_vmo_create :: proc "contextless" (size, options, out: u64, rh: vx.Handle, pa
 	return return_handle(&v.obj, ALL_RIGHTS &~ bit(.Debug), out)
 }
 
-// as_map(task, vmo, offset, size, flags, &address): maps part of a VMO.
+// --- Devices (device.odin) ---
+
+@(private="file")
+sys_irq_create :: proc "contextless" (rh: vx.Handle, line, options, out: u64) -> i64 {
+	if options != 0 || line > u64(max(u32)) {
+		return err(.Err_Invalid)
+	}
+	r, st := handle_get(current_task(), rh, .Resource, bit(.Manage))
+	if r == nil {
+		return err(st)
+	}
+	defer object_release(r)
+	canonical, cst := arch_irq_canonical(u32(line))
+	if cst != .Ok {
+		return err(cst)
+	}
+	q, qst := irq_create(canonical)
+	if qst != .Ok {
+		return err(qst)
+	}
+	return return_handle(&q.obj, bit(.Wait) | bit(.Write) | DEVICE_RIGHTS, out)
+}
+
+@(private="file")
+sys_irq_ack :: proc "contextless" (h: vx.Handle) -> i64 {
+	o, st := handle_get(current_task(), h, .Irq, bit(.Write))
+	if o == nil {
+		return err(st)
+	}
+	irq_ack(cast(^Irq)o)
+	object_release(o)
+	return 0
+}
+
+@(private="file")
+sys_iorange_create :: proc "contextless" (rh: vx.Handle, base, count, out: u64) -> i64 {
+	r, st := handle_get(current_task(), rh, .Resource, bit(.Manage))
+	if r == nil {
+		return err(st)
+	}
+	io, ist := iorange_create(base, count)
+	object_release(r)
+	if ist != .Ok {
+		return err(ist)
+	}
+	return return_handle(&io.obj, bit(.Map) | DEVICE_RIGHTS, out)
+}
+
+// as_map(task, vmo, offset, size, flags, &address): maps part of a VMO. With
+// an IoRange in place of the VMO (and the rest 0), it lets the task use those
+// I/O ports instead.
 @(private="file")
 sys_as_map :: proc "contextless" (th, vh: vx.Handle, offset, size, flags, addr_ptr: u64) -> i64 {
+	if io, _ := handle_get(current_task(), vh, .Iorange, bit(.Map)); io != nil {
+		defer object_release(io)
+		if offset | size | flags != 0 {
+			return err(.Err_Invalid)
+		}
+		to, tst := handle_get(current_task(), th, .Task, bit(.Manage))
+		if to == nil {
+			return err(tst)
+		}
+		st := task_enable_io(cast(^Task)to, cast(^Iorange)io)
+		object_release(to)
+		return err(st)
+	}
 	if flags &~ u64(vx.MAP_WRITE | vx.MAP_EXEC) != 0 {
 		return err(.Err_Invalid)
 	}
@@ -463,7 +540,7 @@ sys_counter_read :: proc "contextless" (h: vx.Handle) -> i64 {
 }
 
 // port_bind(port, source, trigger, key, threshold): a one-shot binding of a
-// channel end, counter, task or ring end to the port.
+// channel end, counter, task, ring end or Irq to the port.
 @(private="file")
 sys_port_bind :: proc "contextless" (ph, sh: vx.Handle, trigger, key, threshold: u64) -> i64 {
 	po, st := handle_get(current_task(), ph, .Port, bit(.Write))
@@ -475,7 +552,7 @@ sys_port_bind :: proc "contextless" (ph, sh: vx.Handle, trigger, key, threshold:
 		return err(.Err_Invalid)
 	}
 	src: ^Object
-	for type in ([]Obj_Type{.Channel, .Counter, .Task, .Ring}) {
+	for type in ([]Obj_Type{.Channel, .Counter, .Task, .Ring, .Irq}) {
 		if src, st = handle_get(current_task(), sh, type, bit(.Wait)); src != nil {
 			break
 		}
@@ -495,6 +572,8 @@ sys_port_bind :: proc "contextless" (ph, sh: vx.Handle, trigger, key, threshold:
 		st = counter_bind(cast(^Counter)src, b)
 	case .Ring:
 		st = ring_bind(cast(^Ring_End)src, b)
+	case .Irq:
+		st = irq_bind(cast(^Irq)src, b)
 	case:
 		st = task_bind(cast(^Task)src, b)
 	}
@@ -825,6 +904,12 @@ syscall_dispatch :: proc "contextless" (nr: u64, a: [6]u64) -> i64 {
 		return sys_ring_xfer(vx.Handle(a[0]), a[1], a[2], a[3], a[4])
 	case .Vmo_Create:
 		return sys_vmo_create(a[0], a[1], a[2], vx.Handle(a[3]), a[4])
+	case .Irq_Create:
+		return sys_irq_create(vx.Handle(a[0]), a[1], a[2], a[3])
+	case .Irq_Ack:
+		return sys_irq_ack(vx.Handle(a[0]))
+	case .Iorange_Create:
+		return sys_iorange_create(vx.Handle(a[0]), a[1], a[2], a[3])
 	case .Vmo_Rw:
 		return sys_vmo_rw(vx.Handle(a[0]), a[1], a[2], a[3], a[4])
 	case .As_Map:

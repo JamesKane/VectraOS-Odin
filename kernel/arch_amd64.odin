@@ -1,6 +1,7 @@
 package kernel
 
 import "base:intrinsics"
+import vx "abi:vx"
 
 // x86_64: the serial console (COM1, a 16550), the GDT, TSS and IDT, traps,
 // page-table entries, and the clock and timer (the TSC, and the local APIC
@@ -174,12 +175,24 @@ Cpu_Local :: struct {
 
 // Each CPU has its own GDT (for its own TSS descriptor), TSS and GS data.
 // The IDT is shared.
+// The TSS's I/O permission bitmap follows it: a 0 bit lets user code use
+// that port. It holds the ports of the task this CPU runs (arch_io_switch),
+// and `open` remembers which, to close them again.
+@(private="file")
+IO_PORTS :: 0x1_0000
+
 @(private="file")
 X86_Cpu :: struct {
-	gdt:   [7]u64,
-	tss:   Tss,
-	local: Cpu_Local,
+	gdt:        [7]u64,
+	tss:        Tss,
+	iomap:      [IO_PORTS / 8 + 1]u8, // one bit a port, then the 0xff the CPU requires after the last
+	open:       u32,
+	open_base:  [TASK_MAX_IO]u16,
+	open_count: [TASK_MAX_IO]u16,
+	local:      Cpu_Local,
 }
+
+#assert(offset_of(X86_Cpu, iomap) == offset_of(X86_Cpu, tss) + size_of(Tss))
 
 @(private="file")
 x86_cpus: [MAX_CPUS]X86_Cpu
@@ -281,13 +294,17 @@ arch_cpu_init :: proc "contextless" (index: u32) {
 		}
 		ist = cast([^]u8)phys_to_virt(pa)
 	}
-	xc.tss = {iomap_base = size_of(Tss)} // no I/O permission bitmap yet: no ports for user code
+	xc.tss = {iomap_base = size_of(Tss)}
+	for &b in xc.iomap {
+		b = 0xff // no ports for user code
+	}
+	xc.open = 0
 	for i in 0 ..< 3 {
 		xc.tss.ist[i] = u64(uintptr(&ist[(i + 1) * IST_STACK_SIZE]))
 	}
 
 	xc.gdt = GDT_TEMPLATE
-	base, limit := u64(uintptr(&xc.tss)), u64(size_of(Tss) - 1)
+	base, limit := u64(uintptr(&xc.tss)), u64(size_of(Tss) + size_of(xc.iomap) - 1)
 	xc.gdt[5] = limit & 0xffff | (base & 0xffffff) << 16 | 0x89 << 40 | ((limit >> 16) & 0xf) << 48 | ((base >> 24) & 0xff) << 56
 	xc.gdt[6] = base >> 32
 	gp := Descriptor_Ptr{limit = size_of(xc.gdt) - 1, base = u64(uintptr(&xc.gdt))}
@@ -626,6 +643,9 @@ x86_trap :: proc "c" (f: ^Trap_Frame) {
 		this_cpu().resched = true
 	case VECTOR_SPURIOUS:
 		return
+	case VECTOR_IRQ_BASE ..< VECTOR_IRQ_BASE + MAX_GSI:
+		irq_fire(u32(f.vector - VECTOR_IRQ_BASE)) // a level line is masked before the EOI
+		vx_wrmsr(X2APIC_EOI, 0)
 	case:
 		if from_user {
 			task_fault_start()
@@ -674,4 +694,182 @@ arch_clobber_vregs :: proc "contextless" () {
 	} else {
 		vx_clobber_vregs_sse()
 	}
+}
+
+// --- Devices: I/O ports, the IOAPICs and the MADT (device.odin) ---
+
+arch_has_io_ports :: proc "contextless" () -> bool {
+	return true
+}
+
+arch_console_device :: proc "contextless" (io: bool, base, size: u64) -> bool {
+	return io && base < COM1 + 8 && COM1 < base + size
+}
+
+@(private="file")
+iomap_set :: proc "contextless" (m: []u8, base, count: u32, allow: bool) {
+	for p in base ..< base + count {
+		if allow {
+			m[p / 8] &~= u8(1 << (p % 8))
+		} else {
+			m[p / 8] |= u8(1 << (p % 8))
+		}
+	}
+}
+
+// This CPU's I/O port permissions become t's; t may be nil.
+arch_io_switch :: proc "contextless" (t: ^Task) {
+	xc := &x86_cpus[arch_cpu_index()]
+	for i in 0 ..< xc.open {
+		iomap_set(xc.iomap[:], u32(xc.open_base[i]), u32(xc.open_count[i]), false)
+	}
+	xc.open = 0
+	if t == nil {
+		return
+	}
+	for i in 0 ..< min(t.io_ranges, TASK_MAX_IO) {
+		iomap_set(xc.iomap[:], u32(t.io_base[i]), u32(t.io_count[i]), true)
+		xc.open_base[i] = t.io_base[i]
+		xc.open_count[i] = t.io_count[i]
+		xc.open += 1
+	}
+}
+
+@(private="file")
+Ioapic :: struct {
+	regs:     [^]u32, // IOREGSEL at 0, IOWIN at 0x10
+	gsi_base: u32,
+	count:    u32,
+}
+
+@(private="file")
+ioapics: [8]Ioapic
+@(private="file")
+ioapic_count: int
+@(private="file")
+Isa_Override :: struct {
+	present: bool,
+	gsi:     u32,
+	flags:   u16, // MPS INTI flags: polarity in bits 0-1, trigger mode in bits 2-3
+}
+@(private="file")
+isa_overrides: [16]Isa_Override
+@(private="file")
+ioapic_lock: Spinlock
+
+@(private="file")
+VECTOR_IRQ_BASE :: 0x30 // device interrupts: VECTOR_IRQ_BASE + GSI
+@(private="file")
+MAX_GSI :: 0x50 // up to vector 0x7f
+
+@(private="file")
+ioapic_read :: proc "contextless" (a: ^Ioapic, reg: u32) -> u32 {
+	intrinsics.volatile_store(&a.regs[0], reg)
+	return intrinsics.volatile_load(&a.regs[4])
+}
+
+@(private="file")
+ioapic_write :: proc "contextless" (a: ^Ioapic, reg, v: u32) {
+	intrinsics.volatile_store(&a.regs[0], reg)
+	intrinsics.volatile_store(&a.regs[4], v)
+}
+
+// Finds the IOAPICs and the ISA overrides in the MADT, maps the IOAPICs and
+// masks every line. Without a MADT, irq_create has no lines to give.
+arch_devices_init :: proc "contextless" () {
+	madt := acpi_table("APIC")
+	if madt == nil {
+		return
+	}
+	length := read32(madt[4:])
+	for off := u32(44); off + 2 <= length && madt[off + 1] >= 2 && off + u32(madt[off + 1]) <= length; off += u32(madt[off + 1]) {
+		e := madt[off:]
+		if e[0] == 1 && e[1] >= 12 && ioapic_count < len(ioapics) {
+			pa := u64(read32(e[4:]))
+			if !map_range(kernel_root, boot.hhdm + pa, pa, 4096, {.Write, .Device}) {
+				kpanic("cannot map an IOAPIC")
+			}
+			a := &ioapics[ioapic_count]
+			ioapic_count += 1
+			a.regs = cast([^]u32)uintptr(boot.hhdm + pa)
+			a.gsi_base = read32(e[8:])
+			a.count = (ioapic_read(a, 1) >> 16 & 0xff) + 1
+			for i in 0 ..< a.count {
+				ioapic_write(a, 0x10 + 2 * i, 1 << 16) // masked
+			}
+		} else if e[0] == 2 && e[1] >= 10 && e[2] == 0 && e[3] < 16 {
+			o := &isa_overrides[e[3]]
+			o.present = true
+			o.gsi = read32(e[4:])
+			o.flags = u16(e[8]) | u16(e[9]) << 8
+		}
+	}
+}
+
+@(private="file")
+ioapic_for :: proc "contextless" (gsi: u32) -> ^Ioapic {
+	for &a in ioapics[:ioapic_count] {
+		if gsi >= a.gsi_base && gsi - a.gsi_base < a.count {
+			return &a
+		}
+	}
+	return nil
+}
+
+// An ISA IRQ (below 16) becomes its GSI through the MADT's overrides; any
+// other number is a GSI already.
+arch_irq_canonical :: proc "contextless" (line: u32) -> (u32, vx.Status) {
+	gsi := line < 16 && isa_overrides[line].present ? isa_overrides[line].gsi : line
+	if gsi >= MAX_GSI || ioapic_for(gsi) == nil {
+		return 0, .Err_Range
+	}
+	return gsi, .Ok
+}
+
+// ISA lines are edge-triggered and active high unless an override says
+// otherwise; the rest (PCI) are level-triggered and active low.
+arch_irq_route :: proc "contextless" (line: u32) -> (level: bool, st: vx.Status) {
+	isa := false
+	flags: u16
+	for i in u32(0) ..< 16 { // the ISA IRQ that lands on this GSI, if any (line: a GSI)
+		to := isa_overrides[i].present ? isa_overrides[i].gsi : i
+		if to != line {
+			continue
+		}
+		isa = true
+		flags = isa_overrides[i].present ? isa_overrides[i].flags : 0
+	}
+	active_low := !isa
+	level = !isa
+	switch flags & 3 { // the override's polarity and trigger mode, where it gives them
+	case 1:
+		active_low = false
+	case 3:
+		active_low = true
+	}
+	switch flags >> 2 & 3 {
+	case 1:
+		level = false
+	case 3:
+		level = true
+	}
+	a := ioapic_for(line)
+	pin := line - a.gsi_base
+	spin_lock(&ioapic_lock)
+	ioapic_write(a, 0x10 + 2 * pin + 1, u32(cpus[0].arch_id << 24)) // to the boot CPU
+	ioapic_write(a, 0x10 + 2 * pin, (VECTOR_IRQ_BASE + line) | (active_low ? 1 << 13 : 0) | (level ? 1 << 15 : 0)) // unmasked
+	spin_unlock(&ioapic_lock)
+	return level, .Ok
+}
+
+arch_irq_mask :: proc "contextless" (line: u32, masked: bool) {
+	a := ioapic_for(line)
+	if a == nil {
+		return
+	}
+	reg := 0x10 + 2 * (line - a.gsi_base)
+	spin_lock(&ioapic_lock)
+	v := ioapic_read(a, reg)
+	ioapic_write(a, reg, masked ? v | 1 << 16 : v &~ (1 << 16))
+	spin_unlock(&ioapic_lock)
 }

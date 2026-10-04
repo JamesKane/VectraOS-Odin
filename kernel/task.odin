@@ -12,6 +12,7 @@ USER_TOP :: u64(0x0000_8000_0000_0000) // first address past the lower half
 USER_MAP_BASE :: u64(0x0000_1000_0000_0000) // where as_map puts mappings it places
 USER_STACK_TOP :: u64(0x0000_7fff_ffff_0000)
 USER_STACK_SIZE :: u64(256 * 1024)
+TASK_MAX_IO :: 4 // I/O port ranges per task
 
 // --- Handles ---
 //
@@ -63,6 +64,9 @@ Task :: struct {
 	name:            [24]u8,
 	parent_id:       u64, // the task that created it, or its nearest live creator; 0 for the root task
 	all_next:        ^Task, // in all_tasks
+	io_ranges:       u32, // I/O ports it may use (x86_64, device.odin): [io_base, io_base + io_count)
+	io_base:         [TASK_MAX_IO]u16,
+	io_count:        [TASK_MAX_IO]u16,
 }
 
 Thread_State :: enum u8 {

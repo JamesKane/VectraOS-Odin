@@ -57,6 +57,11 @@ Address_Response :: struct {
 	virtual_base:  u64,
 }
 
+Rsdp_Response :: struct {
+	revision: u64,
+	address:  u64, // in the HHDM (physical only under base revision 3)
+}
+
 Tsc_Response :: struct {
 	revision:  u64,
 	frequency: u64,
@@ -85,6 +90,9 @@ cmdline_request := Request(Cmdline_Response){id = {MAGIC_0, MAGIC_1, 0x4b161536e
 
 @(export, link_section=".limine_requests")
 address_request := Request(Address_Response){id = {MAGIC_0, MAGIC_1, 0x71ba76863cc55f63, 0xb2644a48c516a487}}
+
+@(export, link_section=".limine_requests")
+rsdp_request := Request(Rsdp_Response){id = {MAGIC_0, MAGIC_1, 0xc5e77b6b397e7b43, 0x27637845accdcf3c}}
 
 @(export, link_section=".limine_requests")
 tsc_request := Request(Tsc_Response){id = {MAGIC_0, MAGIC_1, 0x10f2ee1d87d195e4, 0xf747a2b78f6ddb31}}
@@ -122,6 +130,7 @@ Boot_Info :: struct {
 	kernel_phys:    u64, // where the kernel image is loaded, physically contiguous
 	kernel_virt:    u64,
 	tsc_hz:         u64, // x86_64: the TSC's frequency, from Limine
+	rsdp:           u64, // the ACPI RSDP's physical address, or 0
 	// Every range of RAM and firmware memory, whatever it is used for.
 	ram:            [MAX_RAM_RANGES]Phys_Range,
 	ram_count:      int,
@@ -195,6 +204,9 @@ boot_read :: proc "contextless" () -> bool {
 	boot.cpu_count = 1
 	if mp := intrinsics.volatile_load(&mp_request.response); mp != nil {
 		boot.cpu_count = mp.cpu_count
+	}
+	if r := response(&rsdp_request); r != nil && r.address != 0 {
+		boot.rsdp = r.address - boot.hhdm // the response is in memory reclaim_boot_memory frees
 	}
 	if tsc := response(&tsc_request); tsc != nil {
 		boot.tsc_hz = tsc.frequency

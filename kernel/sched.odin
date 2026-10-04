@@ -149,6 +149,7 @@ schedule_locked :: proc "contextless" () {
 		// task's tables are on no CPU by the time its last thread is reaped.
 		if prev.task != next.task {
 			arch_switch_user_root(next.task != nil ? next.task.root : 0)
+			arch_io_switch(next.task)
 		}
 	} else {
 		prev.state = .Running

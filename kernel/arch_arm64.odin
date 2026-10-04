@@ -1,6 +1,7 @@
 package kernel
 
 import "base:intrinsics"
+import vx "abi:vx"
 
 // aarch64: the early serial console (a PL011), exceptions, page-table
 // entries, and the clock and timer (the generic timer's virtual counter,
@@ -367,6 +368,8 @@ aarch64_irq :: proc "contextless" () {
 		timer_interrupt()
 	} else if intid == INTID_RESCHED {
 		this_cpu().resched = true
+	} else if intid >= 32 {
+		irq_fire(intid) // a device's SPI: masked before the EOI, as it is level-triggered
 	}
 	vx_write_icc_eoir1(iar)
 }
@@ -505,4 +508,61 @@ arch_vreg_irq_test :: proc "contextless" (input, output: ^[512]u8, fired: ^u64, 
 
 arch_clobber_vregs :: proc "contextless" () {
 	vx_clobber_vregs()
+}
+
+// --- Devices: GIC SPIs (device.odin) ---
+//
+// SPIs are configured level-triggered, as the GIC starts them, and routed to
+// the boot CPU.
+
+@(private="file")
+gic_lines: u32 // INTIDs below this exist
+
+@(private="file")
+gicd_reg :: proc "contextless" (off: u64) -> ^u32 {
+	return cast(^u32)uintptr(boot.hhdm + GICD_PHYS + off)
+}
+
+arch_devices_init :: proc "contextless" () {
+	n := 32 * ((intrinsics.volatile_load(gicd_reg(0x004)) & 0x1f) + 1) // GICD_TYPER.ITLinesNumber
+	gic_lines = min(n, 1020)
+}
+
+arch_has_io_ports :: proc "contextless" () -> bool {
+	return false
+}
+
+arch_console_device :: proc "contextless" (io: bool, base, size: u64) -> bool {
+	return !io && base < PL011_PHYS + 4096 && PL011_PHYS < base + size
+}
+
+arch_io_switch :: proc "contextless" (t: ^Task) {}
+
+// SPIs only: SGIs and PPIs are the kernel's.
+arch_irq_canonical :: proc "contextless" (line: u32) -> (u32, vx.Status) {
+	if line < 32 || line >= gic_lines {
+		return 0, .Err_Range
+	}
+	return line, .Ok
+}
+
+arch_irq_route :: proc "contextless" (line: u32) -> (level: bool, st: vx.Status) {
+	bit := u32(1) << (line % 32)
+	g := gicd_reg(0x080 + 4 * u64(line / 32)) // GICD_IGROUPR: group 1
+	intrinsics.volatile_store(g, intrinsics.volatile_load(g) | bit)
+	intrinsics.volatile_store(cast(^u8)uintptr(boot.hhdm + GICD_PHYS + 0x400 + u64(line)), 0x80) // GICD_IPRIORITYR
+	c := gicd_reg(0xc00 + 4 * u64(line / 16)) // GICD_ICFGR: level-triggered
+	intrinsics.volatile_store(c, intrinsics.volatile_load(c) &~ (2 << (line % 16 * 2)))
+	route := cast(^u64)uintptr(boot.hhdm + GICD_PHYS + 0x6000 + 8 * u64(line)) // GICD_IROUTER
+	intrinsics.volatile_store(route, cpus[0].arch_id & 0xff_00ff_ffff)
+	intrinsics.volatile_store(gicd_reg(0x100 + 4 * u64(line / 32)), bit) // GICD_ISENABLER
+	return true, .Ok
+}
+
+arch_irq_mask :: proc "contextless" (line: u32, masked: bool) {
+	if line < 32 || line >= gic_lines {
+		return
+	}
+	off: u64 = masked ? 0x180 : 0x100 // GICD_ICENABLER or GICD_ISENABLER
+	intrinsics.volatile_store(gicd_reg(off + 4 * u64(line / 32)), u32(1) << (line % 32))
 }
