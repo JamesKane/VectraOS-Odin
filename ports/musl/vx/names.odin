@@ -2,6 +2,7 @@ package backend
 
 import vx "abi:vx"
 import "linux"
+import "vx:memory"
 import "vx:ns"
 import "vx:p9"
 import "vx:rt"
@@ -196,7 +197,7 @@ fd_getdents :: proc "contextless" (fd: int, buf: []u8) -> int {
 		if s.mode & p9.DMSYMLINK != 0 {
 			d.type = linux.DT_LNK
 		}
-		copy(rec, ([^]u8)(&d)[:linux.DIRENT_NAME])
+		copy(rec, memory.ptr_to_bytes(&d)[:linux.DIRENT_NAME])
 		copy(rec[linux.DIRENT_NAME:], name)
 		rec[linux.DIRENT_NAME + len(name)] = 0
 		written += reclen

@@ -3,6 +3,7 @@ package backend
 import "base:intrinsics"
 import vx "abi:vx"
 import "linux"
+import "vx:memory"
 import "vx:ns"
 import "vx:p9"
 import "vx:rt"
@@ -314,7 +315,7 @@ sock_give :: proc "contextless" (sa: rawptr, length: ^u32, addr: u32, port: u16)
 		port   = u16be(port),
 		addr   = u32be(addr),
 	}
-	copy(([^]u8)(sa)[:min(length^, size_of(sin))], ([^]u8)(&sin)[:size_of(sin)])
+	copy(([^]u8)(sa)[:min(length^, size_of(sin))], memory.ptr_to_bytes(&sin))
 	length^ = size_of(sin)
 }
 

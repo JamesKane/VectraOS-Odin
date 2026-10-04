@@ -3,6 +3,7 @@ package backend
 import "base:intrinsics"
 import vx "abi:vx"
 import "linux"
+import "vx:memory"
 import "vx:ndb"
 import "vx:note"
 import "vx:ns"
@@ -181,7 +182,7 @@ sig_act :: proc "contextless" (sig: int, code: i32, sender: i64, address: u64, e
 		}
 		uc: linux.Ucontext
 		mask := old
-		copy(uc.sigmask[:], ([^]u8)(&mask)[:size_of(mask)])
+		copy(uc.sigmask[:], memory.ptr_to_bytes(&mask))
 		(Info_Handler)(rawptr(h))(i32(sig), &info, &uc)
 	} else {
 		(Handler)(rawptr(h))(i32(sig))

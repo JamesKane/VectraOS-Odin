@@ -3,6 +3,7 @@ package backend
 import vx "abi:vx"
 import "linux"
 import "vx:drbg"
+import "vx:memory"
 import "vx:ndb"
 import "vx:note"
 import "vx:ns"
@@ -714,7 +715,7 @@ fork_child :: proc "contextless" () -> int {
 	tag := "fork child\x00"
 	drbg.mix(&entropy, transmute([]u8)tag, false)
 	id := task_id
-	drbg.mix(&entropy, ([^]u8)(&id)[:size_of(id)], false)
+	drbg.mix(&entropy, memory.ptr_to_bytes(&id), false)
 	fd_after_fork()
 	clear(&wait_kept) // the parent's children's records are the parent's
 	sig_forget_pending(fork_pending) // the parent's, copied with its memory; not those sent to the child since
