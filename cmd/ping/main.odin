@@ -24,11 +24,11 @@ space: ns.Namespace
 
 // Says what failed, and why if st says, and exits.
 fail :: proc(what: string, st := vx.Status.Ok) -> ! {
-	rt.print("ping: ", what)
+	rt.eprint("ping: ", what)
 	if st != .Ok {
-		rt.print(": ", p9.error_text(st))
+		rt.eprint(": ", p9.error_text(st))
 	}
-	rt.print("\n")
+	rt.eprint("\n")
 	rt.exits("error")
 }
 
@@ -45,8 +45,14 @@ parse_count :: proc(flag: string) -> u64 {
 	return count
 }
 
+// The program ends with run's exit string, as upstream's programs return
+// theirs: empty for success (ADR-0010).
 @(export, link_name="vx_main")
 vx_main :: proc() -> int {
+	rt.exits(run())
+}
+
+run :: proc() -> string {
 	args := rt.args()
 	count := u64(3)
 	if len(args) > 1 && len(args[0]) > 1 && args[0][0] == '-' {
@@ -123,5 +129,5 @@ vx_main :: proc() -> int {
 	ns.close(&data)
 	ns.close(&ctl)
 	rt.print("ping: ", count, " sent, ", received, " received\n")
-	return received == count ? 0 : 1
+	return received == count ? "" : "lost"
 }

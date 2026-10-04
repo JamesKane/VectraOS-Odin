@@ -23,19 +23,25 @@ ask :: proc(f: ^ns.File, path, q: string, dns: bool) -> vx.Status {
 	return .Ok
 }
 
+// The program ends with run's exit string, as upstream's programs return
+// theirs: empty for success (ADR-0010).
 @(export, link_name="vx_main")
 vx_main :: proc() -> int {
+	rt.exits(run())
+}
+
+run :: proc() -> string {
 	args := rt.args()
 	dns := len(args) == 2 && args[0] == "-d"
 	if len(args) != (dns ? 2 : 1) || len(args[dns ? 1 : 0]) > 250 {
-		rt.print("usage: cs NET!HOST!SERVICE, or cs -d NAME\n")
-		return 1
+		rt.eprint("usage: cs NET!HOST!SERVICE, or cs -d NAME\n")
+		return "usage"
 	}
 	q := args[dns ? 1 : 0]
 	f: ns.File
 	if st := ask(&f, dns ? "/net/dns" : "/net/cs", q, dns); st != .Ok {
-		rt.print("cs: ", q, ": ", st == .Err_Not_Found ? "no such name" : p9.error_text(st), "\n")
-		return 1
+		rt.eprint("cs: ", q, ": ", st == .Err_Not_Found ? "no such name" : p9.error_text(st), "\n")
+		return st == .Err_Not_Found ? "no such name" : "error"
 	}
 	// Each read is a line, from the start of the answer.
 	f.offset = 0
@@ -48,5 +54,5 @@ vx_main :: proc() -> int {
 		rt.print(string(line[:n]))
 	}
 	ns.close(&f)
-	return 0
+	return ""
 }

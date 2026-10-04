@@ -98,12 +98,13 @@ Server :: struct {
 	shared:        p9.Shared, // the open files and locks all its connections share (posix)
 }
 
-// A connection goes: every fid is clunked. (Upstream's M4 also unmaps the
-// ring here; that waits for vx:rt's as_unmap, with the kernel's M4 port.)
+// A connection goes: every fid is clunked, and its ring leaves the address
+// space, so a long-lived server does not run out of mappings.
 @(private="file")
 close_conn :: proc "contextless" (c: ^Server_Conn) {
 	p9.hang_up(&c.srv)
 	_ = rt.handle_close(c.end)
+	rt.session_unmap(&c.ring)
 	c.used = false
 }
 
