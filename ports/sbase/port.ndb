@@ -1,0 +1,127 @@
+# ports/sbase/port.ndb: how tools/build builds sbase's commands (ADR-0010),
+# for /boot/bin/posix, which the POSIX namespace template binds before
+# /boot/bin, as Plan 9's APE binds /bin/ape: POSIX programs get sbase's ls and
+# the rest, native ones the first-party commands of the same names.
+#
+# The flags are sbase's Makefile's CPPFLAGS (PREFIX in config.h, as /boot)
+# with -std=c99 -O2, frame pointers kept as for musl (ADR-0007), and the
+# include path for the generated files. sources= is LIBUTFOBJ and LIBUTILOBJ,
+# archived (archive=); each program= is one of BIN, from its own .c as the
+# Makefile's .c rule has it, and make from MAKEOBJ. They are linked into one
+# binary, as the Makefile's sbase-box target does (box=): each program's main
+# renamed NAME_main by -D on its command line rather than by mkbox's copies,
+# and a main build generates choosing the program by argv[0] ("[" is test's).
+# The image is to hold sbase-box once, and each name as a hard link to it:
+# 100 static programs would each carry the C library. make is linked alone
+# (alone=), as mkbox leaves it out: its globals clash with bc's and libutil's.
+#
+# A source under ports/ is generated, once, when sbase was vendored, as the
+# Makefile would make it: bc.c by yacc (bison -y, 3.8.2) from bc.y, and
+# getconf.h by scripts/getconf.sh. install= names files of the tree for the
+# image, under /boot: bc -l's library, where PREFIX says. dir= is the
+# directory under bin/ the programs go in.
+
+port=sbase src=third_party/sbase archive=yes box=sbase-box box.alias=[ dir=posix install=bc.library:share/misc/bc.library
+    cflags="-std=c99 -O2 -fno-omit-frame-pointer -D_DEFAULT_SOURCE -D_NETBSD_SOURCE -D_BSD_SOURCE -D_XOPEN_SOURCE=700 -D_FILE_OFFSET_BITS=64 -Ithird_party/sbase -Iports/sbase/generated -include ports/sbase/config.h"
+    sources="libutf/fgetrune.c libutf/fputrune.c libutf/isalnumrune.c libutf/isalpharune.c libutf/isblankrune.c libutf/iscntrlrune.c libutf/isdigitrune.c libutf/isgraphrune.c libutf/isprintrune.c libutf/ispunctrune.c libutf/isspacerune.c libutf/istitlerune.c libutf/isxdigitrune.c libutf/lowerrune.c libutf/rune.c libutf/runetype.c libutf/upperrune.c libutf/utf.c libutf/utftorunestr.c libutil/concat.c libutil/cp.c libutil/crypt.c libutil/confirm.c libutil/ealloc.c libutil/enmasse.c libutil/eprintf.c libutil/eregcomp.c libutil/estrtod.c libutil/fnck.c libutil/fshut.c libutil/getlines.c libutil/human.c libutil/linecmp.c libutil/md5.c libutil/memmem.c libutil/mkdirp.c libutil/mode.c libutil/parseoffset.c libutil/putword.c libutil/reallocarray.c libutil/recurse.c libutil/rm.c libutil/sha1.c libutil/sha224.c libutil/sha256.c libutil/sha384.c libutil/sha512.c libutil/sha512-224.c libutil/sha512-256.c libutil/strcasestr.c libutil/strlcat.c libutil/strlcpy.c libutil/strsep.c libutil/strnsubst.c libutil/strtonum.c libutil/unescape.c libutil/writeall.c"
+
+program=basename sources=basename.c
+program=bc sources=ports/sbase/generated/bc.c
+program=cal sources=cal.c
+program=cat sources=cat.c
+program=chgrp sources=chgrp.c
+program=chmod sources=chmod.c
+program=chown sources=chown.c
+program=chroot sources=chroot.c
+program=cksum sources=cksum.c
+program=cmp sources=cmp.c
+program=cols sources=cols.c
+program=comm sources=comm.c
+program=cp sources=cp.c
+program=cron sources=cron.c
+program=cut sources=cut.c
+program=date sources=date.c
+program=dc sources=dc.c
+program=dd sources=dd.c
+program=dirname sources=dirname.c
+program=du sources=du.c
+program=echo sources=echo.c
+program=ed sources=ed.c
+program=env sources=env.c
+program=expand sources=expand.c
+program=expr sources=expr.c
+program=false sources=false.c
+program=find sources=find.c
+program=flock sources=flock.c
+program=fold sources=fold.c
+program=getconf sources=getconf.c
+program=grep sources=grep.c
+program=head sources=head.c
+program=hostname sources=hostname.c
+program=join sources=join.c
+program=kill sources=kill.c
+program=link sources=link.c
+program=ln sources=ln.c
+program=logger sources=logger.c
+program=logname sources=logname.c
+program=ls sources=ls.c
+program=make alone=yes sources="make/defaults.c make/main.c make/parser.c make/posix.c make/rules.c"
+program=md5sum sources=md5sum.c
+program=mkdir sources=mkdir.c
+program=mkfifo sources=mkfifo.c
+program=mknod sources=mknod.c
+program=mktemp sources=mktemp.c
+program=mv sources=mv.c
+program=nice sources=nice.c
+program=nl sources=nl.c
+program=nohup sources=nohup.c
+program=od sources=od.c
+program=paste sources=paste.c
+program=pathchk sources=pathchk.c
+program=printenv sources=printenv.c
+program=printf sources=printf.c
+program=pwd sources=pwd.c
+program=readlink sources=readlink.c
+program=renice sources=renice.c
+program=rev sources=rev.c
+program=rm sources=rm.c
+program=rmdir sources=rmdir.c
+program=sed sources=sed.c
+program=seq sources=seq.c
+program=setsid sources=setsid.c
+program=sha1sum sources=sha1sum.c
+program=sha224sum sources=sha224sum.c
+program=sha256sum sources=sha256sum.c
+program=sha384sum sources=sha384sum.c
+program=sha512sum sources=sha512sum.c
+program=sha512-224sum sources=sha512-224sum.c
+program=sha512-256sum sources=sha512-256sum.c
+program=sleep sources=sleep.c
+program=sort sources=sort.c
+program=split sources=split.c
+program=sponge sources=sponge.c
+program=strings sources=strings.c
+program=sync sources=sync.c
+program=tail sources=tail.c
+program=tar sources=tar.c
+program=tee sources=tee.c
+program=test sources=test.c
+program=tftp sources=tftp.c
+program=time sources=time.c
+program=touch sources=touch.c
+program=tr sources=tr.c
+program=true sources=true.c
+program=tsort sources=tsort.c
+program=tty sources=tty.c
+program=uname sources=uname.c
+program=unexpand sources=unexpand.c
+program=uniq sources=uniq.c
+program=unlink sources=unlink.c
+program=uudecode sources=uudecode.c
+program=uuencode sources=uuencode.c
+program=wc sources=wc.c
+program=which sources=which.c
+program=whoami sources=whoami.c
+program=xargs sources=xargs.c
+program=xinstall sources=xinstall.c
+program=yes sources=yes.c

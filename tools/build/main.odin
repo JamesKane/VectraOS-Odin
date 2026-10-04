@@ -11,6 +11,13 @@ import "core:strings"
 // when its sources change, then runs it from the repository root.
 
 USAGE :: `usage: ./build <command> [--arch x86_64|aarch64] [--release] [-v]
+  all            the kernel, the Limine loaders, the user programs, the
+                 vectra-musl sysroot and the C programs against it, and
+                 out/host/vx9pserve once tools/vx9pserve is there;
+                 with --musl-backend DIR, C programs link against
+                 DIR/<arch>/crt1.o and backend.o, not the back end
+                 built from ports/musl/vx (bringing it up)
+|aarch64] [--release] [-v]
   all            the kernel, the Limine loaders, the user programs, and
                  out/host/vx9pserve once tools/vx9pserve is there
   image [--iso]  GPT disk images: out/<arch>/<mode>/vectra-<arch>.img;
@@ -33,6 +40,7 @@ main :: proc() {
 	names := make([dynamic]string, context.temp_allocator)
 	mode := Mode.Debug
 	want_iso := false
+	backend_override := "" // --musl-backend
 	for i := 2; i < len(os.args); i += 1 {
 		switch arg := os.args[i]; arg {
 		case "--arch":
@@ -51,6 +59,13 @@ main :: proc() {
 			mode = .Release
 		case "-v":
 			verbose = true
+		case "--musl-backend":
+			i += 1
+			if command != "all" || i == len(os.args) {
+				fmt.eprintln("build: --musl-backend DIR goes with all")
+				os.exit(2)
+			}
+			backend_override = os.args[i]
 		case "--iso":
 			if command != "image" {
 				fmt.eprintln("build: --iso goes with image")
@@ -89,6 +104,7 @@ main :: proc() {
 		case "all":
 			// A port that does not load has said why; the kernels still build.
 			limine, loaded := port_load("limine")
+			posix, posix_loaded := posix_load()
 			for a in arches {
 				runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 				lok := loaded
@@ -97,7 +113,8 @@ main :: proc() {
 				}
 				_, kok := build_kernel(a, mode)
 				pok := kok && build_programs(a, mode)
-				ok = ok && lok && kok && pok
+				cok := posix_loaded && build_posix(&posix, a, mode, backend_override)
+				ok = ok && lok && kok && pok && cok
 			}
 			// The host tools' sources compile with the rest, once they are there.
 			if os.is_dir(VX9PSERVE_SRC) {
@@ -242,7 +259,7 @@ cmd_loc :: proc() -> bool {
 	// The counts are printed as strings: Odin's %7d pads with zeros, not spaces.
 	FIRST_PARTY :: []string{".odin", ".S", ".ld"}
 	total := 0
-	for dir in ([]string{"kernel", "lib", "servers", "drivers", "cmd", "tools", "abi", "tests", "spikes"}) {
+	for dir in ([]string{"kernel", "lib", "servers", "drivers", "cmd", "tools", "abi", "tests", "spikes", "ports"}) {
 		if !os.exists(dir) {
 			continue
 		}
@@ -251,7 +268,9 @@ cmd_loc :: proc() -> bool {
 		fmt.printfln("  %-14s %7s", dir, fmt.tprint(n))
 	}
 	fmt.printfln("  %-14s %7s", "first-party", fmt.tprint(total))
-	vendored := count("third_party", []string{".c", ".h", ".S", ".asm_x86_64", ".asm_uefi_x86_64", ".asm_x86", ".asm_aarch64", ".asm_uefi_aarch64"})
+	VENDORED :: []string{".c", ".h", ".s", ".S", ".asm_x86_64", ".asm_uefi_x86_64", ".asm_x86", ".asm_aarch64", ".asm_uefi_aarch64"}
+	// Files made from a vendored tree, once, count with it.
+	vendored := count("third_party", VENDORED) + count("ports/musl/generated", VENDORED) + count("ports/sbase/generated", VENDORED)
 	fmt.printfln("  %-14s %7s", "vendored", fmt.tprint(vendored))
 	return true
 }

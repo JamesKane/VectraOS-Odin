@@ -5,7 +5,8 @@ import "core:path/filepath"
 
 // User programs: Odin packages built as static, non-PIE ELF files against
 // lib/rt, through the same IR pipeline as the kernel (frame pointers in
-// every function, reproducible IR).
+// every function, reproducible IR); and C programs against musl, the POSIX
+// personality (posix.odin).
 
 Program_Place :: enum {
 	Module, // on the ESP, a Limine module: the root task's candidates
@@ -13,11 +14,18 @@ Program_Place :: enum {
 	Tests, // in bootfs.tar for a scenario that names it (with=), with tests/user/NAME.ndb
 }
 
+Program_Kind :: enum {
+	Odin, // dir is the package
+	C, // source is the file, built against the vectra-musl sysroot (build_c_program)
+}
+
 Program :: struct {
-	name:  string,
-	dir:   string,
-	place: Program_Place,
-	only:  bit_set[Arch_Kind], // built for these architectures only; none means all
+	name:   string,
+	dir:    string,
+	source: string,
+	kind:   Program_Kind,
+	place:  Program_Place,
+	only:   bit_set[Arch_Kind], // built for these architectures only; none means all
 }
 
 PROGRAMS := []Program {
@@ -68,11 +76,26 @@ program_for :: proc(p: Program, a: ^Arch) -> bool {
 }
 
 build_programs :: proc(a: ^Arch, mode: Mode) -> bool {
+	sysroot: Maybe(Sysroot) // built for the first C program
 	for p in PROGRAMS {
 		if !program_for(p, a) {
 			continue
 		}
-		build_program(a, mode, p) or_return
+		switch p.kind {
+		case .Odin:
+			build_program(a, mode, p) or_return
+		case .C:
+			if sysroot == nil {
+				ps := posix_load() or_return
+				sysroot = build_sysroot(&ps, a, mode) or_return
+			}
+			s := sysroot.?
+			if !s.linkable {
+				fmt.eprintfln("build: %s is a C program, and there is no musl back end to link it (%s)", p.name, BACKEND_PKG)
+				return false
+			}
+			build_c_program(s, a, mode, p) or_return
+		}
 	}
 	return true
 }

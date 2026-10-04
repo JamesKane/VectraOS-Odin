@@ -12,6 +12,8 @@ when ODIN_OS == .Darwin {
 	CLANG :: "/opt/homebrew/opt/llvm@22/bin/clang"
 	LLC :: "/opt/homebrew/opt/llvm@22/bin/llc"
 	OBJCOPY :: "/opt/homebrew/opt/llvm@22/bin/llvm-objcopy"
+	LLVM_AR :: "/opt/homebrew/opt/llvm@22/bin/llvm-ar"
+	CLANG_RESOURCE_INCLUDE :: "/opt/homebrew/opt/llvm@22/lib/clang/22/include" // the pinned clang's own headers
 	LLD :: "/opt/homebrew/opt/lld@22/bin/ld.lld"
 	NASM :: "/opt/homebrew/bin/nasm"
 	MFORMAT :: "/opt/homebrew/bin/mformat"
@@ -27,6 +29,8 @@ when ODIN_OS == .Darwin {
 	CLANG :: "/usr/bin/clang"
 	LLC :: "/usr/bin/llc"
 	OBJCOPY :: "/usr/bin/llvm-objcopy"
+	LLVM_AR :: "/usr/bin/llvm-ar"
+	CLANG_RESOURCE_INCLUDE :: "/usr/lib/clang/22/include" // the pinned clang's own headers
 	LLD :: "/usr/bin/ld.lld"
 	NASM :: "/usr/bin/nasm"
 	MFORMAT :: "/usr/bin/mformat"
@@ -51,6 +55,7 @@ PINS := [?]struct {
 	{CLANG, {"--version"}, "clang version 22.1.8"},
 	{LLC, {"--version"}, "LLVM version 22.1.8"},
 	{OBJCOPY, {"--version"}, "LLVM version 22.1.8"},
+	{LLVM_AR, {"--version"}, "LLVM version 22.1.8"},
 	{LLD, {"--version"}, "LLD 22.1.8"},
 	{NASM, {"--version"}, "NASM version 3.02"},
 }
@@ -72,6 +77,10 @@ check_pins :: proc() -> bool {
 			fmt.eprintfln("build: %s is not the pinned version: want %q (ADR-0001)", p.tool, p.expect)
 			ok = false
 		}
+	}
+	if !os.is_dir(CLANG_RESOURCE_INCLUDE) {
+		fmt.eprintfln("build: %s is missing: the pinned clang's headers (ADR-0001)", CLANG_RESOURCE_INCLUDE)
+		ok = false
 	}
 	return ok
 }

@@ -1,0 +1,18 @@
+# ports/lua/port.ndb: how tools/build builds Lua into /bin/lua (ADR-0009).
+#
+# The flags are those of Lua 5.5.1's src/Makefile for its posix platform
+# (CFLAGS's -O2 -Wall -Wextra and SYSCFLAGS's -DLUA_USE_POSIX, with -std=gnu99
+# from CC), compiled against vectra-musl; one deviation, as for musl: frame
+# pointers are kept, so a debugger unwinds through Lua. Not
+# LUA_USE_LINUX, which adds dlopen: everything is linked statically, and C
+# modules come built in or not at all.
+#
+# sources= is the Makefile's BASE_O (CORE_O and LIB_O, liblua.a's members);
+# each program= is one of its targets, its own sources linked with them. luac
+# is left out until something precompiles chunks.
+
+port=lua src=third_party/lua
+    cflags="-std=gnu99 -O2 -Wall -Wextra -DLUA_USE_POSIX -fno-omit-frame-pointer"
+    sources="src/lapi.c src/lcode.c src/lctype.c src/ldebug.c src/ldo.c src/ldump.c src/lfunc.c src/lgc.c src/llex.c src/lmem.c src/lobject.c src/lopcodes.c src/lparser.c src/lstate.c src/lstring.c src/ltable.c src/ltm.c src/lundump.c src/lvm.c src/lzio.c src/lauxlib.c src/lbaselib.c src/lcorolib.c src/ldblib.c src/liolib.c src/lmathlib.c src/loadlib.c src/loslib.c src/lstrlib.c src/ltablib.c src/lutf8lib.c src/linit.c"
+
+program=lua sources="src/lua.c"

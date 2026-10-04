@@ -47,18 +47,32 @@ Elf64_Sym :: struct #packed {
 
 SHT_SYMTAB :: 2
 STT_FUNC :: 2
+STT_SECTION :: 3
+STT_FILE :: 4
+STB_LOCAL :: 0
+SHN_LORESERVE :: 0xff00
 
 Func_Symbol :: struct {
 	addr: u64,
 	name: string,
 }
 
-// Every function symbol in a .text section, by address and then name.
-// Every offset the file gives is checked: a malformed file is an error, not
-// a read past its end.
-elf_functions :: proc(path: string) -> (syms: [dynamic]Func_Symbol, ok: bool) {
+// One entry of an ELF file's symbol table.
+Elf_Symbol :: struct {
+	name:    string,
+	section: string, // "" when undefined, absolute or common
+	value:   u64,
+	type:    u8, // STT_*
+	bind:    u8, // STB_*
+	defined: bool,
+}
+
+// Every symbol in the file's symbol tables, in file order. Every offset the
+// file gives is checked: a malformed file is an error, not a read past its
+// end.
+elf_symbols :: proc(path: string) -> (syms: [dynamic]Elf_Symbol, ok: bool) {
 	data := transmute([]u8)(read_file(path) or_return)
-	syms = make([dynamic]Func_Symbol, context.temp_allocator)
+	syms = make([dynamic]Elf_Symbol, context.temp_allocator)
 	if len(data) < size_of(Elf64_Ehdr) || string(data[:4]) != "\x7fELF" || data[4] != 2 {
 		fmt.eprintfln("build: %s is not a 64-bit ELF file", path)
 		return syms, false
@@ -89,18 +103,32 @@ elf_functions :: proc(path: string) -> (syms: [dynamic]Func_Symbol, ok: bool) {
 			return syms, false
 		}
 		for sym in st {
-			if sym.info & 0xf != STT_FUNC || sym.shndx == 0 || int(sym.shndx) >= len(sh) {
-				continue
-			}
-			section, sok := cstring_at(shstr, sh[sym.shndx].name)
 			name, nok := cstring_at(strs, sym.name)
+			section := ""
+			sok := true
+			if sym.shndx != 0 && sym.shndx < SHN_LORESERVE { // in a section
+				sok = int(sym.shndx) < len(sh)
+				if sok {
+					section, sok = cstring_at(shstr, sh[sym.shndx].name)
+				}
+			}
 			if !sok || !nok {
 				fmt.eprintfln("build: %s: bad symbol name", path)
 				return syms, false
 			}
-			if strings.has_prefix(section, ".text") {
-				append(&syms, Func_Symbol{sym.value, name})
-			}
+			append(&syms, Elf_Symbol{name = name, section = section, value = sym.value, type = sym.info & 0xf, bind = sym.info >> 4, defined = sym.shndx != 0})
+		}
+	}
+	return syms, true
+}
+
+// Every function symbol in a .text section, by address and then name.
+elf_functions :: proc(path: string) -> (syms: [dynamic]Func_Symbol, ok: bool) {
+	all := elf_symbols(path) or_return
+	syms = make([dynamic]Func_Symbol, context.temp_allocator)
+	for s in all {
+		if s.type == STT_FUNC && strings.has_prefix(s.section, ".text") {
+			append(&syms, Func_Symbol{s.value, s.name})
 		}
 	}
 	slice.sort_by(syms[:], proc(a, b: Func_Symbol) -> bool {
