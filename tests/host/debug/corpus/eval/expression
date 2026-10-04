@@ -1,0 +1,1 @@
+first.next->label[0] + sizeof(struct node) * (table[2] - 1)
