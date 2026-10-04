@@ -1,10 +1,11 @@
 package build
 
-import "core:crypto/sha2"
+import "core:crypto/hash"
 import "core:encoding/hex"
 import "core:fmt"
 import "core:os"
 import "core:slice"
+import "core:strings"
 
 // vendor-check: every vendored tree matches its record in
 // third_party/VENDOR.ndb (ADR-0003 upstream; the same rules here).
@@ -23,26 +24,17 @@ VENDOR_OPTIONAL_KEYS := []string {
 }
 
 @(private="file")
-sha256_hex :: proc(data: []u8) -> string {
-	ctx: sha2.Context_256
-	sha2.init_256(&ctx)
-	sha2.update(&ctx, data)
-	digest: [32]u8
-	sha2.final(&ctx, digest[:])
-	return string(hex.encode(digest[:], context.temp_allocator))
+sha256_hex :: proc(data: string) -> string {
+	return string(hex.encode(hash.hash_string(.SHA256, data, context.temp_allocator), context.temp_allocator))
 }
 
 // What this gives, run inside the tree:
 //   find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum
 tree_sha256 :: proc(dir: string) -> (digest: string, ok: bool) {
-	files := tree_files(dir) or_return
-	listing := make([dynamic]u8, context.temp_allocator)
-	rels := make([dynamic]string, context.temp_allocator)
+	files := tree_files(dir) or_return // sorted: so is each with dir/ cut off
+	listing := strings.builder_make(context.temp_allocator)
 	for f in files {
-		append(&rels, f[len(dir) + 1:])
-	}
-	slice.sort(rels[:])
-	for rel in rels {
+		rel := f[len(dir) + 1:]
 		for i in 0 ..< len(rel) {
 			if rel[i] < 0x20 || rel[i] == 0x7f {
 				// sha256sum would have escaped it, and it could forge lines of the listing.
@@ -50,11 +42,10 @@ tree_sha256 :: proc(dir: string) -> (digest: string, ok: bool) {
 				return "", false
 			}
 		}
-		data := read_file(fmt.tprintf("%s/%s", dir, rel)) or_return
-		line := fmt.tprintf("%s  ./%s\n", sha256_hex(transmute([]u8)data), rel)
-		append(&listing, ..transmute([]u8)line)
+		data := read_file(f) or_return
+		fmt.sbprintf(&listing, "%s  ./%s\n", sha256_hex(data), rel)
 	}
-	return sha256_hex(listing[:]), true
+	return sha256_hex(strings.to_string(listing)), true
 }
 
 cmd_vendor_check :: proc() -> bool {
