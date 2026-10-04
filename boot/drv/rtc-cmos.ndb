@@ -1,0 +1,7 @@
+# boot/drv/rtc-cmos.ndb: the PC's CMOS real-time clock, as ACPI names it
+# (PNP0B00). bus-acpi reports it with its _CRS resources, which devmgr grants
+# its driver exactly; the driver says the time, and devmgr sets the kernel's
+# wall clock from it (clock, upstream's ADR-0031). x86_64's: no aarch64 table
+# has one.
+
+match=acpi hid=PNP0B00 program=/boot/bin/drv-rtc-cmos clock
