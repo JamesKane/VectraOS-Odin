@@ -230,7 +230,7 @@ test_procfs :: proc(t: ^testing.T) {
 	testing.expect_value(t, open_mode(&c, root, "1/status", p9.OEXEC), vx.Status.Ok)
 	testing.expect_value(t, open_mode(&c, root, "1/ctl", p9.OREAD), vx.Status.Err_Access)
 	testing.expect_value(t, open_mode(&c, root, "1/ctl", p9.ORDWR), vx.Status.Err_Access)
-	testing.expect_value(t, open_mode(&c, root, "1/ctl", p9.Open_Mode{access = .Write, trunc = true}), vx.Status.Err_Access)
+	testing.expect_value(t, open_mode(&c, root, "1/ctl", p9.Open_Mode{access = .Write, trunc = true}), vx.Status.Ok) // trunc means nothing here (M3)
 	testing.expect_value(t, open_mode(&c, root, "1/ctl", p9.OWRITE), vx.Status.Ok)
 	testing.expect_value(t, open_mode(&c, root, "1", p9.OREAD), vx.Status.Ok)
 

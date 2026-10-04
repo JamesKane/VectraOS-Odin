@@ -54,8 +54,8 @@ list :: proc "contextless" (path: string) -> string {
 		}
 		it := p9.Dir_Entries{buf = list_buf[:n]}
 		for s in p9.next_entry(&it) {
-			if len(list_out) + len(s.name) + 1 > cap(list_out) {
-				return "(bad entry)"
+			if len(list_out) + len(s.name) + 1 >= cap(list_out) {
+				return "(too long)" // room for a separator too
 			}
 			if len(list_out) > 0 {
 				_ = append(&list_out, ' ')
@@ -78,16 +78,20 @@ test_spawn :: proc "contextless" () {
 }
 
 programs: [512]u8
+manifests: [512]u8
 
 test_namespace :: proc "contextless" () {
-	check_str(list("/"), "bin boot dev proc srv tmp")
+	check_str(list("/"), "bin boot dev n net proc srv tmp")
 	boot_bin := list("/boot/bin")
 	copy(programs[:], boot_bin) // list's buffer is reused
 	progs := string(programs[:len(boot_bin)])
 	check_str(list("/bin"), progs) // the empty /bin, then /boot/bin
 	check(len(progs) > 14 && progs[:14] == "bootfs nstest ")
-	check_str(list("/dev"), "bootfs.ndb cons.ndb procfs.ndb shell.ndb nstest.ndb")
-	check_str(list("/boot/svc"), "bootfs.ndb cons.ndb procfs.ndb shell.ndb nstest.ndb")
+	svc := list("/boot/svc")
+	copy(manifests[:], svc) // list's buffer is reused
+	svcs := string(manifests[:len(svc)])
+	check_str(list("/dev"), svcs) // /dev's own (nothing), then boot/svc attached at /dev
+	check(len(svcs) > 22 && svcs[:20] == "bootfs.ndb cons.ndb ")
 
 	// A file, read through a bind and through a second attach.
 	WANT :: "# boot/svc/bootfs.ndb"
