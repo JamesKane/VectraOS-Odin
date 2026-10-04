@@ -32,6 +32,27 @@ fifo_pop :: proc "contextless" (q: ^Fifo($T)) -> ^T {
 	return x
 }
 
+// Takes x off the queue, wherever it is in it. False if it is not there.
+fifo_remove :: proc "contextless" (q: ^Fifo($T), x: ^T) -> bool {
+	prev: ^T
+	for at := q.head; at != nil; prev, at = at, at.next {
+		if at != x {
+			continue
+		}
+		if prev != nil {
+			prev.next = x.next
+		} else {
+			q.head = x.next
+		}
+		if q.tail == x {
+			q.tail = prev
+		}
+		x.next = nil
+		return true
+	}
+	return false
+}
+
 // Takes x off the singly linked list starting at head^, linked through the
 // field named NEXT, if it is there.
 unlink :: proc "contextless" (head: ^^$T, x: ^T, $NEXT: string) {

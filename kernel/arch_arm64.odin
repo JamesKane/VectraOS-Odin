@@ -41,6 +41,17 @@ foreign _ {
 	vx_run_on_stack :: proc "c" (top: u64, fn: proc "c" () -> !) -> ! ---
 	vx_vreg_irq_test :: proc "c" (input, output: ^[512]u8, fired: ^u64, target: u64) ---
 	vx_switch_user_root :: proc "c" (root: u64) ---
+	vx_tlb_shootdown :: proc "c" (va, length: u64) ---
+	vx_read_mdscr :: proc "c" () -> u64 ---
+	vx_write_mdscr :: proc "c" (v: u64) ---
+	vx_os_unlock :: proc "c" () ---
+	vx_sync_icache :: proc "c" (p: rawptr, length: u64) ---
+	vx_read_tpidr_el0 :: proc "c" () -> u64 ---
+	vx_read_id_aa64dfr0 :: proc "c" () -> u64 ---
+	vx_watch_slot :: proc "c" (slot: u32, value, control: u64) ---
+	vx_read_cntkctl :: proc "c" () -> u64 ---
+	vx_write_cntkctl :: proc "c" (v: u64) ---
+	vx_write_tpidr_el0 :: proc "c" (v: u64) ---
 	vx_write_icc_sgi1r :: proc "c" (v: u64) ---
 	vx_pan_off :: proc "c" () ---
 	vx_context_switch :: proc "c" (save_sp: ^u64, load_sp: u64) ---
@@ -267,6 +278,13 @@ arch_user_top_slots :: proc "contextless" () -> int {
 	return 512
 }
 
+// Every CPU drops its translations for [va, va + length): broadcast
+// invalidations, which need no interrupts (cpu.S). Without ASIDs yet, the
+// root does not narrow them.
+arch_tlb_shootdown :: proc "contextless" (root: Paddr, va: Uva, length: u64) {
+	vx_tlb_shootdown(u64(va), length)
+}
+
 arch_pte_user_ok :: proc "contextless" (e: Pte, write: bool) -> bool {
 	return e & PTE_VALID != 0 && e & PTE_USER != 0 && (!write || e & PTE_READ_ONLY == 0)
 }
@@ -325,6 +343,14 @@ arch_cpu_init :: proc "contextless" (index: u32) {
 	vx_cpu_set(rawptr(aarch64_vectors), u64(index))
 	vx_pan_off()
 	vx_write_mair(vx_read_mair() &~ (0xff << 16))
+	// Software step for user threads (exception_resume .Step): the OS lock
+	// open, and MDSCR_EL1 with KDE off, so the kernel itself is never
+	// stepped. SS is set only on the way to a thread being stepped
+	// (step_on_return).
+	vx_os_unlock()
+	vx_write_mdscr(vx_read_mdscr() &~ (MDSCR_KDE | MDSCR_SS))
+	// CNTKCTL_EL1.EL0VCTEN: user code may read the virtual counter.
+	vx_write_cntkctl(vx_read_cntkctl() | 1 << 1)
 	percpu_ready = true
 }
 
@@ -370,6 +396,12 @@ arch_counter :: proc "contextless" () -> u64 {
 
 arch_counter_hz :: proc "contextless" () -> u64 {
 	return vx_read_cntfrq()
+}
+
+// The generic timer's virtual counter: one rate always, and user code reads
+// it (CNTKCTL_EL1.EL0VCTEN, arch_cpu_init).
+arch_counter_flags :: proc "contextless" () -> vx.Clock_Flags {
+	return {.User, .Invariant, .Cntvct}
 }
 
 // Sets up the GIC for this CPU: the distributor once, on the boot CPU, then
@@ -458,12 +490,20 @@ VECTOR_KINDS := [4]string{"synchronous exception", "IRQ", "FIQ", "SError"}
 // tells apart.
 @(private="file")
 Exception_Class :: enum u8 {
-	Svc64      = 0x15,
-	Iabt_Lower = 0x20, // an instruction abort from EL0
-	Iabt_Same  = 0x21,
-	Dabt_Lower = 0x24, // a data abort from EL0
-	Dabt_Same  = 0x25,
-	Brk        = 0x3c,
+	Unknown       = 0x00, // an undefined instruction
+	Fp_Access     = 0x07,
+	Illegal_State = 0x0e,
+	Svc64         = 0x15,
+	Iabt_Lower    = 0x20, // an instruction abort from EL0
+	Iabt_Same     = 0x21,
+	Pc_Align      = 0x22,
+	Dabt_Lower    = 0x24, // a data abort from EL0
+	Dabt_Same     = 0x25,
+	Sp_Align      = 0x26,
+	Fp_Exc64      = 0x2c, // a trapped FP exception
+	Step_Lower    = 0x32, // software step, from EL0
+	Watch_Lower   = 0x34, // a watchpoint, from EL0
+	Brk           = 0x3c,
 }
 
 @(private="file")
@@ -568,11 +608,199 @@ arch_context_switch :: proc "contextless" (save_sp: ^u64, load_sp: u64) {
 }
 
 arch_enter_user :: proc "contextless" (entry, sp: Uva, arg, arg2, kstack_top: u64) -> ! {
+	step_on_return() // a new thread is never being stepped
 	vx_enter_user(u64(entry), u64(sp), arg, arg2, kstack_top)
 }
 
 // The frame entry.S builds: Trap_Frame, then q0-q31, FPCR and FPSR.
 TRAP_FRAME_SIZE :: size_of(Trap_Frame) + 32 * 16 + 16
+
+// --- User-mode registers (exception.odin) ---
+
+// The frame at the top of a thread's kernel stack: its user-mode registers,
+// once it has entered the kernel from user mode.
+arch_user_frame :: proc "contextless" (th: ^Thread) -> ^Trap_Frame {
+	return cast(^Trap_Frame)uintptr(thread_kstack_top(th) - TRAP_FRAME_SIZE)
+}
+
+arch_frame_regs :: proc "contextless" (f: ^Trap_Frame) -> vx.Regs {
+	return {x = f.x, sp = f.sp_el0, pc = f.elr, pstate = f.spsr}
+}
+
+// NZCV only: EL0t, every interrupt unmasked.
+@(require_results)
+arch_frame_set_regs :: proc "contextless" (f: ^Trap_Frame, r: ^vx.Regs) -> vx.Status {
+	if r.pc >= u64(USER_TOP) || r.sp > u64(USER_TOP) {
+		return .Err_Invalid
+	}
+	f.x = r.x
+	f.sp_el0 = r.sp
+	f.elr = r.pc
+	f.spsr = r.pstate & 0xf000_0000
+	return .Ok
+}
+
+regs_sp :: proc "contextless" (r: ^vx.Regs) -> Uva {
+	return Uva(r.sp)
+}
+
+regs_pc :: proc "contextless" (r: ^vx.Regs) -> u64 {
+	return r.pc
+}
+
+// The register a syscall's result goes back in.
+regs_result :: proc "contextless" (r: ^vx.Regs) -> u64 {
+	return r.x[0]
+}
+
+// To pc(arg), with arg (16-aligned) as the stack pointer, and no frame or
+// return address to go back to.
+arch_frame_divert :: proc "contextless" (f: ^Trap_Frame, pc, arg: Uva) -> bool {
+	f.elr = u64(pc)
+	f.sp_el0 = u64(arg)
+	f.x[0] = u64(arg)
+	f.x[29] = 0
+	f.x[30] = 0
+	return true
+}
+
+@(private="file")
+SPSR_SS :: u64(1) << 21 // software step
+@(private="file")
+MDSCR_SS :: u64(1)
+@(private="file")
+MDSCR_KDE :: u64(1) << 13
+
+// Always the current thread's frame: its own exception, or its resumption.
+arch_frame_step :: proc "contextless" (f: ^Trap_Frame, on: bool) {
+	f.spsr = on ? f.spsr | SPSR_SS : f.spsr &~ SPSR_SS
+	this_cpu().current.stepping = on
+}
+
+// MDSCR_EL1.SS on only for a return to a thread being stepped: with it on, a
+// return with SPSR.SS clear takes a step exception at once (the
+// active-pending state), before running anything. Which is what a stepped
+// svc needs: the call leaves SPSR.SS clear, the instruction done, and the
+// step is reported as the call returns. So it follows the thread's stepping,
+// not SPSR.SS, which would lose that step.
+@(private="file")
+step_enabled: [MAX_CPUS]bool
+
+@(private="file")
+step_on_return :: proc "contextless" () {
+	want := this_cpu().current.stepping
+	cpu := arch_cpu_index()
+	if step_enabled[cpu] == want {
+		return
+	}
+	mdscr := vx_read_mdscr()
+	vx_write_mdscr(want ? mdscr | MDSCR_SS : mdscr &~ MDSCR_SS)
+	step_enabled[cpu] = want
+}
+
+// TPIDR_EL0 is the user's to write directly; the kernel only keeps it with
+// its thread.
+arch_tls_read :: proc "contextless" () -> u64 {
+	return vx_read_tpidr_el0()
+}
+
+arch_tls_write :: proc "contextless" (value: u64) {
+	vx_write_tpidr_el0(value)
+}
+
+// The vector state entry.S saves above the general registers (ADR-0004):
+// q0-q31, FPCR and FPSR, laid out as an Fpregs.
+@(private="file")
+frame_fp :: proc "contextless" (f: ^Trap_Frame) -> ^vx.Fpregs {
+	return cast(^vx.Fpregs)uintptr(u64(uintptr(f)) + size_of(Trap_Frame))
+}
+
+#assert(size_of(vx.Fpregs) == TRAP_FRAME_SIZE - size_of(Trap_Frame))
+
+arch_frame_fpregs :: proc "contextless" (f: ^Trap_Frame) -> vx.Fpregs {
+	return frame_fp(f)^
+}
+
+// FPCR and FPSR are kept to their defined bits.
+arch_frame_set_fpregs :: proc "contextless" (f: ^Trap_Frame, r: ^vx.Fpregs) {
+	fp := frame_fp(f)
+	fp^ = r^
+	fp.fpcr &= 0x07ff_9f00
+	fp.fpsr &= 0xf800_009f
+}
+
+// Code written through the direct map: cleaned to the point of unification,
+// then every CPU's instruction cache invalidated (cpu.S).
+arch_sync_icache :: proc "contextless" (p: []u8) {
+	vx_sync_icache(raw_data(p), u64(len(p)))
+}
+
+// Watchpoints (thread_state .Set_Watch): DBGWVRn_EL1 and DBGWCRn_EL1, for
+// EL0 only (PAC), so the kernel's own accesses never fire them, with
+// MDSCR_EL1.MDE on while a task that has them runs. ID_AA64DFR0_EL1.WRPs says
+// how many there are.
+@(private="file")
+watch_loaded: [MAX_CPUS]bool
+@(private="file")
+MDSCR_MDE :: u64(1) << 15
+
+arch_watch_count :: proc "contextless" () -> u32 {
+	return min(u32(vx_read_id_aa64dfr0() >> 20 & 15) + 1, vx.WATCH_MAX)
+}
+
+arch_watch_load :: proc "contextless" (t: ^Task) {
+	cpu := arch_cpu_index()
+	if !t.watching && !watch_loaded[cpu] {
+		return
+	}
+	for &w, i in t.watches[:arch_watch_count()] {
+		if !t.watching || w.kind == .Off {
+			vx_watch_slot(u32(i), 0, 0)
+			continue
+		}
+		base, bas := w.address &~ 7, (u64(1) << w.len - 1) << (w.address & 7)
+		lsc := w.kind == .Write ? u64(2) : 3 // stores, or loads and stores
+		vx_watch_slot(u32(i), base, bas << 5 | lsc << 3 | 2 << 1 | 1) // BAS, LSC, PAC = EL0, E
+	}
+	mdscr := vx_read_mdscr()
+	vx_write_mdscr(t.watching ? mdscr | MDSCR_MDE : mdscr &~ MDSCR_MDE)
+	watch_loaded[cpu] = t.watching
+}
+
+// A user-mode fault as an exception: its kind, code and address.
+@(private="file")
+aarch64_exception_kind :: proc "contextless" (f: ^Trap_Frame) -> (kind: vx.Exception_Kind, code: u32, address: u64) {
+	esr := transmute(Esr)f.esr
+	code = u32(f.esr)
+	#partial switch esr.ec {
+	case .Dabt_Lower:
+		return .Page_Fault, esr.iss & DABT_WNR != 0 ? 1 : 0, f.far
+	case .Iabt_Lower:
+		return .Page_Fault, 2, f.far
+	case .Fp_Access:
+		return .Fp_Disabled, code, 0
+	case .Brk:
+		return .Breakpoint, esr.iss & 0xffff, 0 // brk #imm
+	case .Unknown, .Illegal_State:
+		return .Illegal, code, 0
+	case .Pc_Align, .Sp_Align:
+		return .Alignment, code, f.far
+	case .Fp_Exc64:
+		return .Arithmetic, code, 0
+	case .Step_Lower:
+		return .Step, code, 0
+	case .Watch_Lower: // before the access
+		t := this_cpu().current.task
+		slot: u32
+		for w, i in t.watches { // the slot whose 8-byte span holds what was touched
+			if w.kind != .Off && w.address &~ 7 == f.far &~ 7 {
+				slot = u32(i)
+			}
+		}
+		return .Watchpoint, slot, t.watches[slot].address
+	}
+	return .General, code, 0
+}
 
 @(export, link_name="aarch64_trap")
 aarch64_trap :: proc "c" (f: ^Trap_Frame, index: u64) {
@@ -583,13 +811,21 @@ aarch64_trap :: proc "c" (f: ^Trap_Frame, index: u64) {
 		aarch64_irq()
 	case from_user && index & 3 == 0 && esr.ec == .Svc64:
 		f.x[0] = u64(syscall_dispatch(f.x[8], {f.x[0], f.x[1], f.x[2], f.x[3], f.x[4], f.x[5]}))
+	case !from_user && index & 3 == 0 && esr.ec == .Dabt_Same && f.far < u64(USER_TOP) && uaccess_fixup(f.elr) != 0:
+		f.elr = uaccess_fixup(f.elr) // a user page gone under a copy: it reports the failure
 	case from_user:
-		task_fault_start()
-		kput_exception(f, index)
-		kput(" at pc ")
-		kput_hex(f.elr)
-		kput("\n")
-		task_fault_exit()
+		kind, code, address := aarch64_exception_kind(f)
+		if index & 3 != 0 {
+			kind = .General // an SError or FIQ
+		}
+		if index & 3 != 0 || !exception_raise(f, kind, code, address) { // nobody took it
+			task_fault_start()
+			kput_exception(f, index)
+			kput(" at pc ")
+			kput_hex(f.elr)
+			kput("\n")
+			task_fault_exit(kind, code, address, f.elr)
+		}
 	case:
 		panic_start()
 		kput_exception(f, index)
@@ -599,6 +835,7 @@ aarch64_trap :: proc "c" (f: ^Trap_Frame, index: u64) {
 	}
 	if from_user {
 		user_return()
+		step_on_return()
 	}
 }
 

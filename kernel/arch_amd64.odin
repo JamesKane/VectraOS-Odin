@@ -29,6 +29,11 @@ foreign _ {
 	vx_run_on_stack :: proc "c" (top: u64, fn: proc "c" () -> !) -> ! ---
 	vx_read_xcr0 :: proc "c" () -> u64 ---
 	vx_write_cr3 :: proc "c" (root: u64) ---
+	vx_read_cr3 :: proc "c" () -> u64 ---
+	vx_invlpg :: proc "c" (va: u64) ---
+	vx_watch_set :: proc "c" (addresses: ^[4]u64, dr7: u64) ---
+	vx_read_dr6 :: proc "c" () -> u64 ---
+	vx_write_dr6 :: proc "c" (v: u64) ---
 	vx_context_switch :: proc "c" (save_sp: ^u64, load_sp: u64) ---
 	vx_enter_user :: proc "c" (entry, sp, arg, arg2, kstack_top: u64) -> ! ---
 	syscall_entry :: proc "c" () --- // entry.S: an address only
@@ -205,6 +210,7 @@ MSR_EFER :: 0xc0000080
 MSR_STAR :: 0xc0000081
 MSR_LSTAR :: 0xc0000082
 MSR_FMASK :: 0xc0000084
+MSR_FS_BASE :: 0xc0000100
 MSR_GS_BASE :: 0xc0000101
 MSR_KERNEL_GS_BASE :: 0xc0000102
 
@@ -449,6 +455,67 @@ arch_switch_tables :: proc "contextless" (root: Paddr) {
 	vx_switch_tables(u64(root))
 }
 
+// Drops this CPU's user translations (loading CR3 again keeps only global,
+// kernel, entries) if a shootdown has asked it to since it last did.
+@(private="file")
+tlb_answer :: proc "contextless" (c: ^Cpu) {
+	asked := intrinsics.atomic_load_explicit(&c.tlb_asked, .Acquire)
+	if intrinsics.atomic_load_explicit(&c.tlb_done, .Relaxed) >= asked {
+		return
+	}
+	vx_write_cr3(vx_read_cr3())
+	intrinsics.atomic_store_explicit(&c.tlb_done, asked, .Release)
+}
+
+@(private="file")
+shootdown_gen: u64
+
+// Every CPU drops its translations for [va, va + length) in the address
+// space with this root; once it returns, the pages may be freed. x86 has no
+// broadcast invalidation: every other CPU with the tables loaded gets an
+// interrupt, and this one waits until each has flushed, or loaded other
+// tables since (a load flushes too). While waiting it answers any shootdown
+// asked of it, so two at once cannot wait for each other. The caller holds
+// no lock that a CPU it waits for might be spinning on.
+arch_tlb_shootdown :: proc "contextless" (root: Paddr, va: Uva, length: u64) {
+	me := this_cpu()
+	if intrinsics.atomic_load_explicit(&me.user_root, .Relaxed) == root {
+		if length / PAGE_SIZE > 32 {
+			vx_write_cr3(vx_read_cr3())
+		} else {
+			for p := u64(va); p < u64(va) + length; p += PAGE_SIZE {
+				vx_invlpg(p)
+			}
+		}
+	}
+	gen := intrinsics.atomic_add_explicit(&shootdown_gen, 1, .Relaxed) + 1
+	loads: [MAX_CPUS]u64
+	waiting: bit_set[0 ..< MAX_CPUS; u64]
+	for &c, i in cpus[:min(cpu_total, MAX_CPUS)] {
+		if &c == me || intrinsics.atomic_load_explicit(&c.user_root, .Acquire) != root {
+			continue
+		}
+		loads[i] = intrinsics.atomic_load_explicit(&c.root_loads, .Acquire)
+		old := intrinsics.atomic_load_explicit(&c.tlb_asked, .Relaxed)
+		for old < gen {
+			_, swapped := intrinsics.atomic_compare_exchange_weak_explicit(&c.tlb_asked, old, gen, .Release, .Relaxed)
+			if swapped {
+				break
+			}
+			old = intrinsics.atomic_load_explicit(&c.tlb_asked, .Relaxed)
+		}
+		waiting += {i}
+		vx_wrmsr(X2APIC_ICR, c.arch_id << 32 | VECTOR_SHOOTDOWN)
+	}
+	for i in waiting {
+		c := &cpus[i]
+		for intrinsics.atomic_load_explicit(&c.tlb_done, .Acquire) < gen && intrinsics.atomic_load_explicit(&c.root_loads, .Acquire) == loads[i] {
+			tlb_answer(me)
+			vx_pause()
+		}
+	}
+}
+
 // --- The clock and the timer ---
 //
 // The timer uses TSC-deadline mode where the CPU has it. Otherwise (QEMU
@@ -488,6 +555,17 @@ arch_counter :: proc "contextless" () -> u64 {
 
 arch_counter_hz :: proc "contextless" () -> u64 {
 	return boot.tsc_hz
+}
+
+// The counter's properties for /sys/clock/info: the TSC runs at one rate in
+// every power state (CPUID 80000007h, EDX bit 8), and user code reads it
+// (CR4.TSD is off).
+arch_counter_flags :: proc "contextless" () -> vx.Clock_Flags {
+	flags := vx.Clock_Flags{.User, .Tsc}
+	if cpuid(0x8000_0000)[0] >= 0x8000_0007 && cpuid(0x8000_0007)[3] & (1 << 8) != 0 {
+		flags += {.Invariant}
+	}
+	return flags
 }
 
 // Per CPU: this CPU's local APIC and its timer. The boot CPU also masks the
@@ -627,6 +705,8 @@ kput_exception :: proc "contextless" (f: ^Trap_Frame) {
 @(private="file")
 VECTOR_RESCHED :: 0x21 // another CPU made a thread ready
 @(private="file")
+VECTOR_SHOOTDOWN :: 0x22 // another CPU unmapped user pages: flush (arch_tlb_shootdown)
+@(private="file")
 VECTOR_SYSCALL :: 0x100 // entry.S
 @(private="file")
 X2APIC_ICR :: 0x830
@@ -678,6 +758,216 @@ arch_enter_user :: proc "contextless" (entry, sp: Uva, arg, arg2, kstack_top: u6
 	vx_enter_user(u64(entry), u64(sp - 8), arg, arg2, kstack_top)
 }
 
+// --- User-mode registers (exception.odin) ---
+
+// The frame at the top of a thread's kernel stack: its user-mode registers,
+// once it has entered the kernel from user mode.
+arch_user_frame :: proc "contextless" (th: ^Thread) -> ^Trap_Frame {
+	return cast(^Trap_Frame)uintptr(thread_kstack_top(th) - size_of(Trap_Frame))
+}
+
+arch_frame_regs :: proc "contextless" (f: ^Trap_Frame) -> vx.Regs {
+	return {
+		rax = f.rax, rbx = f.rbx, rcx = f.rcx, rdx = f.rdx, rsi = f.rsi, rdi = f.rdi, rbp = f.rbp, rsp = f.rsp,
+		r8 = f.r8, r9 = f.r9, r10 = f.r10, r11 = f.r11, r12 = f.r12, r13 = f.r13, r14 = f.r14, r15 = f.r15,
+		rip = f.rip, rflags = f.rflags,
+	}
+}
+
+// The flags user code may set: carry, parity, adjust, zero, sign, direction,
+// overflow, alignment check and ID. Interrupts stay on; trap (single step)
+// is the debugger's (arch_frame_step).
+@(private="file")
+USER_FLAGS :: u64(0x1 | 0x4 | 0x10 | 0x40 | 0x80 | 0x400 | 0x800 | 0x40000 | 0x200000)
+@(private="file")
+RFLAGS_IF :: u64(0x200)
+@(private="file")
+RFLAGS_TF :: u64(0x100) // trap after the next instruction
+@(private="file")
+RFLAGS_DF :: u64(0x400)
+
+// cs and ss stay user mode's: only what user mode may hold is taken.
+@(require_results)
+arch_frame_set_regs :: proc "contextless" (f: ^Trap_Frame, r: ^vx.Regs) -> vx.Status {
+	if r.rip >= u64(USER_TOP) || r.rsp > u64(USER_TOP) {
+		return .Err_Invalid // iretq would fault on them, in the kernel
+	}
+	f.rax, f.rbx, f.rcx, f.rdx, f.rsi, f.rdi, f.rbp, f.rsp = r.rax, r.rbx, r.rcx, r.rdx, r.rsi, r.rdi, r.rbp, r.rsp
+	f.r8, f.r9, f.r10, f.r11, f.r12, f.r13, f.r14, f.r15 = r.r8, r.r9, r.r10, r.r11, r.r12, r.r13, r.r14, r.r15
+	f.rip = r.rip
+	f.rflags = r.rflags & USER_FLAGS | RFLAGS_IF | 0x2 // bit 1 is always set
+	return .Ok
+}
+
+regs_sp :: proc "contextless" (r: ^vx.Regs) -> Uva {
+	return Uva(r.rsp)
+}
+
+regs_pc :: proc "contextless" (r: ^vx.Regs) -> u64 {
+	return r.rip
+}
+
+// The register a syscall's result goes back in.
+regs_result :: proc "contextless" (r: ^vx.Regs) -> u64 {
+	return r.rax
+}
+
+arch_frame_step :: proc "contextless" (f: ^Trap_Frame, on: bool) {
+	f.rflags = on ? f.rflags | RFLAGS_TF : f.rflags &~ RFLAGS_TF
+}
+
+arch_sync_icache :: proc "contextless" (p: []u8) {} // x86 keeps it coherent itself
+
+// The user thread pointer: the FS base. User code changes it only through
+// thread_state (CR4.FSGSBASE is off).
+arch_tls_read :: proc "contextless" () -> u64 {
+	return vx_rdmsr(MSR_FS_BASE)
+}
+
+arch_tls_write :: proc "contextless" (value: u64) {
+	vx_wrmsr(MSR_FS_BASE, value)
+}
+
+// The XSAVE area entry.S keeps below a trap frame, 64-byte aligned: the
+// interrupted context's vector state (ADR-0004). Its first 512 bytes are
+// FXSAVE's image; XSTATE_BV, at 512, says which components it holds, and a
+// component it does not hold is in its initial state.
+@(private="file")
+Xsave_Legacy :: struct {
+	fxsave:    [512]u8,
+	xstate_bv: u64,
+	xcomp_bv:  u64,
+}
+
+@(private="file")
+XSTATE_X87 :: u64(1)
+@(private="file")
+XSTATE_SSE :: u64(2)
+
+@(private="file")
+frame_xsave :: proc "contextless" (f: ^Trap_Frame) -> ^Xsave_Legacy {
+	return cast(^Xsave_Legacy)uintptr((u64(uintptr(f)) - intrinsics.volatile_load(&vx_xsave_size)) &~ 63)
+}
+
+// The FXSAVE image of a thread's saved FP/SIMD state, with any component in
+// its initial state written out as such: FCW 0x37f, every register zero.
+arch_frame_fpregs :: proc "contextless" (f: ^Trap_Frame) -> (r: vx.Fpregs) {
+	x := frame_xsave(f)
+	r.fxsave = x.fxsave
+	if x.xstate_bv & XSTATE_X87 == 0 {
+		mxcsr := r.fxsave[24:32]
+		saved: [8]u8
+		copy(saved[:], mxcsr) // MXCSR and its mask, which XSAVE writes whatever XSTATE_BV says
+		intrinsics.mem_zero(&r.fxsave[0], 160)
+		copy(r.fxsave[24:32], saved[:])
+		r.fxsave[0], r.fxsave[1] = 0x7f, 0x03 // FCW 0x37f
+	}
+	if x.xstate_bv & XSTATE_SSE == 0 {
+		intrinsics.mem_zero(&r.fxsave[160], 16 * 16) // XMM0-15
+	}
+	return
+}
+
+// Writes the FXSAVE image in, which XRSTOR loads on the way out. MXCSR is
+// made safe first: no reserved bit set (XRSTOR would fault in the kernel).
+// The upper halves of the YMM registers stay as they were.
+arch_frame_set_fpregs :: proc "contextless" (f: ^Trap_Frame, r: ^vx.Fpregs) {
+	x := frame_xsave(f)
+	x.fxsave = r.fxsave
+	mxcsr := intrinsics.unaligned_load((^u32)(&x.fxsave[24]))
+	intrinsics.unaligned_store((^u32)(&x.fxsave[24]), mxcsr & 0xffbf) // MXCSR_MASK's default: DAZ aside, every defined bit
+	x.xstate_bv |= XSTATE_X87 | XSTATE_SSE
+}
+
+// To pc(arg) as if called: a zero return address below arg, which is
+// 16-aligned.
+arch_frame_divert :: proc "contextless" (f: ^Trap_Frame, pc, arg: Uva) -> bool {
+	zero: u64
+	if copy_out(arg - 8, &zero) != .Ok {
+		return false
+	}
+	f.rip = u64(pc)
+	f.rsp = u64(arg - 8)
+	f.rdi = u64(arg)
+	f.rflags &~= RFLAGS_DF // the ABI starts functions with the direction flag clear
+	return true
+}
+
+// Watchpoints (thread_state .Set_Watch): DR0-DR3 and DR7, loaded on the way
+// into a task that has them, and DR7 cleared on the way into one that does
+// not. They fire in the kernel too, when it copies to or from a watched
+// address; x86_trap ignores those.
+@(private="file")
+watch_loaded: [MAX_CPUS]bool
+
+arch_watch_count :: proc "contextless" () -> u32 {
+	return 4
+}
+
+@(private="file")
+DR7_LEN := [9]u64{1 = 0, 2 = 1, 4 = 3, 8 = 2} // LEN's odd encoding, by bytes
+
+arch_watch_load :: proc "contextless" (t: ^Task) {
+	cpu := arch_cpu_index()
+	if !t.watching && !watch_loaded[cpu] {
+		return
+	}
+	dr7: u64
+	addresses: [4]u64
+	for &w, i in t.watches[:4] {
+		if !t.watching || w.kind == .Off {
+			continue
+		}
+		rw := w.kind == .Write ? u64(1) : 3 // 01 writes, 11 reads and writes
+		dr7 |= 1 << uint(2 * i) | rw << uint(16 + 4 * i) | DR7_LEN[w.len] << uint(18 + 4 * i)
+		addresses[i] = w.address
+	}
+	vx_watch_set(&addresses, dr7)
+	watch_loaded[cpu] = dr7 != 0
+}
+
+@(private="file")
+DR6_CLEAR :: u64(0xffff_0ff0)
+
+// A user-mode fault as an exception: its kind, code and address.
+@(private="file")
+x86_exception_kind :: proc "contextless" (f: ^Trap_Frame) -> (kind: vx.Exception_Kind, code: u32, address: u64) {
+	code = u32(f.error)
+	switch f.vector {
+	case 0:
+		return .Arithmetic, code, 0 // divide error
+	case 1: // a watchpoint (DR6's B0-B3), or the trap flag (exception_raise clears it, or sets it again)
+		dr6 := vx_read_dr6()
+		vx_write_dr6(DR6_CLEAR)
+		if dr6 & 15 == 0 {
+			return .Step, code, 0
+		}
+		slot := u32(intrinsics.count_trailing_zeros(dr6 & 15))
+		return .Watchpoint, slot, this_cpu().current.task.watches[slot].address // a trap: the access is done
+	case 3:
+		return .Breakpoint, code, 0
+	case 6:
+		return .Illegal, code, 0
+	case 7:
+		return .Fp_Disabled, code, 0
+	case 14:
+		pf := transmute(Pf_Error)f.error
+		code = 0 // read
+		if .Write in pf {
+			code = 1
+		}
+		if .Fetch in pf {
+			code = 2
+		}
+		return .Page_Fault, code, vx_read_cr2()
+	case 16, 19:
+		return .Arithmetic, code, 0 // x87 and SIMD FP exceptions
+	case 17:
+		return .Alignment, code, 0
+	}
+	return .General, u32(f.vector), 0
+}
+
 @(export, link_name="x86_trap")
 x86_trap :: proc "c" (f: ^Trap_Frame) {
 	from_user := f.cs & 3 != 0
@@ -690,6 +980,9 @@ x86_trap :: proc "c" (f: ^Trap_Frame) {
 	case VECTOR_RESCHED:
 		vx_wrmsr(X2APIC_EOI, 0)
 		this_cpu().resched = true
+	case VECTOR_SHOOTDOWN:
+		vx_wrmsr(X2APIC_EOI, 0)
+		tlb_answer(this_cpu())
 	case VECTOR_SPURIOUS:
 		return
 	case VECTOR_MSI_FIRST ..= VECTOR_MSI_LAST:
@@ -699,13 +992,25 @@ x86_trap :: proc "c" (f: ^Trap_Frame) {
 		irq_fire(u32(f.vector - VECTOR_IRQ_BASE)) // a level line is masked before the EOI
 		vx_wrmsr(X2APIC_EOI, 0)
 	case:
+		if f.vector == 1 && !from_user {
+			vx_write_dr6(DR6_CLEAR) // the kernel touched a watched user address for the task: not the task's access
+			return
+		}
+		if f.vector == 14 && !from_user && vx_read_cr2() < u64(USER_TOP) && uaccess_fixup(f.rip) != 0 {
+			f.rip = uaccess_fixup(f.rip) // a user page gone under a copy: it reports the failure
+			return
+		}
 		if from_user {
-			task_fault_start()
-			kput_exception(f)
-			kput(" at rip ")
-			kput_hex(f.rip)
-			kput("\n")
-			task_fault_exit()
+			kind, code, address := x86_exception_kind(f)
+			if !exception_raise(f, kind, code, address) { // nobody took it
+				task_fault_start()
+				kput_exception(f)
+				kput(" at rip ")
+				kput_hex(f.rip)
+				kput("\n")
+				task_fault_exit(kind, code, address, f.rip)
+			}
+			break
 		}
 		panic_start()
 		if (f.vector == 8 || f.vector == 14) && kstack_in_guard(vx_read_cr2()) {

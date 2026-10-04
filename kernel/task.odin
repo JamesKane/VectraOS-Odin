@@ -2,6 +2,7 @@ package kernel
 
 import "base:intrinsics"
 import vx "abi:vx"
+import "vx:utf"
 
 // Tasks, threads, handles and address spaces.
 //
@@ -44,12 +45,14 @@ Mapping :: struct {
 	va:           Uva,
 	size, offset: u64,
 	vmo:          ^Vmo,
+	flags:        vx.Map_Options,
+	privatized:   bool, // its VMO is a copy of its own, made for a debugger's write (exception.odin)
 }
 
 TASK_MAX_MAPPINGS :: PAGE_SIZE / size_of(Mapping)
 
 // A task's lock covers its handle table, its address space, its threads and
-// its life (state, exit status, bindings on its exit).
+// its life (state, exit string, bindings on its exit) and where its faults go.
 Task :: struct {
 	using obj:       Object,
 	lock:            Spinlock,
@@ -64,7 +67,8 @@ Task :: struct {
 	state:           vx.Task_State, // .Exited once torn down
 	ending:          bool, // its last thread has exited, or it was killed: torn down soon
 	killed:          bool,
-	exit_status:     i64,
+	execing:         bool, // in, or the scratch of, a task_exec: no thread starts until the address spaces have changed places
+	exit:            [dynamic; vx.ERRMAX]u8, // its exit string (ADR-0010): empty while it runs, and for success
 	obs:             Observers, // EXIT bindings
 	// The root task's debug capability, until there is a debug-log object; a
 	// task gets it from the task that creates it.
@@ -73,6 +77,15 @@ Task :: struct {
 	parent_id:       u64, // the task that created it, or its nearest live creator; 0 for the root task
 	all_next:        ^Task, // in all_tasks
 	io:              [dynamic; TASK_MAX_IO]Io_Range, // I/O ports it may use (x86_64, device.odin)
+	thread_ids:      u32, // the last thread's id: ids count from 1, in creation order
+	// Where its faults go (exception.odin): an in-task handler, then a port.
+	exc_handler:     Uva,
+	exc_port:        ^Port, // a reference, or nil
+	exc_key:         u64,
+	dbg_port:        ^Port, // a debugger's, which sees faults first (.First_Chance); a reference, or nil
+	dbg_key:         u64,
+	watches:         [vx.WATCH_MAX]vx.Watch, // its watchpoints (thread_state .Set_Watch), loaded as its threads run
+	watching:        bool, // any of them on
 }
 
 #assert(offset_of(Task, obj) == 0) // objects are cast from ^Object
@@ -109,9 +122,28 @@ Thread :: struct {
 	wake_at:      Instant, // the deadline it sleeps until
 	wake_late:    Instant, // wake_at plus its leeway: the timer may wait until here
 	wait_token:   rawptr, // what it waits on, until it is woken or times out (sched.odin)
-	wake_pending: bool, // woken between joining a list of waiters and blocking
-	wait_result:  vx.Status,
+	wake_pending:   bool, // woken between joining a list of waiters and blocking
+	pending_result: vx.Status, // and the result that block returns at once
+	wait_result:    vx.Status,
+	// Exceptions and interrupts (exception.odin), under its task's lock.
+	id:                u32, // in its task
+	exited:            bool, // it has exited, and waits to be reaped: no note reaches it
+	exc_stopped:       bool, // stopped at its task's exception port, until exception_resume
+	exc_first:         bool, // and that port is a debugger's
+	exc_action:        Maybe(vx.Resume_Action), // what exception_resume said
+	suspend_count:     u32, // thread_suspend, less thread_resume
+	parked:            bool, // stopped on its way to user mode while suspended
+	stepping:          bool, // a debugger asked for one instruction (arch_frame_step): aarch64 keeps MDSCR_EL1.SS on
+	tls:               u64, // its user thread pointer while it is not running (sched.odin's user_switch)
+	user_held:         bool, // stopped at an exception: tls is its own, saved, for a debugger (exception_stop)
+	// thread_interrupt's notes not yet delivered, oldest first: each is its
+	// own exception (Plan 9 queued notes the same way).
+	interrupt_pending: bool, // notes waiting, read without the lock
+	notes:             [dynamic; THREAD_MAX_INTERRUPTS]Note,
+	exc:               vx.Exception, // the exception it stopped at
 }
+
+#assert(size_of(Thread) <= PAGE_SIZE) // a pool object
 
 #assert(offset_of(Thread, obj) == 0) // objects are cast from ^Object
 
@@ -230,6 +262,28 @@ handle_close :: proc "contextless" (t: ^Task, h: vx.Handle) -> vx.Status {
 	}
 	object_release(obj)
 	return .Ok
+}
+
+// Closes every handle t holds (task_exec): the new program starts with only
+// what its spawn message names.
+handles_close_all :: proc "contextless" (t: ^Task) {
+	for i in 1 ..< HANDLE_SLOTS {
+		obj: ^Object
+		{
+			spin_guard(&t.lock)
+			if t.handles == nil {
+				return
+			}
+			e := &t.handles[i]
+			obj = e.obj
+			if obj != nil {
+				free_slot(e)
+			}
+		}
+		if obj != nil {
+			object_release(obj)
+		}
+	}
 }
 
 // A handle in flight: the reference the sender's handle held, and its rights.
@@ -390,7 +444,7 @@ task_create :: proc "contextless" (name: string, parent_id: u64) -> (task: ^Task
 	t.map_next = USER_MAP_BASE
 	t.handles = cast(^[HANDLE_SLOTS]Handle_Entry)phys_to_virt(handles)
 	t.maps = cast(^[TASK_MAX_MAPPINGS]Mapping)phys_to_virt(maps)
-	copy(t.name[:len(t.name) - 1], name)
+	copy(t.name[:], utf_cut(name, len(t.name) - 1)) // whole runes (ADR-0013)
 	t.parent_id = parent_id
 	spin_lock(&all_tasks_lock)
 	t.all_next = all_tasks
@@ -399,12 +453,63 @@ task_create :: proc "contextless" (name: string, parent_id: u64) -> (task: ^Task
 	return t, .Ok
 }
 
+// The longest prefix of s of at most max bytes that ends at a rune boundary:
+// where a bounded copy of text is cut (ADR-0013). A bad byte is a rune of
+// its own. The kernel cuts, as Plan 9's kstrcpy does, but does not validate.
+utf_cut :: proc "contextless" (s: string, max_bytes: int) -> string {
+	if len(s) <= max_bytes {
+		return s
+	}
+	at := 0
+	for at < max_bytes {
+		_, n := utf.decode(s[at:])
+		if at + n > max_bytes {
+			break
+		}
+		at += n
+	}
+	return s[:at]
+}
+
 task_name :: proc "contextless" (t: ^Task) -> string {
 	n := 0
 	for n < len(t.name) && t.name[n] != 0 {
 		n += 1
 	}
 	return string(t.name[:n])
+}
+
+// The first of t's mappings that ends after addr (as_query).
+@(require_results)
+task_query :: proc "contextless" (t: ^Task, addr: Uva) -> (info: vx.Map_Info, st: vx.Status) {
+	spin_guard(&t.lock)
+	best: ^Mapping
+	if t.maps != nil {
+		for &m in t.maps {
+			if m.size != 0 && m.va + Uva(m.size) > addr && (best == nil || m.va < best.va) {
+				best = &m
+			}
+		}
+	}
+	if best == nil {
+		return {}, .Err_Not_Found
+	}
+	return {base = u64(best.va), size = best.size, offset = best.offset, flags = best.flags}, .Ok
+}
+
+// The page-table flags for a user mapping.
+user_map_flags :: proc "contextless" (flags: vx.Map_Options, device: bool) -> Map_Flags {
+	mf := Map_Flags{.User}
+	if .Write in flags {
+		mf += {.Write}
+	}
+	if .Exec in flags {
+		mf += {.Exec}
+	}
+	if device {
+		mf += {.Device}
+	}
+	return mf
 }
 
 // Maps [offset, offset + size) of a VMO into a task's address space. With
@@ -420,18 +525,8 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 	if size == 0 || (offset | size) & (PAGE_SIZE - 1) != 0 || overflow || vmo_end > v.size {
 		return 0, .Err_Range
 	}
-	mf := Map_Flags{.User}
-	if .Write in flags {
-		mf += {.Write}
-	}
-	if .Exec in flags {
-		mf += {.Exec}
-	}
-	if v.physical {
-		mf += {.Device}
-	}
+	mf := user_map_flags(flags, v.physical)
 	spin_lock(&t.lock)
-	defer spin_unlock(&t.lock)
 	at := want_va != 0 ? want_va : t.map_next
 	end, end_overflow := intrinsics.overflow_add(at, Uva(size))
 	slot: ^Mapping
@@ -466,15 +561,142 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 		for off := u64(0); off < done; off += PAGE_SIZE {
 			unmap_page(t.root, u64(at) + off)
 		}
+		root := t.root
+		spin_unlock(&t.lock)
+		if done != 0 {
+			arch_tlb_shootdown(root, at, done) // another thread may have touched them
+		}
 		return 0, st
 	}
 	object_ref(&v.obj)
-	slot^ = {va = at, size = size, offset = offset, vmo = v}
+	slot^ = {va = at, size = size, offset = offset, vmo = v, flags = flags}
 	t.mapped += size
 	if want_va == 0 {
 		t.map_next = end + PAGE_SIZE // leave a guard page between placed mappings
 	}
+	spin_unlock(&t.lock)
 	return at, .Ok
+}
+
+// task_create's .Fork: the new task gets a copy of the parent's memory and
+// its handle table, and nothing else; the caller starts a thread in it.
+//   - Each mapping is a copy, made now, of what the parent sees there, at
+//     the same address with the same permissions. A ring's memory is not
+//     copied (a copied ring is broken, a shared one would have two
+//     producers), nor is device memory: the child finds those addresses
+//     unmapped, and its library connects again.
+//   - Each handle keeps its value and rights, so what the parent's memory
+//     says about its handles (its file descriptors) holds in the child. A
+//     handle to the parent itself becomes one to the child.
+//   - The in-task fault handler is the parent's (signal handlers are
+//     inherited); exception ports, a debugger and I/O ports are not.
+@(require_results)
+task_fork_copy :: proc "contextless" (parent, child: ^Task) -> vx.Status {
+	spin_guard(&parent.lock)
+	if parent.root == 0 || parent.ending {
+		return .Err_Bad_State
+	}
+	for m in parent.maps {
+		if m.size == 0 || m.vmo.physical || m.vmo.ring {
+			continue
+		}
+		dup := vmo_create(m.size) or_return
+		for &pa, i in dup.pages {
+			copy(page_bytes(pa), page_bytes(m.vmo.pages[m.offset / PAGE_SIZE + u64(i)]))
+		}
+		_, st := task_map(child, dup, 0, m.size, m.flags, m.va)
+		object_release(&dup.obj) // the child's mapping holds it, if it was made
+		if st != .Ok {
+			return st
+		}
+	}
+	for e, i in parent.handles {
+		e := e
+		if e.obj == &parent.obj {
+			e.obj = &child.obj
+		}
+		if e.obj != nil {
+			object_ref(e.obj)
+		}
+		child.handles[i] = e // free slots too: their generations go on from the parent's
+	}
+	child.map_next = parent.map_next
+	child.exc_handler = parent.exc_handler
+	return .Ok
+}
+
+// Unmaps [va, va + size): whole mappings, or the parts of them in the range;
+// a mapping cut in the middle becomes two, so that needs a free slot. The
+// page entries are cleared under the lock, the translations shot down after
+// it (another CPU spinning on it could not answer), and only then are the
+// VMOs let go, which may free their pages.
+@(require_results)
+task_unmap :: proc "contextless" (t: ^Task, va: Uva, size: u64) -> vx.Status {
+	end, overflow := intrinsics.overflow_add(va, Uva(size))
+	if size == 0 || (u64(va) | size) & (PAGE_SIZE - 1) != 0 || overflow || end > USER_TOP {
+		return .Err_Range
+	}
+	drop: [dynamic; TASK_MAX_MAPPINGS]^Vmo
+	root: Paddr
+	{
+		spin_guard(&t.lock)
+		if t.root == 0 || t.maps == nil || t.ending {
+			return .Err_Bad_State
+		}
+		splits, free_slots := 0, 0
+		for m in t.maps {
+			if m.size == 0 {
+				free_slots += 1
+			} else if m.va < va && m.va + Uva(m.size) > end {
+				splits += 1
+			}
+		}
+		if splits > free_slots {
+			return .Err_No_Memory
+		}
+		for &m in t.maps {
+			m_end := m.va + Uva(m.size)
+			if m.size == 0 || m_end <= va || m.va >= end {
+				continue
+			}
+			lo, hi := max(m.va, va), min(m_end, end)
+			for p := lo; p < hi; p += PAGE_SIZE {
+				unmap_page(t.root, u64(p))
+			}
+			t.mapped -= u64(hi - lo)
+			switch {
+			case lo == m.va && hi == m_end: // all of it
+				_ = append(&drop, m.vmo)
+				m = {}
+			case lo == m.va: // its start
+				m.offset += u64(hi - m.va)
+				m.size = u64(m_end - hi)
+				m.va = hi
+			case hi == m_end: // its end
+				m.size = u64(lo - m.va)
+			case: // its middle: the end becomes a mapping of its own
+				rest: ^Mapping
+				for &r in t.maps {
+					if r.size == 0 {
+						rest = &r
+						break
+					}
+				}
+				object_ref(&m.vmo.obj)
+				rest^ = m
+				rest.va = hi
+				rest.size = u64(m_end - hi)
+				rest.offset = m.offset + u64(hi - m.va)
+				m.size = u64(lo - m.va)
+			}
+		}
+		root = t.root
+	}
+	arch_tlb_shootdown(root, va, size)
+	for v in drop {
+		object_release(&v.obj)
+	}
+	return .Ok
 }
 
 // A thread of task t that has not started (thread_start, process.odin).
@@ -493,6 +715,11 @@ thread_create :: proc "contextless" (t: ^Task) -> (thread: ^Thread, st: vx.Statu
 	}
 	object_init(&th.obj, .Thread) // pool_alloc zeroed the rest
 	th.task = t
+	{
+		spin_guard(&t.lock)
+		t.thread_ids += 1
+		th.id = t.thread_ids
+	}
 	th.kstack = stack
 	th.intent = .Interactive
 	object_ref(&t.obj)

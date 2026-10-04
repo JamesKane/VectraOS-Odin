@@ -48,6 +48,7 @@ ring_pair_pool: Pool(Ring_Pair)
 ring_create :: proc "contextless" (p: vx.Ring_Params) -> (client, server: ^Ring_End, memory: ^Vmo, st: vx.Status) {
 	h := ring.layout(p) or_return
 	v := vmo_create(h.size) or_return
+	v.ring = true
 	defer if st != .Ok {
 		object_release(&v.obj)
 	}

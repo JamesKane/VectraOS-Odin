@@ -27,7 +27,7 @@ Fake_Task :: struct {
 	threads:     u32,
 	blocked:     u32,
 	mapped:      u64,
-	exit_status: i64,
+	exit:        [dynamic; vx.ERRMAX]u8, // its exit string, once killed
 }
 
 // The tree TASKS reaches, in id order; the first is the task itself.
@@ -44,7 +44,8 @@ kernel_log: [1024]u8
 kernel_log_len: int
 
 summary :: proc "contextless" (t: ^Fake_Task, out: ^vx.Task_Summary) {
-	out^ = {id = t.id, state = t.state, threads = t.threads, blocked = t.blocked, mapped = t.mapped, exit_status = t.exit_status}
+	out^ = {id = t.id, state = t.state, threads = t.threads, blocked = t.blocked, mapped = t.mapped}
+	out.exit_len = u32(copy(out.exit[:], t.exit[:]))
 	copy(out.name[:], t.name)
 }
 
@@ -87,12 +88,14 @@ fake_syscall :: proc "c" (nr: vx.Syscall, a0, a1, a2, a3, a4, a5: u64) -> i64 {
 		}
 		summary(t, (^vx.Task_Summary)(uintptr(a1)))
 		return 0
-	case .Task_Kill:
-		t := find(a2)
+	case .Task_Kill: // (task, msg, len, id)
+		t := find(a3)
 		if vx.Handle(a0) != TASKS || t == nil || t.state == .Exited {
 			return i64(vx.Status.Err_Not_Found)
 		}
-		t.state, t.exit_status, t.threads, t.blocked = .Exited, i64(a1), 0, 0
+		t.state, t.threads, t.blocked = .Exited, 0, 0
+		clear(&t.exit)
+		_ = append(&t.exit, string((cast([^]u8)uintptr(a1))[:a2]))
 		return 0
 	}
 	return i64(vx.Status.Err_Unsupported) // port_create among them: vx_main returns
@@ -249,7 +252,7 @@ test_procfs :: proc(t: ^testing.T) {
 	testing.expect_value(t, e, vx.Status.Ok)
 	testing.expect_value(t, n, 7) // the whole message
 	testing.expect_value(t, fake_tasks[5].state, vx.Task_State.Exited)
-	testing.expect_value(t, fake_tasks[5].exit_status, -9)
+	testing.expect_value(t, string(fake_tasks[5].exit[:]), "killed")
 	_, e = p9.client_walk(&c, root, "7")
 	testing.expect_value(t, e, vx.Status.Err_Not_Found) // gone
 	testing.expect_value(t, p9test.list(&c, root, ""), "1 2 3 5")

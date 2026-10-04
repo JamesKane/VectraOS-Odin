@@ -44,7 +44,7 @@ names_used: int
 @(private="file")
 fail :: proc "contextless" (what: string) -> ! {
 	rt.print("bootfs: FAILED: ", what, "\n")
-	rt.thread_exit(-1)
+	rt.exits(what)
 }
 
 @(private="file")

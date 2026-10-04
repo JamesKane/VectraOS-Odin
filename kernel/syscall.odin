@@ -17,15 +17,46 @@ current_task :: #force_inline proc "contextless" () -> ^Task {
 
 // A syscall's options argument as its set, or false if it sets a bit that
 // no option uses.
-@(private="file")
+@(private)
 options_of :: proc "contextless" ($T: typeid, a: u64) -> (T, bool) where intrinsics.type_is_bit_set(T) {
 	return transmute(T)u32(a), a &~ u64(transmute(u32)~T{}) == 0
 }
 
+// User memory is touched only through these, assembly in each architecture's
+// entry.S: a fault inside one resumes at its fault label (uaccess_fixup, from
+// the trap handler), which reports the failure. So a range another thread
+// unmaps between the check and the copy fails the copy, not the kernel.
+foreign _ {
+	vx_user_copy :: proc "c" (dst, src: rawptr, n: u64) -> u64 --- // the bytes not copied
+	vx_user_copy_fault :: proc "c" () --- // an address only
+	vx_user_load32 :: proc "c" (src: rawptr, dst: ^u32) -> bool ---
+	vx_user_load32_fault :: proc "c" () --- // an address only
+}
+
+// Where a kernel fault on a user address at pc resumes, if pc is inside one
+// of the user-access routines; 0 if it is not.
+uaccess_fixup :: proc "contextless" (pc: u64) -> u64 {
+	copy_at, copy_fault := u64(uintptr(rawptr(vx_user_copy))), u64(uintptr(rawptr(vx_user_copy_fault)))
+	load_at, load_fault := u64(uintptr(rawptr(vx_user_load32))), u64(uintptr(rawptr(vx_user_load32_fault)))
+	switch {
+	case pc >= copy_at && pc < copy_fault:
+		return copy_fault
+	case pc >= load_at && pc < load_fault:
+		return load_fault
+	}
+	return 0
+}
+
+// One aligned 32-bit word of user memory (a futex's), read whole through the
+// task's own mapping; false if nothing maps it now.
+@(require_results)
+user_load32 :: proc "contextless" (src: Uva) -> (v: u32, ok: bool) {
+	ok = vx_user_load32(rawptr(uintptr(src)), &v)
+	return
+}
+
 // User pointers are checked against the current task's page tables before
-// the kernel touches them. Mappings are only ever removed when a task ends,
-// so nothing can unmap a range between the check and the copy; with as_unmap
-// these become copies that recover from a fault.
+// the kernel touches them, and then touched only through vx_user_copy.
 user_range_ok :: proc "contextless" (addr: Uva, length: u64, write: bool) -> bool {
 	if length == 0 {
 		return true
@@ -44,19 +75,17 @@ user_range_ok :: proc "contextless" (addr: Uva, length: u64, write: bool) -> boo
 
 @(require_results)
 copy_from_user :: proc "contextless" (dst: rawptr, src: Uva, length: u64) -> vx.Status {
-	if !user_range_ok(src, length, false) {
+	if !user_range_ok(src, length, false) || vx_user_copy(dst, rawptr(uintptr(src)), length) != 0 {
 		return .Err_Invalid
 	}
-	intrinsics.mem_copy(dst, rawptr(uintptr(src)), int(length))
 	return .Ok
 }
 
 @(require_results)
 copy_to_user :: proc "contextless" (dst: Uva, src: rawptr, length: u64) -> vx.Status {
-	if !user_range_ok(dst, length, true) {
+	if !user_range_ok(dst, length, true) || vx_user_copy(rawptr(uintptr(dst)), src, length) != 0 {
 		return .Err_Invalid
 	}
-	intrinsics.mem_copy(rawptr(uintptr(dst)), src, int(length))
 	return .Ok
 }
 
@@ -94,7 +123,7 @@ handle_out :: proc "contextless" (h: vx.Handle, out: Uva) -> vx.Status {
 }
 
 // Gives the current task a handle to a new object, dropping the creator's reference.
-@(private="file", require_results)
+@(private, require_results)
 return_handle :: proc "contextless" (obj: ^Object, rights: vx.Rights, out: Uva) -> vx.Status {
 	h, st := handle_add(current_task(), obj, rights)
 	object_release(obj)
@@ -147,13 +176,13 @@ sys_task_info :: proc "contextless" (h: vx.Handle, out: Uva, id, flags: u64) -> 
 	t := task_target(h, {.Inspect}, id, .Next in opts) or_return
 	spin_lock(&t.lock)
 	info := vx.Task_Summary {
-		id          = t.id,
-		state       = t.state,
-		threads     = t.live_threads,
-		exit_status = t.exit_status,
-		mapped      = t.mapped,
-		name        = t.name,
+		id       = t.id,
+		state    = t.state,
+		threads  = t.live_threads,
+		mapped   = t.mapped,
+		name     = t.name,
 	}
+	info.exit_len = u32(copy(info.exit[:], t.exit[:]))
 	for th := t.threads; th != nil; th = th.task_next {
 		if th.state == .Blocked {
 			info.blocked += 1
@@ -378,6 +407,14 @@ sys_as_map :: proc "contextless" (th, vh: vx.Handle, offset, size, flags: u64, a
 		return st
 	}
 	return copy_out(addr_ptr, &at)
+}
+
+// as_unmap(task, address, size): the pages of a range, mapped or not.
+@(private="file", require_results)
+sys_as_unmap :: proc "contextless" (th: vx.Handle, va: Uva, size: u64) -> vx.Status {
+	t := handle_get_as(current_task(), th, Task, {.Manage}) or_return
+	defer object_release(&t.obj)
+	return task_unmap(t, va, size)
 }
 
 // --- Channels ---
@@ -692,19 +729,32 @@ sys_ring_xfer :: proc "contextless" (h: vx.Handle, op: u64, handles: Uva, count,
 // --- Tasks and threads ---
 
 @(private="file", require_results)
-sys_task_create :: proc "contextless" (name_ptr: Uva, name_len: u64, out: Uva) -> vx.Status {
+sys_task_create :: proc "contextless" (name_ptr: Uva, name_len: u64, out: Uva, options: u64) -> vx.Status {
 	name: [24]u8
 	if name_len >= len(name) {
 		return .Err_Range
 	}
+	opts, valid := options_of(vx.Task_Options, options)
+	if !valid {
+		return .Err_Invalid
+	}
 	copy_in_slice(name[:name_len], name_ptr) or_return
 	t := task_create(string(name[:name_len]), current_task().id) or_return
 	t.may_debug_write = current_task().may_debug_write
+	if .Fork in opts {
+		if st := task_fork_copy(current_task(), t); st != .Ok {
+			task_kill(t, "sys: no memory") // never started: torn down with its last reference
+			object_release(&t.obj)
+			return st
+		}
+	}
 	return return_handle(&t.obj, vx.ALL_RIGHTS, out)
 }
 
+// thread_create(task, &out, &id): a thread, and (unless id is 0) its id in
+// the task, which exceptions and thread_interrupt name it by.
 @(private="file", require_results)
-sys_thread_create :: proc "contextless" (th: vx.Handle, out: Uva) -> vx.Status {
+sys_thread_create :: proc "contextless" (th: vx.Handle, out, id_out: Uva) -> vx.Status {
 	t := handle_get_as(current_task(), th, Task, {.Manage}) or_return
 	spin_lock(&t.lock)
 	ending := t.ending || t.killed
@@ -718,7 +768,12 @@ sys_thread_create :: proc "contextless" (th: vx.Handle, out: Uva) -> vx.Status {
 	if st != .Ok {
 		return st
 	}
-	return return_handle(&thr.obj, vx.ALL_RIGHTS, out)
+	id := thr.id
+	return_handle(&thr.obj, vx.ALL_RIGHTS, out) or_return
+	if id_out != 0 {
+		return copy_out(id_out, &id)
+	}
+	return .Ok
 }
 
 // thread_start(thread, entry, sp, handle, arg2): the handle, unless 0, moves
@@ -748,12 +803,127 @@ sys_thread_start :: proc "contextless" (h: vx.Handle, entry, sp: Uva, arg: vx.Ha
 	return st
 }
 
+// task_kill(task, msg, len, id): ends it with msg as its exit string.
 @(private="file", require_results)
-sys_task_kill :: proc "contextless" (h: vx.Handle, status, id: u64) -> vx.Status {
+sys_task_kill :: proc "contextless" (h: vx.Handle, msg_ptr: Uva, length, id: u64) -> vx.Status {
+	if length > vx.ERRMAX {
+		return .Err_Range
+	}
+	msg: [vx.ERRMAX]u8
+	copy_in_slice(msg[:length], msg_ptr) or_return
 	t := task_target(h, {.Manage}, id, false) or_return
-	task_kill(t, i64(status))
+	task_kill(t, string(msg[:length]))
 	object_release(&t.obj)
 	return .Ok
+}
+
+// Takes two tasks' locks in a fixed order, and gives them back.
+@(private="file")
+lock_pair :: proc "contextless" (a, b: ^Task) {
+	first, second := uintptr(a) < uintptr(b) ? a : b, uintptr(a) < uintptr(b) ? b : a
+	spin_lock(&first.lock)
+	spin_lock(&second.lock)
+}
+
+@(private="file")
+unlock_pair :: proc "contextless" (a, b: ^Task) {
+	spin_unlock(&a.lock)
+	spin_unlock(&b.lock)
+}
+
+// task_exec(scratch, bootstrap, entry, sp) (ADR-0012): the caller takes the
+// address space of scratch, a task it built and never started, and goes on as
+// the program in it, keeping its id, parent and EXIT bindings. Its handles
+// are all closed but bootstrap, which a new thread gets as its first argument
+// at entry, on sp; the calling thread ends. scratch, left with the old
+// address space, ends with it. Only a task with one live thread may call it.
+@(private="file", require_results)
+sys_task_exec :: proc "contextless" (sh, bootstrap: vx.Handle, entry, sp: Uva) -> vx.Status {
+	if entry >= USER_TOP || sp > USER_TOP {
+		return .Err_Invalid
+	}
+	t := current_task()
+	s := handle_get_as(t, sh, Task, {.Manage}) or_return
+	th: ^Thread
+	st := vx.Status.Err_Invalid
+	if s != t {
+		th, st = thread_create(t) // made first: a failure changes nothing
+	}
+	if st == .Ok {
+		// Both are held so until the swap: a thread started meanwhile, in
+		// either, would run on tables about to change hands, and then be freed.
+		lock_pair(t, s)
+		alone := t.live_threads == 1 && !t.ending && !t.killed && !t.execing
+		fresh := s.state == .New && s.live_threads == 0 && !s.ending && !s.killed && s.root != 0 && !s.execing
+		if alone && fresh {
+			t.execing, s.execing = true, true
+		} else {
+			st = .Err_Bad_State
+		}
+		unlock_pair(t, s)
+	}
+	moved: [1]Moved_Handle
+	if st == .Ok {
+		values := [1]vx.Handle{bootstrap}
+		st = handles_take(t, values[:], &t.obj, &s.obj, moved[:])
+		if st != .Ok {
+			lock_pair(t, s)
+			t.execing, s.execing = false, false
+			unlock_pair(t, s)
+		}
+	}
+	if st != .Ok {
+		if th != nil {
+			object_release(&th.obj)
+		}
+		object_release(&s.obj)
+		return st
+	}
+
+	// The address spaces change places, and the caller takes the new
+	// program's name. Both locks: nothing else maps into either meanwhile.
+	lock_pair(t, s)
+	t.root, s.root = s.root, t.root
+	t.map_next, s.map_next = s.map_next, t.map_next
+	t.mapped, s.mapped = s.mapped, t.mapped
+	t.maps, s.maps = s.maps, t.maps
+	t.name = s.name
+	t.exc_handler = 0 // the old program's in-task handler is not in the new one
+	unlock_pair(t, s)
+	// This CPU leaves the old tables now, before they go with s. No other
+	// CPU has them loaded: the caller has no other thread, and without
+	// ASIDs, loading tables drops every cached translation (ADR-0012).
+	load_user_root(this_cpu(), t.root)
+
+	// Every handle the old program held is closed: the new one starts with
+	// only what its spawn message names.
+	handles_close_all(t)
+	value: [1]vx.Handle
+	st = handles_put(t, moved[:], value[:])
+	object_release(moved[0].obj)
+	{
+		spin_guard(&t.lock)
+		t.execing = false // the new program's first thread may start now
+	}
+	task_kill(s, "") // never started: torn down at once, with the old address space
+	object_release(&s.obj)
+	if st == .Ok {
+		st = thread_start(th, entry, sp, u64(value[0]), 0)
+	}
+	object_release(&th.obj) // a started thread holds its own reference
+	if st != .Ok {
+		task_exit_with("exec failed")
+	}
+	thread_exit_current() // the new program goes on in the new thread
+}
+
+// clock_read(&info): the clock's counter, for /sys/clock/info; with no
+// argument, the time (syscall_dispatch).
+@(private="file", require_results)
+sys_clock_info :: proc "contextless" (out: Uva) -> (now: Instant, st: vx.Status) {
+	info := vx.Clock_Info{counter_hz = clock.hz, flags = arch_counter_flags()}
+	copy_out(out, &info) or_return
+	return clock_now(), .Ok
 }
 
 // --- Memory and handles ---
@@ -778,16 +948,16 @@ sys_vmo_rw :: proc "contextless" (h: vx.Handle, op, offset: u64, buf: Uva, size:
 	if overflow || end > v.size {
 		return .Err_Range
 	}
-	// The user side is a checked range, not a kernel slice: copied as memory.
+	// Through the fault-safe copies: another thread may unmap the buffer meanwhile.
 	for done := u64(0); done < size; {
 		at := offset + done
 		page := page_bytes(v.pages[at / PAGE_SIZE])[at % PAGE_SIZE:]
 		n := min(u64(len(page)), size - done)
-		user := rawptr(uintptr(buf + Uva(done)))
+		user := buf + Uva(done)
 		if reading {
-			intrinsics.mem_copy(user, raw_data(page), int(n))
+			copy_to_user(user, raw_data(page), n) or_return
 		} else {
-			intrinsics.mem_copy(raw_data(page), user, int(n))
+			copy_from_user(raw_data(page), user, n) or_return
 		}
 		done += n
 	}
@@ -821,19 +991,24 @@ syscall_dispatch :: proc "contextless" (nr: u64, a: [6]u64) -> i64 {
 	case .Debug_Write:
 		return i64(sys_debug_write(Uva(a[0]), a[1]))
 	case .Clock_Read:
+		if a[0] != 0 {
+			return result(sys_clock_info(Uva(a[0])))
+		}
 		return i64(clock_now())
 	case .Task_Create:
-		return i64(sys_task_create(Uva(a[0]), a[1], Uva(a[2])))
+		return i64(sys_task_create(Uva(a[0]), a[1], Uva(a[2]), a[3]))
 	case .Task_Kill:
-		return i64(sys_task_kill(vx.Handle(a[0]), a[1], a[2]))
+		return i64(sys_task_kill(vx.Handle(a[0]), Uva(a[1]), a[2], a[3]))
+	case .Task_Exec:
+		return i64(sys_task_exec(vx.Handle(a[0]), vx.Handle(a[1]), Uva(a[2]), Uva(a[3])))
 	case .Task_Info:
 		return i64(sys_task_info(vx.Handle(a[0]), Uva(a[1]), a[2], a[3]))
 	case .Thread_Create:
-		return i64(sys_thread_create(vx.Handle(a[0]), Uva(a[1])))
+		return i64(sys_thread_create(vx.Handle(a[0]), Uva(a[1]), Uva(a[2])))
 	case .Thread_Start:
 		return i64(sys_thread_start(vx.Handle(a[0]), Uva(a[1]), Uva(a[2]), vx.Handle(a[3]), a[4]))
 	case .Thread_Exit:
-		thread_exit_current(i64(a[0]))
+		thread_exit_current()
 	case .Port_Create:
 		return i64(sys_port_create(a[0], Uva(a[1])))
 	case .Port_Bind:
@@ -884,6 +1059,26 @@ syscall_dispatch :: proc "contextless" (nr: u64, a: [6]u64) -> i64 {
 		return i64(sys_vmo_rw(vx.Handle(a[0]), a[1], a[2], Uva(a[3]), a[4]))
 	case .As_Map:
 		return i64(sys_as_map(vx.Handle(a[0]), vx.Handle(a[1]), a[2], a[3], a[4], Uva(a[5])))
+	case .As_Query:
+		return i64(sys_as_query(vx.Handle(a[0]), Uva(a[1]), Uva(a[2])))
+	case .Exception_Bind:
+		return i64(sys_exception_bind(vx.Handle(a[0]), vx.Handle(a[1]), a[2], a[3]))
+	case .Exception_Resume:
+		return result(sys_exception_resume(vx.Handle(a[0]), a[1], a[2], Uva(a[3])))
+	case .Thread_State:
+		return i64(sys_thread_state(vx.Handle(a[0]), a[1], a[2], Uva(a[3]), a[4]))
+	case .Thread_Interrupt:
+		return i64(sys_thread_interrupt(vx.Handle(a[0]), a[1], Uva(a[2]), a[3]))
+	case .Thread_Suspend:
+		return i64(sys_thread_suspend(vx.Handle(a[0]), a[1], false))
+	case .Thread_Resume:
+		return i64(sys_thread_suspend(vx.Handle(a[0]), a[1], true))
+	case .Task_Mem_Rw:
+		return i64(sys_task_mem_rw(vx.Handle(a[0]), Uva(a[1]), a[2]))
+	case .Vmo_Clone:
+		return i64(sys_vmo_clone(vx.Handle(a[0]), a[1], a[2], a[3], Uva(a[4])))
+	case .As_Unmap:
+		return i64(sys_as_unmap(vx.Handle(a[0]), Uva(a[1]), a[2]))
 	case .Handle_Dup:
 		return i64(sys_handle_dup(vx.Handle(a[0]), a[1], Uva(a[2])))
 	case .Handle_Close:

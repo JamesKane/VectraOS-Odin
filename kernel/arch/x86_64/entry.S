@@ -270,6 +270,33 @@ vx_enter_user:
     movl $0x1f80, 24(%rsp) // MXCSR
     jmp trap_restore
 
+// vx_user_copy(dst, src, n) -> u64: copies to or from user memory, and
+// returns the bytes not copied: 0 means it all was. A fault inside resumes at
+// vx_user_copy_fault (uaccess_fixup, x86_trap), which returns what is left.
+    .globl vx_user_copy, vx_user_copy_fault
+    .type vx_user_copy, @function
+vx_user_copy:
+    movq %rdx, %rcx
+    rep movsb
+    xorl %eax, %eax
+    ret
+vx_user_copy_fault:
+    movq %rcx, %rax        // rep movsb counts down as it goes: what is left
+    ret
+
+// vx_user_load32(src, dst) -> bool: one aligned 32-bit load from user memory
+// (a futex word), whole. A fault returns false.
+    .globl vx_user_load32, vx_user_load32_fault
+    .type vx_user_load32, @function
+vx_user_load32:
+    movl (%rdi), %eax
+    movl %eax, (%rsi)
+    movl $1, %eax
+    ret
+vx_user_load32_fault:
+    xorl %eax, %eax
+    ret
+
     .set i, 0
     .rept 256
     STUB %i

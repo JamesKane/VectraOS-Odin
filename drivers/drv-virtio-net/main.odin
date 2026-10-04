@@ -73,7 +73,7 @@ client: Client
 
 fail :: proc "contextless" (what: string) -> ! {
 	rt.print("drv-virtio-net: FAILED: ", what, "\n")
-	rt.thread_exit(1)
+	rt.exits(what)
 }
 
 buf_addr :: proc "contextless" (pages: []u64, i: u16) -> u64 {

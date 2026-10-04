@@ -16,7 +16,8 @@ import vx "abi:vx"
 //
 // channel_call writes a request and waits on its own end for the reply whose
 // txid matches; the kernel picks the txid, and the reply goes straight to the
-// waiting caller instead of the queue.
+// waiting caller instead of the queue. A call that ends without its reply
+// takes back a request the server has not read yet.
 //
 // Both ends share one lock. Objects that leave the kernel's hands (a
 // message's handles, a dying end's bindings) are released after it is
@@ -29,6 +30,7 @@ CHANNEL_QUEUE_BYTES :: u64(1) << 20
 // handles, then the body.
 Channel_Msg :: struct {
 	next:  ^Channel_Msg,
+	call:  ^Call_Wait, // the channel_call that sent it, while it waits in a queue
 	order: uint, // the physical block it lives in
 	len:   u32, // body bytes, header included
 	count: u32, // handles
@@ -54,6 +56,7 @@ Call_Wait :: struct {
 	thread: ^Thread,
 	txid:   u32,
 	reply:  ^Channel_Msg, // set by the writer of the reply
+	read:   bool, // its request has left the server's queue: read, and maybe freed
 }
 
 Channel :: struct {
@@ -207,6 +210,10 @@ channel_read :: proc "contextless" (c: ^Channel, cap_bytes, count_cap: u32) -> (
 	_ = fifo_pop(&c.queue)
 	c.count -= 1
 	c.bytes -= u64(m.len)
+	if m.call != nil {
+		m.call.read = true
+		m.call = nil
+	}
 	return m, need, .Ok
 }
 
@@ -229,26 +236,57 @@ channel_call :: proc "contextless" (c: ^Channel, request: ^Channel_Msg, deadline
 	h := msg_header(request)
 	h.txid = w.txid
 	h.sender_intent = .Interactive
+	request.call = &w
 	st = channel_deliver(peer, request)
 	if st == .Ok {
 		sent = true
 		t.wait_token = &w
 		w.next = c.calls
 		c.calls = &w
+	} else {
+		request.call = nil
 	}
 	spin_unlock(&c.pair.lock)
 	if st != .Ok {
 		return nil, false, st
 	}
 
-	woke := thread_block(deadline, 0)
-	spin_lock(&c.pair.lock) // stop waiting, whatever woke us
-	unlink(&c.calls, &w, "next")
-	spin_unlock(&c.pair.lock)
-	if w.reply != nil {
-		return w.reply, true, .Ok
+	// A call that ends without its reply (interrupted, timed out) takes back
+	// a request the server has not read yet, so the server never answers a
+	// call nobody waits for. Whether it is still queued is w.read, not a
+	// search for its address: once read, its block may be freed and given to
+	// another message in the same queue. An interrupted call whose request
+	// the server has read waits on for the reply, so no answer is lost: the
+	// interrupt is delivered once it returns. (A server that holds a call
+	// answers it before it interrupts the caller.)
+	woke: vx.Status
+	for {
+		woke = thread_block(deadline, 0)
+		spin_lock(&c.pair.lock)
+		server := channel_peer(c)
+		queued := server != nil && !w.read && w.reply == nil
+		if queued && (woke == .Err_Interrupted || woke == .Err_Timed_Out || woke == .Err_Killed) && fifo_remove(&server.queue, request) {
+			server.count -= 1
+			server.bytes -= u64(request.len)
+			request.call = nil
+			sent = false // the caller's again, and freed with its handles
+		}
+		if w.reply == nil && woke == .Err_Interrupted && server != nil && !queued {
+			t.wait_token = &w // the server has it: its answer is coming
+			spin_unlock(&c.pair.lock)
+			continue
+		}
+		unlink(&c.calls, &w, "next") // stop waiting
+		if sent && !w.read && server != nil {
+			request.call = nil // left queued: w is gone
+		}
+		spin_unlock(&c.pair.lock)
+		break
 	}
-	return nil, true, woke == .Ok ? .Err_Peer_Closed : woke
+	if w.reply != nil {
+		return w.reply, sent, .Ok
+	}
+	return nil, sent, woke == .Ok ? .Err_Peer_Closed : woke
 }
 
 // Attaches a READABLE or PEER_CLOSED binding, or fires it at once if it holds.

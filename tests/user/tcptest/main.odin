@@ -22,7 +22,7 @@ fail :: proc(what: string, st := vx.Status.Ok) -> ! {
 		rt.print(": ", p9.error_text(st))
 	}
 	rt.print("\n")
-	rt.thread_exit(1)
+	rt.exits(what)
 }
 
 Conn :: struct {

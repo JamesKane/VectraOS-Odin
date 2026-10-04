@@ -29,7 +29,7 @@ fail :: proc(what: string, st := vx.Status.Ok) -> ! {
 		rt.print(": ", p9.error_text(st))
 	}
 	rt.print("\n")
-	rt.thread_exit(1)
+	rt.exits("error")
 }
 
 // The count from "-N": the digits are taken while they make at most 1000,

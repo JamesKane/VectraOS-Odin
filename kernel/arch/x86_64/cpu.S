@@ -177,6 +177,34 @@ vx_write_cr3:
     movq %rdi, %cr3
     ret
 
+// (addresses: ^[4]u64, dr7: u64): the watchpoints, DR7 off while the
+// addresses change.
+    .globl vx_watch_set
+    .type vx_watch_set, @function
+vx_watch_set:
+    xorl %eax, %eax
+    movq %rax, %dr7
+    movq 0(%rdi), %rax
+    movq %rax, %dr0
+    movq 8(%rdi), %rax
+    movq %rax, %dr1
+    movq 16(%rdi), %rax
+    movq %rax, %dr2
+    movq 24(%rdi), %rax
+    movq %rax, %dr3
+    movq %rsi, %dr7
+    ret
+
+    .globl vx_read_dr6, vx_write_dr6
+    .type vx_read_dr6, @function
+    .type vx_write_dr6, @function
+vx_read_dr6:
+    movq %dr6, %rax
+    ret
+vx_write_dr6:
+    movq %rdi, %dr6
+    ret
+
 // The caller's frame pointer: this procedure makes no frame of its own.
     .globl vx_frame_address
     .type vx_frame_address, @function

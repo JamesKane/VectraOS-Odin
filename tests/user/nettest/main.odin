@@ -26,7 +26,7 @@ end, port: vx.Handle
 
 fail :: proc(what: string) -> ! {
 	rt.print("nettest: FAILED: ", what, "\n")
-	rt.thread_exit(1)
+	rt.exits(what)
 }
 
 submit :: proc(e: vx.Sqe) {
@@ -193,7 +193,7 @@ kill_driver :: proc(tasks: vx.Handle) {
 	if !found {
 		fail("no drv-virtio-net task")
 	}
-	if rt.task_kill(tasks, -9, id) != .Ok {
+	if rt.task_kill(tasks, "killed", id) != .Ok {
 		fail("cannot kill the driver")
 	}
 	if rt.port_bind(port, end, .Peer_Closed, 2) != .Ok {

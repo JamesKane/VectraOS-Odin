@@ -150,7 +150,7 @@ spawn_elf :: proc "contextless" (a: ^Spawn_Args) -> (task: vx.Handle, st: vx.Sta
 	// reached the message; ours, which the child does not need (it reads its
 	// message after our end is gone); and, on failure, the child.
 	defer if st != .Ok && t != vx.HANDLE_NONE {
-		_ = task_kill(t, -1)
+		_ = task_kill(t, "spawn failed")
 		_ = handle_close(t)
 	}
 	defer close_all(stack, me, thread, ours, theirs)

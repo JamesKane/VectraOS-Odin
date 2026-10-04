@@ -32,6 +32,13 @@ vx_write_\name:
     READ esr, esr_el1
     READ far, far_el1
     READ icc_iar1, icc_iar1_el1
+    READ mdscr, mdscr_el1
+    WRITE mdscr, mdscr_el1
+    READ tpidr_el0, tpidr_el0
+    WRITE tpidr_el0, tpidr_el0
+    READ id_aa64dfr0, id_aa64dfr0_el1
+    READ cntkctl, cntkctl_el1
+    WRITE cntkctl, cntkctl_el1
 
     .globl vx_read_cntvct
     .type vx_read_cntvct, %function
@@ -226,5 +233,138 @@ vx_pan_off:
     orr x0, x0, #(1 << 23)
     msr sctlr_el1, x0
     msr pan, #0
+    isb
+    ret
+
+// (va, len: u64): every CPU drops its translations for [va, va + len) in
+// whatever address space. The Inner Shareable invalidations reach every CPU,
+// and the DSB after them waits until all have done them: no interrupts
+// needed. Without ASIDs yet, by address for any ASID; past 64 pages, all.
+    .globl vx_tlb_shootdown
+    .type vx_tlb_shootdown, %function
+vx_tlb_shootdown:
+    dsb ishst
+    lsr x2, x1, #12
+    cmp x2, #64
+    b.hi 2f
+    add x1, x0, x1
+1:  cmp x0, x1
+    b.hs 3f
+    lsr x3, x0, #12
+    tlbi vaale1is, x3
+    add x0, x0, #4096
+    b 1b
+2:  tlbi vmalle1is
+3:  dsb ish
+    isb
+    ret
+
+// The OS lock open, so the debug registers and software step take effect.
+    .globl vx_os_unlock
+    .type vx_os_unlock, %function
+vx_os_unlock:
+    msr oslar_el1, xzr
+    isb
+    ret
+
+// (p, len: u64): code written through a data mapping, made runnable: each
+// data cache line cleaned to the point of unification, then every CPU's
+// instruction cache invalidated.
+    .globl vx_sync_icache
+    .type vx_sync_icache, %function
+vx_sync_icache:
+    mrs x2, ctr_el0
+    ubfx x2, x2, #16, #4    // DminLine: log2 of words
+    mov x3, #4
+    lsl x2, x3, x2          // the line size in bytes
+    sub x3, x2, #1
+    add x1, x0, x1
+    bic x0, x0, x3
+1:  cmp x0, x1
+    b.hs 2f
+    dc cvau, x0
+    add x0, x0, x2
+    b 1b
+2:  dsb ish
+    ic ialluis
+    dsb ish
+    isb
+    ret
+
+// (slot: u32, value, control: u64): one watchpoint's registers, which are
+// named in the instruction: a table of four-instruction entries, by slot.
+    .globl vx_watch_slot
+    .type vx_watch_slot, %function
+vx_watch_slot:
+    cmp w0, #16
+    b.hs 1f
+    adr x3, 2f
+    add x3, x3, x0, lsl #4
+    br x3
+1:  ret
+    .p2align 4
+2:
+    msr dbgwvr0_el1, x1
+    msr dbgwcr0_el1, x2
+    isb
+    ret
+    msr dbgwvr1_el1, x1
+    msr dbgwcr1_el1, x2
+    isb
+    ret
+    msr dbgwvr2_el1, x1
+    msr dbgwcr2_el1, x2
+    isb
+    ret
+    msr dbgwvr3_el1, x1
+    msr dbgwcr3_el1, x2
+    isb
+    ret
+    msr dbgwvr4_el1, x1
+    msr dbgwcr4_el1, x2
+    isb
+    ret
+    msr dbgwvr5_el1, x1
+    msr dbgwcr5_el1, x2
+    isb
+    ret
+    msr dbgwvr6_el1, x1
+    msr dbgwcr6_el1, x2
+    isb
+    ret
+    msr dbgwvr7_el1, x1
+    msr dbgwcr7_el1, x2
+    isb
+    ret
+    msr dbgwvr8_el1, x1
+    msr dbgwcr8_el1, x2
+    isb
+    ret
+    msr dbgwvr9_el1, x1
+    msr dbgwcr9_el1, x2
+    isb
+    ret
+    msr dbgwvr10_el1, x1
+    msr dbgwcr10_el1, x2
+    isb
+    ret
+    msr dbgwvr11_el1, x1
+    msr dbgwcr11_el1, x2
+    isb
+    ret
+    msr dbgwvr12_el1, x1
+    msr dbgwcr12_el1, x2
+    isb
+    ret
+    msr dbgwvr13_el1, x1
+    msr dbgwcr13_el1, x2
+    isb
+    ret
+    msr dbgwvr14_el1, x1
+    msr dbgwcr14_el1, x2
+    isb
+    ret
+    msr dbgwvr15_el1, x1
+    msr dbgwcr15_el1, x2
     isb
     ret

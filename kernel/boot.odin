@@ -67,6 +67,12 @@ Tsc_Response :: struct {
 	frequency: u64,
 }
 
+Entropy_Response :: struct {
+	revision:    u64,
+	value_count: u64,
+	values:      [^]u64,
+}
+
 Request :: struct($R: typeid) {
 	id:       [4]u64,
 	revision: u64,
@@ -96,6 +102,17 @@ rsdp_request := Request(Rsdp_Response){id = {MAGIC_0, MAGIC_1, 0xc5e77b6b397e7b4
 
 @(export, link_section=".limine_requests")
 tsc_request := Request(Tsc_Response){id = {MAGIC_0, MAGIC_1, 0x10f2ee1d87d195e4, 0xf747a2b78f6ddb31}}
+
+// 32 bytes of the bootloader's entropy, for user space (root.odin).
+Entropy_Request :: struct {
+	id:          [4]u64,
+	revision:    u64,
+	response:    ^Entropy_Response,
+	value_count: u64,
+}
+
+@(export, link_section=".limine_requests")
+entropy_request := Entropy_Request{id = {MAGIC_0, MAGIC_1, 0x65ea80255d5682c5, 0x9117240723f493eb}, value_count = 4}
 
 Mp_Request :: struct {
 	id:       [4]u64,
@@ -138,6 +155,8 @@ Boot_Info :: struct {
 	kernel_virt:    u64,
 	tsc_hz:         u64, // x86_64: the TSC's frequency, from Limine
 	rsdp:           Paddr, // the ACPI RSDP's physical address, or 0
+	seed:           [4]u64, // the bootloader's entropy, for user space (root.odin)
+	seeded:         bool,
 	// Every range of RAM and firmware memory, whatever it is used for.
 	ram:            [MAX_RAM_RANGES]Phys_Range,
 	ram_count:      int,
@@ -222,6 +241,10 @@ boot_read :: proc "contextless" () -> bool {
 	}
 	if tsc := response(&tsc_request); tsc != nil {
 		boot.tsc_hz = tsc.frequency
+	}
+	if e := intrinsics.volatile_load(&entropy_request.response); e != nil && e.value_count >= len(boot.seed) {
+		copy(boot.seed[:], e.values[:len(boot.seed)])
+		boot.seeded = true
 	}
 	if c := response(&cmdline_request); c != nil && c.cmdline != nil {
 		// Copied: the original is in memory reclaim_boot_memory frees.
