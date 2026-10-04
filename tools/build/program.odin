@@ -65,6 +65,8 @@ PROGRAMS := []Program {
 	{name = "drv-uart-pl011", dir = "drivers/drv-uart-pl011", place = .Bootfs, only = {.AArch64}},
 	{name = "drv-virtio-net", dir = "drivers/drv-virtio-net", place = .Bootfs},
 	{name = "fsd", dir = "servers/fsd", place = .Bootfs},
+	{name = "dosfs", dir = "servers/dosfs", place = .Bootfs},
+	{name = "isofs", dir = "servers/isofs", place = .Bootfs},
 	{name = "ctest", source = "tests/posix/ctest.c", place = .Tests, kind = .C},
 	{name = "ctestfsd", source = "tests/posix/ctest.c", place = .Tests, kind = .C}, // ctest again, with /tmp on fsd
 	{name = "sbasetest", source = "tests/posix/sbasetest.c", place = .Tests, kind = .C},

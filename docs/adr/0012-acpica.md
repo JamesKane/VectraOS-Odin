@@ -1,6 +1,6 @@
 # ADR-0012: ACPICA 20260930, its core vendored unchanged, with an OS layer in Odin, for `bus-acpi`
 
-Status: proposed, import review pending (`third_party/VENDOR.ndb`, `reviewed.by=pending`), 2026-10-04.
+Status: accepted, 2026-10-04. The import is byte-identical to the one James Kane reviewed for upstream VectraOS, 2026-10-03 (upstream `third_party/VENDOR.ndb`); accepted here on that review, at his instruction.
 
 ## Context
 
