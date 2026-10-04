@@ -14,6 +14,13 @@ USER_STACK_TOP :: u64(0x0000_7fff_ffff_0000)
 USER_STACK_SIZE :: u64(256 * 1024)
 TASK_MAX_IO :: 4 // I/O port ranges per task
 
+// I/O ports [base, base + count). The count is a u32 because one range may
+// hold all 65,536 ports.
+Io_Range :: struct {
+	base:  u16,
+	count: u32,
+}
+
 // --- Handles ---
 //
 // A handle is a table index in the low 16 bits and that slot's generation in
@@ -64,9 +71,7 @@ Task :: struct {
 	name:            [24]u8,
 	parent_id:       u64, // the task that created it, or its nearest live creator; 0 for the root task
 	all_next:        ^Task, // in all_tasks
-	io_ranges:       u32, // I/O ports it may use (x86_64, device.odin): [io_base, io_base + io_count)
-	io_base:         [TASK_MAX_IO]u16,
-	io_count:        [TASK_MAX_IO]u16,
+	io:              [dynamic; TASK_MAX_IO]Io_Range, // I/O ports it may use (x86_64, device.odin)
 }
 
 Thread_State :: enum u8 {

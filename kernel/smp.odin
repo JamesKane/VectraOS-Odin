@@ -33,30 +33,32 @@ SMP_TEST_ROUNDS :: 4000
 // handed to two CPUs at once would show up as a wrong stamp.
 @(private="file")
 smp_stress :: proc "contextless" (index: u32) {
-	held, tags: [8]u64
-	orders: [8]uint
+	Held :: struct {
+		pa, tag: u64,
+		order:   uint,
+	}
+	held: [8]Held
 	for r in u32(0) ..< SMP_TEST_ROUNDS {
-		slot, order := r % 8, uint(r % 4)
-		if held[slot] != 0 {
-			first := cast(^u64)phys_to_virt(held[slot])
-			last := cast(^u64)phys_to_virt(held[slot] + (4096 << orders[slot]) - 8)
-			if intrinsics.volatile_load(first) != tags[slot] || intrinsics.volatile_load(last) != tags[slot] {
+		h := &held[r % 8]
+		if h.pa != 0 {
+			first := cast(^u64)phys_to_virt(h.pa)
+			last := cast(^u64)phys_to_virt(h.pa + (4096 << h.order) - 8)
+			if intrinsics.volatile_load(first) != h.tag || intrinsics.volatile_load(last) != h.tag {
 				kpanic("selftest smp: a block was handed out twice")
 			}
-			phys_free(held[slot], orders[slot])
+			phys_free(h.pa, h.order)
 		}
-		held[slot] = phys_alloc(order)
-		if held[slot] == 0 {
+		order := uint(r % 4)
+		h^ = {pa = phys_alloc(order), tag = u64(index) << 32 | u64(r), order = order}
+		if h.pa == 0 {
 			kpanic("selftest smp: out of memory")
 		}
-		orders[slot] = order
-		tags[slot] = u64(index) << 32 | u64(r)
-		intrinsics.volatile_store(cast(^u64)phys_to_virt(held[slot]), tags[slot])
-		intrinsics.volatile_store(cast(^u64)phys_to_virt(held[slot] + (4096 << order) - 8), tags[slot])
+		intrinsics.volatile_store(cast(^u64)phys_to_virt(h.pa), h.tag)
+		intrinsics.volatile_store(cast(^u64)phys_to_virt(h.pa + (4096 << order) - 8), h.tag)
 	}
-	for slot in 0 ..< 8 {
-		if held[slot] != 0 {
-			phys_free(held[slot], orders[slot])
+	for h in held {
+		if h.pa != 0 {
+			phys_free(h.pa, h.order)
 		}
 	}
 }

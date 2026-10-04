@@ -38,8 +38,7 @@ Irq :: struct {
 
 Iorange :: struct {
 	using obj: Object,
-	base:      u16,
-	count:     u16,
+	range:     Io_Range,
 }
 
 resource_pool := Pool{size = (size_of(Resource) + 15) &~ 15}
@@ -215,8 +214,7 @@ iorange_create :: proc "contextless" (base, count: u64) -> (^Iorange, vx.Status)
 		return nil, .Err_No_Memory
 	}
 	object_init(&r.obj, .Iorange)
-	r.base = u16(base)
-	r.count = u16(count)
+	r.range = {u16(base), u32(count)}
 	if arch_console_device(true, base, count) {
 		console_hand_off()
 	}
@@ -228,15 +226,13 @@ iorange_create :: proc "contextless" (base, count: u64) -> (^Iorange, vx.Status)
 @(require_results)
 task_enable_io :: proc "contextless" (t: ^Task, r: ^Iorange) -> vx.Status {
 	spin_lock(&t.lock)
-	st := t.io_ranges < TASK_MAX_IO ? vx.Status.Ok : vx.Status.Err_No_Memory
-	if st == .Ok {
-		t.io_base[t.io_ranges] = r.base
-		t.io_count[t.io_ranges] = r.count
-		t.io_ranges += 1
-	}
+	added := append(&t.io, r.range) == 1
 	spin_unlock(&t.lock)
-	if st == .Ok && t == this_cpu().current.task {
+	if !added {
+		return .Err_No_Memory
+	}
+	if t == this_cpu().current.task {
 		arch_io_switch(t)
 	}
-	return st
+	return .Ok
 }

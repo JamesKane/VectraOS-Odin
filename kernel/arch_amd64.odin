@@ -186,9 +186,7 @@ X86_Cpu :: struct {
 	gdt:        [7]u64,
 	tss:        Tss,
 	iomap:      [IO_PORTS / 8 + 1]u8, // one bit a port, then the 0xff the CPU requires after the last
-	open:       u32,
-	open_base:  [TASK_MAX_IO]u16,
-	open_count: [TASK_MAX_IO]u16,
+	open:       [dynamic; TASK_MAX_IO]Io_Range,
 	local:      Cpu_Local,
 }
 
@@ -298,7 +296,7 @@ arch_cpu_init :: proc "contextless" (index: u32) {
 	for &b in xc.iomap {
 		b = 0xff // no ports for user code
 	}
-	xc.open = 0
+	xc.open = {}
 	for i in 0 ..< 3 {
 		xc.tss.ist[i] = u64(uintptr(&ist[(i + 1) * IST_STACK_SIZE]))
 	}
@@ -720,19 +718,17 @@ iomap_set :: proc "contextless" (m: []u8, base, count: u32, allow: bool) {
 // This CPU's I/O port permissions become t's; t may be nil.
 arch_io_switch :: proc "contextless" (t: ^Task) {
 	xc := &x86_cpus[arch_cpu_index()]
-	for i in 0 ..< xc.open {
-		iomap_set(xc.iomap[:], u32(xc.open_base[i]), u32(xc.open_count[i]), false)
+	for r in xc.open {
+		iomap_set(xc.iomap[:], u32(r.base), r.count, false)
 	}
-	xc.open = 0
+	xc.open = {}
 	if t == nil {
 		return
 	}
-	for i in 0 ..< min(t.io_ranges, TASK_MAX_IO) {
-		iomap_set(xc.iomap[:], u32(t.io_base[i]), u32(t.io_count[i]), true)
-		xc.open_base[i] = t.io_base[i]
-		xc.open_count[i] = t.io_count[i]
-		xc.open += 1
+	for r in t.io {
+		iomap_set(xc.iomap[:], u32(r.base), r.count, true)
 	}
+	xc.open = t.io
 }
 
 @(private="file")
