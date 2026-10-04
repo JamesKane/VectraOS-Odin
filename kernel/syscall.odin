@@ -315,12 +315,12 @@ sys_as_map :: proc "contextless" (th, vh: vx.Handle, offset, size, flags: u64, a
 		need += {.Exec}
 	}
 	v := handle_get_as(current_task(), vh, Vmo, need) or_return
-	va2, st := task_map(target, v, offset, size, opts, va)
+	at, st := task_map(target, v, offset, size, opts, va)
 	object_release(&v.obj)
 	if st != .Ok {
 		return st
 	}
-	return copy_out(addr_ptr, &va2)
+	return copy_out(addr_ptr, &at)
 }
 
 // --- Channels ---
