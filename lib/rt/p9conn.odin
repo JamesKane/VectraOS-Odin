@@ -42,7 +42,7 @@ PARAMS :: vx.Ring_Params {
 map_ring :: proc "contextless" (mem: vx.Handle, side: ring.Side, r: ^ring.Ring) -> vx.Status {
 	layout := ring.layout(PARAMS) or_return
 	base := as_map(self, mem, 0, layout.size, {.Write}) or_return
-	return ring.attach(r, ([^]u8)(uintptr(base))[:layout.size], side)
+	return ring.attach(r, ([^]u8)(uintptr(base))[:layout.size], side, PARAMS)
 }
 
 @(private="file")

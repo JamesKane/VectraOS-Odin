@@ -20,8 +20,9 @@ package p9
 // (the Fs may be shared), hands serve each whole request and a buffer for the
 // reply, sends what comes back, and calls hang_up when the connection goes,
 // so the file server hears every node let go. A read or write the file server
-// cannot do yet (a console with no input typed) answers Err_Should_Wait;
-// serve then returns .Defer, without a reply, and the transport holds the
+// cannot do yet (a console with no input typed), or an open (a listen file
+// with no call yet, through the clone hook), answers Err_Should_Wait; serve
+// then returns .Defer, without a reply, and the transport holds the
 // request and serves it again when the file server's device has done
 // something (upstream's ring transport does this). Everything else completes
 // as it arrives, so Tflush has nothing to cancel.
@@ -45,6 +46,12 @@ Fs :: struct {
 	parent:  proc "contextless" (ctx: rawptr, node: Node) -> (parent: Node, st: vx.Status),
 	stat:    proc "contextless" (ctx: rawptr, node: Node, out: ^Stat) -> vx.Status,
 	open:    proc "contextless" (ctx: rawptr, node: Node, mode: Open_Mode) -> vx.Status,
+	// Optional: after an open, a clone file (upstream 02 §5) makes a new
+	// node, and the fid moves there, opened. Err_Not_Found: the node is not
+	// a clone file. Err_Should_Wait: not yet (a listen file before a call
+	// comes); the open is held and made again, so open must do nothing that
+	// cannot be repeated.
+	clone:   proc "contextless" (ctx: rawptr, node: Node, mode: Open_Mode) -> (opened: Node, st: vx.Status),
 	// Files: up to len(buf) bytes at offset; or Err_Should_Wait.
 	read:    proc "contextless" (ctx: rawptr, node: Node, offset: u64, buf: []u8) -> (count: u32, st: vx.Status),
 	// The index-th entry of a directory; Err_Not_Found past the end.
@@ -55,8 +62,8 @@ Fs :: struct {
 	create:  proc "contextless" (ctx: rawptr, dir: Node, name: string, perm: u32, mode: Open_Mode) -> (node: Node, st: vx.Status),
 	// Or nil.
 	remove:  proc "contextless" (ctx: rawptr, node: Node) -> vx.Status,
-	// Optional: a fid let the node go.
-	clunk:   proc "contextless" (ctx: rawptr, node: Node),
+	// Optional: a fid let the node go; opened says whether the fid had it open.
+	clunk:   proc "contextless" (ctx: rawptr, node: Node, opened: bool),
 }
 
 MAX_FIDS :: 256 // per connection, for now
@@ -125,7 +132,7 @@ fid_new :: proc "contextless" (s: ^Server, fid: Fid) -> ^Fid_Entry {
 @(private="file")
 fid_drop :: proc "contextless" (s: ^Server, f: ^Fid_Entry) {
 	if s.fs.clunk != nil {
-		s.fs.clunk(s.fs.ctx, f.node)
+		s.fs.clunk(s.fs.ctx, f.node, f.open)
 	}
 	f^ = {}
 }
@@ -147,6 +154,33 @@ qid_of :: proc "contextless" (s: ^Server, node: Node) -> (Qid, vx.Status) {
 	st: Stat
 	e := s.fs.stat(s.fs.ctx, node, &st)
 	return st.qid, e
+}
+
+// Opens a fid's node. A clone file moves the fid to the node it makes, as
+// opening /net/tcp/clone moves it to the new conversation's ctl (upstream
+// 02 §5).
+@(private="file", require_results)
+open_node :: proc "contextless" (s: ^Server, f: ^Fid_Entry, mode: Open_Mode) -> vx.Status {
+	s.fs.open(s.fs.ctx, f.node, mode) or_return
+	if s.fs.clone == nil {
+		return .Ok
+	}
+	node, e := s.fs.clone(s.fs.ctx, f.node, mode)
+	if e != .Ok {
+		return e == .Err_Not_Found ? .Ok : e
+	}
+	qid: Qid
+	if qid, e = qid_of(s, node); e != .Ok {
+		if s.fs.clunk != nil {
+			s.fs.clunk(s.fs.ctx, node, true) // opened, and let go at once
+		}
+		return e
+	}
+	if s.fs.clunk != nil {
+		s.fs.clunk(s.fs.ctx, f.node, false)
+	}
+	f.node, f.qid = node, qid
+	return .Ok
 }
 
 // A name the file server may see: not empty, not ".", no '/'.
@@ -297,7 +331,7 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 				break
 			}
 			if n == f && s.fs.clunk != nil {
-				s.fs.clunk(s.fs.ctx, f.node)
+				s.fs.clunk(s.fs.ctx, f.node, false) // walked fids are never open
 			}
 			root := f.root
 			n^ = {fid = t.newfid, used = true, node = node, root = root, qid = qid}
@@ -321,7 +355,7 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 				}
 				if e == .Ok {
 					if s.fs.clunk != nil {
-						s.fs.clunk(s.fs.ctx, f.node)
+						s.fs.clunk(s.fs.ctx, f.node, false)
 					}
 					f.node = node
 					qid: Qid
@@ -333,7 +367,7 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 				if .Dir in f.qid.type && (writes(t.mode) || t.mode.trunc) {
 					e = .Err_Access // directories are only read
 				} else {
-					e = s.fs.open(s.fs.ctx, f.node, t.mode)
+					e = open_node(s, f, t.mode)
 				}
 			}
 			if e != .Ok {
@@ -408,7 +442,7 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 			return 0, .Hang_Up
 		}
 	}
-	if e == .Err_Should_Wait && (t.type == .Tread || t.type == .Twrite) {
+	if e == .Err_Should_Wait && (t.type == .Tread || t.type == .Twrite || t.type == .Topen) {
 		return 0, .Defer
 	}
 	if e != .Ok {

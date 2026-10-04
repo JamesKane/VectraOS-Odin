@@ -196,4 +196,49 @@ test_versions :: proc(t: ^testing.T) {
 	testing.expect_value(t, p9.error_status(p9.error_text(.Err_Not_Found)), vx.Status.Err_Not_Found)
 	testing.expect_value(t, p9.error_status(p9.error_text(.Err_Access)), vx.Status.Err_Access)
 	testing.expect_value(t, p9.error_status("something only plan 9 says"), vx.Status.Err_Invalid)
+	// Other servers' wordings: Unix's strerror() as u9fs passes it on, and u9fs's own.
+	Case :: struct {
+		text: string,
+		want: vx.Status,
+	}
+	heard := []Case {
+		{"No such file or directory", .Err_Not_Found},
+		{"Permission denied", .Err_Access},
+		{"file or directory already exists", .Err_Exists},
+		{"No such file or directory!", .Err_Invalid}, // whole text only
+		{"No such file", .Err_Invalid},
+	}
+	for c in heard {
+		got := p9.error_status(c.text)
+		testing.expectf(t, got == c.want, "error_status(%q) is %v, want %v", c.text, got, c.want)
+	}
+}
+
+// Directory reads: each entry is bounded by what was read, not by its own size.
+@(test)
+test_dir_next :: proc(t: ^testing.T) {
+	s := p9.Stat{name = "a", uid = "u", gid = "g", muid = "m"}
+	b: [256]u8
+	one := p9.stat_encode(&s, b[:])
+	two := one + p9.stat_encode(&s, b[one:])
+	it := p9.Dir_Entries{buf = b[:two]}
+	_, ok := p9.next_entry(&it)
+	testing.expect(t, ok)
+	testing.expect_value(t, it.off, one)
+	_, ok = p9.next_entry(&it)
+	testing.expect(t, ok)
+	testing.expect_value(t, it.off, two)
+	_, ok = p9.next_entry(&it)
+	testing.expect(t, !ok) // the end
+
+	it = {buf = b[:one - 1]}
+	_, ok = p9.next_entry(&it)
+	testing.expect(t, !ok) // cut short
+	testing.expect_value(t, it.off, 0)
+
+	b[one], b[one + 1] = 0xff, 0xff // the second claims 64 KiB
+	it = {buf = b[:two], off = one}
+	_, ok = p9.next_entry(&it)
+	testing.expect(t, !ok)
+	testing.expect_value(t, it.off, one)
 }

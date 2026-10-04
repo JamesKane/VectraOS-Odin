@@ -16,7 +16,9 @@ import "vx:rt"
 //
 // A request the file server cannot do yet (p9.serve's .Defer) is held, and
 // the connection takes nothing more until it completes: it is served again
-// after every event.
+// after every event, and after every tick. (Holding one request per
+// connection is what a synchronous client needs; Tflush of a held request
+// comes with pipelining.)
 
 MAX_CONNS :: 16
 
@@ -68,6 +70,9 @@ Server :: struct {
 	listen_armed: bool,
 	ctx:          rawptr,
 	event:        proc "contextless" (ctx: rawptr, pk: ^vx.Packet), // a packet keyed from KEY_USER up
+	// Optional: does what is due by now, and says when to be called again
+	// (vx.INFINITE: never), as a protocol's retransmission timers need.
+	tick:         proc "contextless" (ctx: rawptr) -> vx.Instant,
 	conns:        [MAX_CONNS]Server_Conn,
 }
 
@@ -119,24 +124,35 @@ connect :: proc "contextless" (s: ^Server, rep: ^vx.Msg_Header) -> (st: vx.Statu
 	return .Ok
 }
 
-// Serves every request waiting on one connection: first one it holds, if it
-// can be served now. False if the client broke the protocol, or sent
-// something too broken to answer, and must be dropped.
+// Requests served on one connection before the server turns to the others: a
+// client that keeps its queue full gets its share, not the whole server.
 @(private="file")
-drain :: proc "contextless" (c: ^Server_Conn) -> bool {
-	for {
+BUDGET :: 8
+
+@(private="file")
+Drained :: enum u8 {
+	Drained, // nothing is left to serve now
+	More, // the budget ran out with requests left
+	Broken, // the client broke the protocol, or sent something too broken to answer: drop it
+}
+
+// Serves the requests waiting on one connection, up to its budget: first one
+// it holds, if it can be served now.
+@(private="file")
+drain :: proc "contextless" (c: ^Server_Conn) -> Drained {
+	for _ in 0 ..< BUDGET {
 		e := vx.Sqe{user_data = c.held_user_data, len = c.held_len}
 		if !c.holding {
 			st := ring.consume(&c.ring, memory.ptr_to_bytes(&e))
 			if st == .Err_Should_Wait {
-				return true
+				return .Drained
 			}
 			if st != .Ok || e.opcode != rt.RING_MSG || e.len > len(c.req) {
-				return false
+				return .Broken
 			}
 			p, ok := ring.peer_bytes(&c.ring, u64(e.arena_off), u64(e.len))
 			if !ok {
-				return false
+				return .Broken
 			}
 			copy(c.req[:], p)
 		}
@@ -146,19 +162,19 @@ drain :: proc "contextless" (c: ^Server_Conn) -> bool {
 			c.holding = true
 			c.held_len = e.len
 			c.held_user_data = e.user_data
-			return true
+			return .Drained
 		case .Hang_Up:
-			return false // unanswerable
+			return .Broken // unanswerable
 		case .Reply:
 			c.holding = false
 		}
 		arena := ring.arena(&c.ring)
 		if n > len(arena) {
-			return false
+			return .Broken
 		}
 		slot, ok := ring.produce_slot(&c.ring)
 		if !ok {
-			return false // a client that does not drain its completions
+			return .Broken // a client that does not drain its completions
 		}
 		copy(arena, c.resp[:n])
 		out := vx.Cqe{user_data = e.user_data, result = i64(n)}
@@ -167,6 +183,7 @@ drain :: proc "contextless" (c: ^Server_Conn) -> bool {
 			_ = rt.ring_notify(c.end)
 		}
 	}
+	return .More
 }
 
 @(private="file")
@@ -183,9 +200,17 @@ serve :: proc "contextless" (s: ^Server) -> vx.Status {
 		s.port = rt.port_create() or_return
 	}
 	for {
+		more := false // a connection still has requests: no sleeping this time round
 		for &c in s.conns {
-			if c.used && !drain(&c) {
+			if !c.used {
+				continue
+			}
+			switch drain(&c) {
+			case .Broken:
 				close_conn(&c)
+			case .More:
+				more = true
+			case .Drained:
 			}
 		}
 		for {
@@ -210,7 +235,7 @@ serve :: proc "contextless" (s: ^Server) -> vx.Status {
 
 		// Arm what is idle, then sleep unless something arrived meanwhile. A
 		// connection holding a request waits for an event, not its doorbell.
-		idle := true
+		idle := !more
 		for &c, i in s.conns {
 			if !idle {
 				break
@@ -228,9 +253,10 @@ serve :: proc "contextless" (s: ^Server) -> vx.Status {
 		if idle && !s.listen_armed {
 			s.listen_armed = rt.port_bind(s.port, s.listen, .Readable, conn_key(.Listen, 0, 0)) == .Ok
 		}
+		deadline := s.tick(s.ctx) if s.tick != nil else vx.INFINITE
 		if idle {
 			pk: [16]vx.Packet
-			n, _ := rt.port_wait(s.port, vx.INFINITE, 0, pk[:])
+			n, _ := rt.port_wait(s.port, deadline, 0, pk[:]) // Err_Timed_Out: the tick is due
 			for &p in pk[:n] {
 				if p.key >= KEY_USER {
 					if s.event != nil {

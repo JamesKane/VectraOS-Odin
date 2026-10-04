@@ -96,27 +96,20 @@ layout :: proc "contextless" (p: vx.Ring_Params) -> (h: vx.Ring_Header, status: 
 	return h, .Ok
 }
 
-// Attaches to a ring mapped as `mapping` as one side. The header is checked
-// against what layout would have made, so a peer that rewrote it is caught
-// here. Takes the indices as they stand: a side attaches before it uses the
-// ring.
+// Attaches to a ring mapped as `mapping` as one side. The header must be
+// exactly what layout makes of `expect`, the parameters this side's protocol
+// uses: whoever made the ring may be hostile, and entry sizes and queue
+// lengths decide how much each consume copies into the caller's buffer.
+// Takes the indices as they stand: a side attaches before it uses the ring.
 @(require_results)
-attach :: proc "contextless" (r: ^Ring, mapping: []u8, side: Side) -> vx.Status {
+attach :: proc "contextless" (r: ^Ring, mapping: []u8, side: Side, expect: vx.Ring_Params) -> vx.Status {
 	r^ = {} // after a failed attach, every operation fails
 	if len(mapping) < size_of(vx.Ring_Header) {
 		return .Err_Invalid // too small to hold even the header, let alone the ring it describes
 	}
 	h := intrinsics.unaligned_load((^vx.Ring_Header)(raw_data(mapping))) // one read of hostile memory
-	p := vx.Ring_Params {
-		sq_entries   = h.sq_entries,
-		cq_entries   = h.cq_entries,
-		sqe_size     = h.sqe_size,
-		cqe_size     = h.cqe_size,
-		client_arena = h.client_arena_size,
-		server_arena = h.server_arena_size,
-	}
-	want, status := layout(p)
-	if h.magic != vx.RING_MAGIC || h.version != vx.RING_VERSION || status != .Ok || h != want || h.size > u64(len(mapping)) {
+	want, status := layout(expect)
+	if status != .Ok || h != want || h.size > u64(len(mapping)) {
 		return .Err_Invalid
 	}
 

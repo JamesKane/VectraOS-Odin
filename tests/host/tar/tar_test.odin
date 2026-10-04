@@ -124,23 +124,26 @@ test_upstream_bytes :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(got), "de7642a9bb23e1c04a9734cab25218e3bfb3cb0c3e47e63acc4986ca502ebea8")
 }
 
-// Not upstream's: a path that fills both prefix (155) and name (100) is
-// written and read back. Upstream's reader writes a NUL one byte past its
-// path buffer for it.
+// The longest path ustar holds: a full prefix, '/', a full name. (Upstream's
+// case also checks the NUL after it fits its entry; here the entry keeps the
+// path's length, not a NUL.)
 @(test)
 test_longest_path :: proc(t: ^testing.T) {
 	path: [tar.MAX_PATH]u8
-	slice.fill(path[:], 'p')
+	slice.fill(path[:155], 'p')
 	path[155] = '/'
-	image: [4 * tar.BLOCK]u8
+	slice.fill(path[156:], 'n')
+	image: [4096]u8
 	w := tar.Writer{buf = image[:]}
-	tar.add(&w, string(path[:]), false, 0o644, nil)
+	tar.add(&w, string(path[:]), false, 0o644, transmute([]u8)string("x"))
 	n := tar.end(&w)
-	testing.expect_value(t, n, 3 * tar.BLOCK)
+	testing.expect(t, n > 0)
+	r := tar.open(image[:n])
 	e: tar.Entry
-	testing.expect_value(t, tar.find(image[:n], string(path[:]), &e), vx.Status.Ok)
+	testing.expect_value(t, tar.next(&r, &e), vx.Status.Ok)
+	testing.expect_value(t, tar.entry_path(&e), string(path[:]))
 
-	// One more byte fits nowhere.
+	// Not upstream's: one more byte fits nowhere.
 	long: [tar.MAX_PATH + 1]u8
 	slice.fill(long[:], 'p')
 	long[155] = '/'

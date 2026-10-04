@@ -20,6 +20,7 @@ Client :: struct {
 	extensions: Extensions, // negotiated
 	next_tag:   u16,
 	next_fid:   Fid,
+	uname:      string, // who attaches; empty: "none"
 	reply:      Msg, // the last reply; its strings and data point into rbuf
 }
 
@@ -73,7 +74,7 @@ client_version :: proc "contextless" (c: ^Client, msize: u32, extensions: Extens
 
 @(require_results)
 client_attach :: proc "contextless" (c: ^Client, aname: string) -> (fid: Fid, e: vx.Status) {
-	t := Msg{type = .Tattach, fid = c.next_fid, afid = NOFID, uname = "none", aname = aname}
+	t := Msg{type = .Tattach, fid = c.next_fid, afid = NOFID, uname = c.uname if len(c.uname) > 0 else "none", aname = aname}
 	c.next_fid += 1
 	e = call(c, &t)
 	return t.fid, e
