@@ -5,12 +5,13 @@ import "vx:ns"
 import "vx:p9"
 import "vx:procns"
 import "vx:rt"
+import "vx:str"
 
 space: ns.Namespace
 buf: [4096]u8
 
 @(export, link_name="vx_main")
-main :: proc() -> int {
+vx_main :: proc() -> int {
 	if procns.from_spawn(&space) != .Ok {
 		return 1
 	}
@@ -24,24 +25,17 @@ main :: proc() -> int {
 		if n <= 0 {
 			break
 		}
-		for off := 0; off + 2 <= n; {
-			size := int(buf[off]) | int(buf[off + 1]) << 8
-			entry: p9.Stat
-			if off + size + 2 > n || p9.stat_decode(buf[off:off + size + 2], &entry) != .Ok {
-				break
-			}
-			off += size + 2
-			path: [64]u8
-			if len(entry.name) > len(path) - 14 {
+		it := p9.Dir_Entries{buf = buf[:n]}
+		for entry in p9.next_entry(&it) {
+			path_buf: [64]u8
+			path, fits := str.join(path_buf[:], "/proc/", entry.name, "/status")
+			if !fits {
 				continue
 			}
-			copy(path[:], "/proc/")
-			copy(path[6:], entry.name)
-			copy(path[6 + len(entry.name):], "/status")
 			f: ns.File
 			status: [256]u8
 			got := 0
-			if ns.open(&space, string(path[:13 + len(entry.name)]), p9.OREAD, &f) == .Ok {
+			if ns.open(&space, path, p9.OREAD, &f) == .Ok {
 				got, _ = ns.read(&f, status[:])
 				ns.close(&f)
 			}

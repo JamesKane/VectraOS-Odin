@@ -31,6 +31,8 @@ INT_TX :: u32(1) << 5
 INT_RT :: u32(1) << 6 // receive timeout: bytes waiting below the FIFO level
 INT_ALL :: u32(0x7ff)
 
+// The driver serves one UART, so its state is here rather than behind
+// driver.Cons's dev pointer, which the callbacks ignore.
 regs: [^]u32
 imsc: u32 = INT_RX | INT_RT
 irq: vx.Handle
@@ -83,13 +85,13 @@ event :: proc "contextless" (ctx: rawptr, pk: ^vx.Packet) {
 }
 
 @(export, link_name="vx_main")
-main :: proc() -> int {
+vx_main :: proc() -> int {
 	mmio := rt.spawn_take("mmio")
 	irq = rt.spawn_take("irq")
 	server.listen = rt.spawn_take("listen")
 	at: u64
 	st := vx.Status.Err_Invalid
-	if mmio != 0 && irq != 0 && server.listen != 0 {
+	if mmio != vx.HANDLE_NONE && irq != vx.HANDLE_NONE && server.listen != vx.HANDLE_NONE {
 		at, st = rt.as_map(rt.self, mmio, 0, 4096, {.Write})
 	}
 	if st != .Ok {

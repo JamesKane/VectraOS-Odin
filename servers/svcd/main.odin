@@ -34,15 +34,18 @@
 package svcd
 
 import vx "abi:vx"
+import "vx:memory"
 import "vx:ndb"
 import "vx:p9"
 import "vx:rt"
+import "vx:str"
 import "vx:tar"
 
 MAX_SERVICES :: 16
 MAX_RESTARTS :: 5 // in RESTART_WINDOW, then svcd gives up
 RESTART_WINDOW :: vx.Duration(10_000_000_000) // 10 s
 MAX_DEVICES :: 4 // device objects per driver
+MAX_NAME :: 31 // bytes in a service's or a post's name
 
 BOOT_IMAGE_RIGHTS :: vx.Rights{.Read, .Map, .Duplicate, .Transfer, .Inspect}
 CONNECTOR_RIGHTS :: vx.Rights{.Read, .Write, .Wait, .Duplicate, .Transfer, .Inspect}
@@ -53,35 +56,40 @@ when ODIN_ARCH == .amd64 {
 	ARCH :: "aarch64"
 }
 
+Device :: struct {
+	handle: vx.Handle, // svcd's own; each instance gets a duplicate
+	name:   string, // the handle's name in the spawn message: ioport, mmio or irq
+}
+
+// A service's name and its post's are held in the struct, not pointed to
+// (the manifest's values do not outlive its reader), so either may be copied.
 Service :: struct {
 	manifest:     string, // the whole file, in the boot image
 	at:           int, // where its service= record starts
-	name:         string, // in names
+	name:         [dynamic; MAX_NAME]u8,
 	restart:      bool,
 	broken:       bool, // its device objects could not be made: never started
-	devices:      int,
-	device:       [MAX_DEVICES]vx.Handle, // svcd's own handles; each instance gets duplicates
-	device_name:  [MAX_DEVICES]string,
+	devices:      [dynamic; MAX_DEVICES]Device,
 	task:         vx.Handle,
 	restarts:     u32,
 	window_start: vx.Instant,
 }
 
 Post :: struct {
-	name:   string, // into buf
+	name:   [dynamic; MAX_NAME]u8,
 	client: vx.Handle, // /srv/NAME,
 	server: vx.Handle, // and svcd's handle to the service's end
-	buf:    [32]u8,
 }
 
-services: [MAX_SERVICES]Service
-service_count: int
-posts: [MAX_SERVICES]Post
-post_count: int
+services: [dynamic; MAX_SERVICES]Service // a service's index is its .Exit key
+posts: [dynamic; MAX_SERVICES]Post
 image: []u8
 image_vmo, port, resource: vx.Handle
 console_attached: bool
-names: [MAX_SERVICES][32]u8
+
+name_of :: proc "contextless" (s: ^Service) -> string {
+	return string(s.name[:])
+}
 
 say :: proc "contextless" (parts: ..rt.Print_Arg) {
 	rt.print("svcd: ")
@@ -97,8 +105,8 @@ fail :: proc "contextless" (what: string) -> ! {
 }
 
 find_post :: proc "contextless" (name: string) -> ^Post {
-	for &p in posts[:post_count] {
-		if p.name == name {
+	for &p in posts {
+		if string(p.name[:]) == name {
 			return &p
 		}
 	}
@@ -114,8 +122,9 @@ manifest_reader :: proc "contextless" (text: string, at: int) -> ndb.Reader {
 }
 
 // Makes the device object a driver's ioport=, mmio= or irq= record names.
+@(require_results)
 mint :: proc "contextless" (s: ^Service, rec: ^ndb.Record) -> vx.Status {
-	if s.devices == MAX_DEVICES {
+	if len(s.devices) == MAX_DEVICES {
 		return .Err_No_Memory
 	}
 	h: vx.Handle
@@ -136,9 +145,7 @@ mint :: proc "contextless" (s: ^Service, rec: ^ndb.Record) -> vx.Status {
 		name = "irq"
 	}
 	if st == .Ok {
-		s.device[s.devices] = h
-		s.device_name[s.devices] = name
-		s.devices += 1
+		_ = append(&s.devices, Device{handle = h, name = name})
 	}
 	return st
 }
@@ -162,9 +169,7 @@ read_manifest :: proc "contextless" (path, text: string) {
 		}
 		if current != nil && is_device_record(&rec) && !current.broken {
 			if st := mint(current, &rec); st != .Ok {
-				say(current.name, ": cannot make its device, status -")
-				rt.print_u64(u64(-i64(st)))
-				rt.print("\n")
+				say(name_of(current), ": cannot make its device, status ", i64(st), "\n")
 				current.broken = true
 			}
 		}
@@ -177,28 +182,26 @@ read_manifest :: proc "contextless" (path, text: string) {
 			switch {
 			case arch != "" && arch != ARCH:
 			// another architecture's
-			case service_count == MAX_SERVICES || name == "" || len(name) >= len(names[0]) || program == "":
+			case len(services) == MAX_SERVICES || name == "" || len(name) > MAX_NAME || program == "":
 				say("skipping a service in ", path, ": no name or program, or too many services\n")
 			case:
-				copy(names[service_count][:], name) // the record's values do not outlive the reader
 				_, restart := ndb.get(&rec, "restart")
-				services[service_count] = {manifest = text, at = before, name = string(names[service_count][:len(name)]), restart = restart}
-				current = &services[service_count]
+				s := Service{manifest = text, at = before, restart = restart}
+				_ = append(&s.name, name)
+				_ = append(&services, s)
+				current = &services[len(services) - 1]
 				if srv != "" && find_post(srv) == nil {
-					if post_count == MAX_SERVICES || len(srv) >= len(posts[0].buf) {
+					if len(posts) == MAX_SERVICES || len(srv) > MAX_NAME {
 						fail("too many posts, or a long name")
 					}
-					p := &posts[post_count]
 					a, b, st := rt.channel_create()
 					if st != .Ok {
 						fail("channel_create")
 					}
-					p^ = {client = a, server = b}
-					copy(p.buf[:], srv)
-					p.name = string(p.buf[:len(srv)])
-					post_count += 1
+					p := Post{client = a, server = b}
+					_ = append(&p.name, srv)
+					_ = append(&posts, p)
 				}
-				service_count += 1
 			}
 		}
 		before = r.pos
@@ -208,20 +211,53 @@ read_manifest :: proc "contextless" (path, text: string) {
 	}
 }
 
+// The handles a service is given, in the spawn message's order, with their
+// names there.
+Grants :: struct {
+	handles: [dynamic; vx.CHANNEL_MAX_HANDLES - 1]vx.Handle,
+	names:   [dynamic; vx.CHANNEL_MAX_HANDLES - 1]string,
+}
+
+// Adds h, as `name`, if the handle_dup that made it (with status st)
+// succeeded.
+@(require_results)
+grant :: proc "contextless" (g: ^Grants, name: string, h: vx.Handle, st: vx.Status) -> vx.Status {
+	if st != .Ok {
+		return st
+	}
+	if append(&g.handles, h) == 0 {
+		_ = rt.handle_close(h)
+		return .Err_Range
+	}
+	_ = append(&g.names, name)
+	return .Ok
+}
+
 @(private="file")
 records_buf: [16 * 1024]u8
 @(private="file")
-ns_names: [vx.CHANNEL_MAX_HANDLES][8]u8
+ns_name_buf: [vx.CHANNEL_MAX_HANDLES][8]u8
+
+// "ns." and a mount's handle index in two digits, as upstream names them:
+// ns.03.
 @(private="file")
-src_buf: [vx.CHANNEL_MAX_HANDLES][40]u8
+ns_name :: proc "contextless" (index: int) -> string {
+	b := str.Buf{buf = ns_name_buf[index][:]}
+	str.write_string(&b, index < 10 ? "ns.0" : "ns.")
+	str.write_u64(&b, u64(index))
+	return str.to_string(&b)
+}
 
 // Builds the spawn message's records and handles for a service, and starts it.
-start :: proc "contextless" (s: ^Service) -> vx.Status {
+@(require_results)
+start :: proc "contextless" (index: int) -> vx.Status {
+	s := &services[index]
+	g: Grants
+	given := false // to spawn_elf, which takes them whatever happens
+	defer if !given {
+		rt.close_all(..g.handles[:])
+	}
 	w := ndb.Writer{buf = records_buf[:]}
-	handles: [vx.CHANNEL_MAX_HANDLES - 1]vx.Handle // NONE until given, so a failure closes only real ones
-	handle_names: [vx.CHANNEL_MAX_HANDLES - 1]string
-	count := 0
-	st := vx.Status.Ok
 
 	r := manifest_reader(s.manifest, s.at)
 	rec: ndb.Record
@@ -235,49 +271,32 @@ start :: proc "contextless" (s: ^Service) -> vx.Status {
 		return .Err_Not_Found
 	}
 	if ndb.has(&rec, "bootimage") {
-		handles[count], st = rt.handle_dup(image_vmo, BOOT_IMAGE_RIGHTS)
-		handle_names[count] = "bootimage"
-		count += 1
+		grant(&g, "bootimage", rt.handle_dup(image_vmo, BOOT_IMAGE_RIGHTS)) or_return
 		ndb.flag(&w, "bootimage")
 		ndb.put_u64(&w, "size", u64(len(image)))
 		_ = ndb.end(&w)
 	}
 	srv, _ := ndb.get(&rec, "post")
 	posts_console := srv == "cons" // decided now: rec moves on to the records below
-	if st == .Ok && srv != "" {
+	if srv != "" {
 		p := find_post(srv)
-		if p != nil {
-			handles[count], st = rt.handle_dup(p.server, CONNECTOR_RIGHTS)
-		} else {
-			st = .Err_Not_Found
+		if p == nil {
+			return .Err_Not_Found
 		}
-		handle_names[count] = "listen"
-		count += 1
+		grant(&g, "listen", rt.handle_dup(p.server, CONNECTOR_RIGHTS)) or_return
 	}
 	cons := find_post("cons")
-	if st == .Ok && ndb.has(&rec, "console") && cons != nil {
-		handles[count], st = rt.handle_dup(cons.client, CONNECTOR_RIGHTS)
-		handle_names[count] = "console"
-		count += 1
+	if ndb.has(&rec, "console") && cons != nil {
+		grant(&g, "console", rt.handle_dup(cons.client, CONNECTOR_RIGHTS)) or_return
 	}
-	if st == .Ok && ndb.has(&rec, "tasks") { // svcd's own task: the whole tree, for procfs
-		handles[count], st = rt.handle_dup(rt.self, {.Inspect, .Manage, .Transfer})
-		handle_names[count] = "tasks"
-		count += 1
+	if ndb.has(&rec, "tasks") { // svcd's own task: the whole tree, for procfs
+		grant(&g, "tasks", rt.handle_dup(rt.self, {.Inspect, .Manage, .Transfer})) or_return
 	}
-	for i in 0 ..< s.devices {
-		if st != .Ok {
-			break
-		}
-		handles[count], st = rt.handle_dup(s.device[i], vx.RIGHTS_SAME)
-		handle_names[count] = s.device_name[i]
-		count += 1
+	for d in s.devices {
+		grant(&g, d.name, rt.handle_dup(d.handle, vx.RIGHTS_SAME)) or_return
 	}
 
-	for st == .Ok {
-		if ndb.next(&r, &rec) != .Record || ndb.has(&rec, "service") {
-			break
-		}
+	for ndb.next(&r, &rec) == .Record && !ndb.has(&rec, "service") {
 		switch {
 		case ndb.has(&rec, "arg"):
 			v, _ := ndb.get(&rec, "arg")
@@ -285,30 +304,24 @@ start :: proc "contextless" (s: ^Service) -> vx.Status {
 		case ndb.has(&rec, "mount"):
 			srv_name, _ := ndb.get(&rec, "srv")
 			p := find_post(srv_name)
-			if p == nil || count == vx.CHANNEL_MAX_HANDLES - 1 {
-				say(s.name, ": cannot mount /srv/", srv_name, "\n")
-				st = .Err_Not_Found
-				break
+			if p == nil || len(g.handles) == cap(g.handles) {
+				say(name_of(s), ": cannot mount /srv/", srv_name, "\n")
+				return .Err_Not_Found
 			}
-			hn := &ns_names[count]
-			hn^ = {'n', 's', '.', u8('0' + count / 10), u8('0' + count % 10), 0, 0, 0}
-			handles[count], st = rt.handle_dup(p.client, CONNECTOR_RIGHTS)
-			handle_names[count] = string(hn[:5])
-			count += 1
-			src := &src_buf[count]
-			copy(src[:], "/srv/")
-			n := min(len(p.name), len(src) - 5)
-			copy(src[5:], p.name[:n])
+			handle := ns_name(len(g.handles))
+			grant(&g, handle, rt.handle_dup(p.client, CONNECTOR_RIGHTS)) or_return
+			src_buf: [len("/srv/") + MAX_NAME]u8
+			src, _ := str.join(src_buf[:], "/srv/", string(p.name[:]))
 			v, _ := ndb.get(&rec, "mount")
 			ndb.put(&w, "mount", v)
-			ndb.put(&w, "handle", string(hn[:5]))
+			ndb.put(&w, "handle", handle)
 			if a, ok := ndb.get(&rec, "aname"); ok {
 				ndb.put(&w, "aname", a)
 			}
 			if f, ok := ndb.get(&rec, "flags"); ok {
 				ndb.put(&w, "flags", f)
 			}
-			ndb.put(&w, "src", string(src[:5 + n]))
+			ndb.put(&w, "src", src)
 		case is_device_record(&rec): // passed on as they are, for the driver to read
 			for t in rec.tuples {
 				if t.flag {
@@ -328,58 +341,39 @@ start :: proc "contextless" (s: ^Service) -> vx.Status {
 		case:
 			continue
 		}
-		if st == .Ok {
-			_ = ndb.end(&w)
-		}
+		_ = ndb.end(&w)
 	}
-	if st == .Ok && w.failed {
-		st = .Err_Range
-	}
-	if st != .Ok {
-		for h in handles[:count] {
-			if h != 0 {
-				_ = rt.handle_close(h)
-			}
-		}
-		return st
+	if w.failed {
+		return .Err_Range
 	}
 
 	a := rt.Spawn_Args {
-		name         = s.name,
+		name         = name_of(s),
 		image        = elf.data,
-		handles      = handles[:count],
-		handle_names = handle_names[:count],
+		handles      = g.handles[:],
+		handle_names = g.names[:],
 		records      = ndb.written(&w),
 	}
-	s.task, st = rt.spawn_elf(&a)
-	if st == .Ok {
-		st = rt.port_bind(port, s.task, .Exit, u64(service_index(s)))
-	}
-	if st != .Ok {
-		return st
-	}
+	given = true
+	s.task = rt.spawn_elf(&a) or_return
+	rt.port_bind(port, s.task, .Exit, u64(index)) or_return
 	info, _ := rt.task_info(s.task)
 	if posts_console && !console_attached && cons != nil {
 		c, dst := rt.handle_dup(cons.client, CONNECTOR_RIGHTS)
 		console_attached = dst == .Ok && rt.console_attach(c) == .Ok
 	}
-	say("started ", s.name, " (task ")
-	rt.print_u64(info.id)
-	rt.print(")\n")
+	say("started ", name_of(s), " (task ", info.id, ")\n")
 	return .Ok
 }
 
-service_index :: proc "contextless" (s: ^Service) -> int {
-	return int((uintptr(s) - uintptr(&services[0])) / size_of(Service))
-}
-
 cannot :: proc "contextless" (what: string, s: ^Service, st: vx.Status) {
-	say(what, s.name, ": ", p9.error_text(st), "\n")
+	say(what, name_of(s), ": ", p9.error_text(st), "\n")
 }
 
 // A service has exited: restart it if its manifest says so, then say so. In
 // that order, because the service may be the console svcd writes to.
-exited :: proc "contextless" (s: ^Service, exit_status: i64) {
+exited :: proc "contextless" (index: int, exit_status: i64) {
+	s := &services[index]
 	_ = rt.handle_close(s.task)
 	s.task = vx.HANDLE_NONE
 	gave_up := false
@@ -392,38 +386,29 @@ exited :: proc "contextless" (s: ^Service, exit_status: i64) {
 		s.restarts += 1
 		gave_up = s.restarts > MAX_RESTARTS
 		if !gave_up {
-			if st := start(s); st != .Ok {
+			if st := start(index); st != .Ok {
 				cannot("cannot restart ", s, st)
 			}
 		}
 	}
-	say(s.name, " exited with status ")
-	rt.print_i64(exit_status)
-	rt.print("\n")
+	say(name_of(s), " exited with status ", exit_status, "\n")
 	if gave_up {
-		say(s.name, " keeps exiting; it is not restarted again\n")
+		say(name_of(s), " keeps exiting; it is not restarted again\n")
 	}
 }
 
 // Whether the kernel command line's vx.skip=NAME,NAME,... names the service.
 skipped :: proc "contextless" (name: string) -> bool {
-	c := rt.spawn.cmdline
 	KEY :: "vx.skip="
-	for i := 0; i + len(KEY) <= len(c); i += 1 {
-		if (i > 0 && c[i - 1] != ' ') || c[i:i + len(KEY)] != KEY {
+	line := rt.spawn.cmdline
+	for word in str.split_iterator(&line, ' ') {
+		if !str.has_prefix(word, KEY) {
 			continue
 		}
-		at := i + len(KEY)
-		for at < len(c) && c[at] != ' ' {
-			start_at := at
-			for at < len(c) && c[at] != ' ' && c[at] != ',' {
-				at += 1
-			}
-			if c[start_at:at] == name {
+		list := word[len(KEY):]
+		for skip in str.split_iterator(&list, ',') {
+			if skip == name {
 				return true
-			}
-			if at < len(c) && c[at] == ',' {
-				at += 1
 			}
 		}
 	}
@@ -431,11 +416,9 @@ skipped :: proc "contextless" (name: string) -> bool {
 }
 
 @(export, link_name="vx_main")
-main :: proc() -> int {
+vx_main :: proc() -> int {
 	info, _ := rt.task_info(rt.self)
-	rt.print("svcd: hello from user space (task ")
-	rt.print_u64(info.id)
-	rt.print(")\n")
+	say("hello from user space (task ", info.id, ")\n")
 	pst: vx.Status
 	if port, pst = rt.port_create(); pst != .Ok {
 		fail("port_create")
@@ -443,16 +426,16 @@ main :: proc() -> int {
 
 	resource = rt.spawn_take("resource")
 	image_vmo = rt.spawn_take("bootimage")
-	rec: ndb.Record
-	size: u64
-	ok := image_vmo != 0 && rt.spawn_record("bootimage", &rec)
-	if ok {
-		size, ok = ndb.get_u64(&rec, "size")
-	}
-	if !ok {
+	size, ok := rt.boot_image_size()
+	if image_vmo == vx.HANDLE_NONE || !ok {
 		fail("no boot image")
 	}
-	base, mst := rt.as_map(rt.self, image_vmo, 0, (size + 4095) &~ 4095, {})
+	// The size is the kernel's, but round it up to pages without wrapping all the same.
+	padded, pok := memory.page_round(size)
+	if !pok {
+		fail("cannot map the boot image")
+	}
+	base, mst := rt.as_map(rt.self, image_vmo, 0, padded, {})
 	if mst != .Ok {
 		fail("cannot map the boot image")
 	}
@@ -464,7 +447,7 @@ main :: proc() -> int {
 	for st = tar.next(&t, &e); st == .Ok; st = tar.next(&t, &e) {
 		DIR :: "boot/svc/"
 		path := tar.entry_path(&e)
-		if e.dir || len(path) < len(DIR) + 5 || path[:len(DIR)] != DIR || path[len(path) - 4:] != ".ndb" {
+		if e.dir || len(path) <= len(DIR) + len(".ndb") || !str.has_prefix(path, DIR) || !str.has_suffix(path, ".ndb") {
 			continue
 		}
 		read_manifest(path, string(e.data))
@@ -473,10 +456,10 @@ main :: proc() -> int {
 		fail("the boot image is malformed")
 	}
 
-	for drivers := 1; drivers >= 0; drivers -= 1 { // drivers first, so the console is there for the rest
-		for &s in services[:service_count] {
-			if (s.devices > 0) == (drivers == 1) && !s.broken && !skipped(s.name) {
-				if started := start(&s); started != .Ok {
+	for drivers in ([2]bool{true, false}) { // drivers first, so the console is there for the rest
+		for &s, i in services {
+			if (len(s.devices) > 0) == drivers && !s.broken && !skipped(name_of(&s)) {
+				if started := start(i); started != .Ok {
 					cannot("cannot start ", &s, started)
 				}
 			}
@@ -487,8 +470,8 @@ main :: proc() -> int {
 		pk: [8]vx.Packet
 		n, _ := rt.port_wait(port, vx.INFINITE, 0, pk[:])
 		for p in pk[:n] {
-			if p.trigger == .Exit && p.key < u64(service_count) {
-				exited(&services[p.key], i64(p.value)) // the exit status, signed
+			if p.trigger == .Exit && p.key < u64(len(services)) {
+				exited(int(p.key), i64(p.value)) // the exit status, signed
 			}
 		}
 	}

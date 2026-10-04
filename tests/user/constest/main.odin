@@ -8,7 +8,7 @@ package constest
 import "vx:rt"
 
 @(export, link_name="vx_main")
-main :: proc() -> int {
+vx_main :: proc() -> int {
 	rt.print("constest: ready\n")
 	line: [300]u8
 	for {
@@ -27,9 +27,7 @@ main :: proc() -> int {
 		rt.print("constest: got [", string(line[:length]), "]\n")
 		if string(line[:length]) == "flood" {
 			for i in u64(0) ..< 300 {
-				rt.print("constest: line ")
-				rt.print_u64(i)
-				rt.print(" ......................................\n")
+				rt.print("constest: line ", i, " ......................................\n")
 			}
 			rt.print("constest: flood done\n")
 		}

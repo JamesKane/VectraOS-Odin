@@ -14,15 +14,15 @@ import "vx:rt"
 
 checks, failures: u32
 
-check :: proc "contextless" (ok: bool, what := #caller_expression(ok), loc := #caller_location) {
+// Returns ok, so a check can guard what depends on it.
+check :: proc "contextless" (ok: bool, what := #caller_expression(ok), loc := #caller_location) -> bool {
 	checks += 1
 	if ok {
-		return
+		return true
 	}
 	failures += 1
-	rt.print("nstest: FAILED line ")
-	rt.print_u64(u64(loc.line))
-	rt.print(": ", what, "\n")
+	rt.print("nstest: FAILED line ", u64(loc.line), ": ", what, "\n")
+	return false
 }
 
 // A string comparison that shows what it got when it fails.
@@ -34,7 +34,7 @@ check_str :: proc "contextless" (got, want: string, what := #caller_expression(g
 }
 
 space: ns.Namespace
-list_out: [512]u8
+list_out: [dynamic; 512]u8
 list_buf: [4096]u8
 
 // The names in a directory, space-separated.
@@ -43,7 +43,8 @@ list :: proc "contextless" (path: string) -> string {
 	if ns.open(&space, path, p9.OREAD, &f) != .Ok {
 		return "(cannot open)"
 	}
-	length := 0
+	defer ns.close(&f)
+	clear(&list_out)
 	n: int
 	st: vx.Status
 	for {
@@ -51,28 +52,27 @@ list :: proc "contextless" (path: string) -> string {
 		if n <= 0 {
 			break
 		}
-		for off := 0; off + 2 <= n; {
-			size := int(list_buf[off]) | int(list_buf[off + 1]) << 8
-			s: p9.Stat
-			if off + size + 2 > n || p9.stat_decode(list_buf[off:off + size + 2], &s) != .Ok || length + len(s.name) + 1 > len(list_out) {
+		it := p9.Dir_Entries{buf = list_buf[:n]}
+		for s in p9.next_entry(&it) {
+			if len(list_out) + len(s.name) + 1 > cap(list_out) {
 				return "(bad entry)"
 			}
-			if length > 0 {
-				list_out[length] = ' '
-				length += 1
+			if len(list_out) > 0 {
+				_ = append(&list_out, ' ')
 			}
-			copy(list_out[length:], s.name)
-			length += len(s.name)
-			off += size + 2
+			_ = append(&list_out, s.name)
+		}
+		if it.off != n {
+			return "(bad entry)"
 		}
 	}
-	ns.close(&f)
-	return st != .Ok ? "(read failed)" : string(list_out[:length])
+	return st != .Ok ? "(read failed)" : string(list_out[:])
 }
 
 test_spawn :: proc "contextless" () {
 	check(rt.spawn.name == "nstest")
-	check(len(rt.args()) == 2 && rt.spawn.args[0] == "first" && rt.spawn.args[1] == "second arg")
+	args := rt.args()
+	check(len(args) == 2 && args[0] == "first" && args[1] == "second arg")
 	check(rt.spawn_take("bootimage") == vx.HANDLE_NONE) // not granted
 	check(rt.spawn_take("listen") == vx.HANDLE_NONE)
 }
@@ -93,14 +93,16 @@ test_namespace :: proc "contextless" () {
 	WANT :: "# boot/svc/bootfs.ndb"
 	got: [len(WANT)]u8
 	f: ns.File
-	check(ns.open(&space, "/dev/bootfs.ndb", p9.OREAD, &f) == .Ok)
-	n, _ := ns.read(&f, got[:])
-	check(n == len(got) && string(got[:]) == WANT)
-	ns.close(&f)
-	check(ns.open(&space, "/bin/nstest", p9.OREAD, &f) == .Ok)
-	n, _ = ns.read(&f, got[:4])
-	check(n == 4 && string(got[:4]) == "\x7fELF")
-	ns.close(&f)
+	if check(ns.open(&space, "/dev/bootfs.ndb", p9.OREAD, &f) == .Ok) {
+		n, _ := ns.read(&f, got[:])
+		check(n == len(got) && string(got[:]) == WANT)
+		ns.close(&f)
+	}
+	if check(ns.open(&space, "/bin/nstest", p9.OREAD, &f) == .Ok) {
+		n, _ := ns.read(&f, got[:4])
+		check(n == 4 && string(got[:4]) == "\x7fELF")
+		ns.close(&f)
+	}
 	// bootfs is read-only.
 	check(ns.open(&space, "/boot/svc/bootfs.ndb", p9.OWRITE, &f) == .Err_Access)
 	check(ns.open(&space, "/boot/svc/bootfs.ndb", p9.Open_Mode{access = .Read, trunc = true}, &f) == .Err_Access)
@@ -142,7 +144,7 @@ test_confinement :: proc "contextless" () {
 }
 
 @(export, link_name="vx_main")
-main :: proc() -> int {
+vx_main :: proc() -> int {
 	test_spawn()
 	st := procns.from_spawn(&space)
 	check(st == .Ok)
@@ -150,10 +152,6 @@ main :: proc() -> int {
 		test_namespace()
 		test_confinement()
 	}
-	rt.print("nstest: ")
-	rt.print_u64(u64(checks))
-	rt.print(" checks, ")
-	rt.print_u64(u64(failures))
-	rt.print(" failed\n")
+	rt.print("nstest: ", u64(checks), " checks, ", u64(failures), " failed\n")
 	return failures != 0 ? 1 : 0
 }

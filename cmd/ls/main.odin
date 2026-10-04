@@ -8,12 +8,13 @@ import "vx:p9"
 import "vx:procns"
 import "vx:rt"
 
-names: [8192]u8
-list: [512]string
+names: [dynamic; 8192]u8 // the text list's strings point into; a fixed capacity never moves it
+list: [dynamic; 512]string // sorted; a directory with more entries is listed in part
 space: ns.Namespace
 buf: [4096]u8
 
-ls :: proc "contextless" (path: string) -> bool {
+// Not contextless: inject_at needs a context.
+ls :: proc(path: string) -> bool {
 	c, fid, e := ns.walk(&space, path)
 	st: p9.Stat
 	if e == .Ok {
@@ -32,7 +33,8 @@ ls :: proc "contextless" (path: string) -> bool {
 	if ns.open(&space, path, p9.OREAD, &f) != .Ok {
 		return false
 	}
-	used, count := 0, 0
+	clear(&names)
+	clear(&list)
 	n: int
 	rst: vx.Status
 	for {
@@ -40,29 +42,23 @@ ls :: proc "contextless" (path: string) -> bool {
 		if n <= 0 {
 			break
 		}
-		for off := 0; off + 2 <= n; {
-			size := int(buf[off]) | int(buf[off + 1]) << 8
-			entry: p9.Stat
-			if off + size + 2 > n || p9.stat_decode(buf[off:off + size + 2], &entry) != .Ok {
-				break
-			}
-			off += size + 2
-			if count == len(list) || len(entry.name) > len(names) - used {
+		it := p9.Dir_Entries{buf = buf[:n]}
+		for entry in p9.next_entry(&it) {
+			if len(list) == cap(list) || len(entry.name) > cap(names) - len(names) {
 				continue
 			}
-			copy(names[used:], entry.name)
-			name := string(names[used:used + len(entry.name)])
-			used += len(entry.name)
-			at := count
-			count += 1
-			for ; at > 0 && list[at - 1] > name; at -= 1 { // insertion sort
-				list[at] = list[at - 1]
+			from := len(names)
+			_ = append(&names, entry.name)
+			name := string(names[from:])
+			at := len(list) // insertion sort: after any equal name
+			for at > 0 && list[at - 1] > name {
+				at -= 1
 			}
-			list[at] = name
+			_ = inject_at(&list, at, name)
 		}
 	}
 	ns.close(&f)
-	for name, i in list[:count] {
+	for name, i in list {
 		if i > 0 {
 			rt.print("  ")
 		}
@@ -73,7 +69,7 @@ ls :: proc "contextless" (path: string) -> bool {
 }
 
 @(export, link_name="vx_main")
-main :: proc() -> int {
+vx_main :: proc() -> int {
 	if procns.from_spawn(&space) != .Ok {
 		return 1
 	}
