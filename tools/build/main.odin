@@ -1,5 +1,6 @@
 package build
 
+import "base:runtime"
 import "core:fmt"
 import "core:os"
 import "core:path/filepath"
@@ -79,6 +80,7 @@ main :: proc() {
 			// A port that does not load has said why; the kernels still build.
 			limine, loaded := port_load("limine")
 			for a in arches {
+				runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 				lok := loaded
 				if loaded {
 					_, lok = build_port_target(&limine, a.limine)
@@ -89,6 +91,7 @@ main :: proc() {
 			}
 		case "image":
 			for a in arches {
+				runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 				ok = build_image(a, mode, image_path(a, mode)) && ok
 			}
 		case "qemu":
@@ -140,6 +143,9 @@ cmd_test :: proc(arches: []^Arch, mode: Mode, names: []string) -> bool {
 	ok := true
 	for a in arches {
 		for name in names {
+			// An image's build reads and writes hundreds of megabytes, all
+			// temporary: let each scenario's go before the next.
+			runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 			ok = run_scenario(a, mode, name) && ok
 		}
 	}

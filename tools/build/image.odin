@@ -52,7 +52,8 @@ build_image :: proc(a: ^Arch, mode: Mode, image: string, cmdline := "", with := 
 	}
 
 	esp := fmt.tprintf("%s.esp", image)
-	write_file(esp, string(make([]u8, ESP_BYTES, context.temp_allocator))) or_return
+	esp_file := create_sized(esp, ESP_BYTES) or_return
+	os.close(esp_file)
 	fmt.eprintfln("  IMG   %s", image)
 	serial := fmt.tprintf("%08x", u32(seed >> 32))
 	mtools(MFORMAT, esp, "-F", "-N", serial, "-v", "VECTRA", "::") or_return
@@ -128,6 +129,35 @@ gpt_header :: proc(h: []u8, my_lba, alt_lba, entries_lba, last_lba: u64, disk_gu
 	put32(h[16:], hash.crc32(h[:92]))
 }
 
+// A file of size bytes, all zero and sparse where the file system allows, open for
+// writing.
+@(private="file")
+create_sized :: proc(path: string, size: i64) -> (f: ^os.File, ok: bool) {
+	err: os.Error
+	f, err = os.open(path, {.Write, .Create, .Trunc}, os.Permissions_Read_All + {.Write_User})
+	if err != nil {
+		fmt.eprintfln("build: cannot write %s: %v", path, err)
+		return nil, false
+	}
+	if err = os.truncate(f, size); err != nil {
+		fmt.eprintfln("build: cannot size %s: %v", path, err)
+		os.close(f)
+		return nil, false
+	}
+	return f, true
+}
+
+@(private="file")
+write_at :: proc(f: ^os.File, path: string, data: []u8, offset: i64) -> bool {
+	if n, err := os.write_at(f, data, offset); err != nil || n != len(data) {
+		fmt.eprintfln("build: cannot write %s: %v", path, err)
+		return false
+	}
+	return true
+}
+
+// Writes the disk a piece at a time: the zeros between the pieces are the
+// sized file's, so nothing the size of the disk is ever in memory.
 @(private="file")
 write_gpt_disk :: proc(path, esp_path: string, seed: u64) -> bool {
 	esp_sectors := u64(ESP_BYTES / SECTOR)
@@ -138,37 +168,57 @@ write_gpt_disk :: proc(path, esp_path: string, seed: u64) -> bool {
 	derived_guid(disk_guid[:], seed, "disk")
 	derived_guid(part_guid[:], seed, "esp")
 
-	entries := make([]u8, GPT_TABLE_BYTES, context.temp_allocator)
-	copy(entries, ESP_TYPE[:])
+	entries: [GPT_TABLE_BYTES]u8
+	copy(entries[:], ESP_TYPE[:])
 	copy(entries[16:], part_guid[:])
 	put64(entries[32:], ESP_LBA)
 	put64(entries[40:], ESP_LBA + esp_sectors - 1)
 	for c, i in "EFI system partition" {
 		put16(entries[56 + 2 * i:], u16(c))
 	}
-	entries_crc := hash.crc32(entries)
-
-	disk := make([]u8, total * SECTOR, context.temp_allocator)
+	entries_crc := hash.crc32(entries[:])
 
 	// A protective MBR: one partition of type 0xEE covering the disk.
-	pe := disk[446:]
+	mbr: [SECTOR]u8
+	pe := mbr[446:]
 	pe[2] = 0x02 // CHS of LBA 1
 	pe[4] = 0xee
 	pe[5], pe[6], pe[7] = 0xff, 0xff, 0xff
 	put32(pe[8:], 1)
 	put32(pe[12:], last > 0xffffffff ? 0xffffffff : u32(last))
-	disk[510], disk[511] = 0x55, 0xaa
+	mbr[510], mbr[511] = 0x55, 0xaa
 
-	gpt_header(disk[SECTOR:][:SECTOR], 1, last, 2, last, disk_guid[:], entries_crc)
-	copy(disk[2 * SECTOR:], entries)
-	copy(disk[(last - 32) * SECTOR:], entries)
-	gpt_header(disk[last * SECTOR:][:SECTOR], last, 1, last - 32, last, disk_guid[:], entries_crc)
+	primary, backup: [SECTOR]u8
+	gpt_header(primary[:], 1, last, 2, last, disk_guid[:], entries_crc)
+	gpt_header(backup[:], last, 1, last - 32, last, disk_guid[:], entries_crc)
 
-	esp := read_file(esp_path) or_return
-	if len(esp) != ESP_BYTES {
-		fmt.eprintfln("build: %s is %d bytes, not %d", esp_path, len(esp), ESP_BYTES)
+	esp, eerr := os.open(esp_path)
+	if eerr != nil {
+		fmt.eprintfln("build: cannot read %s: %v", esp_path, eerr)
 		return false
 	}
-	copy(disk[ESP_LBA * SECTOR:], esp)
-	return write_file(path, string(disk))
+	defer os.close(esp)
+	if size, _ := os.file_size(esp); size != ESP_BYTES {
+		fmt.eprintfln("build: %s is %d bytes, not %d", esp_path, size, ESP_BYTES)
+		return false
+	}
+
+	disk := create_sized(path, i64(total * SECTOR)) or_return
+	defer os.close(disk)
+	write_at(disk, path, mbr[:], 0) or_return
+	write_at(disk, path, primary[:], SECTOR) or_return
+	write_at(disk, path, entries[:], 2 * SECTOR) or_return
+	buf: [64 * 1024]u8
+	for off := i64(0); off < ESP_BYTES; {
+		n, err := os.read(esp, buf[:])
+		if err != nil || n <= 0 {
+			fmt.eprintfln("build: cannot read %s: %v", esp_path, err)
+			return false
+		}
+		write_at(disk, path, buf[:n], ESP_LBA * SECTOR + off) or_return
+		off += i64(n)
+	}
+	write_at(disk, path, entries[:], i64(last - 32) * SECTOR) or_return
+	write_at(disk, path, backup[:], i64(last) * SECTOR) or_return
+	return true
 }
