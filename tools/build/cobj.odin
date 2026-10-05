@@ -21,7 +21,7 @@ import "core:strings"
 //  - for an architecture, out/NAME/ARCH/libNAME.a: compiled once per
 //    architecture (both modes link it) with the freestanding flags Odin
 //    programs are built with, then the port's cflags, and cached as musl is
-//    (its stamp is the port's input hash). A program links it after its own
+//    (its stamp is the port's input hash and the compiler's command). A program links it after its own
 //    objects when its Program entry names the port in cports (program.odin).
 //  - for this machine, out/NAME/host/libNAME.a, for host tests and tools: a
 //    package under tests/host that says `// host-links: NAME` in any of its
@@ -33,9 +33,12 @@ import "core:strings"
 
 // What a native port compiles with on an architecture, before its cflags:
 // freestanding, static and not PIC, as Odin's objects are. No stack
-// protector: Odin programs define no __stack_chk_guard.
+// protector: Odin programs define no __stack_chk_guard. No -g: upstream
+// builds its native ports without debug information (build.c's user flags
+// and the ports' cflags carry none). ACPICA's would be 1.8 MB of bus-acpi,
+// in each boot slot of an ESP (64 MiB in the slots scenario) that holds two.
 @(private="file")
-COBJ_TARGET_FLAGS :: []string{"-ffreestanding", "-fno-pic", "-fno-stack-protector", "-g"}
+COBJ_TARGET_FLAGS :: []string{"-ffreestanding", "-fno-pic", "-fno-stack-protector"}
 
 // And on this machine: position-independent, so it links into Odin's host
 // executables whether or not they are PIE.
@@ -131,7 +134,7 @@ cobj_build :: proc(p: ^Port, target: string, cc: []string) -> (lib: string, ok: 
 	objdir := fmt.tprintf("%s/obj", outdir)
 	lib = fmt.tprintf("%s/lib%s.a", outdir, p.name)
 	stamp := fmt.tprintf("%s/stamp", outdir)
-	key := fmt.tprintf("%016x\n", p.input_hash)
+	key := fmt.tprintf("%016x %s\n", p.input_hash, strings.join(cc, " ", context.temp_allocator))
 	if os.exists(lib) && os.exists(stamp) {
 		if got, _ := read_file(stamp); got == key {
 			return lib, true
