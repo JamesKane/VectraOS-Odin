@@ -4,29 +4,18 @@ package rc
 
 import "base:intrinsics"
 import "vx:str"
+import vxutf "vx:utf"
 
 // --- Patterns and globbing ---
 
-// The length of the UTF-8 sequence at s[i], 1 when it is not one, as rc's
-// nextutf; and its rune (-1 if malformed), as rc's unicode.
+// The length of the UTF-8 sequence at s[i], 1 when it is not one; and its
+// rune, -1 if it is not one: vx:utf's strict decoding, the one rune library
+// (upstream ADR-0013).
 @(private = "file")
 utf :: proc "contextless" (s: string, i: int) -> (n: int, c: i32) {
-	b := s[i]
-	size := 4
-	v := i32(b & 0x07)
-	switch {
-	case b < 0x80:
-		size, v = 1, i32(b)
-	case b < 0xe0:
-		size, v = 2, i32(b & 0x1f)
-	case b < 0xf0:
-		size, v = 3, i32(b & 0x0f)
-	}
-	n = 1
-	for ; n < size && i + n < len(s) && s[i + n] & 0xc0 == 0x80; n += 1 {
-		v = v << 6 | i32(s[i + n] & 0x3f)
-	}
-	return n, n == size ? v : -1
+	r, size := vxutf.decode(s[i:])
+	bad := size == 1 && r == vxutf.RUNE_ERROR && s[i] >= vxutf.RUNE_SELF
+	return max(size, 1), bad ? -1 : i32(r)
 }
 
 // Whether s matches pattern p, as rc's match: * ? and [ are special only

@@ -1,0 +1,348 @@
+page=vxfs sect=6 summary="the vx-fs disk format"
+    src=lib/vx-fs/fs.h,lib/vx-fs/blk.c,lib/vx-fs/tree.c,lib/vx-fs/vol.c,lib/vx-fs/file.c,lib/vx-fs/xxh64.c
+    keys=vx-fs,format,superblock,arena,log,b-epsilon,tree,pivot,leaf,key,message,snapshot,deadlist,gefs
+
+# SYNOPSIS
+
+```text
+block 0           superblock
+block 1 ...       arena 0: header, data blocks, footer
+                  arena 1 ... arena n-1
+                  (unused)
+last block        superblock, a copy
+```
+
+# DESCRIPTION
+
+vx-fs is the system volume's file system, after 9front's gefs: the volume is a forest of copy-on-write Bε trees in blocks of one size, and a file system is one tree's keys.
+fsd(4) serves a volume, install(8) makes one, and vxfs(8) makes and reads images on the development machine; all three use `lib/vx-fs`, and nothing else reads or writes the format.
+The volume is a partition, or an image file holding one.
+
+Every block is 16384 bytes and starts at a byte address that is a multiple of 16384.
+Integers in blocks are little-endian.
+Integers inside keys are big-endian, so that keys compare as bytes and sort as their numbers do.
+The hash is XXH64, with seed 0 unless this page says otherwise; it catches failing media and bugs, not tampering.
+Times are signed nanoseconds since 1970, UTC, as the system's clock gives them (counted from boot before it has a wall clock).
+
+A generation is a number from one counter, kept in the superblock, which also numbers snapshots.
+Each tree is changed in a generation of its own, which ends at a commit; every block a tree writes carries the generation it was born in, and a snapshot's id is the generation of its newest blocks.
+0 means none.
+
+Nothing written is changed in place, except an arena's log, its header and footer, and the superblocks.
+A block is reached through a pointer holding its hash, so a block read wrongly is found and refused, and the volume is then read-only; every offset and length inside a block is checked too, so a damaged volume makes errors, never faults.
+
+The page describes each structure as the code lays it out: the superblock, arenas and their logs, block pointers, the trees' blocks, keys and messages, the snapshot tree, and files and directories.
+A field is written `name[n]`, <n> its size in bytes.
+
+@node=superblock title="The superblock"
+
+The superblock is the volume's first block, and a copy is its last.
+A commit writes the first, then, after a barrier, the copy, so a power cut tears at most one of them.
+Mounting reads both, takes the whole one with the larger `commit`, or the other if its arenas will not load, and rewrites the other copy before it writes anything else.
+
+| Offset | Field | Holds |
+| 0 | `magic[4]` | `0x73667876`, the bytes `vxfs` |
+| 4 | `version[4]` | 1 |
+| 8 | `blksz[4]` | 16384 |
+| 12 | `bufspc[4]` | 8187, a pivot's buffer's size |
+| 16 | `narenas[4]` | the arenas, 1 to 677 |
+| 20 | `snapht[4]` | the snapshot tree's height, 1 to 32 |
+| 24 | `snaproot[24]` | a pointer to the snapshot tree's root |
+| 48 | `commit[8]` | the commits made so far |
+| 56 | `nextgen[8]` | the next generation |
+| 64 | `nextqid[8]` | the next `qid.path` |
+| 72 | `nextdl[8]` | the next deadlist sequence number |
+| 80 | `flags[8]` | 0 |
+| 88 | `freed[8]` | the address of the freed chain, or 0 |
+| 96 | `spare[8]` | 0 |
+| 104 | the arena table | `narenas` entries of 24 bytes |
+| 104 + 24 × `narenas` | `hash[8]` | XXH64 of every byte before it |
+
+The rest of the block is zeros.
+Each arena table entry is `base[8] blocks[8] hash[8]`: the arena's header's address, its count of data blocks, and the hash of its header block.
+
+A superblock is refused if its magic, version, block size or buffer size differ, if `narenas` is 0 or over 677, if `snapht` is outside 1 to 32, or if its hash does not match.
+An arena that does not lie wholly between the two superblocks, or that overlaps another, is refused.
+
+The freed chain lists what the commit freed, in deadlist blocks ({the snapshot tree|#snapshots}).
+Those frees were logged after the part of the logs the commit covers, so mounting does them again, and frees the chain's own blocks at the next commit.
+
+@node=arenas title="Arenas and their logs"
+
+An arena is a header block at `base`, `blocks` data blocks after it, and a footer after them: a copy of the header, which a commit writes after the superblock.
+Every block of a tree, a file, a log or a chain is a data block of some arena.
+A volume made by `lib/vx-fs` has one arena for each 4 GiB, 64 at most and each of at least 64 blocks; arena <i> starts at block 1 + <i> × <per>, where <per> is the volume's blocks less two, divided by the number of arenas, and holds <per> − 2 data blocks.
+
+The header block is:
+
+| Offset | Field | Holds |
+| 0 | `type[2]` | 5 |
+| 2 | `base[8]` | the header's own address |
+| 10 | `blocks[8]` | the data blocks |
+| 18 | `loghd[8]` | the address of the log's first block |
+| 26 | `logtl[8]` | the address of the log's last block |
+| 34 | `tailsz[2]` | the bytes of the last block the commit covers |
+| 36 | `tailhash[8]` | XXH64 of those bytes |
+
+and zeros.
+Mounting reads the header, checked against the superblock's hash of it, or the footer if the header does not match; its `base` and `blocks` must agree with the table's.
+
+An arena's free space is its log: a chain of log blocks recording each allocation and free, replayed at mount, which is the one structure appended to in place.
+A log block is:
+
+| Offset | Field | Holds |
+| 0 | `type[2]` | 3 |
+| 2 | `logsz[2]` | the bytes of entries, a multiple of 8, at most 16348 |
+| 4 | `loghash[8]` | the block's own hash |
+| 12 | `next[24]` | a pointer to the next block, its address only |
+| 36 | entries | 16348 bytes |
+
+`loghash` is XXH64 of the entries, seeded with XXH64 of the first 4 bytes (seed 0) exclusive-or XXH64 of `next` (seed 1), so a damaged header is found as a damaged entry is.
+An entry is a word `addr[8]`, a block's address with an operation in its low byte, which a block-aligned address leaves free:
+
+: 1, one block taken
+  `addr` alone.
+: 2, one block freed
+  `addr` alone.
+: 3, blocks taken
+  Followed by `len[8]`, the bytes taken from `addr`, a nonzero multiple of 16384.
+: 4, blocks freed
+  Followed by `len[8]`, likewise.
+
+Any other operation is refused.
+A replay starts with nothing free; a new arena's log starts with a free of all its data blocks and the taking of the log's first block.
+When a block's entries reach 16308 bytes, the next block is taken, recorded in the full block as a one-block take, and named in its `next`.
+A replay reads each block from `loghd` checked by its own hash, then of `logtl` only the `tailsz` bytes the header covers, checked against `tailhash`; the rest of that block was written after the commit and is ignored.
+Every block of the log must then be one the log says is taken.
+A long log is rewritten as new blocks holding only frees, one for each free range; the old blocks stay taken until the commit naming the new log is durable.
+
+@node=pointers title="Block pointers"
+
+A block pointer is `addr[8] hash[8] gen[8]`:
+
+: `addr`
+  The block's byte address on the volume, a multiple of 16384.
+: `hash`
+  XXH64 of the block's 16384 bytes.
+: `gen`
+  The generation the block was born in.
+
+A block whose hash does not match its pointer is refused.
+Log and deadlist blocks carry their own hash instead, and the pointers to them have only an address.
+A block is never older than a block it points at.
+
+@node=blocks title="The trees' blocks"
+
+A block's first two bytes are its type, except a data block's:
+
+: 0, data
+  A file's bytes, 16384 of them, with no header.
+: 1, pivot
+  An inner node of a tree.
+: 2, leaf
+  A tree's values.
+: 3, log
+  An arena's log ({arenas|#arenas}).
+: 4, deadlist
+  A chain of addresses ({the snapshot tree|#snapshots}).
+: 5, arena
+  An arena's header or footer.
+
+A pivot's header is `type[2] nval[2] valsz[2] nbuf[2] bufsz[2]`, 10 bytes.
+After it are two areas of 8187 bytes: its children, then a buffer of messages bound for them.
+A leaf's header is `type[2] nval[2] valsz[2]`, 6 bytes, and one area of 16378 bytes, its values, follows.
+
+An area is a table.
+At its front are `nval` (or `nbuf`) offsets of 2 bytes, each from the area's start to an entry; the entries are packed from the area's end towards the front, and `valsz` (or `bufsz`) is their bytes, the offsets apart.
+An entry is
+
+```text
+op[1] nk[2] key[nk] nv[2] value[nv]
+```
+
+with `op` only in a buffer.
+A key is 1 to 256 bytes, and a value at most 512.
+Keys compare byte by byte, and a key that is a prefix of another sorts first.
+
+- In a leaf, the entries are values in strictly increasing order of key.
+- In a pivot's first area, each entry is a child: the least key it holds, or less, and a value of 26 bytes, a block pointer and `fill[2]`, the bytes the child uses, its offsets included.
+  There is at least one, in strictly increasing order of key.
+  A key belongs to the last child whose key is at most it, or to the first if none is.
+- In a pivot's buffer, the entries are messages ({keys and messages|#keys}) for its children, in order of key; messages for one key are in the order they were made, oldest first.
+
+A tree's height is 1 when its root is a leaf, and at most 32.
+A value is read by applying, to the leaf's value, the messages for its key buffered on the path, the deepest first.
+
+@node=keys title="Keys and messages"
+
+A key's first byte is its type:
+
+: 0, `Kdat qid[8] off[8]`
+  A block of a file's data: the file's `qid.path` and the block-aligned offset.
+  The value is a kind byte, then, for kind 0, a block pointer to a data block (25 bytes in all), or, for kind 1, the bytes themselves, at most 511, the rest of the block reading as zeros.
+: 1, `Kent pqid[8] name[]`
+  A directory entry: the directory's `qid.path` and the entry's name.
+  The value is the entry ({files and directories|#files}).
+: 2, `Kup qid[8]`
+  The value is the `Kent` or `Korphan` key of the entry whose `qid.path` is <qid>.
+: 3, `Klabel name[]`
+  A label, in the snapshot tree.
+: 4, `Ksnap id[8]`
+  A snapshot, in the snapshot tree.
+: 5, `Kdlist snap[8] birth[8] seq[8]`
+  A deadlist, in the snapshot tree.
+: 6, `Korphan qid[8]`
+  A file removed while it was open; the value is its entry.
+
+A message is an operation on a key:
+
+: 1, insert
+  The value, replacing any.
+: 2, delete
+  The key goes.
+: 3, clear block
+  A `Kdat` key goes, if it is there.
+: 4, clobber
+  The key goes, if it is there, and nothing is freed.
+: 5, wstat
+  An entry's fields change in place, and its `qid.vers` grows by one.
+
+Operation 0, or one over 5, is refused.
+An insert, delete or clear block that removes a `Kdat` value naming a data block frees that block.
+A wstat's value is `flags[1]`, then each field a flag names, in this order, and nothing else:
+
+| Flag | Field |
+| 0x01 | `length[8]` |
+| 0x02 | `mode[4]`, which also sets `qid.type` to its top byte |
+| 0x04 | `mtime[8]` |
+| 0x08 | `atime[8]` |
+| 0x10 | `uid[4]` |
+| 0x20 | `gid[4]` |
+| 0x40 | `muid[4]` |
+| 0x80 | `ctime[8]` |
+
+A wstat of a value that is not a 77-byte entry is damage.
+
+@node=snapshots title="The snapshot tree"
+
+The superblock's `snaproot` is the snapshot tree, a tree like any other that holds `Klabel`, `Ksnap` and `Kdlist` keys; it is never snapshotted itself.
+
+: `Klabel name[]`
+  A label, 1 to 255 bytes.
+  The value is `id[8] flags[4]`: the snapshot it names, and flag 1 if the label is a branch, which moves to the branch's new snapshot at every commit.
+  A label without it names a snapshot that stays as it is.
+: `Ksnap id[8]`
+  A snapshot, keyed by its id; the value is 72 bytes:
+
+| Offset | Field | Holds |
+| 0 | `root[24]` | a block pointer to the tree's root |
+| 24 | `height[4]` | its height, 1 to 32 |
+| 28 | `flags[4]` | 0 |
+| 32 | `gen[8]` | the id: its newest blocks' generation |
+| 40 | `pred[8]` | the one before it on its branch, or 0 |
+| 48 | `succ[8]` | the one after it, or 0 |
+| 56 | `base[8]` | the snapshot its branch was forked from, or 0 |
+| 64 | `nlbl[4]` | the labels naming it |
+| 68 | `nref[4]` | the branches forked from it |
+
+: `Kdlist snap[8] birth[8] seq[8]`
+  A deadlist: blocks born in generation <birth> that the tree being built as snapshot <snap> no longer reaches, while an older snapshot still does.
+  The value is `head[8] count[8]`: the address of the list's first block and how many addresses it holds.
+  <seq> is from the superblock's `nextdl`, and keeps apart lists of one snapshot and birth; a deleted snapshot's lists are moved to its successor under new keys, never rewritten.
+
+A snapshot with no label and no fork is deleted.
+Deleting snapshot <S>, preceded by <P> and followed by <T>: <S>'s deadlists born at or before <P> become <T>'s; the rest, and <T>'s lists born after <P>, hold blocks only <S> had, and are freed.
+Blocks born at or before a branch's `base` are freed by the branch they came from, never by it.
+
+A deadlist block, like a block of the freed chain, is laid out as a log block, type 4, its entries addresses of 8 bytes, at most 2043 to a block; `next`'s address is the next block, and 0 ends the chain.
+
+@node=files title="Files and directories"
+
+A branch's tree, or a snapshot's, holds one file system.
+Its root is `Kent(0, "")`, a key of 9 bytes, and every other entry is `Kent(`<pqid>`, `<name>`)` in its directory, so a directory's entries are one range of keys, in name order.
+A name is 1 to 247 bytes other than `.` and `..`, with no `/` or NUL.
+Every entry, the root's too, has a `Kup` naming its key, so it is found by its qid, and a directory's parent is the `pqid` of its key.
+There are no hard links: each entry has one name.
+
+An entry is 77 bytes:
+
+| Offset | Field | Holds |
+| 0 | `flags[8]` | 0 |
+| 8 | `qid.path[8]` | the file's number, from `nextqid` |
+| 16 | `qid.vers[4]` | grows at each change |
+| 20 | `qid.type[1]` | 0x80 a directory, 0x02 a link, 0 a file |
+| 21 | `mode[4]` | the permission bits and the type, below |
+| 25 | `atime[8]` | the last access |
+| 33 | `mtime[8]` | the last change of the contents |
+| 41 | `ctime[8]` | the last change of the entry |
+| 49 | `btime[8]` | the creation |
+| 57 | `length[8]` | the bytes, at most 2^62; 0 for a directory |
+| 65 | `uid[4]` | the owner |
+| 69 | `gid[4]` | the group |
+| 73 | `muid[4]` | the last to change the contents |
+
+`mode`'s low 12 bits, 07777, are the permission bits; 0x80000000 marks a directory and 0x02000000 a symbolic link.
+`qid.path` is never reused.
+Owners are numbers; users(6) names them.
+
+A file's data is a `Kdat` key for each 16384-byte block that holds any; a missing key reads as zeros.
+A file of at most 511 bytes is kept whole as inline bytes in `Kdat(`<qid>`, 0)`; a longer one is kept in data blocks, one pointer a block.
+A symbolic link is a file whose target, 1 to 511 bytes, is its inline data.
+
+A file removed while it is open loses its `Kent`; its entry moves to `Korphan(`<qid>`)`, its `Kup` names that key, and its data stays until it is freed, when the last open goes or, after a crash, when its branch is next opened.
+
+# EXAMPLES
+
+A new volume, its superblock and its one arena's header:
+
+```rc
+% vxfs mkfs t.img 64 adm home
+% vxfs info t.img
+commit 3, 1 arenas, next generation 10
+used 80 of 65472 KiB
+branch adm: snapshot 7
+branch home: snapshot 8
+% od -A d -t x1 -N 136 t.img
+0000000 76 78 66 73 01 00 00 00 00 40 00 00 fb 1f 00 00
+0000016 01 00 00 00 01 00 00 00 00 80 fd 03 00 00 00 00
+0000032 99 96 bf 61 b0 55 fb 77 09 00 00 00 00 00 00 00
+0000048 03 00 00 00 00 00 00 00 0a 00 00 00 00 00 00 00
+0000064 04 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00
+0000080 00 00 00 00 00 00 00 00 00 80 fe 03 00 00 00 00
+0000096 00 00 00 00 00 00 00 00 00 40 00 00 00 00 00 00
+0000112 fc 0f 00 00 00 00 00 00 f7 ab 14 67 80 50 ad c8
+0000128 40 c5 b5 1e df bc b1 11
+0000136
+% od -A d -t x1 -j 16384 -N 44 t.img
+0016384 05 00 00 40 00 00 00 00 00 00 fc 0f 00 00 00 00
+0016400 00 00 00 80 00 00 00 00 00 00 00 80 00 00 00 00
+0016416 00 00 c8 00 cf 47 aa ef 08 a4 15 de
+0016428
+```
+
+The superblock: one arena, a snapshot tree of height 1 rooted at 0x3fd8000 and born in generation 9, commit 3, next generation 10, next qid 4 (the two roots and `/adm/users` took 1 to 3), the freed chain at 0x3fe8000, then the arena (its header at 0x4000, 4092 data blocks, its header's hash) and the superblock's hash.
+The arena's header: its log is one block, at 0x8000, of which the commit covers 200 bytes.
+
+# FILES
+
+: `lib/vx-fs/fs.h`
+  The format's constants, keys, messages and records.
+
+# SEE ALSO
+
+fsd(4), vxfs(8), install(8), users(6); `docs/11-storage.md` and ADR-0025 in the repository; gefs's paper, 9front's `/sys/doc/gefs.ms`
+
+# BUGS
+
+The `flags` fields of the superblock, a snapshot and an entry are written as 0, or copied, and never read: a volume with other values there mounts as if they were 0.
+
+A key whose type is none of these, in any tree, is kept in order like any other and never read; no check refuses it.
+A reader takes inline data at any offset, though a writer makes it only for a whole small file.
+
+Version 1 changed in place in M5 step 10, when a log block's hash came to cover its header; a volume made before then does not mount, and says only that it is damaged.
+
+`docs/11-storage.md` gives the limit on a snapshot's height as 16; it is 32.
+It says a create adds a `Kup` only for a directory, and that a removed file's data is cleared in the background; every entry has a `Kup`, and a remove clears the data in its own upserts.
+`fs.h` says a delete's key must exist; deleting a key that is not there does nothing.
+
+The superblock's table has room for 677 arenas, but `lib/vx-fs` makes at most 64, and a volume cannot grow.

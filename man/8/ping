@@ -1,0 +1,61 @@
+page=ping sect=8 summary="probe a machine with ICMP echo requests"
+    src=cmd/ping.c
+    keys=icmp,echo,network,round,trip,reachable
+
+# SYNOPSIS
+
+```usage
+ping [-count] addr
+```
+
+# DESCRIPTION
+
+`ping` sends ICMP echo requests to the IPv4 address <addr>, a second apart, and prints a line for each reply: the address, the request's sequence number, from 1, and the round trip in microseconds.
+When all are answered it prints how many it sent and how many came back.
+
+: `-`<count>
+  Send <count> requests, a decimal number, instead of 3.
+
+<addr> is a dotted IPv4 address; `ping` does not look up names, which cs(1) does.
+Each request is 64 bytes: the 8-byte header and 56 bytes of payload, whose first 8 bytes are the time it was sent, so the round trip is measured from the reply alone.
+
+`ping` works through netd(4)'s `/net/icmp`: it opens `clone`, reads the conversation's number from the file that becomes its `ctl`, writes `connect` <addr> there, then writes each request to the conversation's `data` and reads replies from it.
+netd fills in each request's identifier and checksum.
+A reply that is not an echo reply, or answers an earlier request, is skipped.
+
+`ping` exits with no error when every request is answered.
+
+# EXAMPLES
+
+```rc
+% ping 10.0.2.2
+ping: 10.0.2.2: seq=1 time=391us
+ping: 10.0.2.2: seq=2 time=329us
+ping: 10.0.2.2: seq=3 time=259us
+ping: 3 sent, 3 received
+% ping 10.0.2
+ping: connect: bad message
+```
+
+# FILES
+
+: `/net/icmp/clone`
+  Opened for each run, making the conversation.
+: `/net/icmp/<n>/data`
+  The conversation's requests and replies.
+
+# SEE ALSO
+
+cs(1), netd(4)
+
+# DIAGNOSTICS
+
+A failure prints `ping:` and what failed, such as `connect` or `/net/icmp/clone`, with the error when there is one, and exits `error`.
+An <addr> that is not a dotted IPv4 address is refused by netd as `connect: bad message`.
+An <addr> longer than 40 bytes, or a <count> that is not a number, prints the usage message.
+
+# BUGS
+
+There is no timeout: a request that is never answered holds `ping` in its read until a reply comes, so it hangs rather than reporting a loss; the exit string `lost`, for requests unanswered, is never reached.
+`-0` sends nothing and succeeds.
+The test that bounds <count> is made before its last digit, so a count of up to 10009 is accepted.

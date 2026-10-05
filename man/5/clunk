@@ -1,0 +1,36 @@
+page=clunk sect=5 summary="forget about a fid"
+    names=clunk,Tclunk,Rclunk
+    src=lib/vx-9p/server.c,lib/vx-9p/ring_server.c,lib/vx-9p/client.c,lib/vx-9p/messages.def
+    keys=9p,9px,clunk,close,fid,orclose
+
+# SYNOPSIS
+
+```text
+size[4] Tclunk tag[2] fid[4]
+size[4] Rclunk tag[2]
+```
+
+# DESCRIPTION
+
+The `clunk` request, type 120, tells the server that <fid> is no longer needed; `Rclunk` is type 121.
+Once clunked, the fid may be used again in a walk or an attach.
+
+A VectraOS server answers a <fid> the connection does not have with `unknown fid`; any other is let go and answered `Rclunk`, which then cannot fail.
+The file server is told the fid let its file go, and whether the fid was open, and some act on it: fsd(4) removes a file removed while open when its last fid goes, and dosfs(4) writes out a file written through the fid.
+
+With the `posix` extension, an open fid has an open file the server keeps, perhaps shared with fids on other connections (see share(5)).
+The clunk takes the fid from it; the open file goes when it has no fids left and no holds for `Tjoin`, and holds outlive its last fid by 10 seconds.
+Clunking an open fid also lets go of every lock the connection holds on the file, whatever the lock's process (see lock(5)), as POSIX's `close` lets go of a process's locks on a file.
+
+The server clunks fids itself as well: `Tremove` clunks its fid whether the remove works or not (see remove(5)), `Tversion` clunks every fid on the connection (see version(5)), and so does the connection's end.
+
+VectraOS's client clunks a fid when the program is done with it, and the fid a walk of a long path made when a later step fails; it does not use a fid's number again.
+
+# SEE ALSO
+
+attach(5), walk(5), open(5), remove(5), version(5)
+
+# BUGS
+
+`ORCLOSE` is not carried out: the server never removes a file at its clunk.
+procfs(4), netd(4) and the console refuse an open with it, and bootfs(4), isofs(4), distd(8) and a read-only dosfs(4) count it as writing and refuse it as they refuse any write; fsd(4), tmpfs(4) and a writable dosfs(4) open the file as if the bit were clear.

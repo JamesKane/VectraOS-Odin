@@ -1,0 +1,179 @@
+page=pager sect=2 summary="supply the pages of VMOs from a trusted task"
+    names=pager_create,pager_supply,pager_op
+    src=kernel/obj/pager.c,kernel/syscall/syscall.c,lib/vx-rt/base.c
+    keys=pager,mmap,page,fault,dirty,writeback,evict,resize
+
+# SYNOPSIS
+
+```c
+vx_status vx_pager_create(vx_handle resource, vx_handle port, uint64_t key,
+                          vx_duration deadline, vx_handle *out);
+vx_status vx_vmo_create_pager(vx_handle pager, uint32_t key, uint64_t size,
+                              vx_handle *out);
+
+vx_status vx_pager_supply(vx_handle pager, vx_handle vmo, uint64_t offset,
+                          uint64_t size, vx_handle source,
+                          uint64_t source_offset);
+
+int64_t vx_pager_op(vx_handle pager, vx_handle vmo, uint32_t op,
+                    uint64_t offset, uint64_t size, vx_pager_range *ranges);
+vx_status vx_pager_resize(vx_handle pager, vx_handle vmo, uint64_t size);
+```
+
+# DESCRIPTION
+
+A pager is a trusted task's supply of pages for VMOs (see vmo(2)), how a file server backs the mapping of files: `fsd` is the system's pager, and answers a `Tmap` with a pager-backed VMO holding the file, one for all who map it (docs/11 §8).
+Pagers are trusted or absent: only a task that `svcd` has marked a pager holds the authority to make one.
+
+`vx_pager_create` makes a Pager and puts a handle to it in <out>.
+<resource> must be a Resource handle with `VX_RIGHT_PAGER`, which `svcd` gives, narrowed to that right alone, to a service whose manifest says `pager`; one with `VX_RIGHT_MANAGE`, the root Resource, serves as well.
+Page requests go to <port>, which needs `VX_RIGHT_SIGNAL`, as packets whose key is <key>.
+<deadline> is how long, in nanoseconds, a thread that touches a missing page waits for it; it may not be 0.
+The handle has `VX_RIGHT_READ`, `VX_RIGHT_WRITE`, `VX_RIGHT_DUPLICATE`, `VX_RIGHT_TRANSFER` and `VX_RIGHT_INSPECT`; every call on the Pager needs `VX_RIGHT_WRITE`.
+The Pager holds its port, and each of its VMOs holds the Pager.
+
+`vx_vmo_create_pager`, which vmo(2) describes, makes a VMO whose pages the Pager supplies, none yet, named in requests by <key>.
+The pager keeps a handle to it, and hands others out as it chooses.
+
+## Faults
+
+A mapping of a pager-backed VMO maps what has been supplied when it is made, and the rest as it is touched.
+A thread that touches a page not supplied faults, and the kernel asks the pager for it with a packet on its port: trigger `VX_TRIGGER_PAGER`, key the Pager's key, source the VMO's key, and value the page's range, read with `vx_pager_offset` and `vx_pager_pages`.
+It asks once however many threads fault on the page, and each waits.
+When the page comes, the waiters map it and go on; when the pager's deadline passes first, counted from a thread's first wait, the thread takes a `VX_EXCEPTION_PAGER_TIMEOUT` exception instead, naming the page and whether it read, wrote or executed (POSIX's `SIGBUS`), and the next fault on the page asks again.
+A request the port has no room for is not lost: the faulting thread asks again every millisecond until its deadline.
+
+A page is mapped read-only, even in a writable mapping, until it is written: that write faults, marks the page dirty and maps it writable, which is how the pager learns what to write back.
+A forked task shares its parent's mappings of a pager-backed VMO rather than copying them.
+The kernel's own copies to and from user memory take no page that is not there yet; they fail as on an unmapped page, so a program touches a mapped file's pages itself before handing them to a system call.
+
+## Supplying
+
+`vx_pager_supply` copies pages <source_offset> to <source_offset> + <size> of <source> into pages <offset> to <offset> + <size> of <vmo>, and wakes every thread waiting on <vmo>'s pages.
+<vmo> must be one of <pager>'s, and needs no rights of its own; <source> must be an anonymous VMO, with `VX_RIGHT_READ`.
+The offsets and <size> must be page-aligned, <size> not zero, and both ranges within their VMOs.
+A page already supplied stays as it is, and the copy of it is dropped.
+A page need not have been asked for: a pager may supply pages ahead of the faults that would ask.
+
+## Operations
+
+`vx_pager_op` acts on pages <offset> to <offset> + <size> of <vmo>, which must be one of <pager>'s.
+<offset> and <size> must be page-aligned; pages of the range past the VMO's end are ignored.
+<op> is one of:
+
+: `VX_PAGER_DIRTY`
+  The range's dirty pages, as runs of adjacent pages, into <ranges>: at most `VX_PAGER_RANGES` (64) `vx_pager_range`, each an offset and a size in bytes.
+  It returns how many it wrote, so 64 may mean more are left: the pager cleans those it has, and asks again.
+  A page is dirty from its first write after it was supplied or cleaned.
+: `VX_PAGER_CLEAN`
+  The range's pages clean, and taken out of every mapping, so the next write to one marks it dirty again.
+  To write back, a pager cleans a range, then reads it and writes it out: a write before the clean is in what it reads, one after it is dirty for next time.
+  <ranges> is not used.
+: `VX_PAGER_EVICT`
+  The range's clean pages taken out of every mapping and freed, absent again: a touch asks the pager for them as before.
+  Dirty pages stay.
+: `VX_PAGER_IDLE`
+  Returns 1 if the caller's handle to <vmo> is its only reference, with no other handle and no mapping, and 0 otherwise.
+  The pager may then let the VMO go, as `fsd` does with a file no one maps.
+  <offset> and <size> are 0.
+: `VX_PAGER_RESIZE`
+  The VMO's new size is <size>, rounded up to a page, with <offset> 0; `vx_pager_resize` makes this call.
+  Pages added are absent.
+  Pages past a smaller size are made absent, taken out of every mapping and freed, and a touch there, or a mapping made there from then on, is refused as past the VMO's end.
+  Resizing is the pager's alone, since everyone who maps the VMO shares its size; `vmo_op` on a pager-backed VMO is refused.
+
+# EXAMPLES
+
+`fsd` answers a page request: each page read from the file into an anonymous scratch page, zeros past the file's end, and supplied from it (`servers/fsd/fsd.c`, lines rewrapped):
+
+```c
+static void supply(const vx_packet *pk) {
+  uint32_t i = (uint32_t)pk->source;
+  if (i >= MAX_CACHED || !pcache[i].used) return;
+  cached *c = &pcache[i];
+  vxfs_file f;
+  bool there = !c->dead && file_of(c->node, &f) == VX_OK;
+  uint64_t first = vx_pager_offset(pk->value);
+  for (uint64_t p = 0; p < vx_pager_pages(pk->value); p++) {
+    uint64_t at = first + p * 4096, got = 0;
+    if (there && at < f.d.length)
+      vxfs_read(&vol, tree_of(c->node), &f, at, page_buf, 4096, &got);
+    memset(page_buf + got, 0, 4096 - got);
+    if (vx_vmo_rw(scratch, VX_VMO_WRITE, 0, page_buf, 4096) == VX_OK)
+      vx_pager_supply(pager, c->vmo, at, 4096, scratch, 0);
+  }
+}
+```
+
+And writes back what the mappings wrote, asking for the dirty ranges until there are none, each set cleaned before it is read:
+
+```c
+for (uint32_t round = 0; round < 4096; round++) {
+  vx_pager_range ranges[VX_PAGER_RANGES];
+  int64_t n = vx_pager_op(pager, c->vmo, VX_PAGER_DIRTY, 0, c->size,
+                          ranges);
+  if (n <= 0) return;
+  writeback_ranges(c, &f, ranges, n);
+}
+```
+
+# SEE ALSO
+
+vmo(2), port_create(2), port_wait(2), exception_bind(2), fsd(4), svcd(8)
+
+# DIAGNOSTICS
+
+`vx_pager_create` returns:
+
+: `VX_OK`
+  The Pager is made, and its handle is in <out>.
+: `VX_ERR_BAD_HANDLE`
+  <resource> is not a handle to a Resource, or <port> not one to a Port.
+: `VX_ERR_ACCESS`
+  <resource> has neither `VX_RIGHT_PAGER` nor `VX_RIGHT_MANAGE`, or <port> lacks `VX_RIGHT_SIGNAL`.
+: `VX_ERR_INVALID`
+  <deadline> is 0, or <out> is not writable memory of the caller's.
+: `VX_ERR_NO_MEMORY`
+  There is no memory for the Pager or its handle.
+
+`vx_pager_supply` returns:
+
+: `VX_OK`
+  The pages are supplied.
+: `VX_ERR_BAD_HANDLE`
+  <pager>, <vmo> or <source> is not a handle to an object of its kind.
+: `VX_ERR_ACCESS`
+  <pager> lacks `VX_RIGHT_WRITE`, or <source> lacks `VX_RIGHT_READ`.
+: `VX_ERR_INVALID`
+  <vmo> is not one of <pager>'s VMOs.
+: `VX_ERR_UNSUPPORTED`
+  <source> is physical or pager-backed.
+: `VX_ERR_RANGE`
+  <size> is 0, an offset or <size> is not page-aligned, or a range does not lie within its VMO.
+: `VX_ERR_NO_MEMORY`
+  There was no memory for a page; the pages before it are supplied, and the waiters woken.
+
+`vx_pager_op` returns a count for `VX_PAGER_DIRTY`, 1 or 0 for `VX_PAGER_IDLE`, `VX_OK` for the others, or:
+
+: `VX_ERR_INVALID`
+  <op> is not one of the five, <offset> or <size> is not page-aligned, <ranges> is not writable memory for 64 ranges when <op> is `VX_PAGER_DIRTY`, <vmo> is not one of <pager>'s VMOs, or <offset> is not 0 for `VX_PAGER_RESIZE`.
+: `VX_ERR_RANGE`
+  <offset> + <size> wraps, or for `VX_PAGER_RESIZE` <size> is 0 or more than 256 MiB.
+: `VX_ERR_BAD_HANDLE`
+  <pager> or <vmo> is not a handle to an object of its kind.
+: `VX_ERR_ACCESS`
+  <pager> lacks `VX_RIGHT_WRITE`.
+: `VX_ERR_BAD_STATE`
+  Another resize of the VMO is under way.
+: `VX_ERR_NO_MEMORY`
+  There is no memory for a larger page list.
+
+# BUGS
+
+The design's access hints (`willneed`, `sequential`, `random`, `dontneed`; 01 §5, docs/11 §8) are not there, and the kernel asks for one page at a time: a request's range is always a single page, though its value can say more.
+
+The kernel does not yet take clean pages of pager-backed VMOs back under memory pressure on its own; only `VX_PAGER_EVICT` frees them.
+
+`VX_PAGER_IDLE` counts references, so a reference the kernel holds for a moment, such as one a call in progress on the VMO holds, reads as not idle.
+
+A pager that dies leaves its VMOs: their supplied pages stay, and a fault on an absent page waits out the deadline and takes `VX_EXCEPTION_PAGER_TIMEOUT`.

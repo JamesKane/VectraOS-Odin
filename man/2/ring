@@ -1,0 +1,117 @@
+page=ring sect=2 summary="make a ring, ring its peer's doorbell, pass handles beside it"
+    names=ring_create,ring_notify,ring_xfer_handles
+    src=kernel/obj/ring.c,kernel/syscall/syscall.c,lib/vx-rt/base.c,lib/vx-ring/ring.c
+    keys=ring,doorbell,queue,sqe,cqe,arena,handles
+
+# SYNOPSIS
+
+```c
+vx_status vx_ring_create(const vx_ring_params *params, vx_ring_handles *out);
+vx_status vx_ring_notify(vx_handle end);
+int64_t vx_ring_put_handles(vx_handle end, const vx_handle *handles,
+                            uint32_t count);
+int64_t vx_ring_take_handles(vx_handle end, uint32_t slot, vx_handle *handles,
+                             uint32_t capacity);
+```
+
+# DESCRIPTION
+
+A ring is the data plane between a client and a server: one VMO both map, holding a submission queue the client fills and the server drains, a completion queue going the other way, and an arena for each side's payloads (see the kernel's design, 01 §4.3).
+The kernel makes the VMO and writes its header, and never reads the ring again; the queues are the two sides' business, and `lib/vx-ring` is the protocol they keep.
+What the kernel keeps is per end: a doorbell, and a side channel for handles, which an entry in shared memory cannot carry.
+
+`vx_ring_create` makes a ring as <params> asks: `sq_entries` and `cq_entries`, powers of two from 1 to 4096; `sqe_size` and `cqe_size`, multiples of 16 up to 256; and `client_arena` and `server_arena`, in bytes up to 1 GiB each, rounded up to pages.
+It writes three handles into <out>: `client` and `server`, the two ends, and `memory`, the VMO.
+The VMO's header is what `vx_ring_layout` makes of <params>, and its `size` is the VMO's; each side maps it with `as_map` and checks the header against the parameters its own protocol expects (`vx_ring_attach`), since whoever made the ring may be hostile.
+Each end's handle has READ, WRITE, WAIT, SIGNAL, DUPLICATE, TRANSFER and INSPECT; the VMO's has READ, WRITE, MAP, DUPLICATE, TRANSFER and INSPECT.
+The caller keeps one end and sends the other, with the VMO, to its peer, usually in reply to a channel message.
+No handle is needed to make a ring.
+
+`vx_ring_notify` rings the doorbell of the peer of <end>, which needs SIGNAL: it adds one to a counter the peer's end holds.
+A producer calls it only when the consumer has said it sleeps (`vx_ring_produce` returns true), so with both sides busy neither enters the kernel.
+A consumer about to sleep reads its own doorbell with `counter_read` on its end (READ), announces the sleep, checks the queue once more, and binds its end to a port with `VX_TRIGGER_COUNTER_GE` and a threshold one past what it read (`port_bind`, WAIT on the end); a binding with `VX_TRIGGER_PEER_CLOSED` fires when the peer's end is gone.
+`counter_read` and `port_bind` accept a ring end in place of a counter for this.
+
+`vx_ring_put_handles` and `vx_ring_take_handles` make the one call `ring_xfer_handles`, with `VX_RING_PUT` and `VX_RING_TAKE`.
+Both need WRITE on <end>.
+`vx_ring_put_handles` moves <count> handles, 1 to `VX_RING_SLOT_HANDLES` (4), out of the caller's table into a free slot for the peer, and returns the slot's number, 0 to `VX_RING_SLOTS` - 1 (15); the sender names it in an entry's `handle_slot` with `VX_SQE_HANDLES`.
+Each handle needs TRANSFER, and keeps its rights; none may be <end> or its peer, and none may appear twice.
+If one is refused, none moves.
+`vx_ring_take_handles` takes the handles from the peer's slot <slot> into the caller's table, writes them into <handles>, and returns how many, freeing the slot.
+Each direction has its own 16 slots.
+Handles left in slots when both ends have gone are closed with the ring.
+
+# EXAMPLES
+
+A consumer's sleep, from the kernel's tests (`tests/kernel/ktest.c`):
+
+```c
+static void ring_sleep(vx_ring *r, vx_handle end, vx_handle port) {
+  int64_t seen = vx_counter_read(end);
+  if (vx_ring_prepare_sleep(r)) {
+    vx_packet pk;
+    vx_port_bind(port, end, VX_TRIGGER_COUNTER_GE, 1, (uint64_t)seen + 1);
+    vx_port_wait(port, after_ms(2000), 0, &pk, 1);
+  }
+  vx_ring_end_sleep(r);
+}
+```
+
+A handle through the side channel, from the same test:
+
+```c
+int64_t slot = vx_ring_put_handles(h.client, &counter, 1);
+CHECK(slot >= 0);
+CHECK(vx_counter_read(counter) == VX_ERR_BAD_HANDLE); // it left our table
+```
+
+# SEE ALSO
+
+futex(2), port_bind(2), counter_read(2), as_map(2), channel_create(2)
+
+# DIAGNOSTICS
+
+`vx_ring_create` returns:
+
+: `VX_OK`
+  The ring is made, and its handles are in <out>.
+: `VX_ERR_INVALID`
+  A queue length or entry size is not as above, or <params> or <out> is not readable or writable memory.
+: `VX_ERR_RANGE`
+  An arena is larger than 1 GiB.
+: `VX_ERR_NO_MEMORY`
+  There is no memory for the VMO or the ends, or no room in the caller's handle table.
+: `VX_ERR_BAD_STATE`
+  The caller's handle table is gone: the task is being torn down.
+
+`vx_ring_notify` returns `VX_OK`; `VX_ERR_PEER_CLOSED` if the peer's end is gone; `VX_ERR_BAD_HANDLE` if <end> is not a ring end; or `VX_ERR_ACCESS` if it lacks SIGNAL.
+
+`vx_ring_put_handles` returns the slot, or:
+
+: `VX_ERR_INVALID`
+  <count> is 0 or more than 4; <handles> is not readable; a handle is <end>, its peer, or given twice.
+: `VX_ERR_BAD_HANDLE`
+  <end> is not a ring end, or a handle in <handles> is not valid.
+: `VX_ERR_ACCESS`
+  <end> lacks WRITE, or a handle lacks TRANSFER.
+: `VX_ERR_SHOULD_WAIT`
+  All 16 of the caller's slots hold handles the peer has not taken. The handles are closed.
+
+`vx_ring_take_handles` returns the number of handles taken, or:
+
+: `VX_ERR_INVALID`
+  <slot> is 16 or more, or holds nothing; <capacity> is more than 4; <handles> is not writable.
+: `VX_ERR_BAD_HANDLE`, `VX_ERR_ACCESS`
+  As for `vx_ring_put_handles`.
+: `VX_ERR_TOO_SMALL`
+  The slot holds more than <capacity> handles. The slot is freed and its handles closed.
+: `VX_ERR_NO_MEMORY`, `VX_ERR_BAD_STATE`
+  The caller's handle table is full, or gone. The slot is freed and its handles closed.
+
+# BUGS
+
+A put that finds every slot full, and a take that is too small or finds the table full, lose the handles rather than leave them where they were.
+
+A put succeeds after the peer has gone; its handles wait in the slot until the caller's end goes too.
+
+The design fixes a ring's service class when the server makes it, from the intent the kernel stamped on the channel message that asked for it; `vx_ring_create` takes no such class yet.

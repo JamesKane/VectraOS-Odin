@@ -16,9 +16,9 @@ import "vx:p9"
 import "vx:procns"
 import "vx:rt"
 import "vx:str"
+import usage "gen:usage/ping"
 
 PAYLOAD :: 56 // and 8 bytes of header: 64, as everyone's ping sends
-USAGE :: "usage: ping [-N] ADDR"
 
 space: ns.Namespace
 
@@ -38,7 +38,7 @@ parse_count :: proc(flag: string) -> u64 {
 	count: u64
 	for c in transmute([]u8)flag[1:] {
 		if c < '0' || c > '9' || count > 1000 {
-			fail(USAGE)
+			fail(usage.TEXT)
 		}
 		count = count * 10 + u64(c - '0')
 	}
@@ -60,7 +60,7 @@ run :: proc() -> string {
 		args = args[1:]
 	}
 	if len(args) != 1 || len(args[0]) > 40 {
-		fail(USAGE)
+		fail(usage.TEXT)
 	}
 	addr := args[0]
 

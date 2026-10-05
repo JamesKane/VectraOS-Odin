@@ -1,0 +1,109 @@
+page=release sect=6 summary="release records"
+    src=build.c,cmd/install.c,servers/distd/distd.c
+    keys=release,record,records,set,tree,arch,channel,commit,update
+
+# SYNOPSIS
+
+```ndb
+release=N name=NAME channel=CHANNEL commit=COMMIT vx-abi=LEVELS unsigned
+set=base arch=ARCH tree=b2:HASH size=BYTES
+```
+
+# DESCRIPTION
+
+A release record says what one release of VectraOS is: its number, where it was built from, and the hash of each of its trees, one for each architecture.
+It is ndb text (see ndb(6)): a first record about the release, then a record for each tree, which the record calls a set.
+A tree's hash names its root directory in the content store, and through it every file of the release (see store(6)).
+
+`./build release` writes one, `out/release/release.ndb`, after putting both architectures' base trees into `out/release/store`.
+An install medium carries a record of its own, `records/`<n>`.ndb`, at the front of its store image, `store.tar`.
+install(8) reads the medium's record (the last, if it carries more than one), installs the base tree it names for the machine's architecture, and copies the record into the system volume's `store` branch as `records/`<file>, keeping its name.
+distd(8) reads every `records/*.ndb` in that branch, at the start and at `rescan`, and serves each as `/dist/releases/`<n>`/record`, exactly as it is.
+
+Neither reader needs the records in order, nor the tuples in a record: each key is looked for in every record.
+A record with a key not defined below is refused: install(8) fails, and distd(8) does not serve it.
+
+## The release
+
+: `release`
+  The release's number, decimal: its sequence, which only grows.
+  `./build release` writes the number of commits up to the one it builds, from `git rev-list --count HEAD`.
+  distd names the release by it, and skips a record file without one; install writes it into the slot table (see slots(6)).
+  When more than one record has it, the last is taken.
+: `name`
+  The release's name for people: `dev-`<n> from `./build release`.
+  Not read.
+: `channel`
+  The channel the release is published on: `dev` from `./build release`.
+  Not read.
+: `commit`
+  The git commit the release is built from, 40 hex digits, followed by `+dirty` if the working tree had changes.
+  Not read.
+: `vx-abi`
+  The ABI levels the release provides, separated by commas: `0` while the ABI is a draft.
+  Not read.
+: `unsigned`
+  A flag: the record has no signatures.
+  Every record is unsigned today; the flag is not read.
+
+## Sets
+
+: `set`
+  The set the record describes: `base`, the base system.
+  Only `base` is read.
+: `arch`
+  The architecture the tree is for: `x86_64` or `aarch64`.
+  install and distd each take the `set=base` record of their own architecture and ignore the others.
+: `tree`
+  The tree's hash, `b2:` and 64 hex digits: its root directory's name in the store.
+  A record whose base tree for this architecture has no `tree`, or a malformed one, names no release for install, which refuses the medium, nor for distd, which skips it.
+: `size`
+  The bytes of the tree's files, decimal, as vxstore(8) counts them.
+  Written by `./build release`, not by install media; not read.
+
+# EXAMPLES
+
+The record `./build release` wrote for release 174, built from a tree with uncommitted changes:
+
+```ndb
+release=174 name=dev-174 channel=dev
+    commit=3e34a58a22f2815df0effada9816f017028f09e4+dirty vx-abi=0 unsigned
+set=base arch=x86_64
+    tree=b2:fb75fe2e7273a2973ace1435c4322d4cc93c108ebc51c1fc38b5f36ea536b6a2
+    size=170704900
+set=base arch=aarch64
+    tree=b2:9573cfa899be6a89530d5f91ed9505fad792787122f79d92dbbb325921435c53
+    size=175122380
+```
+
+An install medium's, as install(8) copies it into the store:
+
+```ndb
+release=2 name=test-2 channel=dev commit=test vx-abi=0 unsigned
+set=base arch=x86_64
+    tree=b2:6d7eccaf261abb486a2b201954baed8fe62ba8a253dfcae1877fbf61afa9dd16
+```
+
+# FILES
+
+: `out/release/release.ndb`
+  The record `./build release` writes.
+: `records/<n>.ndb`
+  An install medium's record, in its `store.tar`.
+: `/n/records/*.ndb`
+  The records in distd's namespace: the `store` branch of the system volume.
+: `/dist/releases/<n>/record`
+  A record as distd(8) serves it.
+
+# SEE ALSO
+
+distd(8), install(8), vxstore(8), store(6), slots(6), ndb(6); `docs/06-install-update.md` §5.3 in the repository
+
+# BUGS
+
+Records are not signed, and nothing checks them: the design's signatures, `prev` chain, `image=` records with `hash` and `sha256`, and heads records with `expires` and `revoked` are not written or read, and a node accepts any record in its store, older or newer.
+
+A `release` that is not a number is ignored without a word: install then takes release 0, and distd skips the record.
+distd reads at most 16 records, each at most 16 KiB, and names a release by the first record file it reads with that number.
+
+`./build release --verify` compares the record as text, looking for `arch=`<arch>` tree=`<hash> followed by a space, so it fails on a record whose `tree` is the last tuple of its line, or which is written in another order.

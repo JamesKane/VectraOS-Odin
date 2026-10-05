@@ -1,0 +1,48 @@
+page=debug sect=2 summary="write to the kernel's console"
+    names=debug_write
+    src=kernel/syscall/syscall.c,kernel/panic.c,lib/vx-rt/base.c
+    keys=console,debug,print,kmesg,log
+
+# SYNOPSIS
+
+```c
+vx_status vx_debug_write(vx_str s);
+```
+
+# DESCRIPTION
+
+`vx_debug_write` writes the bytes of <s> to the kernel's console, as the kernel's own messages are written.
+It is how the root task and early services print before there is a console driver: `vx_print` makes it unless a program has hooked another output, and `vx-rt`'s console falls back to it when it cannot reach the console driver.
+
+Each thread has a line buffer of 160 bytes in the kernel.
+A line goes out whole when its newline arrives, or when the buffer fills, so lines from different threads never interleave.
+The kernel puts its timestamp, the seconds since boot, before each line.
+
+What is written goes to the kernel's log, a ring of its latest 16 KiB of output, and to the console device until a driver is given that device; from then on only to the log, unless the kernel's command line holds `vx.kconsole`.
+
+A task may write only if the kernel allows it.
+It allows the root task, and a task made with `task_create` if it allows the task's creator.
+
+# SEE ALSO
+
+intro(2)
+
+# DIAGNOSTICS
+
+`vx_debug_write` returns:
+
+: `VX_OK`
+  The bytes are written, or held in the line buffer.
+: `VX_ERR_ACCESS`
+  The calling task may not write.
+: `VX_ERR_INVALID`
+  Part of <s> is not readable memory of the caller's.
+  It is copied 256 bytes at a time, and what came before the bad part is written.
+
+# BUGS
+
+The design allows the call only while the task holds a debug capability (01 §3); today every task descends from the root task, so every task may write.
+
+Nothing reads the kernel's log from user space yet.
+
+Bytes of a line with no newline stay in the thread's buffer, and are lost if the thread exits.

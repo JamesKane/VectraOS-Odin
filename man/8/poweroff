@@ -1,0 +1,65 @@
+page=poweroff sect=8 summary="turn the machine off"
+    src=cmd/poweroff.c
+    keys=power,off,shutdown,halt,acpi,s5,psci
+
+# SYNOPSIS
+
+```usage
+poweroff
+```
+
+# DESCRIPTION
+
+`poweroff` turns the machine off at once, by asking bus-acpi(8) on `/srv/acpi`.
+It takes no arguments, and it neither stops services nor syncs file systems first.
+
+bus-acpi waits a second, so what the console holds is printed, then enters the sleep state S5 through ACPICA where the firmware's ACPI has sleep registers, as on x86_64.
+Where it has none, as on a hardware-reduced firmware such as QEMU's aarch64, or where S5 leaves the machine on, bus-acpi asks devmgr(8), which makes the kernel's `system_power` call, PSCI's `SYSTEM_OFF`.
+
+Its connection to bus-acpi is the one its manifest names, `connect=acpi` (see svc(6)), else `/srv/acpi` mounted in its namespace.
+It returns only if the machine is still on: bus-acpi's reply comes only then, and `poweroff` waits for it 10 seconds at most.
+
+# EXAMPLES
+
+A manifest that runs it as a service, as the poweroff test does:
+
+```ndb
+service=offtest program=/boot/bin/poweroff console
+connect=acpi
+```
+
+and what is printed, on x86_64:
+
+```text
+poweroff: asking bus-acpi
+bus-acpi: powering off
+bus-acpi: S5
+```
+
+and on aarch64:
+
+```text
+poweroff: asking bus-acpi
+bus-acpi: powering off
+bus-acpi: PSCI, through devmgr
+devmgr: powering off (PSCI)
+```
+
+# FILES
+
+: `/srv/acpi`
+  bus-acpi's post.
+
+# SEE ALSO
+
+bus-acpi(8), devmgr(8), install(8)
+
+# DIAGNOSTICS
+
+With no connection to bus-acpi, `poweroff` prints nothing and exits `no /srv/acpi`.
+If the machine is still on, it prints `poweroff: the machine is still on` and exits with that, or with `bus-acpi could not power off` when bus-acpi reported an error or did not answer in time.
+
+# BUGS
+
+The console shell's namespace has no `/srv/acpi`, so `poweroff` typed there exits `no /srv/acpi`.
+Nothing is shut down in order: services and servers are not told, and data a file server has not yet written is lost.

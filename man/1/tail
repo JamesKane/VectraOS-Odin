@@ -1,0 +1,63 @@
+page=tail sect=1 summary="print the last lines of a file"
+    src=cmd/tail.c,third_party/sbase/tail.c
+    keys=last,lines,end
+
+# SYNOPSIS
+
+```usage
+tail [-N] [file]
+```
+
+# DESCRIPTION
+
+`tail` prints the last 10 lines of <file>, or of standard input if there is no <file>.
+With `-`<N> it prints the last <N> lines instead; `-0` prints nothing.
+A last line with no newline counts as a line, and is printed without one.
+
+`tail` reads the whole input before it prints, keeping only its last 64 KiB, so it never seeks and works the same on a file, a pipe or a terminal.
+It does not follow a growing file.
+
+# EXAMPLES
+
+```rc
+% ns | tail -2
+mount tcp!10.0.2.100!5640 /n/host
+mount tcp!10.0.2.100!5640 /n/again
+```
+
+# SEE ALSO
+
+head(1), sed(1)
+
+# DIAGNOSTICS
+
+`tail` says `tail: cannot open it` when it cannot open <file>, and exits `cannot open`.
+A malformed `-`<N> prints the usage message and exits `usage`.
+
+# BUGS
+
+Only the last 64 KiB of the input are kept: when the last <N> lines are longer, `tail` prints the last 64 KiB alone, starting part way through a line.
+
+An <N> above 1000009 is refused as a usage error.
+
+Words after <file> are ignored, without a complaint.
+A read error ends the input as if it were the end of the file.
+
+@node=posix title="The POSIX command"
+
+In the POSIX namespace, `/lib/ns/posix`, `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so a POSIX program that runs `tail` gets sbase's:
+
+```text
+tail [-f] [-c num | -m num | -n num | -num] [file ...]
+```
+
+It prints the last 10 lines of each <file>, or of standard input, and behaves as POSIX specifies.
+
+: `-n` <num>, `-`<num>
+  The last <num> lines; with a leading `+`, from line <num> on.
+: `-c` <num>
+  The last <num> bytes, or from byte <num> on with a `+`.
+: `-m` <num>
+  The last <num> characters, UTF-8 decoded, or from character <num> on with a `+`.
+: `-f`
+  With one <file>, keep printing what is appended to it.

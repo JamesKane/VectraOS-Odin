@@ -229,6 +229,9 @@ has_tests :: proc(dir: string) -> bool {
 // tests/host with a suite, under ASan.
 cmd_check :: proc() -> bool {
 	ok := check_man()
+	// The usage packages, for the suites that import a program (dbg, dosfs,
+	// isofs): gen:usage/NAME.
+	ok = make_usage() && ok
 	dirs, err := os.read_directory_by_path("tests/host", -1, context.temp_allocator)
 	if err != nil {
 		fmt.eprintfln("build: cannot read tests/host: %v", err)
@@ -250,7 +253,7 @@ cmd_check :: proc() -> bool {
 		ran += 1
 		fmt.eprintfln("  HOST  %s", d.name)
 		dir := fmt.tprintf("tests/host/%s", d.name)
-		c := cmd_make(ODIN, "test", dir, "-collection:vx=lib", "-collection:abi=abi", "-vet", "-strict-style", "-warnings-as-errors", "-sanitize:address", fmt.tprintf("-out:out/host/%s", d.name))
+		c := cmd_make(ODIN, "test", dir, "-collection:vx=lib", "-collection:abi=abi", "-collection:gen=out/gen", "-vet", "-strict-style", "-warnings-as-errors", "-sanitize:address", fmt.tprintf("-out:out/host/%s", d.name))
 		// The vendored C a suite says it links (cobj.odin).
 		ports, found := cobj_host_links(dir)
 		links, built := cobj_host_link_flags(ports[:])

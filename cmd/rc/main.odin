@@ -35,6 +35,7 @@ import "vx:rc"
 import "vx:rt"
 import "vx:str"
 import "vx:utf"
+import usage_of "gen:usage/rc"
 
 MAX_STAGES :: 16
 MAX_FILES :: 16
@@ -110,8 +111,9 @@ report :: proc "contextless" (what: string, st: vx.Status) {
 	set_status(p9.error_text(st))
 }
 
-usage :: proc "contextless" (text: string) {
+usage :: proc "contextless" (text: string) { // a builtin's, from rc(1)'s usage fence
 	err(text)
+	err("\n")
 	set_status("usage")
 }
 
@@ -144,7 +146,7 @@ builtin_run :: proc "contextless" (argv: ^rc.Word, n: int) -> bool {
 	switch w[0] {
 	case "bind":
 		if !flags_ok || n - first != 2 {
-			usage("usage: bind [-abc] new old\n")
+			usage(usage_of.TEXT_bind)
 		} else {
 			report("bind", ns.bind(&space, w[first], w[first + 1], flags))
 		}
@@ -154,7 +156,7 @@ builtin_run :: proc "contextless" (argv: ^rc.Word, n: int) -> bool {
 		// prints it, so its output replays), or a 9P server over TCP,
 		// tcp!HOST!PORT or 9p://HOST:PORT.
 		if !flags_ok || n - first < 2 || n - first > 3 {
-			usage("usage: mount [-abc] /srv/name|tcp!host!port old [aname]\n")
+			usage(usage_of.TEXT_mount)
 			return true
 		}
 		from, old := w[first], w[first + 1]
@@ -178,7 +180,7 @@ builtin_run :: proc "contextless" (argv: ^rc.Word, n: int) -> bool {
 		case 3:
 			report("unmount", ns.unmount(&space, w[1], w[2]))
 		case:
-			usage("usage: unmount [new] old\n")
+			usage(usage_of.TEXT_unmount)
 		}
 		return true
 	}
@@ -1145,8 +1147,6 @@ quoted :: proc "contextless" (b: ^[dynamic; 512]u8, room: int, s: string) {
 // The host's builtins, for whatis.
 HOST_BUILTINS := [?]string{"bind", "mount", "unmount"}
 
-USAGE :: "usage: rc [-srdiIlxebpvV] [-c command] [-m initial] [file [arg ...]]\n"
-
 @(export, link_name="vx_main")
 vx_main :: proc() -> int {
 	rt.exits(shell())
@@ -1197,7 +1197,7 @@ shell :: proc() -> string {
 					v = args[i]
 				}
 				if v == "" {
-					rt.eprint(USAGE)
+					rt.eprint(usage_of.TEXT, "\n")
 					return "usage"
 				}
 				if f == 'c' {
@@ -1209,7 +1209,7 @@ shell :: proc() -> string {
 				continue flags
 			}
 			if str.index_byte("srdiIlxebpvV", f) < 0 {
-				rt.eprint(USAGE)
+				rt.eprint(usage_of.TEXT, "\n")
 				return "usage"
 			}
 			sh.flag[f] = true

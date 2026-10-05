@@ -1,0 +1,99 @@
+page=vxstore sect=8 summary="make and read content stores on the host"
+    host
+    src=host/vxstore/main.c,lib/vx-store/store.c
+    keys=store,release,tree,hash,blake2b,content-addressed,objects
+
+# SYNOPSIS
+
+```usage
+vxstore put store dir [tar]
+vxstore tar store tree out [name=file ...]
+vxstore check store tree
+vxstore ls store tree [path]
+vxstore cat store tree path
+vxstore blocks store tree path
+```
+
+# DESCRIPTION
+
+`vxstore` puts trees into a content store and reads them back, on the development machine, with `lib/vx-store`, the library distd(8) and install(8) use.
+A store is a directory of objects, each a file named by its BLAKE2b hash under `b2/`, the first two hex digits a subdirectory: `b2/7f/7f52...`.
+An object is a file's block, a file's index of its blocks, or a directory, an ndb text of its entries; a tree is named by its root directory's hash, written `b2:` and 64 hex digits (see store(6)).
+build(1)'s `release` puts each architecture's base tree into `out/release/store` with it, and makes install media's stores the same way.
+
+Modes are not the host's: a file is 0444, or 0555 if any execute bit is set; a directory is 0555 and a symbolic link 0777.
+Owners and times are not kept.
+So a tree's hash depends only on its names, contents and links, and two builds of one commit give one hash.
+An object the store already has is not written again; a new one is written under a temporary name, then renamed.
+
+The commands:
+
+: `put` <store> <dir> [<tar>]
+  Put the host tree under <dir> into <store>, with the entries of the ustar archive <tar>, if given, added at the tree's root (a file of the archive replaces one of <dir> with the same path).
+  The store is made if it is not there.
+  It prints the tree's hash and the bytes of files in it.
+: `tar` <store> <tree> <out> [<name>`=`<file> ...]
+  Write to <out> a ustar archive of every object <tree> reaches, each at its path in the store (`b2/xx/<hex>`), in order of path; each <file> named comes first, at the path <name>.
+  build(1) uses it to make `store-ARCH.tar` and an install medium's `store.tar`, with the release's record at `records/1.ndb`.
+: `check` <store> <tree>
+  Read every object <tree> reaches and check it against its hash, each file's index against its size, and each block against its index.
+  It exits with status 0 if all are there and sound.
+: `ls` <store> <tree> [<path>]
+  Print a directory of the tree, its root by default, as the directory object's text: a record for each entry, with its `name`, `mode`, and `size` and `hash` for a file, `hash` for a directory, or `link` for a link.
+: `cat` <store> <tree> <path>
+  Write a file's bytes to standard output, each block checked as it is read.
+: `blocks` <store> <tree> <path>
+  Print the store paths of a file's block objects, one a line, for tests that damage one.
+
+# EXAMPLES
+
+A tree of a file, an executable and a link, put in a new store and read back (the long lines are broken here, as ndb allows):
+
+```rc
+% vxstore put st tr
+b2:7f52617084847c7931a877a8a79d0bc21a4a0a1d19930ae8603f7247b1a3366c 11
+% t=b2:7f52617084847c7931a877a8a79d0bc21a4a0a1d19930ae8603f7247b1a3366c
+% vxstore ls st $t
+```
+
+```ndb
+name=README mode=0100444 size=5
+    hash=b2:c0f0063dbe72505fcdaf5d90825b3f13521ed0536e18862718ff26d45e7389d5
+name=bin mode=040555
+    hash=b2:41f86c01ddf31899146cf094aa9a077625294786dcf1e274d6e9a99a0a419303
+name=link mode=0120777 link=README
+```
+
+```rc
+% vxstore cat st $t README
+note
+% vxstore blocks st $t README
+b2/23/235d0e0671a108ae3cd0786c51cadb0cc609876cf0a3c88ba58567c199da6566
+% vxstore check st $t
+% vxstore tar st $t s.tar
+```
+
+# FILES
+
+: `out/host/vxstore`
+  The program, as build(1) builds it.
+: `out/release/store`
+  The store build(1)'s `release` fills.
+
+# SEE ALSO
+
+build(1), distd(8), install(8), store(6), release(6), vxfs(8)
+
+# DIAGNOSTICS
+
+A failure prints `vxstore:` and what failed, such as `vxstore: the store lacks: b2:...` or `vxstore: a block does not match its hash`, and exits with status 1.
+So does a command it does not know, or the wrong number of arguments, with its usage message, `vxstore: usage: vxstore put|tar|check|ls|cat STORE ...`.
+
+# BUGS
+
+The usage message leaves out `blocks`.
+
+`put` stops at anything in <dir> that is neither a file, a directory nor a link.
+From <tar> it takes files and directories only: a symbolic link there makes it fail with `a malformed tar`, and a hard link, unless <dir> has a file at its path, with `cannot read: (null)`.
+
+Files are read whole into memory, by `put`, and by `tar`, which holds the whole archive in memory before writing it.

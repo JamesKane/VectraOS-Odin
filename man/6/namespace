@@ -1,0 +1,149 @@
+page=namespace sect=6 summary="namespace files: scripts that build a namespace"
+    src=lib/vx-ns/newns.c,lib/vx-ns/ns.c,lib/vx-ns/spawn.c,servers/svcd/svcd.c
+    keys=newns,mount,bind,unmount,union,template
+
+# SYNOPSIS
+
+```text
+mount [-abcC] service old [spec]
+bind [-abcC] new old
+unmount [new] old
+cd dir
+clear
+. file
+```
+
+# DESCRIPTION
+
+A namespace file describes how to build a namespace, one operation to a line, as Plan 9's do.
+The namespace templates are in `/lib/ns`: a service manifest's `ns=<name>` names `/lib/ns/<name>` (see svc(6)), and svcd(8) applies it when it starts the service.
+ns(1) prints a namespace as a namespace file, procfs(4) serves one as `/proc/<pid>/ns`, and nsd(4) keeps each namespace group's as one, which every member replays.
+`lib/vx-ns` parses them, as Plan 9's `newns` does, and the program applying a file decides what each operation does.
+A namespace file is a script, not data, so it is not ndb(6).
+
+Words are separated by spaces and tabs.
+A single quote starts or ends a quoted part of a word, which may hold spaces, tabs, `$` and `#`; inside one, `''` is a quote, and `a'b c'd` is one word, `ab cd`.
+`''` alone is an empty word.
+Outside quotes, `$<name>` is replaced by the value of the variable <name>, which ends at a space, a tab, a `/`, a `$` or a quote; a variable with no value is empty.
+A line whose first word starts with `#` is a comment, and a blank line is ignored.
+A `#` anywhere else is part of a word, so a comment cannot follow an operation on its line.
+A line has at most six words, at most 1024 bytes of them once expanded.
+
+An operation's first word names it.
+The second word of a `mount` or a `bind`, if it starts with `-` and has letters after it, holds its flags, all in that one word:
+
+: `-a`
+  Add after: the new directory joins the union at <old>, after what is there.
+: `-b`
+  Add before: it joins the union before what is there.
+: `-c`
+  Create: a file created in a union of more than one member is created in the first member with `-c`, as 9front's `createdir` chooses, and such a union with none refuses a create.
+: `-C`
+  Plan 9's caching; accepted, and ignored.
+
+With neither `-a` nor `-b`, the new directory replaces the union at <old>; with both, the line is refused.
+
+The operations are:
+
+: `mount` `[-abcC]` <service> <old> [<spec>]
+  Mounts the file server <service> on <old>, attaching to the tree <spec> names, the attach name, or to its root without one.
+  What a <service> is depends on who applies the file: `/srv/<name>` is a service by its post's name; `tcp!<host>!<port>` or `9p://<host>:<port>` is a 9P server reached over TCP.
+: `bind` `[-abcC]` <new> <old>
+  Makes <old> show what <new> names now.
+  A union at <new> is copied whole, its members in order; a union bound onto itself is refused.
+: `unmount` [<new>] <old>
+  Removes what was mounted or bound from <new> at <old>, or everything at <old> without <new>.
+  For a mount, <new> is the service as `mount` named it, `/srv/tmpfs`.
+: `cd` <dir>
+  Changes the working directory to <dir>.
+: `clear`
+  Empties the namespace, as Plan 9's `rfork(RFCNAMEG)`.
+: `.` <file>
+  Runs the namespace file <file>, which must be in the namespace being built.
+
+Any other first word, a wrong number of words, a flag not listed above and an unclosed quote are errors, reported with the line.
+
+<old> and <new> are absolute paths.
+Each is cleaned before use, so `..` never climbs out of a bind, and each component must be UTF-8 with no control character (see utf(6)); a path is at most 256 bytes, a service's name 64.
+A mount point is found by the identity of the directory it was made on, not by the path it was made at, so a mount shows through every name that reaches that directory (ADR-0009).
+A namespace holds at most 32 mount points, 8 members to a union and 16 servers.
+
+@node=appliers title="Who applies them"
+
+svcd(8) reads a template straight from the boot image, as `lib/ns/<name>`.
+It does only `mount` of a post and `bind`: each line becomes one of the mount and bind records of the service's spawn message, where the manifest's `ns=` record stands, and the service's runtime replays them in order before `vx_main` runs.
+A template with any other line, or a mount of a post that cannot be made, is refused, and the service is not started.
+svcd has no variables, so a `$<name>` is always empty.
+
+A member of a namespace group replays the group's text whenever it has changed: a `mount` through a connection the member already has from <service>, through nsd(4)'s connector for a `/srv/` name, or by dialing an address; `bind` and `unmount` as written.
+It skips `cd`, `clear` and `.`.
+A line that fails is reported, `vx-ns: cannot replay line <n> of the namespace group's:` and why, and the lines after it are still replayed.
+
+ns(1), `/proc/<pid>/ns` and the text nsd(4) keeps are written by `vx_ns_print`.
+It writes only `mount` and `bind` lines, one for each member of each union in the order they were added, since a later one may need a path an earlier one made.
+The first member of a union to be added has no flag; each later one has `-b` if it comes before every member added so far and `-a` otherwise; and a member that takes creates has `-c` too.
+A word holding a space, a tab, a quote, `$` or `#`, or an empty one, is quoted.
+
+rc(1)'s builtins `bind`, `mount` and `unmount` take the same words, and rc quotes as this format does, so ns(1)'s output can be run by `rc` as well.
+
+# EXAMPLES
+
+The POSIX template, `boot/lib/ns/posix`, which a manifest's `ns=posix` gives a service; its comment is left out:
+
+```text
+mount /srv/bootfs /
+bind -a /boot/bin /bin
+bind -b /boot/bin/posix /bin
+mount -c /srv/tmpfs /tmp
+mount /srv/null /dev
+mount -a /srv/ptyd /dev
+mount /srv/proc /proc
+mount /srv/net /net
+mount /srv/sys /sys
+```
+
+A manifest that uses it, `tests/user/ctest.ndb`, cut short:
+
+```ndb
+service=ctest program=/boot/bin/ctest console entropy
+arg=one
+arg="two words"
+env=GREETING=hello
+ns=posix
+connect=nsd
+```
+
+A mount, printed again by ns(1):
+
+```rc
+% mount /srv/bootfs /n; ls /n; ns | tail -1
+adm  bin  boot  dev  dist  lib  n  net  proc  rc  srv  sys  tmp
+mount /srv/bootfs /n
+```
+
+# FILES
+
+: `/lib/ns/*`
+  The namespace templates.
+: `/lib/ns/posix`
+  The namespace a POSIX program expects.
+: `/proc/<pid>/ns`
+  The text of the namespace group process <pid> is in.
+
+# SEE ALSO
+
+ns(1), rc(1), nsd(4), procfs(4), svc(6), svcd(8), utf(6); ADR-0009 and docs/02 §2 in the repository
+
+# DIAGNOSTICS
+
+svcd(8) reports `svcd: <service>: no namespace template <name>` for a template not in the boot image, `svcd: <service>: namespace template <name>: no operation on line <n>` for a line it cannot parse, and `svcd: <service>: namespace template <name>: cannot do line <n>` for one it does not apply.
+
+# BUGS
+
+No program applies `cd`, `clear` or `.` yet: svcd refuses a template holding one, and a group's replay skips them.
+
+There is no `newns` command, and nothing gives a namespace file variables, so `$<name>` is always empty.
+
+Flags must be one word: in `mount -a -c /srv/tmpfs /tmp`, the `-c` is taken as the service, and the line mounts the wrong thing or is refused.
+
+Plan 9's `chdev` is not an operation, since VectraOS has no kernel devices to restrict.

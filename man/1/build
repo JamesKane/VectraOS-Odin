@@ -1,0 +1,246 @@
+page=build sect=1 summary="build, boot and test VectraOS on the development machine"
+    host
+    src=build.c
+    keys=build,make,compile,image,qemu,test,scenario,release,check,ci,toolchain
+
+# SYNOPSIS
+
+```usage
+./build [-v] all [--arch arch] [--release]
+./build [-v] image [--arch arch] [--release] [--iso]
+./build [-v] qemu [--arch arch] [--release] [--kvm] [--gdb]
+./build [-v] test [--arch arch] [--release] [--tcg] [scenario ...]
+./build [-v] release [--verify record]
+./build [-v] loc
+./build [-v] man [section ...] title [node]
+./build [-v] man --check
+./build [-v] vendor-check
+./build [-v] check
+```
+
+# DESCRIPTION
+
+`build` is the developer's tool: one C program, `build.c` at the top of the repository, that builds the system for both architectures, makes its disk images, boots them under QEMU, runs the tests, makes releases, and checks the tree as CI's first job does.
+It runs on the host, a Linux machine, from the repository's top directory, and refuses to run anywhere else.
+
+The first time it is made by hand, with `cc -std=c23 -o build build.c`.
+After that, whenever `build.c` or a source it includes (`lib/vx-ndb`, `lib/vx-sha256`, `lib/vx-tar`, `lib/vx-guide`, `lib/vx-utf`'s header and the ABI's definitions in `abi/vx`) is newer than `./build`, it rebuilds itself with the pinned clang and runs again with the same arguments.
+
+Every first-party component is one translation unit, so there is no dependency tracking: each command builds again what it names.
+Vendored ports (`ports/`, built from `third_party/`) are built once and cached under a hash of their inputs.
+The toolchain is pinned (ADR-0001): before building, `build` checks that `/usr/bin/clang`, `ld.lld`, `llvm-objcopy` and `llvm-ar` print exactly the versions it names, and stops if one does not.
+Builds are reproducible: every time written into an output is `SOURCE_DATE_EPOCH`, which, when the environment does not set it, is the time of the last commit (1980-01-01 without git).
+
+An architecture, <arch>, is `x86_64` or `aarch64`.
+`all`, `image` and `test` do both architectures at once, one process each, unless `--arch` names one; `qemu` boots x86_64 unless it names the other.
+`--release` builds optimised, into `out/<arch>/release` rather than `out/<arch>/debug`.
+
+: `-v`
+  Print each command before it runs it.
+  It must come before the command.
+
+Each command is described in a node of its own, below.
+An option a command does not take, or an unknown command, prints the usage message and exits with status 2.
+
+@node=all title="all and image"
+
+## all
+
+`all` builds, for each architecture, the kernel, musl for VectraOS, the native ports, the native programs, the POSIX ports' programs, and Limine; and `vx9pserve` for the host (see vx9pserve(8)).
+
+## image
+
+`image` builds what `all` builds, then writes a disk image, `out/<arch>/<mode>/vectra-<arch>.img`: a GPT disk holding one EFI system partition, FAT32, 64 MiB, labelled `VECTRA`.
+The partition holds Limine at the firmware's fallback path (`\EFI\BOOT`), and under `\boot\vx` the kernel, `bootfs.tar` and the root task's candidate programs; Limine's configuration is `\boot\limine\limine.conf`, from `boot/limine.conf`.
+`bootfs.tar` is a deterministic ustar archive of `boot/bin` with the programs that live in bootfs, the service manifests of `boot/svc`, the driver manifests of `boot/drv`, the namespace templates of `boot/lib/ns`, and the manual, with the index the manual's check writes.
+The disk's GUIDs and the FAT serial number are made from a hash of what the disk holds, so the same inputs give the same image.
+
+: `--iso`
+  Also write `vectra-<arch>.iso`, a UEFI CD image of the same files, with Limine in a small FAT image for El Torito.
+
+@node=qemu title="qemu"
+
+`qemu` builds the image and `vx9pserve`, then replaces itself with QEMU booting the image, its serial console and QEMU's monitor on the terminal: `Ctrl-A X` quits.
+
+On x86_64 the machine is QEMU's `q35` with an Intel IOMMU (VT-d, without interrupt remapping) and OVMF; on aarch64 it is `virt` with GICv3 and an SMMUv3, and QEMU's UEFI firmware.
+Either has 512 MiB of memory, 4 CPUs, no display, and does not reboot.
+The image is the boot disk, on virtio-blk, and what the system writes to it stays.
+The network is QEMU's user networking on virtio-net, where the guest is 10.0.2.15 and the host 10.0.2.2; each connection to 10.0.2.100 port 7 gets a `cat` on the host, an echo server, and each to port 5640 a `vx9pserve` serving `out/share`, made from `tests/fixtures/share` the first time.
+
+: `--kvm`
+  Use KVM, with the host's CPU; only on x86_64, with access to `/dev/kvm`.
+  Without it the CPU is QEMU's `max`, emulated.
+: `--gdb`
+  Start QEMU stopped, with its gdb server on TCP port 1234.
+
+@node=test title="test"
+
+`test` runs the test scenarios, each a file `tests/qemu/<scenario>.ndb`: those named, or all of them, at most 64.
+It builds the image and the host programs the scenarios use (`vx9pserve`, `u9fs` and `vxfs`), then, for each architecture at once, boots each scenario's machine headless under QEMU, as `qemu` does, and watches its serial console for what the scenario expects.
+On x86_64 it uses KVM when it can, unless `--tcg` says not to.
+
+The scenarios run several at a time: half the host's CPUs to each architecture, and at least 2, since each QEMU has 4 CPUs.
+A scenario marked `alone` runs after the rest, by itself, one architecture after the other.
+A scenario that changes the system (`cmdline=`, `with=`, `iso`) boots an image of its own, `test-<scenario>.img`; the others share the image, which no test writes.
+
+Each scenario prints a line when it ends: its name, the architecture, `ok` or `FAIL` and the seconds it took; a failure says why (`timed out waiting for "..."`, `failure line: ...`, `QEMU exited`) and where its serial log is.
+`test` exits with status 1 if any scenario failed.
+
+## Scenarios
+
+A scenario is ndb records.
+The first is `scenario=` and the scenario's name, with these attributes:
+
+: `timeout=`<seconds>
+  How long to wait for each boot's expectations, from the boot's start. Required.
+: `cmdline=`<words>
+  Added to the kernel command line.
+: `with=`<names>
+  Test programs, and their manifests from `tests/user/<name>.ndb`, put in this image's bootfs; also script tests.
+: `alone`
+  Run by itself, after the rest.
+: `arch=`<arch>
+  Run on that architecture only; skipped on the other.
+: `disk=`<mib>
+  A second disk, of up to 4096 MiB, made fresh for the run: a signature in its first sector and a GPT of an EFI system partition of 8 MiB and a VectraOS system volume of 32 MiB.
+  With `volume=`<dir> the system volume is a vx-fs volume with <dir>'s tree in its `home` branch, and with `storetree` a test release's objects in its `store`.
+  With `fat=12`, `16` or `32` the disk is one FAT volume and no GPT, and `fsck` has `fsck.fat -n` check it after the run; with `blank` it is all zeros.
+: `bus=nvme`
+  The second disk on NVMe, not virtio-blk (`bus=virtio`).
+: `isodisk`
+  A second disk that is an ISO 9660 image.
+: `iso`, `installer`, `media`
+  Boot the image's ISO as a CD, with no disk; `installer` makes it an install medium carrying a release's store, and `media` adds a second release on a FAT disk for the boots after the first.
+: `iommu=caching`
+  VT-d in caching mode.
+: `rtc=`<time>
+  Start the machine's real-time clock at <time>, as QEMU's `-rtc base=` takes it.
+: `exits`
+  The last boot must end with QEMU exiting by itself, as when the system powers off.
+
+The records after it, in order:
+
+: `expect=`<text>
+  The next line of the console holding <text>.
+: `line=`<text>
+  The next line of the console that is exactly <text>.
+: `prompt=`<text>
+  <text> at the start of a line, with or without a newline, since what was last typed.
+: `send=`<text>, `type=`<text>
+  Typed once every expectation before it has been met; `send=` presses return after it.
+: `fail=`<text>
+  Any line holding <text> fails the scenario at once.
+: `host=`<file> `text=`<text>
+  After a passing run, the file in the run's directory, such as `share/out.txt`, must hold <text>.
+: `reboot`, `again`
+  Another boot, with the expectations after it: `reboot` boots the second disk, as the machine installed would, and `again` the same image with the second disk as the last boot left it, cut off as a power cut would.
+
+`$arch` in `expect=` and `fail=` is the architecture's name.
+
+@node=release title="release"
+
+`release` makes a release of the commit checked out (`docs/06-install-update.md`).
+It builds both architectures with `--release`, and puts each one's base tree, what a boot slot holds and bootfs's files beside it, into the content store `out/release/store` with vxstore(8), and each tree's objects into `out/release/store-<arch>.tar`.
+It then writes the release's record, `out/release/release.ndb` (see release(6)): `release=` the number of commits, `name=dev-`<n>, `channel=dev`, the commit, with `+dirty` if the tree has uncommitted changes, `vx-abi=0`, `unsigned`, and a `set=base` record of each architecture's tree and size.
+It needs git.
+
+: `--verify` <record>
+  Build the trees again and compare each one's hash with <record>'s, printing `VERIFY` and whether it matches; exit with status 1 if one does not. No record is written.
+
+@node=loc title="loc"
+
+`loc` prints the line-count ledger: the lines of each component of the tree, first-party and vendored; the assembly lines of each architecture's kernel; the number of system calls; and the totals.
+It exits with status 1 if the kernel is over its budget of 25000 lines (`docs/01` §1).
+
+@node=man title="man"
+
+`man` shows a page of `man/` as man(1) shows it, so the manual can be read before an image boots: the page <title> in the first of the <section>s that has one, or in any section, filled to the terminal's width, or 80 columns, and only its node <node> if one is given.
+
+With `--check` it runs the manual's pass of `check` alone, in milliseconds: every page parsed, its headings in order, its links resolved, its fences within 80 columns; every program, server, driver, system call, 9Px message and format either documented or listed in `man/missing`, and nothing listed that is documented; every program with a page taking its usage message from the page's usage fence.
+It writes the index, `out/man/index/base`, and fails if the pass takes more than 200 ms.
+
+The usage fences are where the native programs' usage messages come from: a program whose page has one is compiled with a header, `out/gen/usage/<name>.h`, that defines `VX_USAGE` from the fence's lines that start with its name.
+
+@node=vendor-check title="vendor-check"
+
+`vendor-check` checks `third_party/` against `third_party/VENDOR.ndb`: each record has its required keys (`version`, `upstream`, `tree.sha256`, `license`, `adr`, `reviewed.by`, and `sha256` or `git.tree`) and no others; the files its `adr` and `port` name exist; its tree holds only files and directories and hashes to `tree.sha256`; and every directory of `third_party/` has a record.
+It warns of each review still `pending`.
+
+@node=check title="check"
+
+`check` is CI's first job, and runs, in order, carrying on past a failure:
+
+- the manual's pass, as `man --check`;
+- the host tests, each `tests/host/<name>_test.c` built for the host under ASan and UBSan, and run;
+- the fuzzers, each `tests/fuzz/<name>_fuzz.c` a libFuzzer target under ASan and UBSan, replaying its corpus and then fuzzing for 10 seconds, starting where the last check stopped (`out/fuzz`);
+- a vx-fs volume image made with vxfs(8), `docs/` put in it and read back, a snapshot, a fork and a deletion, checked clean each time;
+- `vendor-check`;
+- the house format, `clang-format` over every first-party C file;
+- clang's static analyzer, each finding an error;
+- `clang-tidy` with the house checks;
+- the build-time budget: a clean build of the kernel in under 1 second, and of all first-party code in under 10.
+
+It prints `build: check passed` or `build: check FAILED`, and exits with status 0 only if everything passed.
+
+# EXAMPLES
+
+One scenario on one architecture:
+
+```rc
+% ./build test --arch x86_64 boot
+...
+  IMG   out/x86_64/debug/vectra-x86_64.img
+  TEST  boot        x86_64   ok (1.2 s)
+```
+
+The end of the ledger:
+
+```rc
+% ./build loc
+...
+assembly, x86_64 kernel               168
+assembly, aarch64 kernel              186
+syscalls                               65
+
+first-party                         71722
+vendored                           355094
+total                              426816
+```
+
+A page, and a node of one:
+
+```rc
+% ./build man 8 install
+% ./build man rc quoting
+```
+
+# FILES
+
+: `out/<arch>/debug`, `out/<arch>/release`
+  What is built for each architecture: the kernel, the programs, the images, and each scenario's image, `test-<scenario>.log` (its serial log) and `run-<scenario>` (what its servers served).
+: `out/host`
+  The host programs: vxfs(8), vxstore(8), vx9pserve(8), `u9fs`, and the host tests.
+: `out/release`
+  `release`'s store, archives and record.
+: `out/man/index/base`
+  The manual's index.
+: `tests/qemu/*.ndb`
+  The scenarios.
+: `boot/limine.conf`, `boot/svc`, `boot/drv`, `boot/lib/ns`
+  What the images are made from, beside the programs.
+
+# SEE ALSO
+
+vxfs(8), vxstore(8), vx9pserve(8), man(1), guide(6); the design is `docs/04-bootstrap-toolchain.md` in the repository
+
+# DIAGNOSTICS
+
+A fatal error prints `build:` and what went wrong, such as `build: run ./build from the repository root (missing build.c)`, and exits with status 1; a command that fails prints its own output and `build` stops with status 1.
+
+# BUGS
+
+A failure of the manual's check is printed but does not stop `all`, `image` or `test`.
+
+`./build man` with no title prints the whole usage message rather than its own.
+
+The usage message says `all` builds "the kernel and Limine", but it builds everything an image holds; and it does not say that `-v` must come before the command.

@@ -753,10 +753,12 @@ test_dbg :: proc(t: ^testing.T) {
 		exit:      string,
 		said:      string,
 	}
+	// dbg(1)'s usage fence, as upstream's M6 step 6b gives it to dbg.
+	USAGE :: "usage: dbg [-c] [-x file] program [arg ...]\n       dbg [-c] [-x file] -p pid\n       dbg [-c] [-x file] crashdir\n"
 	cases := []Case {
 		// No program.
-		{{}, "usage", "usage: dbg -c [-x FILE] PROGRAM [ARG ...] | -p PID | CRASHDIR\n"},
-		{{"-c", "-x", "/boot/tests/empty"}, "usage", "usage: dbg -c [-x FILE] PROGRAM [ARG ...] | -p PID | CRASHDIR\n"},
+		{{}, "usage", USAGE},
+		{{"-c", "-x", "/boot/tests/empty"}, "usage", USAGE},
 		// Nothing there to index.
 		{{"-c", "/boot/bin/nothing"}, "no symbols", "dbg: cannot read the program's symbols\n"},
 		{{"-c", "/boot/tests/empty"}, "no symbols", "dbg: cannot read the program's symbols\n"},

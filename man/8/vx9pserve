@@ -1,0 +1,87 @@
+page=vx9pserve sect=8 summary="serve a host directory over 9P to VectraOS"
+    host
+    src=host/vx9pserve/main.c,host/vx9pserve/fs.c,lib/vx-9p/server.c
+    keys=9p,9p2000,host,share,mount,tcp,qemu
+
+# SYNOPSIS
+
+```usage
+vx9pserve --listen addr:port dir
+vx9pserve --stdio dir
+```
+
+# DESCRIPTION
+
+`vx9pserve` serves the host directory <dir> over 9P2000, for VectraOS to mount over TCP with `mount` (see rc(1)).
+It is a file server built on `lib/vx-9p`'s server framework, the one VectraOS's own servers use, and runs on Linux.
+
+: `--listen` <addr>`:`<port>
+  Listen on the IPv4 address <addr>, port <port>, and serve each connection in a process of its own.
+: `--stdio`
+  Serve one connection, on standard input and output, until it ends.
+
+Under QEMU's user networking, build(1)'s `qemu` and `test` give each connection to 10.0.2.100 port 5640 a `vx9pserve --stdio` of its own, through QEMU's `guestfwd`, so no host port is used.
+`./build qemu` serves `out/share`; each test scenario serves a fresh copy of `tests/fixtures/share` in its run directory, which the scenario's `host=` records check after the run.
+QEMU does not forward the gateway's own address, so to mount `tcp!10.0.2.2!5640`, the host as the guest sees it, run `vx9pserve --listen 127.0.0.1:5640` <dir> on the host.
+
+Nothing outside <dir> can be reached.
+The framework keeps every walk inside the attach root and refuses the names `.`, the empty name, and names holding `/`; the server opens each path one component at a time from a descriptor on <dir>, never following a symbolic link, so a link anywhere, even one put there after a walk, is refused.
+Only directories and regular files are seen: links, devices, sockets and FIFOs are neither listed nor walked to.
+
+Each file is numbered the first time it is walked to, and the number is its qid path for as long as the server runs; its qid version is its modification time in seconds.
+Every file and directory is owned by `host`, user and group, and shows the host's permission bits.
+The server keeps no descriptors but the root's: each read and write opens the file again.
+
+What a client may do:
+
+- `Tversion`, with an msize of at most 65536; no 9Px extension is granted.
+- `Tattach`, with an empty aname only; `Tauth` is refused.
+- `Twalk`, `Tstat`, `Tread` and `Twrite` as 9P2000 has them, and `Topen` with the host's permissions checked, truncating with `OTRUNC`.
+- `Tcreate` of a file, or of a directory, with the permission bits asked for, less the host's umask; a file's are cut to 0666.
+- `Tremove` of a file or an empty directory, but not of the root.
+
+# EXAMPLES
+
+A mount from the console, as the mount test does it, with the console's other output removed:
+
+```rc
+% mount tcp!10.0.2.100!5640 /n/host
+% ls /n/host
+hello.txt
+% cat /n/host/hello.txt
+hello from the host
+% echo hi > /n/host/out.txt
+% cat /n/host/out.txt
+hi
+% mount 9p://10.0.2.100:5640 /n/again
+% ls /n/again
+hello.txt  out.txt
+```
+
+# FILES
+
+: `out/host/vx9pserve`
+  The program, as build(1) builds it.
+: `out/share`
+  The directory `./build qemu` serves.
+: `tests/fixtures/share`
+  What each test scenario's copy starts as.
+
+# SEE ALSO
+
+build(1), rc(1), netd(4), intro(5)
+
+# DIAGNOSTICS
+
+`vx9pserve: cannot open` <dir> when <dir> cannot be opened as a directory, with exit status 1; under `--listen` that is found only when a client connects, and only that connection ends.
+A message too large for the msize, or too broken to answer, ends the connection, with exit status 1; the client's hanging up ends it with 0.
+A failure to listen or accept prints `vx9pserve: listen:` or `vx9pserve: accept:` and the host's error.
+Other arguments print the usage message, which spells the parameters in capitals, and exit with status 2.
+
+# BUGS
+
+An <addr>`:`<port> it cannot read makes it exit with status 2 and no message; the port is not checked, so a port that is not a number is port 0.
+Only IPv4 is served.
+
+`Twstat` is refused, so nothing can be renamed or have its mode changed, and `ORCLOSE` is refused.
+The table of numbered files only grows, for as long as the server runs, and a file removed and made again gets its old number.

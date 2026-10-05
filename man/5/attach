@@ -1,0 +1,68 @@
+page=attach sect=5 summary="messages to establish a connection to a file tree"
+    names=attach,Tattach,Rattach,Tauth,Rauth
+    src=lib/vx-9p/server.c,lib/vx-9p/client.c,lib/vx-ns/dial.c,lib/vx-9p/messages.def
+    keys=9p,9px,attach,auth,uname,aname,afid,root,user
+
+# SYNOPSIS
+
+```text
+size[4] Tauth tag[2] afid[4] uname[s] aname[s]
+size[4] Rauth tag[2] aqid[13]
+
+size[4] Tattach tag[2] fid[4] afid[4] uname[s] aname[s]
+size[4] Rattach tag[2] qid[13]
+```
+
+# DESCRIPTION
+
+The `attach` request introduces a user to the server and gives the client a fid for the root of a file tree.
+`Tauth` is type 102, `Rauth` 103, `Tattach` 104 and `Rattach` 105.
+<uname> names the user, <aname> chooses the tree, and <afid> is a fid made by `Tauth`, or `NOFID`, `0xffffffff`, for none.
+If the attach succeeds, <fid> refers to the tree's root, and <qid> is the root's.
+9Px's `Tattach` is 9P2000's: 9P2000.L's adds a numeric user, `n_uname[4]`, which 9Px does not have, and a 9P2000.L client is answered with plain 9P2000 (see version(5)), so it sends 9P2000's.
+
+A VectraOS server refuses a `Tattach` before `Tversion` (see version(5)), and one whose <afid> is not `NOFID` with `operation not supported`.
+<fid> must not be `NOFID` or in use on the connection, and the connection must have room for it, 256 fids at once; otherwise the answer is `fid already in use`.
+The file server then attaches <aname>, and its error, if any, is the answer, in which case <fid> stays unused.
+
+What <aname> means is each server's.
+fsd(4) serves a branch, a snapshot or its dump view by the name, and bootfs(4) the directory the name is a path to; every other server has one tree and takes only the empty name, answering any other `file does not exist`.
+The fid remembers the root it was attached at: `..` there is the root itself, and no walk from it leaves the tree (see walk(5)).
+A connection may attach as often as it likes, to different trees and as different users.
+
+<uname> is advisory.
+A server that has users, such as fsd(4), checks every later request on the fid and on fids walked from it as that user; the others ignore it.
+Nothing stops a client from naming anyone until the system has a key server.
+
+The `auth` request makes <afid> a fid for an authentication protocol, with the <uname> and <aname> of the attach to follow, and in Plan 9 the reply's <aqid> is a file of type `QTAUTH` that the client reads and writes to run the protocol.
+No VectraOS server requires authentication, and every server answers `Tauth` with `operation not supported`, as a Plan 9 server that needs none answers it with an `Rerror`.
+Tokens presented in `Tauth` or `Tattach` are planned, with the key server (`docs/02` §3.4).
+
+VectraOS's client sends <afid> `NOFID`, and as <fid> the next number of a count that starts at 1 after `Tversion` and is never wound back.
+It attaches as the program's user, from its spawn message's `user=`, or as `none` when the program has none; over TCP it attaches as `vectra`, since a Plan 9 server refuses `none` before a connection has authenticated.
+It never sends `Tauth`.
+
+# EXAMPLES
+
+The exchanges `tests/host/p9_server_test.c` makes and checks, written in Plan 9's trace form, with a server whose file server knows `docs` but has no authentication:
+
+```text
+Tattach tag 1 fid 1 afid -1 uname '' aname 'docs'
+Rattach tag 1 qid (0000000000000002 0 d)
+Tattach tag 1 fid 1 afid -1 uname '' aname ''
+Rerror tag 1 ename fid already in use
+Tattach tag 1 fid 9 afid 3 uname '' aname ''
+Rerror tag 1 ename operation not supported
+```
+
+# SEE ALSO
+
+version(5), walk(5), clunk(5), error(5), fsd(4)
+
+# BUGS
+
+<uname> is taken on trust.
+
+A connection with all 256 fids in use is refused a `Tattach` with `fid already in use`, though a walk is refused one with `out of memory`.
+
+Over TCP every VectraOS program attaches as `vectra`.

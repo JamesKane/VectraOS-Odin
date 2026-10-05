@@ -1,0 +1,61 @@
+page=symlink sect=5 summary="make and read symbolic links"
+    names=symlink,Tsymlink,Rsymlink,Treadlink,Rreadlink
+    src=lib/vx-9p/server.c,lib/vx-9p/client.c,lib/vx-9p/messages.def,lib/vx-9p/fields.def,docs/proto/posix.md
+    keys=9p,9px,9p2000.l,posix,symlink,readlink,link,symbolic,target,eloop
+
+# SYNOPSIS
+
+```text
+size[4] Tsymlink tag[2] fid[4] name[s] symtgt[s] gid[4]
+size[4] Rsymlink tag[2] qid[13]
+
+size[4] Treadlink tag[2] fid[4]
+size[4] Rreadlink tag[2] target[s]
+```
+
+# DESCRIPTION
+
+These are 9P2000.L's messages, unchanged on the wire, and belong to the `posix` extension: a server answers them only once `Tversion` has negotiated `+posix` (see version(5)), and before that with `operation not supported`.
+`Tsymlink` is type 16, `Rsymlink` 17, `Treadlink` 22 and `Rreadlink` 23.
+As every 9Px message does, they fail with an `Rerror` and its string, not 9P2000.L's `Rlerror` and an errno (see error(5)).
+
+A symbolic link is a file holding a path, its target.
+The server makes it and reads it back; the client follows it.
+A 9P server walks names only, and a link is not a directory, so a `Twalk` through one fails at the link (see walk(5)).
+VectraOS's POSIX library then looks for a link among the path's prefixes, walking to each and asking `Tstat` whether it is one, reads it, puts its target in its place, and walks again, at most 40 times before it fails with `ELOOP`.
+A link's stat entry has 9P2000.u's `DMSYMLINK`, `0x02000000`, in its mode, and its `Rgetattr` the type `S_IFLNK` (see stat(5), getattr(5)).
+
+<fid> must be in use on the connection, or the answer is `unknown fid`; it may be open or not.
+
+## Symlink
+
+The `symlink` request makes a symbolic link called <name>, holding <symtgt>, in the directory <fid> refers to.
+<fid> must refer to a directory, and <name> must be a name a file may have: valid UTF-8, not empty, `.` or `..`, and without `/`; otherwise the answer is `bad message`.
+A server that cannot make links answers `permission denied`.
+`Rsymlink` returns the new link's qid.
+Unlike `Tcreate`, the request leaves <fid> where it was, on the directory and not open.
+
+The server gives the link an owner and group of its own choosing, and ignores <gid>: fsd(4) gives it the directory's group, and tmpfs(4) keeps none.
+Both refuse an empty <symtgt> with `bad message`, and fsd(4) one of 4097 bytes or more; neither looks at what the target names, which need not exist.
+The link's permissions are `0777`, as POSIX's are, and mean nothing.
+
+VectraOS's client sends <gid> 0.
+The POSIX library sends `Tsymlink` for `symlink` and `symlinkat`.
+
+## Readlink
+
+The `readlink` request asks for the target of the symbolic link <fid> refers to, which `Rreadlink` returns.
+A file that is not a link is refused with `bad message`, and so is any request to a server that has no links.
+The POSIX library sends it for `readlink` and `readlinkat`, and to follow links in every path it resolves.
+
+tmpfs(4) and fsd(4) make and read links; isofs(4) reads Rock Ridge's, and distd(8) those in a release; the other servers with `posix` have none.
+
+# SEE ALSO
+
+intro(5), walk(5), getattr(5), stat(5), version(5); the extension is `docs/proto/posix.md` in the repository
+
+# BUGS
+
+The client follows links only by trying a walk and looking again after it fails, so every path through a link costs a failed walk, a walk and a `Tstat` for each prefix tried, and a `Treadlink`.
+
+<gid> is ignored, and a link's group is the server's choice.

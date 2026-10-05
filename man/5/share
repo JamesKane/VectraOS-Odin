@@ -1,0 +1,89 @@
+page=share sect=5 summary="share an open file between connections, move its offset, set its appending"
+    names=Tshare,Rshare,Tjoin,Rjoin,Tseek,Rseek,Tdesc,Rdesc
+    src=lib/vx-9p/server.c,lib/vx-9p/client.c,lib/vx-9p/messages.def,lib/vx-9p/fields.def,lib/vx-9p/ring_server.c,docs/proto/posix.md
+    keys=9p,9px,posix,fork,exec,token,join,offset,lseek,append,o_append,descriptor
+
+# SYNOPSIS
+
+```text
+size[4] Tshare tag[2] fid[4] holds[4]
+size[4] Rshare tag[2] token[16]
+
+size[4] Tjoin tag[2] newfid[4] token[16]
+size[4] Rjoin tag[2] qid[13] iounit[4]
+
+size[4] Tseek tag[2] fid[4] offset[8] whence[1]
+size[4] Rseek tag[2] offset[8]
+
+size[4] Tdesc tag[2] fid[4] flags[4]
+size[4] Rdesc tag[2]
+```
+
+# DESCRIPTION
+
+These four are 9Px's own, with no counterpart in 9P2000 or 9P2000.L, and belong to the `posix` extension: a server answers them only once `Tversion` has negotiated `+posix` (see version(5)).
+They give a POSIX program what its descriptors need of a file server: an offset and an append flag kept by the server, not the client, and shared by a process and its children, across `fork` and `exec`, though each child has a connection of its own.
+Their type numbers are 150 to 157.
+
+## Open files
+
+With `posix`, a server keeps an open file for each fid it opens that is not a directory: the node, the open mode, an offset starting at 0, and whether writes append.
+`Topen`'s mode bit `0x80`, `P9_OAPPEND`, which a server takes out of the mode before its file system sees it and ignores without `posix`, makes the open file append from the start (see open(5)).
+A `Tread` or `Twrite` whose offset is all ones, `P9_OFFSET_CURRENT`, reads or writes at the open file's offset and moves it on by the count; at any other offset it does as 9P2000 does and leaves the offset alone (see read(5)).
+A write at the current offset of a file that appends goes to the file's end, found at that moment; since a server answers one request at a time, the append is atomic.
+An open file lasts while a fid is open on it, or while it has holds, as below.
+A server's open files are one table, 256 entries, shared by all its connections; an open that finds it full fails with `out of memory`.
+
+## Share and join
+
+The `Tshare` request asks for a token for the open file of <fid>, which must be open on a file that is not a directory.
+The token is good for <holds> joins, 1 to 64, and the open file holds at most 64 at once; `Rshare` returns it.
+The token is 16 bytes from the server's random generator, made at the open file's first `Tshare` and the same for every later one.
+A server whose spawn message gave it no `entropy` (see svc(6)) has no generator, and refuses `Tshare`: a token that could be guessed would let any connection reach an open file it could not open.
+
+The `Tjoin` request, on any connection to the same server, makes <newfid> a fid open on the open file the token names, and uses up one of its holds.
+The new fid shares everything of the open file: its offset, its appending and its mode; it is not walked, has no attach root of its own to walk from, and is open from the start.
+The server opens the file again as a join, not as a new open, so permissions are not checked again and a file removed since is still reached: the token is the authority.
+`Rjoin` returns the file's <qid> and an <iounit> of the session's msize less 24, as `Ropen`'s.
+Tokens are compared whole, in constant time.
+
+Holds last 10 seconds from the last `Tshare` of the file, or from its last fid's clunk, whichever is later.
+So a child may join after its parent has closed the file or exited, as an `exec` does at once; holds not used by then run out, open file or not, so a client that gave out tokens no child took cannot fill the file's 64.
+An open file with no fid and no live hold is gone, and its token with it.
+
+The musl back end shares each open file before a `fork` and writes the token into the child's spawn record; the child joins on the connection its namespace gives the file's path, or its directory's, and opens the file again at the parent's offset if the join fails.
+Its `poll` shares a file with itself, a token of one hold, to join it on a second connection where a read can wait.
+
+## Seek
+
+The `Tseek` request moves the open file's offset of <fid>, as `lseek` does, and `Rseek` returns where it now is.
+<whence> is 0 to set it to <offset>, 1 to add <offset> to it, and 2 to add <offset> to the file's length, which the server asks its file system for then.
+<offset> is read as signed, two's complement.
+A result below 0, or past the largest signed 64-bit number, and a <whence> above 2 are refused, and the offset is left as it was.
+
+## Desc
+
+The `Tdesc` request sets the open file's flags, as `fcntl(F_SETFL)` sets a descriptor's.
+Bit 1 of <flags>, append, makes writes at the current offset go to the file's end, and its absence makes them write at the offset again; the other bits are ignored.
+It changes every fid that shares the open file.
+
+## Errors
+
+Before `posix` is negotiated, and from a server without the shared table, each of these is answered `operation not supported`; so is `Tshare` on a server with no generator.
+A <fid> that is not one of the connection's is `unknown fid`.
+A <fid> that is not open, or is open on a directory, or got no open file because the table was full, is `fid already in use`, though no fid is.
+A token that names no live open file with a hold left is `file does not exist`, and a <newfid> already in use `fid already in use`.
+`Tshare`'s <holds> of 0, over 64, or more than the file has room for is `offset out of range`; `Tseek`'s refusals are `bad message`.
+VectraOS's client sends none of the four unless the session has `posix`, and fails the call with `VX_ERR_UNSUPPORTED` itself.
+
+# SEE ALSO
+
+intro(5), version(5), open(5), read(5), lock(5), map(5), dref(5), tmpfs(4), fsd(4), svc(6); the extension's spec is `docs/proto/posix.md` in the repository
+
+# BUGS
+
+A file's token is made once and kept for the open file's life, so a token whose holds have run out becomes good again at the next `Tshare` of the file: anyone who kept it may join then.
+
+`Tseek` and `Tdesc` cannot reach a directory, which has no open file, so a directory's offset stays the client's; a `Tseek` on one, like one on a fid with no open file, is answered `fid already in use`, a misleading string.
+
+Of the servers with `posix`, the boot manifests give `entropy` only to `tmpfs`, `ptyd` and `fsd`; `dosfs`, `isofs` and `distd` refuse `Tshare`, so a child's descriptors on their files are opened again and do not share their parent's offset.

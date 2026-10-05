@@ -1,0 +1,46 @@
+page=remove sect=5 summary="remove a file from a server"
+    names=Tremove,Rremove,remove
+    src=lib/vx-9p/messages.def,lib/vx-9p/server.c,lib/vx-9p/client.c
+    keys=9p,9px,remove,delete,unlink,clunk,orphan
+
+# SYNOPSIS
+
+```text
+size[4] Tremove tag[2] fid[4]
+size[4] Rremove tag[2]
+```
+
+# DESCRIPTION
+
+`Tremove` asks the server to remove the file <fid> refers to and to clunk <fid>, which happens even if the remove fails.
+It is a clunk (see clunk(5)) with the side effect of removing the file if permissions allow.
+The fid may be open or not.
+The message is 9P2000's, types 122 and 123, unchanged, and needs no extension.
+
+The framework checks only that <fid> is known, and lets the file server decide the rest.
+VectraOS's servers that remove files, tmpfs(4), fsd(4) and dosfs(4) when writable, refuse to remove the root they serve and a directory that is not empty; fsd asks for write permission in the file's directory, as Plan 9's servers do.
+A server that removes nothing refuses every `Tremove`, and the fid is clunked all the same.
+
+When a file is open as other fids, on this connection or another, they keep working.
+tmpfs and fsd take the file out of its directory at once but keep its contents until the last fid open on it is clunked, as POSIX's `unlink` does; fsd keeps it on the volume as an orphan for that time, and reaps those a crash leaves at the branch's next attach.
+A fid not open is another matter: an open of it after the remove finds no file, though share(5)'s `Tjoin` still reaches an open file that has been removed.
+Plan 9's own servers differ, failing the other fids at once with a `phase error`.
+
+A `Tremove` of an open fid lets go of the connection's locks on the file, as any clunk of one does (see lock(5)).
+
+# SEE ALSO
+
+intro(5), clunk(5), walk(5), open(5), lock(5), fsd(4), tmpfs(4)
+
+# DIAGNOSTICS
+
+A VectraOS server answers with these:
+
+: `unknown fid`
+  <fid> is not in use.
+: `permission denied`
+  The root of the tree; no write permission in the directory; or a server that removes nothing.
+: `file already exists`
+  A directory that is not empty, which is the wording of the status VectraOS's servers have for it.
+: `file does not exist`
+  The file has already been removed.

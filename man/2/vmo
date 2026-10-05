@@ -1,0 +1,174 @@
+page=vmo sect=2 summary="create, copy, read and write virtual memory objects"
+    names=vmo_create,vmo_clone,vmo_rw,vmo_op,vmo_seal,vmo_lease,vmo_revoke
+    src=kernel/obj/vmo.c,kernel/obj/device.c,kernel/obj/pager.c,kernel/obj/exception.c,kernel/syscall/syscall.c,lib/vx-rt/base.c
+    keys=vmo,memory,pages,mmio,clone,copy,resize,seal,lease
+
+# SYNOPSIS
+
+```c
+vx_status vx_vmo_create(uint64_t size, uint32_t options, vx_handle *out);
+vx_status vx_vmo_create_physical(vx_handle resource, uint64_t pa,
+                                 uint64_t size, vx_handle *out);
+vx_status vx_vmo_create_pager(vx_handle pager, uint32_t key, uint64_t size,
+                              vx_handle *out);
+
+vx_status vx_vmo_clone(vx_handle vmo, uint64_t offset, uint64_t size,
+                       vx_handle *out);
+
+vx_status vx_vmo_rw(vx_handle vmo, enum vx_vmo_op op, uint64_t offset,
+                    void *buf, uint64_t size);
+
+vx_status vx_vmo_resize(vx_handle vmo, uint64_t size);
+```
+
+# DESCRIPTION
+
+A VMO, a virtual memory object, is a run of pages named by a handle (see the kernel's design, 01 §5).
+It is what a task maps with as_map(2), what a channel passes when it passes memory, and what a device driver maps to reach its registers.
+A VMO's size is a whole number of 4096-byte pages and at most 256 MiB; a size that is not a multiple of a page is rounded up.
+It lives until its last handle and its last mapping are gone.
+
+There are three kinds.
+An anonymous VMO's pages are all allocated and zeroed when it is made: memory is committed, not overcommitted, so a task learns it has run out from a failed call and never from a fault later.
+A physical VMO is device memory, a fixed range of physical addresses that is not RAM.
+A pager-backed VMO starts with no pages, and a trusted task supplies them as they are touched; pager(2) describes it.
+
+`vx_vmo_create` makes an anonymous VMO of <size> bytes and puts a handle to it in <out>.
+<options> must be 0: the other two kinds have calls of their own, below, which make the same system call with `VX_VMO_PHYSICAL` or `VX_VMO_PAGER`.
+The handle has every right but `VX_RIGHT_DEBUG`, `VX_RIGHT_EXEC` among them, since loaders and JITs map their own code; that a mapping is never both writable and executable is decided per mapping by as_map(2), not per VMO.
+
+`vx_vmo_create_physical` makes a VMO over the device memory from <pa> to <pa> + <size>.
+<resource> must be a Resource handle with `VX_RIGHT_MANAGE`: drivers are given VMOs made this way, not the Resource.
+<pa> and <size> must be page-aligned, and the range may not overlap RAM; the kernel refuses every physical VMO if the firmware's memory map left it unsure where RAM is.
+The handle has `VX_RIGHT_READ`, `VX_RIGHT_WRITE`, `VX_RIGHT_MAP`, `VX_RIGHT_DUPLICATE`, `VX_RIGHT_TRANSFER` and `VX_RIGHT_INSPECT`: device memory is mapped, never executed.
+Making a VMO over the range the kernel's console writes to hands the console over to the caller, so the kernel stops writing there, unless the kernel's command line holds `vx.kconsole`.
+
+`vx_vmo_create_pager` makes a pager-backed VMO of <size> bytes whose pages <pager> supplies, none yet.
+<pager> must be a Pager handle with `VX_RIGHT_WRITE`, and <key>, a 32-bit number of the pager's choosing, names the VMO in the page requests the pager receives.
+The handle has every right but `VX_RIGHT_DEBUG`.
+
+`vx_vmo_clone` makes a new anonymous VMO holding a copy of bytes <offset> to <offset> + <size> of <vmo> and puts a handle to it in <out>.
+The copy is made at once and charged in full, as a clone is in 01 §5.
+<vmo> needs `VX_RIGHT_READ`; <offset> and <size> must be page-aligned, <size> not zero, and the range within the VMO.
+The new handle has the rights `vx_vmo_create` gives.
+A physical or pager-backed VMO cannot be cloned.
+
+`vx_vmo_rw` copies <size> bytes between offset <offset> of <vmo> and <buf> in the caller's memory: into <buf> when <op> is `VX_VMO_READ`, which needs `VX_RIGHT_READ`, and from it when <op> is `VX_VMO_WRITE`, which needs `VX_RIGHT_WRITE`.
+The range may cross pages and need not be aligned, but must lie within the VMO.
+It takes no page of a pager-backed VMO that its pager has not supplied, and asks for none: it copies up to the first such page and returns `VX_ERR_SHOULD_WAIT`.
+A write to a pager-backed VMO marks the pages it writes dirty, as a store through a mapping would.
+A physical VMO is not read or written this way; it is mapped.
+
+`vx_vmo_resize` makes the system call `vmo_op` with `VX_VMO_RESIZE`: it asks for <vmo>'s size to become <size>, and needs `VX_RIGHT_WRITE`.
+An anonymous or physical VMO cannot be resized yet.
+A pager-backed one is its pager's to resize, with `pager_op` (see pager(2)), since everyone who maps it shares its size: `vmo_op` on one is refused.
+`VX_VMO_RESIZE` is the only operation `vmo_op` has.
+
+## Reserved calls
+
+Three calls in `abi/vx/syscalls.def` are reserved, and have no vx-rt function; made directly, as `vx_syscall(VX_SYS_vmo_seal, ...)` and so on, each returns `VX_ERR_UNSUPPORTED`:
+
+: `vmo_seal`
+  Will make a VMO read-only for all who hold it, so its bytes cannot change under a reader that checks them (01 §4.3, §6.6).
+: `vmo_lease`
+  Will make a revocable handle derived from a VMO's, to share memory that can be taken back (01 §3).
+: `vmo_revoke`
+  Will revoke a lease: the memory is unmapped from every task that maps it through the lease, and its DMA mappings are torn down.
+
+# EXAMPLES
+
+A write and a read across a page boundary, and a read past the end refused, from the kernel's tests (`tests/kernel/ktest.c`):
+
+```c
+vx_handle vmo;
+char in[8] = "abcdefg", out[8] = {};
+CHECK(vx_vmo_create(8192, 0, &vmo) == VX_OK);
+CHECK(vx_vmo_rw(vmo, VX_VMO_WRITE, 4092, in, 8) == VX_OK);
+CHECK(vx_vmo_rw(vmo, VX_VMO_READ, 4092, out, 8) == VX_OK);
+CHECK(out[0] == 'a' && out[6] == 'g');
+CHECK(vx_vmo_rw(vmo, VX_VMO_READ, 8190, out, 8) == VX_ERR_RANGE);
+vx_handle_close(vmo);
+```
+
+# SEE ALSO
+
+pager(2), as_map(2), dma_map(2), handle_dup(2), intro(2)
+
+# DIAGNOSTICS
+
+`vx_vmo_create`, `vx_vmo_create_physical` and `vx_vmo_create_pager` return:
+
+: `VX_OK`
+  The VMO is made, and its handle is in <out>.
+: `VX_ERR_INVALID`
+  <options> holds a bit that is not `VX_VMO_PHYSICAL` or `VX_VMO_PAGER`, or both of them; <key> does not fit 32 bits; or <out> is not writable memory of the caller's.
+: `VX_ERR_RANGE`
+  <size> is 0 or more than 256 MiB; for a physical VMO, <pa> or <size> is not page-aligned, or the range wraps.
+: `VX_ERR_BAD_HANDLE`
+  <resource> or <pager> is not a handle to a Resource or a Pager.
+: `VX_ERR_ACCESS`
+  <resource> lacks `VX_RIGHT_MANAGE` or <pager> lacks `VX_RIGHT_WRITE`; or the physical range overlaps RAM, or the kernel does not know all of RAM.
+: `VX_ERR_NO_MEMORY`
+  There is no memory for the pages, the page list, or a handle.
+
+`vx_vmo_clone` returns:
+
+: `VX_OK`
+  The copy is made, and its handle is in <out>.
+: `VX_ERR_INVALID`
+  The options, which the vx-rt function always passes as 0, are not 0; or <out> is not writable.
+: `VX_ERR_BAD_HANDLE`
+  <vmo> is not a handle to a VMO.
+: `VX_ERR_ACCESS`
+  <vmo> lacks `VX_RIGHT_READ`.
+: `VX_ERR_UNSUPPORTED`
+  <vmo> is physical or pager-backed.
+: `VX_ERR_RANGE`
+  <size> is 0, <offset> or <size> is not page-aligned, or the range does not lie within the VMO.
+: `VX_ERR_NO_MEMORY`
+  There is no memory for the copy or its handle.
+
+`vx_vmo_rw` returns:
+
+: `VX_OK`
+  Every byte was copied.
+: `VX_ERR_INVALID`
+  <op> is neither `VX_VMO_READ` nor `VX_VMO_WRITE`, or <buf> is not memory of the caller's that the copy may use; a copy that faults partway leaves the bytes before the fault copied.
+: `VX_ERR_BAD_HANDLE`
+  <vmo> is not a handle to a VMO.
+: `VX_ERR_ACCESS`
+  <vmo> lacks the right <op> needs.
+: `VX_ERR_RANGE`
+  The range does not lie within the VMO.
+: `VX_ERR_UNSUPPORTED`
+  <vmo> is physical.
+: `VX_ERR_SHOULD_WAIT`
+  <vmo> is pager-backed and a page of the range has not been supplied; the bytes before it were copied.
+
+`vx_vmo_resize` returns:
+
+: `VX_ERR_INVALID`
+  The operation is not `VX_VMO_RESIZE`.
+: `VX_ERR_BAD_HANDLE`
+  <vmo> is not a handle to a VMO.
+: `VX_ERR_ACCESS`
+  <vmo> lacks `VX_RIGHT_WRITE`, or is pager-backed.
+: `VX_ERR_UNSUPPORTED`
+  <vmo> is anonymous or physical.
+
+`vmo_seal`, `vmo_lease` and `vmo_revoke` return `VX_ERR_UNSUPPORTED`.
+
+# BUGS
+
+`vmo_op` never succeeds: anonymous VMOs cannot be resized yet, and pager-backed ones are refused, so `VX_VMO_RESIZE` is a call that only says no.
+The design's other operations (commit, decommit, cache cleaning and invalidation, lock, hint, purgeable, priority; 01 §3, §5) are not there, and neither are seals, leases or the `NODUMP` mark.
+
+A clone is a full copy made at once, not pages shared until written; the design's copy-on-write is an optimization for later behind the same call.
+
+The design's contiguous VMOs, NUMA placement, cache policy per VMO and carve-outs (`VX_VMO_CARVEOUT`) are not there: a physical VMO is always mapped as device memory.
+
+VMOs are not yet charged to a memory budget: commit is enforced only by the allocator running out.
+
+A VMO is limited to 256 MiB, the most one block of its page list can name.
+
+`vx_vmo_rw` on a pager-backed VMO copies through a small buffer, 256 bytes at a time, to hold the VMO's lock while it touches a page; it is slow for large copies.

@@ -1,0 +1,70 @@
+page=map sect=5 summary="a file's range as a VMO, for mapping"
+    names=Tmap,Rmap
+    src=lib/vx-9p/server.c,lib/vx-9p/client.c,lib/vx-9p/ring.c,lib/vx-9p/ring_server.c,lib/vx-9p/messages.def,servers/fsd/fsd.c,docs/proto/map.md
+    keys=9p,9px,mmap,vmo,pager,page,cache,mapping
+
+# SYNOPSIS
+
+```text
+size[4] Tmap tag[2] fid[4] offset[8] length[8] prot[4]
+size[4] Rmap tag[2] offset[8] length[8]
+```
+
+# DESCRIPTION
+
+`Tmap` is 9Px's own, with no counterpart in 9P2000 or 9P2000.L, and belongs to the `map` extension, which `Tversion` negotiates as `+map` (see version(5)).
+It asks the server for the bytes of a file from <offset> for <length> as a VMO, a memory object the client maps into its address space (see vmo(2)), so that a program's `mmap` of a file is the file's own pages, not a copy.
+Its type numbers are 158 and 159.
+
+<fid> must be open, on a file that is not a directory, and open for reading: `OREAD`, `ORDWR` or `OEXEC`, but not `OWRITE`.
+<prot> is the access the mapping wants: read 1, write 2, exec 4.
+A writable mapping needs <fid> open `ORDWR`, as POSIX's `mmap` asks of a descriptor.
+Write and exec together are refused, as are other bits and a <length> of 0; <prot> of 0 is taken, and gives a VMO that can be read.
+
+The VMO comes beside the reply, not in it.
+On the ring transport the server puts it in one of the ring's handle slots (see ring_xfer_handles(2)), and the completion carries `P9_CQE_HANDLE` in its flags and the slot's number in `aux`; the client takes it from there.
+Its rights are those <prot> asks for: `VX_RIGHT_READ` and `VX_RIGHT_MAP` always, `VX_RIGHT_WRITE` or `VX_RIGHT_EXEC` as asked, and `fsd` adds `VX_RIGHT_TRANSFER` and `VX_RIGHT_INSPECT`.
+A reply that finds no free slot is sent without its VMO, which the server closes, and the client's call fails.
+
+`Rmap`'s <offset> is where in the VMO the file's <offset> lies, and its <length> how many bytes the VMO has from there.
+`fsd`'s VMO holds the whole file from its first byte, so its <offset> is the one asked for, and its <length> runs to the end of the VMO, which may be more than was asked for, or less, past the file's last page.
+The client maps no more than it asked for and no more than there is, and leaves the rest of its range unmapped.
+Neither offset need be a multiple of the page size, though a mapping is made of whole pages.
+
+## The file's pages
+
+Only a pager can make a VMO whose pages are the file's (see pager_create(2)), and only `fsd`, given `pager` in its manifest, has the extension; every other server, and `fsd` without `pager`, refuses `Tmap`.
+`fsd` answers every `Tmap` of a file, from any connection and any user, with the same VMO, the file's page cache, as fsd(4) describes under {the pager|fsd(4)#pager}.
+Its size is the file's in whole pages, one at least, and it follows the file's as writes change it; only the pager resizes it, never a client, so no client can shrink it under the others or grow the file with pages of zeros.
+Writes through mappings reach the file: `fsd` writes the pages back every 5 seconds while files are mapped, before each commit, before a `Tread` of the file and before its size changes, and a `Twrite` goes into the pages as well as the volume, so every mapping and every reader sees one file.
+In the last page, bytes past the file's end read as zeros, and what is written there is lost; past the last page nothing is mapped.
+A file removed while it is mapped stays, as POSIX keeps a removed file's data while it is mapped, until nothing but `fsd` refers to the VMO.
+
+The musl back end sends `Tmap` for an `mmap` of a file that is `MAP_SHARED`, or `MAP_PRIVATE` and not writable; a writable `MAP_PRIVATE` mapping, or one on a server without `map`, is read into a VMO of the back end's own with `Tread`.
+
+## Errors
+
+Before `map` is negotiated, and from a server with no `map` operation, `Tmap` is answered `operation not supported`; `fsd` without `pager` answers the same.
+A <fid> that is not one of the connection's is `unknown fid`.
+A <fid> not open, open on a directory, open `OWRITE`, or open for less than `ORDWR` with write asked for, is `permission denied`.
+Bad <prot> bits, write with exec, and a <length> of 0 are `bad message`; an <offset> and <length> whose sum overflows 64 bits, and in `fsd` an <offset> at or past the file's last page, are `offset out of range`.
+`fsd` also answers `permission denied` for its made-up files (`adm`'s `ctl` and `status`) and for a writable mapping in a read-only tree, and `out of memory` for a 65th mapped file.
+VectraOS's client sends `Tmap` only once the session has `map`, failing with `VX_ERR_UNSUPPORTED` otherwise, and fails with `VX_ERR_INVALID` an `Rmap` that comes without its VMO.
+
+# SEE ALSO
+
+intro(5), version(5), open(5), read(5), dref(5), vmo(2), pager_create(2), ring_xfer_handles(2), fsd(4); the extension's spec is `docs/proto/map.md` in the repository
+
+# BUGS
+
+A touch past the file's last page faults as a bad address, `SIGSEGV`, where POSIX says `SIGBUS`.
+
+The VMO's rights are more than the spec's "no more than <prot> asks": `fsd` adds `VX_RIGHT_TRANSFER` and `VX_RIGHT_INSPECT`, so a client may pass a mapping of the file on.
+
+Exec is checked against nothing but W^X: a fid open `OREAD` may be mapped executable, as POSIX allows of a descriptor, without the file's `x` permission.
+
+`msync(MS_SYNC)` does not wait: pages written through a mapping reach the volume within about 10 seconds, or at the file's next `Tfsync` (see fsync(5)).
+
+Pages supplied to a mapping are not synced to the instruction cache, which matters on aarch64 hardware, not under QEMU.
+
+A server that is not a pager could only answer with an anonymous VMO, a copy a client could not tell from the file; the private copy 9Px's design gives remote servers comes with the network transport, so `Tmap` is local only.

@@ -8,7 +8,7 @@ Section 6 describes the formats of files, and the conventions they keep.
 There is one text format, ndb(6): records of `key=value` tuples, one record to a line with indented lines continuing it.
 Configuration, manifests, the namespace files, the manual's index and most of what servers print are ndb, and one strict parser reads them all, so no program formats or parses it by hand.
 
-A format's page lists its keys; a key it does not know is an error, not ignored.
+A format's page defines its keys, and its parser refuses a key the page does not: a misspelt key is an error, not ignored. Each such parser keeps its keys in a table, a `.def` file of `KEY` lines, and `./build man --check` holds the page to it, so the two cannot drift apart.
 The manual's own pages are in guide(6); text is UTF-8 (utf(6)).
 
 # SEE ALSO

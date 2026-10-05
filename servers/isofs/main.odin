@@ -21,6 +21,7 @@ import "vx:p9"
 import "vx:p9ring"
 import "vx:rt"
 import "vx:str"
+import usage "gen:usage/isofs"
 
 @(private="file")
 disk: driver.Blk
@@ -237,7 +238,7 @@ start :: proc() -> string {
 		case args[i] == "-j":
 			avoid += {.Joliet}
 		case:
-			fail("usage: isofs [-r] [-j] [-u user]")
+			fail(usage.TEXT)
 		}
 	}
 	server.listen = rt.spawn_take("listen")

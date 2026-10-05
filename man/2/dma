@@ -1,0 +1,146 @@
+page=dma sect=2 summary="what a device may reach by DMA"
+    names=dma_domain_create,dma_domain_op,dma_map,dma_unmap
+    src=kernel/obj/device.c,kernel/iommu/vtd.c,kernel/iommu/smmuv3.c,kernel/syscall/syscall.c,lib/vx-rt/base.c
+    keys=iommu,vt-d,smmu,smmuv3,dma,domain,mapping,revoke,quiesce,driver
+
+# SYNOPSIS
+
+```c
+vx_status vx_dma_domain_create(vx_handle resource, uint32_t source,
+                               vx_handle *out);
+int64_t vx_dma_domain_op(vx_handle domain, uint32_t op);
+vx_status vx_dma_map(vx_handle domain, vx_handle vmo, uint64_t offset,
+                     uint64_t size, uint32_t options, uint64_t *addresses,
+                     vx_handle *mapping);
+vx_status vx_dma_unmap(vx_handle mapping);
+```
+
+# DESCRIPTION
+
+A DmaDomain is what one PCI function may reach by DMA (see the kernel's design, 01 §7.1).
+devmgr makes it and keeps it, and gives the function's driver a duplicate that can map, wait for faults and look, but not revoke; so a driver that dies, or lies, cannot leave its device writing into memory that has gone to someone else.
+
+Where an IOMMU covers the function, the domain translates: on x86_64 the kernel drives VT-d, on aarch64 SMMUv3, and in both the IOMMU denies every device all memory until its domain is made.
+A mapping then gets device addresses of the domain's own, contiguous however its pages lie, between 4 GiB and 512 GiB.
+On x86_64 the firmware's reserved regions for the device are mapped at their own addresses, below that; on aarch64 the GIC ITS's doorbell is, so the device's MSIs arrive.
+A function no IOMMU covers gets a pass-through domain, whose device addresses are physical addresses: safe only with devices QEMU emulates.
+
+`vx_dma_domain_create` makes a domain for the PCI function whose requester ID (`bus << 8 | device << 3 | function`) is <source>, with a Resource handle that has MANAGE.
+Its handle has MAP, MANAGE, WAIT, DUPLICATE, TRANSFER and INSPECT.
+A translated function has one domain at a time.
+It makes the call `dma_domain_create` with options 0, the only kind so far.
+
+`vx_dma_map` maps the bytes [<offset>, <offset> + <size>) of <vmo> for the device of <domain>, which needs MAP, and writes the device address of each page into `addresses[size / 4096]` and a handle to a DmaMapping for the range into <mapping>.
+<offset> and <size> are multiples of 4096; <size> is at most 2 MiB.
+<options> says what the device may do, and is checked against the VMO handle's rights: `VX_DMA_READ`, the device reads the memory, needs READ; `VX_DMA_WRITE`, it writes it, needs WRITE; either or both, but not neither.
+The VMO must be anonymous memory: not device memory, and not a pager's, whose pages come and go.
+The mapping holds the VMO's pages for the device, whatever becomes of the VMO's handles; its own handle has only INSPECT, so it stays with the task that made it.
+Each range is a mapping of its own, and a range may be mapped more than once.
+
+`vx_dma_unmap` says the device is done with <mapping>, which needs no right: in a translated domain the range leaves the device's tables, and the IOMMU's caches are invalidated, before its pages are let go.
+The wrapper then closes the mapping's handle, whatever the call returned.
+A mapping whose handle goes without an unmap (its driver died) is different.
+In a translated domain it is unmapped as it goes.
+In a pass-through domain nothing can stop the device, so its pages are kept for the device until the domain's owner says the device has been stopped (`VX_DMA_QUIESCED`).
+
+`vx_dma_domain_op` acts on the whole domain:
+
+: `VX_DMA_REVOKE`
+  Needs MANAGE.
+  Every live mapping becomes the owner's: its handle can no longer unmap it.
+  In a translated domain every mapping leaves the device's tables, and its pages are let go, at once; in a pass-through domain they are kept until `VX_DMA_QUIESCED`.
+  devmgr revokes a dead driver's domain before it resets the device.
+: `VX_DMA_QUIESCED`
+  Needs MANAGE.
+  The device has been stopped (bus mastering off, the function reset), so every page kept for it is let go.
+: `VX_DMA_FAULTS`
+  Needs INSPECT.
+  Returns how many faults the IOMMU has reported for the device.
+
+A fault also fires a binding on the domain: `port_bind` with `VX_TRIGGER_DMA_FAULT` and WAIT on the domain fires when the count passes the binding's threshold, at once if it already has, with the count as the packet's value.
+The domain goes when its last handle and its last mapping have gone.
+
+# EXAMPLES
+
+From `lib/vx-driver/virtio.c`, a virtqueue's three pages given to the device:
+
+```c
+vx_status st = vx_vmo_create(QUEUE_BYTES, 0, &vmo);
+if (st == VX_OK)
+  st = vx_as_map(vx_self, vmo, 0, QUEUE_BYTES, VX_MAP_WRITE, &at);
+// kept as long as the driver lives: the device reads the queue and
+// writes its used ring
+vx_handle mapping;
+if (st == VX_OK)
+  st = vx_dma_map(v->dma, vmo, 0, QUEUE_BYTES, VX_DMA_READ | VX_DMA_WRITE,
+                  pa, &mapping);
+vx_handle_close(vmo); // the mappings keep it
+```
+
+From the kernel's tests (`tests/kernel/ktest.c`), a driver's duplicate of a domain:
+
+```c
+CHECK(vx_handle_dup(dom, VX_RIGHT_MAP | VX_RIGHT_WAIT | VX_RIGHT_INSPECT,
+                    &user) == VX_OK);
+CHECK(vx_dma_map(user, mem, 0, 8192, VX_DMA_READ | VX_DMA_WRITE, addrs,
+                 &map1) == VX_OK);
+CHECK(vx_dma_map(user, mem, 8192, 4096, VX_DMA_WRITE, addrs, &map2) ==
+      VX_OK);
+CHECK(vx_dma_domain_op(user, VX_DMA_REVOKE) == VX_ERR_ACCESS);
+CHECK(vx_dma_domain_op(user, VX_DMA_FAULTS) == 0);
+```
+
+# SEE ALSO
+
+irq(2), port_bind(2), vmo_create(2), handle_dup(2), devmgr(8)
+
+# DIAGNOSTICS
+
+`vx_dma_domain_create` returns:
+
+: `VX_OK`
+  The domain is made, and its handle is in <out>.
+: `VX_ERR_INVALID`
+  <source> is above `0xffff`, or <out> is not writable.
+: `VX_ERR_BAD_HANDLE`
+  <resource> is not a Resource.
+: `VX_ERR_ACCESS`
+  <resource> lacks MANAGE.
+: `VX_ERR_EXISTS`
+  The function is translated and already has a domain.
+: `VX_ERR_NO_MEMORY`
+  There is no memory for the domain or its tables, the IOMMU has no domain left, or the caller's handle table is full.
+: `VX_ERR_BAD_STATE`
+  The caller's handle table is gone.
+
+`vx_dma_map` returns:
+
+: `VX_OK`
+  The range is mapped; its addresses are in <addresses> and the mapping's handle in <mapping>.
+: `VX_ERR_INVALID`
+  <options> is 0 or has another bit; <size> is above 2 MiB; <addresses> is not writable.
+: `VX_ERR_RANGE`
+  <size> is 0, <offset> or <size> is not a multiple of 4096, or the range runs past the VMO's end.
+: `VX_ERR_BAD_HANDLE`
+  <domain> is not a DmaDomain, or <vmo> not a VMO.
+: `VX_ERR_ACCESS`
+  <domain> lacks MAP, or <vmo> lacks a right <options> needs.
+: `VX_ERR_UNSUPPORTED`
+  <vmo> is device memory or a pager's.
+: `VX_ERR_NO_MEMORY`
+  There is no memory for the mapping or the device's tables, the domain's addresses are used up, or the caller's handle table is full.
+: `VX_ERR_BAD_STATE`
+  The caller's handle table is gone.
+
+`vx_dma_unmap` returns `VX_OK`; `VX_ERR_BAD_STATE` if the mapping was unmapped already, or revoked; or `VX_ERR_BAD_HANDLE` if <mapping> is not a DmaMapping.
+
+`vx_dma_domain_op` returns `VX_OK`, or for `VX_DMA_FAULTS` the count; `VX_ERR_INVALID` for another <op>; `VX_ERR_BAD_HANDLE` if <domain> is not a DmaDomain; or `VX_ERR_ACCESS` if it lacks the right <op> needs.
+
+# BUGS
+
+In a pass-through domain, a mapping kept after its handle went, while the domain's own handles have all gone too, is never let go: nobody is left to say `VX_DMA_QUIESCED`.
+
+The design's batched `dma_map`, taking an array of ranges, and its placed and switched domains, with `VX_DMA_AT`, `VX_DMA_EXEC` and `VX_DMA_PRIV`, are not implemented; `dma_domain_create` refuses any options.
+Mapped pages are not charged to a pin budget.
+
+Device memory cannot be mapped for another device: peer-to-peer DMA comes later.

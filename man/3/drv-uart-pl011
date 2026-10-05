@@ -1,0 +1,96 @@
+page=drv-uart-pl011 sect=3 summary="arm PL011 UART driver, the console on aarch64"
+    src=drivers/drv-uart-pl011/uart.c,lib/vx-driver/cons.c,boot/svc/cons.ndb
+    keys=uart,serial,pl011,console,cons,tty,aarch64,arm
+
+# SYNOPSIS
+
+```ndb
+service=uart program=/boot/bin/drv-uart-pl011 arch=aarch64 post=cons restart
+mmio=0x9000000 size=4096
+irq=33
+```
+
+```text
+/srv/cons
+```
+
+# DESCRIPTION
+
+`drv-uart-pl011` drives arm's PL011 UART and serves it as the console, the file `cons`, posted as `/srv/cons`.
+It is aarch64's console driver; drv-uart-16550(3) is x86_64's.
+
+It is a service, not a device devmgr(8) finds: svcd(8) starts it first of all, from the manifest in `/boot/svc/cons.ndb` shown above, and restarts it if it exits.
+svcd mints its device objects from the root Resource, once, and gives each start its own handles to them: the UART's registers, the page the `mmio=` record names (QEMU's `virt` machine has it at 0x9000000), the interrupt the `irq=` record names (the GIC's interrupt 33, SPI 1), and the listen end of `/srv/cons`.
+It takes no arguments.
+Once it has the registers, the kernel writes to the UART only to report a panic; svcd, and every program started with `console`, write their messages to `/srv/cons`, and the driver's own go straight to its output queue.
+
+At start it turns the FIFOs on, clears every interrupt, and enables the receive and receive-timeout interrupts.
+It takes what arrived before the interrupt was its own, then serves.
+It leaves the speed and the rest of the line format as the firmware set them.
+
+The interrupt is level-triggered, and the kernel masks it when it fires: the driver clears the UART's pending interrupts, takes every byte received and refills the transmit FIFO, then acknowledges it.
+It asks for the transmit interrupt only while output is waiting, and sends 16 bytes when the FIFO is empty, else one while it is not full.
+
+## The console
+
+The tree is one file, `cons`, mode 0666, owned by `cons`.
+Offsets mean nothing: it is a stream.
+Up to 128 connections are served at once, one for each program with console output.
+
+Reads are cooked, as Plan 9's console is.
+Bytes typed are echoed and gathered into a line, and a read returns at most one line, once it is ended, never part of the next; a read with nothing finished waits.
+Typed bytes mean:
+
+: return or newline
+  Ends the line; the read returns it with a newline.
+  A carriage return is taken as a newline.
+: backspace or DEL
+  Takes back the last rune typed, all of its bytes (UTF-8 is all text, ADR-0013), echoed as one character erased.
+: `^U`
+  Takes back the whole line.
+: `^D`
+  Sends the line as it is, without a newline; on an empty line, makes one read return 0, the end of the file, in its place among the lines.
+: tab and printable bytes
+  Added to the line and echoed.
+
+Any other control byte, `^C` among them, is dropped.
+A line is at most 255 bytes: a longer one ends at the last whole rune that fits, and the rest starts the next.
+Finished input waits in 4 KiB, at most 64 lines; a line that does not fit, because the reader is far behind, is dropped whole.
+
+Writes go out with each newline as carriage return and newline.
+A write takes what fits in the 8 KiB output queue and waits only if nothing does, until the port has taken some.
+
+# EXAMPLES
+
+What it says at start:
+
+```text
+drv-uart-pl011: serving /srv/cons
+svcd: started uart (task 2)
+```
+
+# FILES
+
+: `/boot/svc/cons.ndb`
+  Its manifest, with x86_64's.
+: `/srv/cons`
+  Its post.
+
+# SEE ALSO
+
+drv-uart-16550(3), svcd(8), rc(1)
+
+# DIAGNOSTICS
+
+Without its registers, interrupt or listen channel it prints `drv-uart-pl011: no registers, IRQ or listen channel` and exits with the words after the colon.
+If it cannot wait for its interrupt it prints `drv-uart-pl011: cannot wait for the IRQ` and exits so; if serving fails it exits `cannot serve`.
+
+# BUGS
+
+The speed and line format are never set, so the console works only at what the firmware or the bootloader left.
+There is no raw mode and no `consctl`: every program reads cooked lines.
+`^C` is dropped rather than sent as a note, so it cannot interrupt a program.
+A blocked read of the console is not interrupted by a signal: its handler runs once the line comes.
+There is no `/dev/cons` in a namespace: the console is a handle given at spawn, so a program cannot open it by name.
+Overrun, parity, framing and break errors are ignored; there is no flow control.
+The manifest names the UART's address, so it is QEMU's `virt` machine's; the PL011 that ACPI's tables list is not matched from them.

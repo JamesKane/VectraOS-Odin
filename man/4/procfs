@@ -1,0 +1,295 @@
+page=procfs sect=4 summary="process file system"
+    src=servers/procfs/procfs.c,servers/procfs/debug.c,servers/procfs/crash.c,servers/procfs/prof.c,lib/vx-proc/proc.h
+    keys=proc,process,pid,note,notepg,noteid,wait,ctl,debug,breakpoint,watchpoint,registers,crash,profile,zones
+
+# SYNOPSIS
+
+```usage
+procfs
+```
+
+# DESCRIPTION
+
+`procfs` serves `/proc`, the system's one process table (ADR-0011), with 9front's files and the debug files dbg(1) uses.
+svcd(8) starts it from `boot/svc/procfs.ndb` and posts it as `/srv/proc`; a namespace that wants the processes mounts `/srv/proc` on `/proc`, as the console shell's manifest and `/lib/ns/posix` do.
+svcd gives it a handle to svcd's own task (`tasks`), a connection to nsd(4) for each process's namespace, and one to tmpfs(4) for crash directories.
+svcd starts it again when it exits.
+
+The root holds a directory for each process, named by its process id in decimal, listed in the order of procfs's table, not by id.
+A pid is the kernel's id of the process's task, which is never reused; exec keeps the task, and so the pid.
+Every file is owned by `proc`, and opening one is allowed or refused by its mode alone; an open with `ORCLOSE` is refused.
+
+A process is in `/proc` only once it is registered, and leaves it when its task ends.
+Whoever spawns a process registers it before it runs, with a call on the channel procfs listens on, the post `/srv/proc` or the connector a namespace mounted `/proc` from (`lib/vx-proc/proc.h`).
+The call carries a handle to the child's task, the parent's pid, the flags `PROC_NOWAIT` (the parent wants no wait record), `PROC_NOTEG` (a note group of its own) and `PROC_SETSID` (a session and a note group of its own), and optionally a note group in the parent's session to join; the reply is the child's pid.
+Without either flag a child is in its parent's note group and session.
+svcd is the root of the table, admitted through `tasks`; it registers the services it started before procfs, each a note group and session of its own.
+procfs holds each task's handle, watches for its end, and catches each fault that nothing else takes ({crash directories|#crash}).
+
+Each process directory holds these files, described in the nodes that follow:
+
+| File | Mode | Holds |
+| `status` | r | the process's state, one record |
+| `ctl` | w | control verbs |
+| `note` | w | a note to post to it |
+| `notepg` | w | a note to post to its note group |
+| `noteid` | rw | its note group |
+| `ppid` | r | its parent's pid |
+| `wait` | r | its children's wait records |
+| `ns` | r | its namespace |
+| `events` | r | debug events |
+| `mem` | rw | its address space |
+| `maps` | r | its mappings |
+| `images` | r | its program's ELF image |
+| `info` | r | what the debugger can do on this machine |
+| `prof/` | | profiling zones |
+| `threads/` | | a directory for each thread |
+
+@node=files title="The process files"
+
+: `status`
+  One ndb record (see ndb(6)), made when it is read: `pid`, `name` (the task's name), `state`, `threads` (the number of threads), `mem` (memory mapped into its address space, in KiB, followed by `K`) and `sid` (its session).
+  `state` is `new` if the task has not started, `stopped` if `ctl`'s `stop` or a `SIGSTOP` stopped it, `waiting` if every thread is blocked, and `running` otherwise.
+  ps(1) prints these records.
+: `note`
+  A write posts its text, without trailing newlines and spaces, as a note: the kernel interrupts the process with it (see {notes|#notes}).
+  It must be 1 to 128 bytes.
+: `notepg`
+  A write posts the note to every process in this process's note group, the writer included if it is a member, as each `note` would.
+  It succeeds even if some of them refuse the note.
+: `noteid`
+  Reading gives the process's note group, a number in decimal.
+  Writing a number moves the process to that group, which must be one some process in its session is in, or its own pid, which makes a new group; any other is refused.
+: `ppid`
+  The parent's pid, in decimal: the one its registration named, or 0 for svcd.
+  A parent that ends leaves its children's `ppid` as it was.
+: `ns`
+  The namespace(6) text of the namespace group the process is in (ADR-0009), which procfs asks nsd for: what ns(1) would print in it.
+  It is empty if the process is in no group or nsd does not answer within a second.
+: `wait`
+  A read waits for one of the process's children to end, then returns its wait record, one record each read whatever the offset, as in 9front.
+  The record holds `pid`, `name`, `noteid` (its note group when it ended), `status` (its exit string, empty for success) and `real` (milliseconds from its registration to its end).
+  A process that has asked for `childnotes` (see {control|#ctl}) also gets records of its children's stops, with `stopped=` and the signal in place of `status` and `real`, and of their continues, with the flag `continued`.
+  A read with no record queued and no living child that will leave one fails with `no living children`.
+  The file's length in a stat is the number of records queued, so a length above 0 means a read will not wait.
+
+A child leaves a record only if its parent is registered and alive and the child was not registered with `PROC_NOWAIT`.
+At most 128 records are queued for one parent and 2048 for all of them; past that a child's end goes unrecorded.
+A process's unread records go when it ends.
+
+@node=ctl title="Control"
+
+A write to `ctl` is one verb with its arguments; trailing newlines and spaces are dropped.
+An address is decimal or hexadecimal after `0x`; a thread id, a signal and a hit count are decimal.
+A verb that is not one of these fails with `bad message`.
+svcd, the root, refuses every verb that would stop, kill or change it with `permission denied`: the system needs it.
+
+: `kill`
+  Ends the process at once, with the exit string `killed`.
+: `stop [<sig>]`
+  Stops every thread of the process.
+  <sig>, from 1 to 64 and `SIGSTOP` (19) when left out, is the signal its parent's wait record and `SIGCHLD` note report.
+  Stopping a process already stopped does nothing.
+: `start`
+  Lets go every thread held at a debug event, and continues a stopped process; its parent hears that it continued.
+: `setsid`
+  Gives the process a session and a note group of its own, both named by its pid.
+  It is refused with `permission denied` if any process's note group is already that pid, as POSIX refuses a group leader.
+: `childnotes`
+  From now on the process is sent the note `posix: SIGCHLD pid=<pid>` when a child ends, stops or continues, and gets wait records for stops and continues.
+  It cannot be turned off.
+: `break <addr> [if <cond>] [after <n>]`
+  Sets a breakpoint at <addr> (see {debugging|#debug}).
+  `after` lets <n> hits go by before the first that stops.
+  <cond>, written without spaces, is a register name (as in `regs.ndb`) or an address in brackets, `[0x7f001000]`, for the 64-bit word there, one of `==`, `!=`, `<`, `<=`, `>` and `>=`, and a number; the comparison is unsigned.
+  A breakpoint at an address that has one replaces its condition and count.
+: `unbreak <addr>`
+  Removes the breakpoint at <addr>, putting back the code it replaced.
+: `watch <addr> <len> write|rw`
+  Sets a watchpoint on the <len> bytes at <addr>, stopping a thread that writes them, or (`rw`) reads or writes them.
+  A watchpoint at an address that has one replaces it.
+  The hardware decides which lengths and alignments it takes; one it refuses leaves the slot as it was.
+: `unwatch <addr>`
+  Removes the watchpoint at <addr>.
+: `step <tid>`
+  Runs thread <tid>, which must be held at a debug event, for one instruction; it stops again with `event=step`.
+: `freeze <tid>`, `thaw <tid>`
+  Suspends thread <tid>, so its registers can be read, or lets it run again.
+: `detach`
+  Removes every breakpoint and watchpoint, lets every held thread go, and stops taking the process's exceptions first.
+
+@node=notes title="Notes and signals"
+
+A note posted through `note` or `notepg` is delivered by the kernel, which interrupts the process with it (ADR-0010).
+If the process is blocked in a read of its own `wait` file, that read ends with `interrupted`, after the note, so the process sees the note first.
+
+The POSIX back end builds signals on notes (`lib/vx-posix/posix.h`), and procfs carries out the signals a process cannot act on itself.
+A note naming `SIGKILL` kills the process with `killed`; one naming `SIGSTOP` stops it, as `ctl`'s `stop` does; one naming `SIGCONT` continues it and is then delivered, for its handler.
+svcd takes no note at all: it has no handler, and a note would end it, and the system with it.
+
+Unlike 9front's, `notepg` includes the writer: a note to oneself is delivered before the write returns, so POSIX's `kill(0, sig)` signals the caller too.
+
+@node=debug title="Debugging"
+
+The debug files (`docs/05-debugger.md` §3) let a debugger stop and examine a process with reads and writes, as acid reads Plan 9's `/proc`.
+Breakpoints live in procfs, not in the debugger, so a shell script and dbg(1) share them.
+
+The first time a breakpoint or watchpoint is set, or `events` is opened, procfs binds its port to the task's exceptions first, before the program's own handler.
+procfs then writes the trap instruction (`int3` on x86_64, `brk #0` on aarch64) with `task_mem_rw`, which gives the task a private copy of the code page.
+A thread that reaches a breakpoint stays stopped, with an event, until `ctl`'s `start` or its own `resume` or `step`.
+procfs then puts the code back, steps the thread over it and puts the trap back.
+A breakpoint whose condition is false, or that is within its `after` count, is stepped over at once, with no event and no round trip to the debugger.
+A fault stops the faulting thread with an event; letting it go passes the fault on to the program's handler, else to procfs's crash handler.
+A trap instruction the program has itself stops the thread with `event=trap`, and letting it go passes it to the program in the same way.
+A note is passed on to the program without stopping it.
+
+: `events`
+  Opening it makes the opener a debugger, as above.
+  A read waits for an event, then returns its record, one each read.
+  At most 32 events wait to be read; later ones are lost.
+  The file's length in a stat is the number waiting.
+
+An event's record holds `event`, `thread` and `pc`, and for a fault or a watchpoint `addr` and `access`:
+
+```text
+event=break thread=1 pc=0x401a20
+event=step thread=1 pc=0x401a24
+event=fault thread=1 pc=0x401a30 addr=0x0 access=read
+event=trap thread=1 pc=0x401a40
+event=watch thread=1 pc=0x401a50 addr=0x4c2008 access=write
+```
+
+A fault's `access` is `read`, `write` or `exec`; a watchpoint's is the kind it was set as.
+
+: `mem`
+  The address space as a file, the offset being the address.
+  A read stops at the first page that is not mapped, and a read starting at one fails with `bad message`.
+  A write goes a page at a time, and stops at the first page that cannot be written; it may be up to 16 KiB.
+  svcd's memory cannot be written.
+: `maps`
+  One record for each mapping, in address order: `base`, `size`, `prot` (such as `r-x`) and `offset` into its VMO, the numbers in hexadecimal.
+: `images`
+  One record for the program's ELF image: `name` (the task's name), `base` (the lowest mapping that starts with an ELF header) and `build-id`, in hexadecimal, if the image has a GNU build-id note.
+: `info`
+  One record: `arch` (`x86_64` or `aarch64`), `watchpoints` (how many the hardware has) and `breakpoints` (how many procfs keeps for a process, 32).
+: `threads/<tid>/`
+  A directory for each living thread, named by its id in decimal, holding:
+: `threads/<tid>/status`
+  `state` (`running`, `blocked`, `stopped` or `frozen`), `reason` (`break`, `step`, `fault`, `trap` or `watch`) if procfs holds it at an event, and `pc`, if its registers can be read.
+: `threads/<tid>/regs`
+  The general registers, binary: the architecture's `vx_regs`.
+  It is read, or written, whole and at offset 0.
+: `threads/<tid>/regs.ndb`
+  The same registers as one record, each in hexadecimal: `rax` to `r15`, `rip` and `rflags` on x86_64; `x0` to `x30`, `sp`, `pc` and `pstate` on aarch64.
+  Writing `<name>=<value> ...` sets those registers and leaves the rest.
+: `threads/<tid>/fpregs`
+  The floating-point and SIMD registers, binary: the architecture's `vx_fpregs`, read or written whole at offset 0.
+: `threads/<tid>/ctl`
+  `step`, `resume` (lets the thread go from its event), `freeze` or `thaw`, for this thread.
+
+A thread's registers can be read only while it holds still: stopped at an event, or frozen.
+
+@node=prof title="Profiling zones"
+
+A process that calls `vx_prof_init` (`lib/vx-prof/prof.h`) gives procfs its profiling ring, a VMO, with a `PROC_PROF` call on the listen channel, naming where it maps it.
+procfs maps the ring too, writes a nonce of its own into it, and takes it only if the process's memory at that address shows the nonce, the proof that the process maps that VMO there.
+
+: `prof/ctl`
+  `zones on` or `zones off` turns the process's zones on or off.
+  It fails with `file does not exist` if the process has given no ring.
+: `prof/zones`
+  The ring as it is now: a `vx_prof_header`, then the records it holds, oldest first.
+  Its times are in cycles of the counter sysfs(4) describes in `/sys/clock/info`.
+
+`prof` is listed in the process's directory, and its two files in it.
+
+@node=crash title="Crash directories"
+
+procfs binds every process's exception port last in line, so a fault that neither a debugger nor the program's handler takes reaches it (`docs/05-debugger.md` §5).
+It stops the process's other threads and saves the process as a directory shaped like a `/proc` directory, which dbg(1) opens as it opens a live process:
+
+```text
+/tmp/crash/NAME.PID/
+    info status maps images    as /proc/N's, at the fault
+    note                       the fault in Plan 9's words
+    threads/T/status regs regs.ndb fpregs
+    mem/0xBASE                 each writable mapping's bytes
+```
+
+The directory is made on tmpfs, which namespaces mount on `/tmp`, so it is seen as `/tmp/crash/<name>.<pid>`.
+Read-only mappings are not copied, since `images` names them by build id; of the writable ones at most 16 MiB is saved, and a mapping's file ends at its first page that cannot be read.
+Each call to tmpfs has a time limit of 5 seconds, since the process that faulted may be tmpfs or one it waits on.
+procfs then prints a line on the console and kills the process with the fault's note as its exit string, as an unhandled fault always ends it.
+
+A fault of procfs's own is not caught, since it would wait for procfs to take it: procfs ends, and svcd starts it again.
+
+# EXAMPLES
+
+The manifest that starts it, `boot/svc/procfs.ndb`:
+
+```ndb
+service=procfs program=/boot/bin/procfs post=proc tasks console restart
+connect=nsd
+connect=tmpfs
+```
+
+From the shell test, svcd's status and a kill:
+
+```rc
+% cat /proc/1/status
+pid=1 name=svcd state=waiting threads=1 mem=32560K sid=1
+% uartpid=2; echo kill > /proc/$uartpid/ctl
+```
+
+after which svcd reports `svcd: uart exited: killed` and starts it again.
+
+A crash, from the debugger test: procfs prints
+
+`procfs: dbgdemo.17: sys: trap: fault read addr=0x10 pc=0x21afa0; saved in /tmp/crash`
+
+and dbg(1), which ran the program, then says:
+
+```text
+dbg: dbgdemo exited: sys: trap: fault read addr=0x10 pc=0x21afa0
+dbg: crash directory /tmp/crash/dbgdemo.17
+```
+
+# FILES
+
+: `/srv/proc`
+  procfs's post, and the channel processes are registered on.
+: `/proc/<pid>/`
+  A process.
+: `/tmp/crash/<name>.<pid>/`
+  A crash directory.
+
+# SEE ALSO
+
+ps(1), dbg(1), ns(1), kill(1), nsd(4), ptyd(4), tmpfs(4), svcd(8), task(2), thread(2), exception(2), debug(2); ADR-0010, ADR-0011 and `docs/05-debugger.md` in the repository
+
+# DIAGNOSTICS
+
+If it has no task tree or listen channel, procfs prints `procfs: FAILED: no task tree or listen channel` and exits with `no task tree or listen channel`; it exits `cannot serve` if serving fails.
+
+For a crash it prints `procfs: <name>.<pid>: <note>; saved in /tmp/crash`, or `; not saved` when tmpfs could not be reached or the directory made.
+
+Its files fail with 9P's words: `file does not exist` for a process or thread that has ended, `permission denied` for svcd's refusals, a mode, a `setsid` or a note group that is not allowed, `bad message` for a verb or number it cannot parse, `interrupted` and `no living children` from `wait`, `out of memory` when no breakpoint or watchpoint slot is free, and `fid already in use` for `step` or `resume` on a thread not held at an event.
+
+# BUGS
+
+Anyone who can open `/proc/<pid>` can debug, signal and kill the process: `mem`, the registers, `note` and the stopping verbs check no capability token, and procfs trusts the task handle and parent a registration names.
+
+A restart loses the table: svcd registers its services again, but every other process is gone from `/proc`.
+The table holds 128 processes.
+
+9front's `ctl` verbs `startstop`, `waitstop`, `hang` and `nohang`, and its `args` file, are not there, and wait records have no CPU times.
+
+The debugger follows 16 held threads of a process, and steps a thread over a breakpoint without stopping the others, so in a busy multithreaded process another thread may run past the breakpoint meanwhile.
+
+`docs/05-debugger.md` §3 asks for more than there is: no `image`, `thread` or `exit` events, no `image=` in `maps`, `images` shows only the program's own image and not its path, and there are no `fpregs.ndb`, `sched` or `intent=`.
+Events lost to a full queue are counted but the count is never shown.
+
+`regs.ndb` of a thread that is running reads as empty, where `regs` fails.
+A thread not held at an event is reported with `fid already in use`, 9P's words for the status procfs returns.
+
+Crash directories go to `/tmp/crash`, so they are lost at reboot, are never pruned, and keep secrets: `NODUMP` memory is not kept out, nor is anything encrypted.

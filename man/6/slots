@@ -1,0 +1,122 @@
+page=slots sect=6 summary="the ESP's boot slot table"
+    src=lib/vx-slots/slots.c,cmd/install.c,servers/distd/distd.c
+    keys=slot,slots,boot,rollback,esp,limine,limine.conf,previous,cmdline
+
+# SYNOPSIS
+
+```ndb
+slot=a release=N tree=b2:HASH kernel=HEX svcd=HEX ktest=HEX bootfs=HEX
+boot=a previous=- cmdline="WORDS"
+```
+
+# DESCRIPTION
+
+An installed system's ESP has three boot slots, the directories `\EFI\vectra\a`, `b` and `c`.
+Each holds one release's `kernel.elf`, the root task's modules `svcd` and `ktest`, and `bootfs.tar`.
+The slot table, `\EFI\vectra\slots.ndb`, says what each slot holds, which slot boots, and which booted before it.
+It is ndb text (see ndb(6)): a record for each slot in use, then one record for the table.
+
+install(8) writes it with slot `a` in use and booting.
+distd(8) reads it for its `status`, and rewrites it at `apply`, which fills a free slot and makes it the one that boots, and at `rollback`, which makes the previous slot boot again.
+Both read and write it with `lib/vx-slots`, and each time they write it they write Limine's configuration, `\boot\limine\limine.conf`, from it alone, the table first, so the two never disagree.
+There is one Limine, at the firmware's fallback path `\EFI\BOOT\BOOTX64.EFI` or `BOOTAA64.EFI`, and no UEFI boot entries: choosing a slot is rewriting the configuration.
+
+A table is refused if it is not ndb, if it has a key not defined below, if it names no slot that boots, or if the slot that boots is not in use.
+A slot is in use when its record has a `release` and all four file hashes; a record without them is read as a slot not in use.
+
+## A slot
+
+: `slot`
+  The slot: `a`, `b` or `c`.
+  A record whose `slot` is anything else is read as the table's record.
+: `release`
+  The number of the release in the slot, decimal (see release(6)).
+  distd's `status` shows it as `current=` for the slot that booted and `boot=` for the slot that will.
+: `tree`
+  The release's base tree, `b2:` and 64 hex digits (see store(6)).
+  Written, but not read; a longer value is cut to 67 characters.
+: `kernel`, `svcd`, `ktest`, `bootfs`
+  The BLAKE2b-512 hashes of the slot's `kernel.elf`, `svcd`, `ktest` and `bootfs.tar`, 128 hex digits each.
+  install and distd compute them from the bytes as written to the ESP, distd reading each file back to be sure; they go into Limine's configuration, and Limine refuses a file that does not match.
+  A value of another length leaves the slot not in use; one of the right length is not checked further.
+
+## The table
+
+: `boot`
+  The slot that boots next: `a`, `b` or `c`.
+  Required.
+: `previous`
+  The slot that booted before it, the one `rollback` returns to, or `-` for none.
+  A slot not in use, and any other value, is read as none.
+: `cmdline`
+  The words each entry's kernel command line has after `vx.system vx.slot=`<x>: install writes the live system's command line without `vx.live`.
+  Up to 255 bytes are kept; it may be empty, and the key may be left out.
+
+When more than one record carries `boot`, `previous` or `cmdline`, the last that has a valid value is taken.
+distd and install always write all three.
+
+## Limine's configuration
+
+The configuration is made from the table and has, after a comment saying so, `timeout: 0` and a `default_entry` naming the slot that boots, then an entry for each slot in use, in the order `a`, `b`, `c`.
+An entry is titled `VectraOS (slot `<x>`, release `<n>`)`, uses Limine's own protocol, and names the slot's kernel by `path` and its three modules by `module_path`, each as `boot():/EFI/vectra/`<x>`/`<file> followed by `#` and the file's hash.
+Its command line is `vx.system vx.slot=`<x>, then the table's `cmdline`.
+`vx.system` starts the installed system's services (see svcd(8)); distd reads `vx.slot=` to know which slot booted.
+
+# EXAMPLES
+
+The table after the slots test has applied release 2 and rolled back, read from its disk with `mtype`, each 128-digit hash shortened here to its first and last eight:
+
+```ndb
+slot=a release=1
+    tree=b2:155a7449f2c3a213479d5d4dfa137d5c964a7714b42f57e02a8201efbde77b8a
+    kernel=3d7b1d81…721347ea svcd=2a64addb…9b9d5300
+    ktest=f8b92b84…f37616bc bootfs=09c69e32…83f376d5
+slot=b release=2
+    tree=b2:6d7eccaf261abb486a2b201954baed8fe62ba8a253dfcae1877fbf61afa9dd16
+    kernel=3d7b1d81…721347ea svcd=2a64addb…9b9d5300
+    ktest=f8b92b84…f37616bc bootfs=2470fba6…88fa7003
+boot=a previous=b cmdline=vx.skip=gsh
+```
+
+and the configuration made from it, its hashes shortened in the same way, its comment cut short and its second entry left out:
+
+```text
+# Written from \EFI\vectra\slots.ndb (install, distd: M5 step 9). One entry
+...
+timeout: 0
+default_entry: 1
+
+/VectraOS (slot a, release 1)
+    protocol: limine
+    path: boot():/EFI/vectra/a/kernel.elf#3d7b1d81…721347ea
+    module_path: boot():/EFI/vectra/a/svcd#2a64addb…9b9d5300
+    module_path: boot():/EFI/vectra/a/ktest#f8b92b84…f37616bc
+    module_path: boot():/EFI/vectra/a/bootfs.tar#09c69e32…83f376d5
+    cmdline: vx.system vx.slot=a vx.skip=gsh
+
+/VectraOS (slot b, release 2)
+...
+```
+
+# FILES
+
+: `\EFI\vectra\slots.ndb`
+  The slot table: `/tmp/EFI/vectra/slots.ndb` in distd's namespace, where the ESP is mounted.
+: `\EFI\vectra\a`, `\EFI\vectra\b`, `\EFI\vectra\c`
+  The slots.
+: `\boot\limine\limine.conf`
+  Limine's configuration, made from the table.
+
+# SEE ALSO
+
+distd(8), install(8), dosfs(4), release(6), store(6), ndb(6); `docs/06-install-update.md` §7 in the repository
+
+# BUGS
+
+A record that is neither a slot's nor the table's is ignored.
+
+The table is rewritten in place, then the configuration: a crash between the two leaves a configuration naming the old slots, and a crash during either leaves a file half written.
+
+`apply` does not look at which slot booted: two applies without a boot between them make the second's previous slot the first's, which has never booted, and a third overwrites the slot that is running.
+
+The design's slots each hold a Limine of their own with its configuration enrolled, and a UEFI boot entry each; there is one Limine and no boot entries, and the slot's `bootfs` does not hold its release's record.

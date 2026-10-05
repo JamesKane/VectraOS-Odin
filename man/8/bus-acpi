@@ -1,0 +1,162 @@
+page=bus-acpi sect=8 summary="ACPI in user space: the firmware's AML, its devices and power off"
+    src=servers/bus-acpi/bus-acpi.c,lib/vx-acpi/mint.h,ports/acpica/acvectra.h
+    keys=acpi,acpica,aml,dsdt,ssdt,_crs,_hid,s5,psci,power,poweroff,devices
+
+# SYNOPSIS
+
+```usage
+bus-acpi
+```
+
+# DESCRIPTION
+
+`bus-acpi` runs ACPICA, the interpreter of the firmware's ACPI machine language, as a task of its own.
+It loads the DSDT and SSDTs, runs their AML, reports the devices present to devmgr(8), which starts their drivers, and serves `/srv/acpi`, whose one request turns the machine off.
+
+devmgr(8) starts it, once, after it has scanned PCI and started the PCI drivers; svcd(8) has no manifest for it.
+It takes no arguments.
+devmgr gives it:
+
+: `acpi`
+  The kernel's copy of every ACPI table, end to end, as one read-only VMO, with its size in the spawn message.
+: `devmgr`
+  A channel to devmgr, on which it asks for what its AML touches and reports the devices it finds.
+: `listen`
+  The server end of `/srv/acpi`, devmgr's `claim=acpi` (see svc(6)), when devmgr's manifest has one.
+: `console`
+  devmgr's console, where everything `bus-acpi` and ACPICA say goes.
+
+and devmgr's own command line, which the kernel's is (devmgr's manifest says `cmdline`).
+The only word of it `bus-acpi` reads is `bus-acpi.probe=1`; see {Probing|#probe}.
+
+@node=tables title="The tables"
+
+ACPICA finds tables through an RSDP and an XSDT at physical addresses, but the firmware's memory they were in may have been reclaimed since the kernel copied them.
+So `bus-acpi` copies the kernel's copies into memory of its own and gives them addresses in a range no real table has, `0x7f0000000000` and up, behind an RSDP and an XSDT it makes, both named `VECTRA`.
+ACPICA's mappings of that range are of the copies.
+
+The XSDT lists every copy but the DSDT and any FACS.
+The FADT's copy is changed to name the DSDT's copy and no FACS, and its checksum made again.
+There is no FACS among the kernel's copies, so ACPICA runs without one (ADR-0030).
+
+`bus-acpi` then initialises ACPICA fully: the tables loaded, the hardware put in ACPI mode with its fixed registers and event blocks set up, and the namespace's objects initialised, their `_INI` methods run.
+Events are enabled but never delivered, since there is no SCI handler.
+
+@node=regions title="What the AML reaches"
+
+AML reaches hardware through operation regions: memory, I/O ports and PCI configuration space.
+`bus-acpi` holds none of them to begin with.
+When the AML first touches one, it asks devmgr for it on its `devmgr` channel and keeps what it is given, mapped, for the rest of its life:
+
+- memory, as a physical VMO of the page-aligned range, mapped uncached and writable;
+- I/O ports, on x86_64, as an IoRange mapped into its task; on aarch64 there are none, and every port access is refused;
+- a PCI function's configuration space, its 4 KiB of segment 0's ECAM, as a physical VMO.
+
+devmgr refuses RAM, the kernel's own devices (its interrupt controllers and IOMMU as the MADT, DMAR and IORT place them; on x86_64 the PIC's, the PIT's and the console's ports) and anything it has granted a driver, and says each answer on the console.
+An access refused, or one past `bus-acpi`'s 64 memory ranges, 64 port ranges or 64 configuration spaces, fails in the AML with `AE_NOT_EXIST`, and `bus-acpi` says so once for each address.
+The request is lib/vx-acpi/mint.h's `vx_acpi_mint`, by `channel_call` with a 5-second deadline.
+
+@node=devices title="The devices"
+
+`bus-acpi` walks the namespace for every device.
+Each one present, by its `_STA` or by having none, with a hardware ID (`_HID`), is printed on the console with its path, its hardware ID and its `_CRS` resources: `io=`<base>`/`<count> for ports, `mem=`<base>`/`<size> for memory, `irq=`<line> for an interrupt.
+Of an interrupt resource that offers a choice of lines, the first is taken.
+
+Each is also reported to devmgr, by a `channel_write` of a `vx_acpi_device` with no reply: the hardware ID, the path (cut to 47 bytes) and up to 8 resources.
+devmgr matches the hardware ID against its drivers' `match=acpi hid=` records and starts the driver it names with exactly those resources as grants, unless one is the kernel's or another driver's, as drv-rtc-cmos(3) for `PNP0B00`.
+
+A last line counts the devices, those present with a hardware ID, and the KiB of `bus-acpi`'s 8 MiB heap in use.
+
+@node=power title="/srv/acpi"
+
+With a `listen` handle, `bus-acpi` says `serving /srv/acpi` and serves it; without one it serves nothing and waits for ever.
+`/srv/acpi` is not a file server.
+A client sends a request with `channel_call` on its connector: a `vx_msg_header` whose ordinal is `VX_ACPI_POWER_OFF` (lib/vx-acpi/mint.h); any other message is answered `INVALID`.
+
+To power off, `bus-acpi` says `powering off`, waits a second so what the console holds is printed, then:
+
+- where the firmware is not hardware-reduced and has an `_S5` object, it says `S5` and enters the sleep state S5 through ACPICA, as on x86_64;
+- otherwise, or if the machine is still on after S5, it says `PSCI, through devmgr` and asks devmgr, which makes the kernel's `system_power` call (see power(2)): PSCI's `SYSTEM_OFF` by the FADT's conduit, as on QEMU's aarch64.
+
+The reply comes only if the machine is still on, with the error in its `flags`.
+poweroff(8) is the client.
+
+@node=probe title="Probing"
+
+With `bus-acpi.probe=1` on the command line, before loading the tables, `bus-acpi` asks devmgr for three things it must refuse: the interrupt controller's page (the local APIC at `0xfee00000` on x86_64, QEMU virt's GIC distributor at `0x8000000` on aarch64), a page of RAM, and the console's ports `0x3f8` to `0x3ff`, and says which it got.
+The acpi scenarios check that all three are refused.
+
+@node=reference title="Examples, files and diagnostics"
+
+# EXAMPLES
+
+The devices on QEMU's x86_64 machine, some of them, and devmgr starting the RTC's driver:
+
+```text
+bus-acpi: \_SB.PCI0 PNP0A08 io=0xcf8/8
+bus-acpi: \_SB.PCI0.SF8.KBD PNP0303 io=0x60/1 io=0x64/1 irq=1
+bus-acpi: \_SB.PCI0.SF8.COM1 PNP0501 io=0x3f8/8 irq=4
+bus-acpi: \_SB.PCI0.SF8.RTC PNP0B00 io=0x70/8 irq=8
+devmgr: \_SB.PCI0.SF8.RTC PNP0B00: /boot/bin/drv-rtc-cmos
+bus-acpi: 38 devices, 29 present with a hardware ID; 273 KiB of heap
+```
+
+Two of the probe's requests, refused, then the AML's first touches, granted:
+
+```text
+devmgr: bus-acpi refused memory 0xfee00000/4096
+devmgr: bus-acpi refused I/O ports 0x3f8/8
+devmgr: bus-acpi gets I/O ports 0x604/2
+devmgr: bus-acpi gets PCI configuration 0xf8/4096
+```
+
+On aarch64, where the UART is memory:
+
+```text
+bus-acpi: \_SB.COM0 ARMH0011 mem=0x9000000/0x1000 irq=33
+bus-acpi: 52 devices, 47 present with a hardware ID; 162 KiB of heap
+bus-acpi: serving /srv/acpi
+```
+
+# FILES
+
+: `/srv/acpi`
+  The post `bus-acpi` serves: power off.
+: `/boot/bin/bus-acpi`
+  The program, which devmgr reads from bootfs.
+: `/boot/svc/devmgr.ndb`
+  devmgr's manifest, whose `claim=acpi` is the post.
+
+# SEE ALSO
+
+devmgr(8), poweroff(8), drv-rtc-cmos(3), power(2), svc(6); ADR-0024 and ADR-0030 in the repository's `docs/adr`
+
+# DIAGNOSTICS
+
+A failure before serving prints `bus-acpi: FAILED:`, what failed and ACPICA's name for the error, and exits with what failed: `no ACPI tables`, `no memory`, `no memory for the tables`, `malformed tables` (a table's length runs past the end of the copies), or the name of the ACPICA call that failed, such as `AcpiLoadTables`.
+
+A refused region is said once: `bus-acpi: no memory at 0x`<address>`: refused (RAM, the kernel's, or a driver's)`, or `no I/O port`, or `no PCI configuration for` with segment, bus, device and function packed as in `vx_acpi_mint`.
+The reasons are `refused (RAM, the kernel's, or a driver's)`, `out of range`, `no such thing here`, `no room` and `devmgr is gone`.
+
+ACPICA's own warnings and errors, and the AML's `Debug` output, are printed as ACPICA words them.
+
+# BUGS
+
+There is no FACS, so no global lock shared with the firmware and no waking vector; a machine whose AML takes the global lock would race its firmware.
+
+One thread: ACPICA's locks and semaphores are counters, deferred work runs at once, and a wait for a semaphore not already signalled fails at once rather than waiting.
+
+ACPI's events are not delivered: there is no SCI handler, so GPEs, the power button, and thermal and battery notifications go unseen.
+
+`/srv/acpi` serves power off alone: no reboot, no sleep, and no orderly shutdown; services and file systems are not told first.
+
+A request on `/srv/acpi` larger than a `vx_msg_header`, or carrying handles, is never read: it stays at the head of the channel, and every request behind it goes unanswered while `bus-acpi` wakes for it again and again.
+
+`bus-acpi` is not restarted if it exits.
+devmgr does not start it at all on a machine whose tables have no MCFG.
+
+The PCI configuration spaces it can reach are segment 0's.
+An interrupt resource's polarity and trigger are not reported, and of a choice of lines only the first is.
+Regions it was given are never let go.
+
+QEMU's aarch64 tables do not list its PL031 RTC, so there is no clock driver there.

@@ -1,0 +1,90 @@
+page=users sect=6 summary="file server user list format"
+    src=servers/fsd/fsd.c,cmd/install.c,host/vxfs/main.c
+    keys=users,groups,adm,none,leader,uid,gid,permissions
+
+# SYNOPSIS
+
+```text
+id:name:leader:members
+```
+
+# DESCRIPTION
+
+fsd(4) keeps its users and groups in the file `users` at the root of the volume's `adm` branch, `/adm/users` where that branch is mounted on `/adm`, as Plan 9's file servers keep theirs.
+The format is Plan 9's users file, not ndb(6): one line a user, its fields separated by `:`.
+
+`fsd` reads the file when it starts, and again whenever the last open of a file called `users` in the `adm` branch is closed, so an edit takes effect when the editor closes it.
+install(8) writes it when it makes the system volume, and vxfs(8)'s `mkfs` when it makes an image with an `adm` branch; after that it is changed only by writing it through `fsd`.
+It is created owned by user 0 and group 0, mode 0664, so the members of group 0 may change it.
+
+Each line defines a user and a group with the same name and id.
+The file is split into lines at newlines; a line that is empty or starts with `#` is skipped.
+Nothing is trimmed: a blank or a carriage return is part of the field it is in.
+The fields are:
+
+: <id>
+  The user's number, in decimal, 0 to 4294967295: what a vx-fs entry stores as its `uid`, `gid` and `muid` (see vxfs(6)).
+  It must be present and all digits.
+: <name>
+  The user's name: 1 to 32 bytes, any but `:` and newline.
+  It is what a Tattach's `uname` names.
+: <leader>
+  The group's leader: the name of a user in the file, before or after this line, or nothing.
+  A group with no leader is led by each of its members.
+: <members>
+  The group's members besides the user itself, names of users in the file separated by commas, 32 at most; empty items are skipped.
+  It may be empty.
+
+A line with fewer fields leaves the rest empty, so `5:bob` defines a user with no leader and no members.
+Everything after the third `:` is <members>, so a further `:` makes a member name no user has, and the file malformed.
+
+A user is a member of its own group as well as of the group of each line that lists it.
+Group 0 is the administrators' group, whatever it is called: its members may write `/adm/ctl`, attach permissively and give files away, as fsd(4) describes.
+
+The user called `none` is always present.
+If the file does not name it, `fsd` adds it, with id 4294967294.
+A Tattach whose `uname` names no user attaches as `none`, which gets only the others' permission bits.
+
+The file is malformed if a line has no <name> or one longer than 32 bytes, an <id> that is not a number of that range, a <leader> or member that is no user in the file, more than 32 members, or if there are more than 127 users or the file is 64 KiB or longer.
+A malformed file changes nothing: the users stay as they were, and `fsd` prints `fsd: /adm/users is malformed: the users stay as they were`.
+If there is no file it can read when it starts, the users are those of the file
+
+```text
+0:adm:adm:
+1:none::
+```
+
+and it prints `fsd: no /adm/users it can read: adm and none only`.
+
+# EXAMPLES
+
+The file install(8) writes, read from an image vxfs(8) made:
+
+```rc
+% vxfs mkfs t.img 64 adm home
+% vxfs cat t.img adm /users
+0:adm:adm:vectra
+1:none::
+1000:vectra:vectra:
+```
+
+`adm` is user 0, led by itself, with `vectra` a member, so `vectra` administers the volume; `vectra`, user 1000, owns `/home`'s root.
+
+# FILES
+
+: `/adm/users`
+  The users file, in the `adm` branch of `/srv/fsd`.
+
+# SEE ALSO
+
+fsd(4), install(8), vxfs(8), vxfs(6); Plan 9's `users(6)`
+
+# BUGS
+
+Duplicate ids and duplicate names are not refused; a name or an id finds the first line that has it.
+
+Names are not checked for the characters Plan 9 excludes (`?`, `=`, `+`, `-` and `/`); only `:` and newline are impossible.
+
+An entry stores numbers, so a user whose id changes, or whose line is deleted, leaves its files owned by a number no name has, or by whoever takes the number next.
+
+The file is advisory until keyd (M10): a client names whom it attaches as.

@@ -1,0 +1,68 @@
+page=error sect=5 summary="return an error"
+    names=error,Rerror
+    src=lib/vx-9p/codec.c,lib/vx-9p/server.c,lib/vx-9p/client.c,abi/vx/status.def
+    keys=9p,9px,error,ename,status,errstr,message
+
+# SYNOPSIS
+
+```text
+size[4] Rerror tag[2] ename[s]
+```
+
+# DESCRIPTION
+
+The `Rerror` message, type 107, returns a string describing why a request failed.
+It replaces the reply the request would have had, and its <tag> is the request's.
+There is no `Terror`: type 106 is no message, and a server sent one hangs up.
+
+A VectraOS server's operations fail with a `vx_status` (see intro(2)), and the server turns it into Plan 9's wording where Plan 9 has one:
+
+| Status | <ename> |
+| `VX_ERR_NOT_FOUND` | `file does not exist` |
+| `VX_ERR_EXISTS` | `file already exists` |
+| `VX_ERR_ACCESS` | `permission denied` |
+| `VX_ERR_BAD_HANDLE` | `unknown fid` |
+| `VX_ERR_BAD_STATE` | `fid already in use` |
+| `VX_ERR_RANGE` | `offset out of range` |
+| `VX_ERR_NO_MEMORY` | `out of memory` |
+| `VX_ERR_UNSUPPORTED` | `operation not supported` |
+| `VX_ERR_TOO_SMALL` | `message too large for msize` |
+| `VX_ERR_REFUSED` | `connection refused` |
+| `VX_ERR_TIMED_OUT` | `connection timed out` |
+| `VX_ERR_PEER_CLOSED` | `i/o on hungup channel` |
+| `VX_ERR_INTERRUPTED` | `interrupted` |
+| `VX_ERR_NO_CHILD` | `no living children` |
+| `VX_ERR_IO` | `i/o error` |
+| `VX_ERR_NO_SPACE` | `file system full` |
+| `VX_ERR_INVALID` | `bad message` |
+
+Any other status, such as `VX_ERR_KILLED`, is sent as `i/o error`.
+Servers, svcd(8) and vx-ns print a status with the same words, so a message printed from a status reads as the error that came over the wire.
+
+VectraOS's client turns <ename> back into the status, ignoring ASCII case.
+It also knows the wordings of Unix's `strerror` and of u9fs, as a Unix 9P server passes them on, though it never sends them:
+
+| <ename> heard | Status |
+| `no such file or directory`, `not a directory` | `VX_ERR_NOT_FOUND` |
+| `file exists`, `file or directory already exists` | `VX_ERR_EXISTS` |
+| `read-only file system`, `is a directory`, `operation not permitted` | `VX_ERR_ACCESS` |
+| `fid unknown or out of range` | `VX_ERR_BAD_HANDLE` |
+| `no space left on device` | `VX_ERR_NO_SPACE` |
+
+Any other <ename> becomes `VX_ERR_INVALID`.
+The program sees only the status; the text itself goes no further than the client.
+
+Every 9Px session's errors are `Rerror` strings, whatever its extensions: 9P2000.L's `Rlerror`, type 7, which carries an errno, is no 9Px message, and since a 9P2000.L client is answered with plain 9P2000 (see version(5)), it never expects one.
+
+A request too broken to answer gets no `Rerror`: one that does not decode exactly (a <size> that is not the message's, a field that runs past it, bytes after the last field, a string holding NUL, a walk of more than 16 names), an R-message sent to a server, and a message of a type 9Px does not have make the server hang up the connection.
+So does a reply the transport cannot carry.
+
+# SEE ALSO
+
+intro(5), version(5), flush(5), intro(2)
+
+# BUGS
+
+Some strings fit the request badly, because they belong to the status, not the error: `fid already in use` also answers a request before `Tversion`, a `Topen` of a fid already open and a lock on a fid not open; `message too large for msize` also answers a `Tversion` whose <msize> is too small.
+
+Distinct errors that share a status share a string, so the client cannot tell them apart: Unix's `is a directory` and `read-only file system` both come back as `VX_ERR_ACCESS`.

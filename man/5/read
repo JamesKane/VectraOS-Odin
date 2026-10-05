@@ -1,0 +1,66 @@
+page=read sect=5 summary="transfer data from and to a file"
+    names=Tread,Rread,Twrite,Rwrite,read
+    src=lib/vx-9p/messages.def,lib/vx-9p/codec.c,lib/vx-9p/server.c,lib/vx-9p/client.c,docs/proto/posix.md
+    keys=9p,9px,read,write,offset,count,iounit,directory,append
+
+# SYNOPSIS
+
+```text
+size[4] Tread tag[2] fid[4] offset[8] count[4]
+size[4] Rread tag[2] count[4] data[count]
+
+size[4] Twrite tag[2] fid[4] offset[8] count[4] data[count]
+size[4] Rwrite tag[2] count[4]
+```
+
+# DESCRIPTION
+
+`Tread` asks for <count> bytes of the file <fid> refers to, starting <offset> bytes from its start.
+<fid> must be open (see open(5)) for reading: `OREAD`, `ORDWR` or `OEXEC`.
+`Rread` carries the bytes, and its <count> says how many: it may be fewer than asked for, and is zero at or past the file's end.
+The server returns no more than the negotiated msize less 24, `P9_IOHDRSZ`, which is open(5)'s <iounit>, and cuts a larger <count> to that, as vx-9p's client does before it sends one.
+These messages are 9P2000's, types 116 to 119, unchanged on the wire.
+
+A read of a directory returns whole directory entries, each laid out as stat(5) describes, one for each file in it, and never part of one.
+Its <offset> must be zero, which starts again from the first entry, or where the previous read of the fid ended; any other is refused, since a directory cannot be read from anywhere else.
+A read whose <count> is too small for the next entry is refused rather than answered with nothing, which would look like the end.
+
+`Twrite` asks that <count> bytes of <data> be written to the file, starting <offset> bytes from its start.
+<fid> must be open for writing, `OWRITE` or `ORDWR`; a directory is never open so.
+A <count> larger than msize less 24 is refused, not cut.
+`Rwrite`'s <count> is how many bytes the server wrote; vx-9p's client treats more than it sent as a bad reply.
+
+The `posix` extension (see version(5) and share(5)) gives an open file an offset of its own.
+A `Tread` or `Twrite` whose <offset> is `P9_OFFSET_CURRENT`, all ones, uses that offset and moves it on by <count>; one at any other offset does as 9P2000's does and leaves it alone.
+A write at `P9_OFFSET_CURRENT` to an open file that appends, opened with `OAPPEND` or set so by `Tdesc`, goes to the file's end, found and written in one step since a server answers one request at a time.
+Without `posix`, and on a directory, which has no open file, `P9_OFFSET_CURRENT` is refused.
+On a connection with `posix`, the musl back end reads and writes so for POSIX's `read` and `write` of a file, and at an explicit offset for `pread` and `pwrite`.
+
+A read or write the server cannot do yet, such as a console's read before a line is typed or a terminal's from ptyd(4), gets no reply until it can; the framework holds the request and serves it again, and every other request on the connection is answered meanwhile.
+
+`Treadref` and `Twriteref` (see dref(5)) do the same with the data in the client's memory, not in the message; `Tmap` (see map(5)) gives a file's bytes as memory.
+
+# SEE ALSO
+
+intro(5), open(5), stat(5), share(5), dref(5), map(5)
+
+# DIAGNOSTICS
+
+A VectraOS server answers with these:
+
+: `unknown fid`
+  <fid> is not in use.
+: `permission denied`
+  The fid is not open, or not open for reading (a `Tread`) or writing (a `Twrite`), or the server writes no files.
+: `message too large for msize`
+  A `Twrite` with more than msize less 24 bytes; or a directory read too small for the next entry.
+: `offset out of range`
+  A directory read at an offset other than zero or where the last ended.
+: `bad message`
+  `P9_OFFSET_CURRENT` on a fid with no open file.
+
+# BUGS
+
+vx-9p's client has no `Tflush`, so a read or write a server holds, such as a `listen` or a `ping` that is never answered, waits until it is answered; a note does not end it.
+
+`DMAPPEND` is not kept, so no file appends at an explicit <offset> as Plan 9's append-only files do; only the `posix` extension's `OAPPEND` appends.

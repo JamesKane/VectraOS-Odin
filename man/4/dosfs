@@ -1,0 +1,124 @@
+page=dosfs sect=4 summary="FAT file system"
+    src=servers/dosfs/dosfs.c,lib/vx-fat/fat.c
+    keys=fat,fat12,fat16,fat32,esp,vfat,msdos,dos
+
+# SYNOPSIS
+
+```usage
+dosfs [-r] [-u user]
+```
+
+# DESCRIPTION
+
+`dosfs` serves a FAT12, FAT16 or FAT32 volume as 9Px: the EFI system partition, a USB stick, an SD card.
+It is started by svcd(8), whose manifest (see svc(6)) connects it to the disk (`connect=`) and names its post (`post=`); it takes the one connector named `srv:<name>` as the disk and opens a block session on it.
+It reads the boot sector, prints what it found, and serves the volume.
+The type is decided by the cluster count, as Microsoft's specification has it.
+
+It reads and writes: files and directories are made, written, truncated, removed, and renamed with the posix extension's `Trenameat`, and changed with `Tsetattr`.
+Writes go to the disk as they are made, in an order that leaves a volume a crash cuts short with lost clusters at worst, never one file's clusters in another.
+Both FATs are written.
+`Tfsync`, and the clunk of a fid opened for writing, flush the disk and FAT32's FSInfo.
+
+The tree is attached with an empty aname; any other is refused.
+
+: `-r`
+  Serve the volume read-only.
+  A disk the block session reports read-only is served read-only without it.
+: `-u` <user>
+  The owner and group every file is shown with; `none` without it.
+
+## Names
+
+A long name, UTF-16 on the disk, is served as UTF-8; an entry with none is served by its 8.3 name, lower-cased where Windows NT's case flags say.
+A lookup ignores ASCII case and matches an entry's long name or its 8.3 alias.
+A new name that is a plain 8.3 name in one case is written as one, with NT's flags and no long name; any other gets a long name and a unique alias in Windows' manner, `BASIS~N.EXT`.
+A name holding a control character, one of `"*/:<>?\|`, or ending in a dot or space is refused.
+Deleted entries, the volume label, `.` and `..` are not listed; hidden and system files are.
+
+## Owners and permissions
+
+FAT has neither, so `dosfs` makes them up: every file is <user>'s, `0644`, and every directory `0755`.
+An entry marked read-only is `0444` (a directory `0555`), and so is everything with `-r`.
+Changing the mode turns the read-only mark on when the owner's write bit is off and off when it is on; the other bits are not kept.
+Changing the owner or group is refused.
+A read-only entry cannot be opened for writing.
+Nothing else is checked: whoever can reach the post can change any file.
+
+Only files and directories can be made: a create asking for any other kind, such as a symbolic link, is refused.
+
+## Nodes
+
+A file's node is its entry's place: the first cluster of the directory it is in and the index of its entry there.
+A rename moves the entry, so the old node is remembered as moved, for fids that still hold it; the last 64 renames are remembered.
+A file's times are stamped from the wall clock, the qid's version is its modification time in seconds, and its access time is FAT's, which is a day.
+
+# EXAMPLES
+
+The installed system's manifest for the ESP, from `boot/svc/system.ndb`:
+
+```ndb
+service=sys-dosfs program=/boot/bin/dosfs post=esp console when=vx.system
+connect=disk0.esp
+arg=-u
+arg=adm
+```
+
+what it prints:
+
+```text
+dosfs: /srv/disk0.esp: FAT32 "VECTRA", 129008 clusters of 512 bytes
+```
+
+and, with `-r` on a test's FAT32 disk:
+
+```text
+dosfs: /srv/disk1: FAT32 "VECTRAFAT", 130040 clusters of 1024 bytes, read-only
+```
+
+# FILES
+
+: `/srv/<post>`
+  Its post, as the manifest's `post=` names it: `/srv/esp` on an installed system.
+
+# SEE ALSO
+
+isofs(4), fsd(4), partd(8), svcd(8), svc(6), drv-virtio-blk(3)
+
+# DIAGNOSTICS
+
+At start it prints the disk, the FAT type, the volume's label if it has one, its clusters and their size, and `read-only` when it is so.
+A failure to start prints `dosfs: FAILED:` and what failed, with the error when there is one, and exits with what failed:
+
+: `no connector to a disk (connect=)`
+  The manifest connects it to no disk.
+: `no listen channel (post=)`
+  The manifest posts nothing.
+: `cannot open a session on the disk`
+  The block session was refused.
+: `no FAT volume on the disk`
+  The boot sector is not FAT's.
+: `the volume's sectors are smaller than the disk's`
+  The volume's sector size is not a multiple of the disk's.
+
+An argument it does not know prints the usage message, after `dosfs: FAILED:`, and exits with it.
+It exits `cannot serve` if serving fails.
+A write to a full volume fails with `file system full`, keeping what was written.
+
+# BUGS
+
+A short name's bytes past ASCII are in a DOS code page the volume does not name, and are served as U+FFFD; lookups fold ASCII case only.
+
+Times are FAT's local time taken as UTC, to two seconds, and access times to the day.
+
+A file removed while it is open is gone at once, and a fid that held a renamed entry finds it only while the rename is among the last 64; a node is a place, so a fid to a removed entry may later find a new entry made there.
+
+Finding a node's entry or parent reads its directory from its start, so directories of thousands of entries are slow.
+A FAT chain that loops is bounded by the file's size and the cluster count, not detected.
+
+Owners are the `-u` user's alone, which the posix userland shows as a number.
+
+The dirty bit is never set, and the backup boot sector and FSInfo's copy are not kept up to date.
+Writes are synchronous, sector by sector, so large writes are slow.
+
+In QEMU only FAT16 is written; FAT12 and FAT32 writing are tested on the host only, as is `Tsetattr`'s size, since sbase has no `truncate`.

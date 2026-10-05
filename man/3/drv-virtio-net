@@ -1,0 +1,84 @@
+page=drv-virtio-net sect=3 summary="virtio network card driver"
+    src=drivers/drv-virtio-net/net.c,boot/drv/virtio-net.ndb,lib/vx-driver/netproto.h,lib/vx-driver/virtio.c
+    keys=virtio,network,ethernet,nic,ether0,pci,qemu
+
+# SYNOPSIS
+
+```ndb
+match=pci vendor=0x1af4 device=0x1041 program=/boot/bin/drv-virtio-net
+    post=ether0 msi=2
+```
+
+```text
+/srv/ether0
+```
+
+# DESCRIPTION
+
+`drv-virtio-net` drives the virtio network card, as QEMU and other hypervisors offer it, and serves its Ethernet frames on `/srv/ether0` to one client, netd(4).
+
+devmgr(8) starts it for a PCI function with vendor 1af4 and device 1041, the modern (virtio 1.0) network device, by the manifest in `/boot/drv/virtio-net.ndb` shown above.
+It gets the function's configuration space, its memory BARs, a DMA domain, two MSI-X interrupts (`msi=2`), one for receiving and one for sending, and the listen end of `/srv/ether0`, and nothing else; it takes no arguments.
+The post is not numbered, so only the first such card found has a driver.
+devmgr starts it again if it exits, after a function-level reset where the device has one, up to five starts in all; netd dials it again.
+
+At start it finds the device's virtio structures, offers the one feature it uses, `VIRTIO_NET_F_MAC`, and sets up a receive queue and a transmit queue of 64 buffers of 2 KiB each, which the device reaches through the DMA domain.
+It takes the card's MAC address from the device, or uses `02:00:00:00:00:01`, a locally administered address, if the device offers none.
+Every receive buffer is given to the device at once and stays with it.
+It then says its address and serves `/srv/ether0`.
+
+## The net class
+
+The protocol is defined in `lib/vx-driver/netproto.h`; in short:
+a client sends `CONNECT` on the post and gets back a ring session (see ring(2)) whose two arenas hold 64 slots of 2 KiB each.
+The driver takes one client at a time and refuses a second `CONNECT` while it has one.
+Each request on the ring is completed once, with the same `user_data`:
+
+: `INFO`
+  Completes at once with the MAC address, its six bytes from the lowest in `aux2`, and the MTU, 1500, in `aux`.
+: `TX`
+  Sends the frame at `arena_off` in the client's arena, `len` bytes, which must be marked `VX_SQE_DREF` and be a whole Ethernet frame of 14 to 1514 bytes, without the FCS.
+  The driver copies it into a free transmit buffer and completes with its length, or with `INVALID` for a frame that is not one.
+  With every transmit buffer in flight it takes nothing more from the client until the device gives one back.
+: `RX`
+  Offers slot `target` of the driver's arena for a frame.
+  It completes when a frame arrives, with its length and `aux2` its offset in the driver's arena; the driver writes nothing there again until the slot is offered again.
+  Offers are filled oldest first, up to 64 outstanding.
+
+Any other request completes with `INVALID`.
+A frame that arrives while no slot is offered is dropped, as a full card would drop it, and its buffer goes straight back to the device.
+A client that does not drain its completions, or breaks the ring's protocol, is dropped, as is one that closes its end.
+
+# EXAMPLES
+
+What it says at start, under QEMU, with netd's address after it:
+
+```text
+devmgr: started drv-virtio-net
+drv-virtio-net: 52:54:00:12:34:56, serving /srv/ether0
+netd: 10.0.2.15/24 from dhcp, gateway 10.0.2.2
+```
+
+# FILES
+
+: `/boot/drv/virtio-net.ndb`
+  Its manifest.
+: `/srv/ether0`
+  Its post.
+
+# SEE ALSO
+
+netd(4), devmgr(8), drv-virtio-blk(3)
+
+# DIAGNOSTICS
+
+A failure at start prints `drv-virtio-net: FAILED:` and what failed, and exits with that: `no listen channel`, `no configuration space or DMA domain`, `no MSIs`, `not a modern virtio device with MSI-X`, `feature negotiation`, `the queues`, `no memory for buffers` or `port_create`.
+It exits `the listen channel is gone` if its post's listen end closes.
+
+# BUGS
+
+One card: a second has no post of its own.
+One client, so only netd can use the card.
+No offloads: no checksum offload, segmentation or merged receive buffers, and the device's own MTU and link status are not read; the MTU is always 1500.
+Every frame is copied, once each way, between the device's buffers and the session's arenas.
+The legacy and transitional devices (1af4:1000) are not matched.

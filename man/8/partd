@@ -1,0 +1,97 @@
+page=partd sect=8 summary="serve a disk's GPT partitions as disks of their own"
+    src=servers/partd/partd.c,lib/vx-gpt/gpt.c
+    keys=partition,gpt,disk,esp,block,window
+
+# SYNOPSIS
+
+```usage
+partd
+```
+
+# DESCRIPTION
+
+`partd` reads a disk's GUID partition table and serves each partition its manifest names on a post of its own, so a file server given a partition reaches that partition's sectors and no others.
+A partition's post speaks the block class's protocol, as the disk's does (see `docs/proto/block.md` in the repository): a client that can open a session on `/srv/disk0` can open one on `/srv/disk0.esp` the same way.
+
+svcd(8) starts it from a manifest (see svc(6)), and it takes no arguments.
+The manifest gives it:
+
+- the disk, by one `connect=` naming the disk's post, such as `connect=disk0`;
+- a `claim=` for each post it is to serve;
+- a `part=` record for each partition: `part=`<post>` type=`<guid> matches the first GPT entry of that type GUID, and `part=`<post>` name=`<name> the first whose name is <name>. With both, the type alone is used.
+
+At its start `partd` opens a read-only session on the disk, reads the GPT through it with `lib/vx-gpt`, and closes it: the primary table, or the backup if the primary's header or entries fail their checks.
+A table whose entries overlap, or lie outside the disk's usable sectors, is refused whole.
+It then says, for each `part=` record, the partition's sectors and GPT name, or that the disk has no such partition.
+
+A `CONNECT` on a partition's post asks for a window counted in the partition: its `first` sector from the partition's start, and its `count`, 0 for the rest of the partition.
+`partd` checks the window lies inside the partition, asks the disk's driver for a session on the same window counted in the disk, with the client's flags, and passes the driver's reply, the ring end and the ring's memory, on to the client unchanged.
+It keeps nothing of the session, which is between the client and the driver; when the driver restarts, the client dials the partition's post again, as it would the disk's.
+A post whose partition the disk does not have, or whose disk had no table `partd` could trust, refuses every `CONNECT`.
+
+The table is read once.
+A disk repartitioned under a running `partd` is not seen until it starts again.
+
+# EXAMPLES
+
+The installed system's manifest, `/boot/svc/system.ndb`, serving disk0's ESP and system volume for dosfs(4) and fsd(4):
+
+```ndb
+service=sys-partd program=/boot/bin/partd console when=vx.system
+connect=disk0
+claim=disk0.esp
+part=disk0.esp type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+claim=disk0.system
+part=disk0.system type=7C6D3E1A-2B4F-4E0A-9C1D-56F2A8B90E35
+```
+
+The block test's, with a partition found by its name and one the disk does not have:
+
+```ndb
+service=partd program=/boot/bin/partd console
+connect=disk1
+claim=disk1.esp
+part=disk1.esp type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+claim=disk1.vectra
+part=disk1.vectra name=vectra
+claim=disk1.none
+part=disk1.none name=nosuch
+```
+
+and what it says:
+
+```text
+partd: /srv/disk1: 2 partitions
+partd: /srv/disk1.esp is sectors 2048-18431 (EFI system partition)
+partd: /srv/disk1.vectra is sectors 18432-83967 (vectra)
+partd: /srv/disk1.none: no such partition on the disk
+```
+
+# FILES
+
+: `/srv/`<post>
+  Each partition's post, as its `part=` record names it.
+
+# SEE ALSO
+
+svc(6), svcd(8), devmgr(8), drv-virtio-blk(3), drv-nvme(3), fsd(4), dosfs(4), install(8); `docs/proto/block.md` §6 in the repository
+
+# DIAGNOSTICS
+
+At its start `partd` says how many partitions the disk's table has, adding `from the backup table: the primary is damaged` when it used the backup, or says `no partition table it can trust:` and why.
+
+It exits, printing `partd: FAILED:` and the reason, with the reason as its exit string:
+`no connector to a disk (connect=)`; `more part= records than partd serves` (more than 8); `a part= record with no claim= for its post`; `a post is gone`, when a post it serves is closed; `port_create`.
+
+A `CONNECT` is refused with `NOT_FOUND` for a partition not on the disk, `RANGE` for a window outside the partition, `INVALID` for a message that is not a `CONNECT`, and the driver's own refusal, or `TIMED_OUT` after 5 seconds, passed on.
+
+# BUGS
+
+Only disks of 512-byte sectors: a disk of 4 KiB sectors is said to have no table it can trust.
+
+One disk for each `partd`: of several `connect=` it takes the first, and the others are ignored.
+At most 8 partitions, and a `part=` record finds only the first entry that matches, so of two partitions of one type only the first is reachable by type.
+
+A `part=` record with neither `type=` nor `name=`, or with a `type=` that is not a GUID, matches nothing and is said to be missing from the disk.
+
+`partd` is one thread: while it waits up to 5 seconds for a driver to answer one `CONNECT`, every other post waits.

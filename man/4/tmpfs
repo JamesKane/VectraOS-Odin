@@ -1,0 +1,80 @@
+page=tmpfs sect=4 summary="file system in memory"
+    src=servers/tmpfs/tmpfs.c
+    keys=tmp,memory,ram,ramfs,scratch
+
+# SYNOPSIS
+
+```usage
+tmpfs
+```
+
+# DESCRIPTION
+
+`tmpfs` serves a file system held in its own memory, posted as `/srv/tmpfs`.
+The POSIX template (`/lib/ns/posix`, see namespace(6)) mounts it on `/tmp`, allowing creation, and the console shell's manifest mounts it there too; procfs(4) writes crash directories to it.
+svcd(8) starts it from the manifest `boot/svc/tmpfs.ndb`, and does not restart it: what it holds lives only in it, and is lost when it exits.
+It takes no arguments.
+
+Files and directories are made, written, truncated and removed as 9P has them, and renamed, changed and linked symbolically with the posix and xattr extensions (`Trenameat`, `Tsetattr`, `Tsymlink`, `Treadlink`).
+The tree is attached with an empty aname; any other is refused.
+
+A file's bytes are in a mapping of its own, which doubles as the file grows, from 4 KiB.
+A write past the end leaves a hole that reads as zeros, and so does a truncation that grows a file.
+A symbolic link's bytes are its target, which must not be empty; its mode is `0777` with `DMSYMLINK`.
+
+Everything is owned by `posix`, and the root is `0777`.
+A create keeps its permission bits and `DMDIR` and nothing else; `Tsetattr` keeps the mode's low 12 bits, and changes no owner, without an error.
+Permissions are kept but never checked: anyone who can reach the post can read, change or remove anything.
+A directory cannot be opened for writing.
+
+A file's modification time is set when it is made, written or truncated, and a directory's when an entry is added to it or leaves it; access times are set only by `Tsetattr`.
+A file's qid version counts its changes.
+
+A directory is removed only when empty.
+A file removed while it is open leaves its directory at once but keeps its bytes until the last fid that opened it is clunked, as POSIX has it; a node's id names that node only, so a fid to a removed node, once freed, finds nothing.
+A rename replaces what the new name has, as POSIX's does: a file by a file, an empty directory by a directory; a directory cannot be moved into itself.
+
+# EXAMPLES
+
+Its manifest, `boot/svc/tmpfs.ndb`:
+
+```ndb
+service=tmpfs program=/boot/bin/tmpfs post=tmpfs console entropy
+```
+
+and the console shell's mount of it:
+
+```ndb
+mount=/tmp srv=tmpfs
+```
+
+# FILES
+
+: `/srv/tmpfs`
+  Its post.
+
+# SEE ALSO
+
+namespace(6), svc(6), svcd(8), bootfs(4), nullfs(4), fsd(4)
+
+# DIAGNOSTICS
+
+At start it prints `tmpfs: serving /srv/tmpfs`.
+With no post it prints `tmpfs: no listen channel` and exits with `no listen channel`; it exits `cannot serve` if serving fails.
+
+A full file system, or a file grown past its limit, fails with `out of memory`.
+A name of 128 bytes or more fails with `offset out of range`, and removing a directory that is not empty with `file already exists`.
+
+# BUGS
+
+It holds 1022 files, directories and links besides the root, 128 MiB of mappings (counted as mapped, so a file just past a power of two holds nearly twice its size), and 64 MiB in one file; names are at most 127 bytes.
+
+It is not restarted, and keeps nothing: a `tmpfs` that exits loses every file.
+
+`DMEXCL` and `DMAPPEND` are dropped from a create's permissions without an error, so exclusive-use and append-only files silently do not work.
+
+Permissions are not enforced, and owners are not kept.
+
+Errors are 9P's nearest words, not POSIX's: `offset out of range` for a long name, `out of memory` for a full file system.
+
+Its manifest gives it a seed (`entropy`), which it does not use.

@@ -1,0 +1,96 @@
+page=isofs sect=4 summary="ISO 9660 file system, with Rock Ridge and Joliet"
+    src=servers/isofs/isofs.c,lib/vx-iso/iso.c
+    keys=iso,iso9660,cd,cdrom,dvd,rockridge,joliet,9660
+
+# SYNOPSIS
+
+```usage
+isofs [-r] [-j] [-u user]
+```
+
+# DESCRIPTION
+
+`isofs` serves an ISO 9660 volume read-only as 9Px: an install medium, a CD image.
+It is started by svcd(8), whose manifest (see svc(6)) connects it to the disk (`connect=`) and names its post (`post=`); it takes the one connector named `srv:<name>` as the disk and opens a block session on it.
+The disk's sectors must divide ISO 9660's 2048 bytes.
+
+It reads the volume the first of three ways the volume has, unless told not to:
+
+- Rock Ridge, found by the root's SUSP `SP` and `ER` entries: the primary tree, with its real names, POSIX modes, times and symbolic links, names continued in continuation areas, and directories relocated for depth served where they belong.
+  Names are matched exactly.
+- Joliet, a supplementary descriptor for UCS-2: its own tree, its names served as UTF-8.
+  Names are matched ignoring ASCII case.
+- ISO 9660 alone: the primary tree, its names lower-cased, without `;1` or a trailing dot, as Plan 9's `9660srv` shows them.
+  Names are matched ignoring ASCII case.
+
+Every file is shown as <user>'s, and its permissions are Rock Ridge's, or `0444` (directories `0555`) without it.
+A symbolic link has `DMSYMLINK` in its mode, a length of 0, and its target read with the posix extension's `Treadlink`.
+Anything opened for writing, truncating or removing on close is refused.
+The tree is attached with an empty aname; any other is refused.
+
+: `-r`
+  Do not read Rock Ridge.
+: `-j`
+  Do not read Joliet.
+: `-u` <user>
+  The owner and group every file is shown with; `none` without it.
+
+# EXAMPLES
+
+The isofs test's manifest serves one test ISO twice: by its Rock Ridge on `/srv/cd`, and by its Joliet tree, with `-r`, on `/srv/cdj`:
+
+```ndb
+service=isofs program=/boot/bin/isofs post=cd console
+connect=disk1
+arg=-u
+arg=vectra
+
+service=isofsj program=/boot/bin/isofs post=cdj console
+connect=disk1
+arg=-r
+```
+
+and what they print:
+
+```text
+isofs: /srv/disk1: ISO 9660 with Joliet "VECTRAOS", 194 sectors
+isofs: /srv/disk1: ISO 9660 with Rock Ridge "VECTRAOS", 194 sectors
+```
+
+# FILES
+
+: `/srv/<post>`
+  Its post, as the manifest's `post=` names it.
+
+# SEE ALSO
+
+dosfs(4), svcd(8), svc(6), install(8)
+
+# DIAGNOSTICS
+
+At start it prints the disk, how the volume is read, its label if it has one, and its size in sectors.
+A failure to start prints `isofs: FAILED:` and what failed, with the error when there is one, and exits with what failed:
+
+: `no connector to a disk (connect=)`
+  The manifest connects it to no disk.
+: `no listen channel (post=)`
+  The manifest posts nothing.
+: `cannot open a session on the disk`
+  The block session was refused.
+: `the disk's sectors do not divide 2048`
+  The disk's sectors are larger than ISO 9660's, or not a divisor of them.
+: `no ISO 9660 volume on the disk`
+  There is no volume descriptor at sector 16, or no primary one; followed by `operation not supported`, the volume's logical blocks are not 2048 bytes.
+
+An argument it does not know prints the usage message, after `isofs: FAILED:`, and exits with it.
+It exits `cannot serve` if serving fails.
+
+# BUGS
+
+A file of more than one extent, past 4 GiB, is read only to its first extent.
+
+There is no zisofs, no UDF, no ISO level 3, and El Torito's boot images are not served as files.
+
+Rock Ridge is checked only against the specification, 9660srv's reading and Limine; no reader of it on the build host checks the writer `./build` uses for its ISOs, so a misreading the two share would go unseen.
+
+A CD drive needs virtio-scsi, which has no driver, so ISOs are read from disks.

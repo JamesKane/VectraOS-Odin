@@ -1,0 +1,61 @@
+page=dref sect=5 summary="read or write a file with the data in the client's VMO"
+    names=Treadref,Rreadref,Twriteref,Rwriteref
+    src=lib/vx-9p/server.c,lib/vx-9p/ring.c,lib/vx-9p/ring_server.c,lib/vx-9p/messages.def,lib/vx-9p/fields.def,servers/fsd/fsd.c,docs/proto/dref.md
+    keys=9p,9px,vmo,buffer,reference,zero-copy,bulk,read,write
+
+# SYNOPSIS
+
+```text
+size[4] Treadref tag[2] fid[4] offset[8] count[4] roffset[8]
+size[4] Rreadref tag[2] count[4]
+
+size[4] Twriteref tag[2] fid[4] offset[8] count[4] roffset[8]
+size[4] Rwriteref tag[2] count[4]
+```
+
+# DESCRIPTION
+
+`Treadref` and `Twriteref` are 9Px's own, with no counterpart in 9P2000 or 9P2000.L, and belong to the `dref` extension, which `Tversion` negotiates as `+dref` (see version(5)).
+They are `Tread` and `Twrite` (see read(5)) whose data is not in the message but in a VMO of the client's (see vmo(2)), passed by reference: one message moves any amount, whatever the msize, and the bytes are copied once, by the server, between the file and the VMO.
+Their type numbers are 160 to 163.
+
+The VMO comes beside the request.
+On the ring transport the client puts it in one of the ring's handle slots (see ring_xfer_handles(2)) and names the slot in the submission's `handle_slot`, with `VX_SQE_HANDLES` in its flags.
+VectraOS's client sends a duplicate and keeps its own, so the VMO needs `VX_RIGHT_DUPLICATE` and `VX_RIGHT_TRANSFER`; the server closes what it was sent once it has answered.
+`Treadref` needs the VMO writable and `Twriteref` readable.
+
+The `Treadref` request asks for <count> bytes of the file from <offset>, written into the VMO from <roffset>; the `Twriteref` request writes <count> bytes, taken from the VMO from <roffset>, to the file at <offset>.
+The <count> bytes must lie within the VMO.
+Either reply's <count> is how many bytes were moved.
+
+The rest is `Tread`'s and `Twrite`'s.
+<fid> must be open, on a file that is not a directory: for reading (`OREAD`, `ORDWR` or `OEXEC`) for `Treadref`, for writing (`OWRITE` or `ORDWR`) for `Twriteref`.
+With the `posix` extension too, an <offset> of all ones, `P9_OFFSET_CURRENT`, uses the open file's offset and moves it on by the count, and a write at it to a file that appends goes to the file's end (see share(5)).
+A read past the end of the file answers what there was, or a <count> of 0.
+A failure part way through answers what was done, if anything was; otherwise its error.
+
+`fsd` is the only server with the extension.
+It copies between the volume and the VMO 64 KiB at a time through a buffer of its own, with `vmo_rw`, rather than mapping the VMO: a client could hand it a VMO of `fsd`'s own page cache (see map(5)), and `fsd` mapping that would fault to itself, where `vmo_rw` refuses pages not there and the request fails.
+A read of a mapped file sees what its mappings wrote, and a write reaches them, as `Tread` and `Twrite` do.
+
+VectraOS's ring client has them as `p9c_readref` and `p9c_writeref`, for native programs with a VMO to fill or empty.
+POSIX's `read` and `write` stay `Tread` and `Twrite`, since their buffer is no VMO.
+
+## Errors
+
+Before `dref` is negotiated, and from a server without the operation, each is answered `operation not supported`.
+A <fid> that is not one of the connection's is `unknown fid`.
+A <fid> not open, open on a directory, or open in the wrong mode is `permission denied`; so, in `fsd`, are its made-up files (`adm`'s `ctl` and `status`), which take only `Tread` and `Twrite`.
+A request that came without a VMO, and `P9_OFFSET_CURRENT` on a fid with no open file, are `bad message`.
+A VMO without the right needed, or <count> bytes past its end, fail as `vmo_rw` fails, unless some bytes were moved first.
+VectraOS's client sends neither unless the session has `dref`, and fails the call with `VX_ERR_UNSUPPORTED` itself.
+
+# SEE ALSO
+
+intro(5), version(5), read(5), open(5), share(5), map(5), vmo(2), ring_xfer_handles(2), fsd(4); the extension's spec is `docs/proto/dref.md` in the repository
+
+# BUGS
+
+<count> is limited by nothing but its 32 bits, and `fsd` serves one request at a time, so one large `Treadref` or `Twriteref` holds every other client of `fsd` until it is done.
+
+9Px's design gives references other kinds of region, the bytes after the message on TCP and an RDMA key; only the ring transport's VMO exists, so `dref` is local only.

@@ -1,0 +1,40 @@
+page=fsync sect=5 summary="wait until a file's writes are kept"
+    names=fsync,Tfsync,Rfsync
+    src=lib/vx-9p/server.c,lib/vx-9p/client.c,lib/vx-9p/messages.def,lib/vx-9p/fields.def,docs/proto/posix.md
+    keys=9p,9px,9p2000.l,posix,fsync,fdatasync,commit,durable,sync
+
+# SYNOPSIS
+
+```text
+size[4] Tfsync tag[2] fid[4] datasync[4]
+size[4] Rfsync tag[2]
+```
+
+# DESCRIPTION
+
+This is 9P2000.L's message, unchanged on the wire, and belongs to the `posix` extension: a server answers it only once `Tversion` has negotiated `+posix` (see version(5)), and before that with `operation not supported`.
+`Tfsync` is type 50 and `Rfsync` 51.
+As every 9Px message does, it fails with an `Rerror` and its string, not 9P2000.L's `Rlerror` and an errno (see error(5)).
+
+The `fsync` request asks the server to answer when the writes made to the file <fid> refers to are where the server keeps them, so that a crash after `Rfsync` loses none of them.
+<fid> must be in use on the connection, or the answer is `unknown fid`; it need not be open.
+A non-zero <datasync> asks, as POSIX's `fdatasync` does, only for the data and what is needed to read it back; VectraOS's servers ignore it and do the same either way.
+
+A server that has written by the time it answers `Rwrite`, or that keeps nothing, has nothing to wait for and answers at once, as tmpfs(4), isofs(4), distd(8) and ptyd(4) do.
+fsd(4) commits the volume, every change waiting in it and not only the file's, and answers when the commit is on the disk.
+dosfs(4) writes its file allocation table and asks the disk to flush its cache.
+A file server's error in doing so is the answer.
+
+VectraOS's client sends <datasync> 0.
+On a connection without `posix` it sends nothing and reports success at once, since a server without the extension has no later moment to write at.
+The POSIX library sends `Tfsync` for `fsync` and `fdatasync`.
+
+# SEE ALSO
+
+intro(5), version(5), fsd(4); the extension is `docs/proto/posix.md` in the repository
+
+# BUGS
+
+<datasync> is ignored, and fsd(4) commits the whole volume for one file.
+
+A server without `posix`, such as a 9P2000 one, is never asked, and the client's success says nothing about where its writes are.

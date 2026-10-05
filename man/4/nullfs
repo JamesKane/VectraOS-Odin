@@ -1,0 +1,60 @@
+page=nullfs sect=4 summary="null, zero and random files"
+    src=servers/nullfs/nullfs.c,lib/vx-rand/drbg.c
+    keys=null,zero,random,urandom,entropy,dev
+
+# SYNOPSIS
+
+```usage
+nullfs
+```
+
+# DESCRIPTION
+
+`nullfs` serves four files in one directory, posted as `/srv/null`.
+The POSIX template (`/lib/ns/posix`, see namespace(6)) mounts it on `/dev`, where ptyd(4)'s terminals are added after it.
+svcd(8) starts it from the manifest `boot/svc/nullfs.ndb`, gives it a seed of its own from the bootloader's entropy (`entropy`), and restarts it if it exits.
+It takes no arguments.
+
+`random` and `urandom` are one generator, as on Linux since 5.6: `lib/vx-rand`'s, a hash DRBG over SHA-256 in the manner of NIST SP 800-90A, seeded with svcd's seed.
+Without a seed, they refuse to be opened for reading rather than give bytes nobody should trust.
+
+Every file is `0666`, the directory `0555`, and all are owned by `sys`.
+Nothing can be made, removed or changed, and the directory cannot be opened for writing.
+The tree is attached with an empty aname; any other is refused.
+
+# EXAMPLES
+
+Its manifest, `boot/svc/nullfs.ndb`:
+
+```ndb
+service=nullfs program=/boot/bin/nullfs post=null console restart entropy
+```
+
+# FILES
+
+: `null`
+  Reads as empty; takes and discards any write.
+: `zero`
+  Reads as zeros, as many as are asked for; takes and discards any write.
+: `random`
+  Reads as random bytes, as many as are asked for, from the generator.
+  What is written is mixed into the generator, as on Linux, but not counted as a seed.
+: `urandom`
+  The same as `random`: the same generator, and the same writes.
+: `/srv/null`
+  Its post.
+
+# SEE ALSO
+
+namespace(6), svc(6), svcd(8), tmpfs(4), bootfs(4)
+
+# DIAGNOSTICS
+
+At start it prints `nullfs: serving /srv/null`, followed by `, without entropy: random cannot be read` when it has no seed of 16 bytes or more.
+With no post it prints `nullfs: no listen channel` and exits with `no listen channel`; it exits `cannot serve` if serving fails.
+
+# BUGS
+
+Opening `random` or `urandom` for reading without a seed fails with `fid already in use`, the 9P wording of the status it returns, rather than words that say why.
+
+Its seed is the bootloader's entropy only, given once: nothing is mixed in later but what is written to it, and a restarted `nullfs` gets a new seed from svcd's generator, not new entropy.

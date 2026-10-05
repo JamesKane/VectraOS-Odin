@@ -1,0 +1,94 @@
+page=bootfs sect=4 summary="the boot image as a read-only file tree"
+    src=servers/bootfs/bootfs.c,lib/vx-tar/tar.c
+    keys=boot,image,tar,ustar,root
+
+# SYNOPSIS
+
+```usage
+bootfs
+```
+
+# DESCRIPTION
+
+`bootfs` serves the boot image, `bootfs.tar`, as a read-only 9Px tree posted as `/srv/bootfs`.
+It is the root of nearly every namespace: the POSIX template (`/lib/ns/posix`, see namespace(6)) mounts it on `/`, and most manifests (see svc(6)) start with `mount=/ srv=bootfs`.
+
+svcd(8) starts it among the first services, from the manifest `boot/svc/bootfs.ndb`, and gives it the image, a read-only VMO the bootloader loaded as a module, and a listen channel; it restarts it if it exits.
+`bootfs` maps the image and makes a node for each entry, and for each directory the archive only implies.
+Nothing is copied: a read comes straight from the mapped archive.
+It takes no arguments.
+
+The image is a ustar archive that `./build` makes: regular files, directories, and hard links to a file earlier in the archive, served as that file, as sbase's programs are one program under many names.
+Every header is checked, and every path must be relative, with no empty, `.` or `..` part.
+Its entries keep the archive's order in a listing.
+
+Every file is owned by `boot`, has no times, and has the archive's permissions with every write bit cleared; an implied directory is `0555`.
+Anything opened for writing, truncating or removing on close is refused, and nothing can be made, removed or changed.
+
+An aname attaches below the root: `boot/svc` serves only that directory, and `..` stops there.
+An aname that names a file, or holds `..` or a part that does not exist, is refused.
+
+# EXAMPLES
+
+Its manifest, `boot/svc/bootfs.ndb`:
+
+```ndb
+service=bootfs program=/boot/bin/bootfs post=bootfs bootimage console restart
+```
+
+and what it prints:
+
+```text
+bootfs: serving 170 files in 33 directories
+```
+
+The namespace test mounts it twice, the second time its `boot/svc` alone, after `/dev`:
+
+```ndb
+mount=/ srv=bootfs
+bind=/bin new=/boot/bin flags=a
+mount=/dev srv=bootfs aname=boot/svc flags=a
+```
+
+# FILES
+
+: `/srv/bootfs`
+  Its post.
+: `/boot/bin`
+  The programs.
+: `/boot/svc`, `/boot/drv`
+  The service and driver manifests svcd(8) and devmgr(8) read.
+: `/lib/ns`
+  The namespace templates.
+: `/adm`, `/bin`, `/dev`, `/dist`, `/n`, `/net`, `/proc`, `/srv`, `/sys`, `/tmp`
+  Empty directories, mount points for the namespace.
+
+# SEE ALSO
+
+svcd(8), svc(6), namespace(6), tmpfs(4), nullfs(4)
+
+# DIAGNOSTICS
+
+At start it prints how many files and directories it serves.
+A failure to start prints `bootfs: FAILED:` and what failed, and exits with it:
+
+: `no boot image or listen channel in the spawn message`
+  svcd gave it no image, no size for it, or no post.
+: `cannot map the boot image`
+  The image could not be mapped.
+: `the boot image is malformed`
+  A header, a field or a path in the archive is bad.
+: `the boot image has too many entries`
+  More than 1022 files and directories below the root, or more than 64 KiB of names.
+: `the boot image has a file and a directory with one name`
+  Two entries clash.
+
+It exits `cannot serve` if serving fails.
+
+# BUGS
+
+The tree has room for 1022 files and directories below the root and 64 KiB of names, whatever the image holds.
+
+Files have no times: every modification and access time is 0.
+
+A file's offset is not shared with a child, as it is on a server with the posix extension: a POSIX child opens the file again.

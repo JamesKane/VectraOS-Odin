@@ -1,0 +1,104 @@
+page=getattr sect=5 summary="get and set a file's attributes as POSIX has them"
+    names=getattr,Tgetattr,Rgetattr,Tsetattr,Rsetattr
+    src=lib/vx-9p/server.c,lib/vx-9p/client.c,lib/vx-9p/codec.c,lib/vx-9p/messages.def,lib/vx-9p/fields.def,docs/proto/posix.md
+    keys=9p,9px,9p2000.l,xattr,stat,fstat,lstat,chmod,truncate,utimensat,attributes,mode,times
+
+# SYNOPSIS
+
+```text
+size[4] Tgetattr tag[2] fid[4] request_mask[8]
+size[4] Rgetattr tag[2] valid[8] qid[13] mode[4] uid[4] gid[4]
+        nlink[8] rdev[8] size[8] blksize[8] blocks[8]
+        atime_sec[8] atime_nsec[8] mtime_sec[8] mtime_nsec[8]
+        ctime_sec[8] ctime_nsec[8] btime_sec[8] btime_nsec[8]
+        gen[8] data_version[8]
+
+size[4] Tsetattr tag[2] fid[4] valid[4] mode[4] uid[4] gid[4]
+        size[8] atime_sec[8] atime_nsec[8] mtime_sec[8] mtime_nsec[8]
+size[4] Rsetattr tag[2]
+```
+
+# DESCRIPTION
+
+These are 9P2000.L's messages, unchanged on the wire, and belong to the `xattr` extension: a server answers them only once `Tversion` has negotiated `+xattr` (see version(5)), and before that with `operation not supported`.
+`Tgetattr` is type 24, `Rgetattr` 25, `Tsetattr` 26 and `Rsetattr` 27.
+They are what a POSIX program's `stat` and `chmod` need: the attributes in POSIX's terms, numbers and nanoseconds, where 9P2000's `Tstat` and `Twstat` carry strings and seconds (see stat(5)).
+As every 9Px message does, they fail with an `Rerror` and its string, not 9P2000.L's `Rlerror` and an errno (see error(5)).
+A 9P2000.L client is answered with plain 9P2000 and no extensions, so it cannot send them to a VectraOS server.
+Despite the extension's name, 9Px has no extended attributes: 9P2000.L's `Txattrwalk` and `Txattrcreate` do not exist in it.
+
+<fid> must be in use on the connection, or the answer is `unknown fid`; it may be open or not, and on any kind of file.
+
+## Getattr
+
+The `getattr` request asks for the attributes of the file <fid> refers to.
+A VectraOS server ignores <request_mask> and answers every time with the same set, made from the file server's stat entry (see stat(5)):
+
+: <valid>
+  `0x7ff`, `P9_GETATTR_BASIC`: Linux's bits for `mode`, `nlink`, `uid`, `gid`, `rdev`, `atime`, `mtime`, `ctime`, `ino`, `size` and `blocks`.
+: <qid>
+  The file's qid; its <path> is the file's inode number for `stat`.
+: <mode>
+  POSIX's: the type, `S_IFDIR` (`0040000`) for a directory, `S_IFLNK` (`0120000`) for a symbolic link, `S_IFCHR` (`0020000`) for a device, `S_IFREG` (`0100000`) for anything else, then the stat's permission bits, `mode & 07777`.
+: <uid>, <gid>
+  0, always (see BUGS).
+: <nlink>
+  2 for a directory, 1 for anything else.
+: <rdev>
+  0.
+: <size>
+  The stat's <length>.
+: <blksize>
+  4096.
+: <blocks>
+  The size in 512-byte blocks, rounded up.
+: <atime_sec>, <mtime_sec>
+  The stat's <atime> and <mtime>, in seconds since 1970.
+: <ctime_sec>
+  The stat's <mtime>.
+: <data_version>
+  The qid's <version>.
+
+The nanoseconds, <btime_sec>, <btime_nsec> and <gen> are 0.
+
+VectraOS's client sends <request_mask> `P9_GETATTR_BASIC`, and only on a connection that negotiated `xattr`.
+The POSIX library's `stat`, `lstat` and `fstat` send `Tgetattr` where the server has `xattr`, and `Tstat` where it has not.
+Every VectraOS server of stored files has `xattr`, as do bootfs(4), nullfs(4), sysfs(4) and ptyd(4); procfs(4), netd(4) and the console's driver have not.
+
+## Setattr
+
+The `setattr` request changes the attributes of the file <fid> refers to.
+<valid> says which of the rest to change; its bits are Linux's:
+
+| Bit | Name | Changes |
+| `0x1` | `MODE` | the permissions to <mode> |
+| `0x2` | `UID` | the owner to <uid> |
+| `0x4` | `GID` | the group to <gid> |
+| `0x8` | `SIZE` | the length to <size>, cutting the file or extending it with zeros |
+| `0x10` | `ATIME` | the access time, to now |
+| `0x20` | `MTIME` | the modification time, to now |
+| `0x40` | `CTIME` | the change time; every server ignores it |
+| `0x80` | `ATIME_SET` | with `ATIME`: the access time to <atime_sec> and <atime_nsec> |
+| `0x100` | `MTIME_SET` | with `MTIME`: the modification time to <mtime_sec> and <mtime_nsec> |
+
+The framework passes the request to the file server whole, and the file server's answer is the reply; a file server that changes nothing answers `permission denied`, as bootfs(4), nullfs(4), sysfs(4), isofs(4), distd(8) and ptyd(4) do.
+What each of the others changes, and whom it lets, is its own:
+tmpfs(4) changes the size, the permissions and the times, and accepts an owner or group but keeps neither;
+fsd(4) changes all of them, as its permissions allow;
+dosfs(4) refuses an owner or group, and keeps of the permissions only whether the owner may write, as FAT's read-only attribute.
+In tmpfs(4) and fsd(4) a change of size sets the modification time to now unless <valid> sets it too.
+
+VectraOS's client sends the request as it is given, and only on a connection that negotiated `xattr`.
+The POSIX library sends it for `chmod`, `fchmod`, `chown`, `truncate`, `ftruncate`, `utimensat` and `futimens`.
+
+# SEE ALSO
+
+intro(5), stat(5), version(5), error(5); the extension is `docs/proto/posix.md` in the repository
+
+# BUGS
+
+`Rgetattr`'s <uid> and <gid> are 0, though <valid> says they are set and fsd(4) keeps owners, so `ls -l` and `stat` show every file as root's.
+
+<request_mask> is ignored, the times have no nanoseconds though fsd(4) keeps them, the change time is the modification time, and <nlink> is 1 or 2 whatever the file.
+
+`Twstat` is refused by every server and never sent by the client, so permissions and lengths cannot be changed between VectraOS and a 9P2000 system such as 9front or `u9fs`, in either direction.

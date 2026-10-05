@@ -1,0 +1,142 @@
+page=port sect=2 summary="the one wait: bind event sources to a port, post to it, wait on it"
+    names=port_create,port_bind,port_wait,port_post,port_cancel
+    src=kernel/obj/port.c,kernel/syscall/syscall.c,lib/vx-rt/base.c
+    keys=wait,event,packet,binding,trigger,deadline,timer
+
+# SYNOPSIS
+
+```c
+vx_status vx_port_create(uint32_t options, vx_handle *out);
+vx_status vx_port_bind(vx_handle port, vx_handle source,
+                       enum vx_trigger trigger, uint64_t key,
+                       uint64_t threshold);
+int64_t vx_port_wait(vx_handle port, vx_instant deadline, vx_duration leeway,
+                     vx_packet *out, size_t out_len);
+vx_status vx_port_post(vx_handle port, const vx_packet *packet);
+```
+
+# DESCRIPTION
+
+A port is a queue of packets, and the one place a thread waits for anything that takes long (the blueprint's rule 4, 00; the kernel's design, 01 §4.4).
+Every event source a program cares about is bound to a port, and the program makes one call, `vx_port_wait`, to wait on all of them.
+There is no timer object: the deadline is an argument of the wait.
+Locks wait on a futex instead; see futex(2).
+
+A packet is 32 bytes:
+
+```c
+typedef struct vx_packet {
+  uint64_t key;   // chosen by whoever bound or posted it
+  uint64_t value; // counter value, IRQ count, exit string's length;
+                  // free for user posts
+  vx_instant timestamp;
+  uint32_t source;  // the handle it came from, or 0 for port_post
+  uint32_t trigger; // enum vx_trigger
+} vx_packet;
+```
+
+<timestamp> is the time the packet was made, on the one monotonic clock.
+
+`vx_port_create` makes a port and stores a handle to it in <*out>.
+<options> must be 0.
+The handle carries every right except `VX_RIGHT_EXEC`, `VX_RIGHT_MAP` and `VX_RIGHT_DEBUG`.
+
+`vx_port_bind` attaches a one-shot binding to <source>: when <trigger> holds on it, the port gets one packet with <key>, and the binding is gone.
+If the trigger already holds when the call is made, the packet is queued at once, so no event is lost between looking at a source and binding it; a program re-binds after handling each packet.
+<port> needs `VX_RIGHT_WRITE` and <source> `VX_RIGHT_WAIT`.
+The packet's <source> is the handle value given here, and its <value> depends on the trigger:
+
+| Source | Trigger | Fires when | value |
+| channel end | `VX_TRIGGER_READABLE` | a message is queued to read | messages queued |
+| channel end | `VX_TRIGGER_PEER_CLOSED` | the other end is gone | 0 |
+| counter | `VX_TRIGGER_COUNTER_GE` | the counter reaches <threshold> | the counter |
+| ring end | `VX_TRIGGER_COUNTER_GE` | its doorbell reaches <threshold> | the doorbell |
+| ring end | `VX_TRIGGER_PEER_CLOSED` | the other end is gone | 0 |
+| task | `VX_TRIGGER_EXIT` | the task has ended | its exit string's length |
+| Irq | `VX_TRIGGER_IRQ` | the line fired since it was last bound | times fired in all |
+| DmaDomain | `VX_TRIGGER_DMA_FAULT` | its faults exceed <threshold> | faults in all |
+
+<threshold> is used only by `VX_TRIGGER_COUNTER_GE` and `VX_TRIGGER_DMA_FAULT`.
+An `EXIT` packet's value is 0 when the task succeeded; the exit string itself comes from `task_info`.
+Each binding is the packet it will deliver, allocated when it is bound, so bindings never overflow a port.
+A binding whose source is destroyed before it fires goes with it, delivering nothing.
+Two triggers are not bound here: `VX_TRIGGER_EXCEPTION` comes from `exception_bind` and `VX_TRIGGER_PAGER` from `pager_create`.
+
+`vx_port_wait` stores up to <out_len> packets in <out> and returns how many, at least one.
+Packets from fired bindings come first, oldest first, then posted ones in the order they were posted.
+If none is queued it blocks until one is, or until <deadline> passes; <leeway> lets the kernel wake it up to that many nanoseconds late, so one timer interrupt can serve several waits.
+A <deadline> of `VX_INFINITE` never comes, and a <deadline> already past makes the call a poll.
+<port> needs `VX_RIGHT_WAIT`.
+<out_len> is 1 to 64.
+Several threads may wait on one port; each packet wakes one of them, the longest waiting first.
+
+`vx_port_post` queues a copy of <*packet>, for self-wakes and user events.
+The kernel sets its <timestamp> to now, its <source> to 0 and its <trigger> to `VX_TRIGGER_USER`; <key> and <value> are the caller's.
+<port> needs `VX_RIGHT_SIGNAL`.
+Posts wait in a ring of 64 per port.
+
+A port's packets that nobody takes are freed with the port when its last handle is closed.
+
+`port_cancel` is reserved.
+The design names it in the syscall surface (01 §3) without describing it; it has no wrapper, and `vx_syscall(VX_SYS_port_cancel, ...)` returns `VX_ERR_UNSUPPORTED` today.
+
+# EXAMPLES
+
+A binding fires once, and at once if its condition already holds; from the kernel's tests:
+
+```c
+  CHECK(vx_port_bind(port, ch[1], VX_TRIGGER_READABLE, 11, 0) == VX_OK);
+  CHECK(vx_port_wait(port, after_ms(1), 0, pk, 4) == VX_ERR_TIMED_OUT);
+  note out = {};
+  CHECK(vx_channel_write(ch[0], &out, sizeof out, nullptr, 0) == VX_OK);
+  CHECK(vx_port_wait(port, after_ms(100), 0, pk, 4) == 1);
+```
+
+Waiting for a child task to end:
+
+```c
+  if (vx_port_bind(port, task, VX_TRIGGER_EXIT, 99, 0) != VX_OK) return nullptr;
+  if (vx_port_wait(port, after_ms(2000), 0, &pk, 1) != 1 || pk.key != 99)
+    return nullptr;
+```
+
+# SEE ALSO
+
+counter(2), channel(2), futex(2), intro(2)
+
+# DIAGNOSTICS
+
+`vx_port_wait` returns the number of packets stored, or:
+
+: `VX_ERR_TIMED_OUT`
+  <deadline> passed with no packet.
+: `VX_ERR_INTERRUPTED`
+  `thread_interrupt` woke it; the interrupt is delivered on the way out.
+: `VX_ERR_KILLED`
+  The calling task is being killed.
+: `VX_ERR_INVALID`
+  <out_len> is 0 or more than 64, <leeway> is negative, or <out> is not writable memory for <out_len> packets.
+
+The other calls return `VX_OK`, or:
+
+: `VX_ERR_BAD_HANDLE`
+  <port> or <source> is not a handle of the right kind.
+: `VX_ERR_ACCESS`
+  A handle lacks the right the call needs.
+: `VX_ERR_INVALID`
+  `vx_port_create`'s <options> is not 0, <trigger> does not fit <source>, or <out> or <packet> is not mapped.
+: `VX_ERR_NO_MEMORY`
+  The kernel's pool of ports or bindings, or the caller's handle table, is full.
+: `VX_ERR_SHOULD_WAIT`
+  `vx_port_post`: the port already holds 64 posts.
+
+# BUGS
+
+`port_cancel` does nothing yet: a binding cannot be withdrawn before it fires, except by destroying its source.
+
+A <source> that lacks `VX_RIGHT_WAIT` is reported as `VX_ERR_BAD_HANDLE`, not `VX_ERR_ACCESS`, unless it is a DmaDomain: the kernel tries each kind of source in turn and reports the last failure.
+
+<trigger> is truncated to 32 bits before it is checked.
+
+The design's batched form, an array of bindings in one call (rule 11), is not there yet.
+Posts are not yet charged to the poster's budget; budgets come later.

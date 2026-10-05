@@ -1,0 +1,138 @@
+page=driver sect=6 summary="driver manifests"
+    src=servers/devmgr/devmgr.c
+    keys=drivers,manifest,match,pci,acpi,hid,msi,clock,devices
+
+# SYNOPSIS
+
+```text
+match=pci vendor=id device=id program=path post=srv [msi=n]
+match=pci class=class program=path post=srv [msi=n]
+match=acpi hid=id program=path [post=srv] [clock]
+```
+
+# DESCRIPTION
+
+A driver manifest says which devices a driver drives, and what devmgr(8) gives it.
+The manifests are the files `boot/drv/*.ndb` in the repository, one for each driver, installed in the boot image as `/boot/drv/*.ndb`.
+They are written by hand, and only devmgr reads them: once, at its start, after it has scanned PCI, through its namespace, where svcd mounts the boot image on `/`.
+It reads each file in `/boot/drv` in bootfs(4)'s order, by name, and each file's records in order.
+
+A manifest is ndb records (see ndb(6)), one record for each match.
+A record matches PCI functions or the ACPI devices bus-acpi(8) reports, as its `match=` says, and every function or device it matches gets its own instance of the driver.
+One device gets one driver, through its post: the first match to take the post's claim has it.
+
+A manifest with an ndb error anywhere, or a key not defined below, is used not at all: devmgr says so, naming the file and the key.
+
+Numbers are decimal, without leading zeros, or hexadecimal after `0x`, in lower case.
+
+@node=keys title="Keys"
+
+: `match`
+  The bus: `pci` or `acpi`.
+  A record without it is ignored.
+: `vendor`
+  A PCI match's vendor ID, with `device`, as `0x1af4`.
+: `device`
+  A PCI match's device ID, with `vendor`, as `0x1042`.
+: `class`
+  A PCI match's class, subclass and programming interface, as one number: `0x010802` is any NVMe controller, whoever made it.
+  It is used only when the record has no `vendor` and `device`.
+: `hid`
+  An ACPI match's hardware ID, at most 15 bytes, as bus-acpi reports it from `_HID`: `PNP0B00` is the PC's CMOS clock.
+  It must be equal, byte for byte.
+: `program`
+  The driver's path in the boot image, from `/`, at most 63 bytes, such as `/boot/bin/drv-nvme`.
+  Required.
+: `post`
+  The post the driver serves, `/srv/<srv>` without `/srv/`, at most 25 bytes.
+  It must be one svcd gives devmgr a claim on, by a `claim=` in devmgr's service manifest (see svc(6)).
+  A post ending in `#` is numbered: every PCI match, of every record whose post has that prefix, gets the prefix and a number, `disk0`, `disk1`, ..., in the order devmgr found the functions, so `/srv/disk0` is the first disk found, virtio or NVMe.
+  A PCI match needs a post; an ACPI match may have none.
+: `msi`
+  How many MSIs a PCI match's driver gets, at most 8; none without it.
+: `clock`
+  A flag on an ACPI match: the driver keeps time, and is given a channel to tell devmgr the time on, from which devmgr sets the kernel's wall clock.
+
+@node=given title="What the driver is given"
+
+The driver's spawn message (see {svc(6)#spawn}) holds its device as handles and records, its post's server end as `listen` and the console as `console`; devmgr(8) says what each handle is.
+Its records are:
+
+: `bar`
+  For each memory BAR given, `bar=<n> size=<bytes>`: the handle `bar<n>` is BAR <n>, whole, rounded up to pages.
+: `msi`
+  For each MSI, `msi=<n> address=<address> data=<data>`: the handle `msi<n>`, and the message the driver programs the function with.
+: `address`
+  An MSI's address.
+: `data`
+  An MSI's data.
+: `io`
+  For each of an ACPI device's `_CRS` port ranges, `io=<n> base=<port> size=<ports>`, as `io=0 base=0x70 size=8`: the handle `io<n>`, an IoRange.
+: `mem`
+  For each `_CRS` memory range, `mem=<n> base=<address> size=<bytes>`: the handle `mem<n>`, a physical VMO of the pages that hold it.
+: `irq`
+  For each `_CRS` interrupt, `irq=<n> base=<line> size=<n>`: the handle `irq<n>`.
+: `base`
+  A resource's first port, address or interrupt, as `_CRS` gave it.
+: `size`
+  A BAR's or resource's bytes, or ports.
+: `fadt`
+  For a clock driver, `fadt century=<reg>`: the FADT's CMOS century register, when it has one.
+: `century`
+  The century register's index.
+: `start`
+  Which start of the driver this is: 1, then 2 after a restart, and so on.
+: `cmdline`
+  The kernel command line, whose `<program>.<key>=<value>` words are the driver's options, as `drv-nvme.reset=50`.
+
+# EXAMPLES
+
+The four manifests in `boot/drv`:
+
+```ndb
+match=pci class=0x010802 program=/boot/bin/drv-nvme post=disk# msi=8
+match=acpi hid=PNP0B00 program=/boot/bin/drv-rtc-cmos clock
+match=pci vendor=0x1af4 device=0x1042 program=/boot/bin/drv-virtio-blk
+    post=disk# msi=1
+match=pci vendor=0x1af4 device=0x1041 program=/boot/bin/drv-virtio-net
+    post=ether0 msi=2
+```
+
+The claims in devmgr's own manifest, `boot/svc/devmgr.ndb`, which the posts above must be among:
+
+```ndb
+service=devmgr program=/boot/bin/devmgr resource acpi console cmdline restart
+mount=/ srv=bootfs
+claim=ether0
+claim=disk0
+claim=disk1
+claim=disk2
+claim=disk3
+claim=acpi
+```
+
+# FILES
+
+: `/boot/drv/*.ndb`
+  The manifests, in the boot image.
+: `boot/drv/*.ndb`
+  The manifests in the repository.
+
+# SEE ALSO
+
+devmgr(8), svc(6), ndb(6), bus-acpi(8), drv-nvme(3), drv-virtio-blk(3), drv-virtio-net(3), drv-rtc-cmos(3), intro(3)
+
+# BUGS
+
+A record devmgr cannot use is ignored: one with no program, with a PCI match that has neither `vendor` and `device` nor `class`, or with a value too long.
+Nothing is said of any of them.
+
+Any `match=` but `acpi` is taken as PCI, so `match=usb vendor=... device=...` matches PCI functions.
+
+devmgr reads every file in `/boot/drv`, not only `.ndb` files, and at most 8 KiB of each.
+
+`msi=` above 8 gives 8, `clock` on a PCI match does nothing, and a numbered post on an ACPI match is not numbered.
+devmgr keeps 16 drivers, 8 ACPI matches and 64 PCI functions.
+
+Every driver is restarted when it exits, up to five starts in all; a manifest cannot say otherwise.
+The match manifest `docs/01-kernel-ipc.md` sketches, with `bus=dt`, `compatible=`, `intent=`, `trusted` and `switched=`, is not read: there is no device-tree bus, and no key for a driver's intent or trust.

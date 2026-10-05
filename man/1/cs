@@ -1,0 +1,62 @@
+page=cs sect=1 summary="ask the connection server or DNS what to dial"
+    src=cmd/cs.c
+    keys=connection,server,dns,dial,address,lookup,name,resolve
+
+# SYNOPSIS
+
+```usage
+cs net!host!service
+cs -d name
+```
+
+# DESCRIPTION
+
+`cs` asks netd(4)'s connection server, `/net/cs`, what to dial for <net>`!`<host>`!`<service>, and prints its answer: a line for each address, the clone file to open and the address to connect to.
+
+<net> is `tcp`, `udp` or `icmp`; `net` means `tcp`.
+<host> is a dotted IPv4 address or a name, which netd looks up with the DNS server DHCP gave it; `localhost` is `127.0.0.1`.
+A <host> of `*` means any address, for announcing.
+<service> is a port number or one of the names `echo`, `ssh`, `domain`, `http`, `https` and `9fs`; with `icmp` there is none, and the query is `icmp!`<host>.
+
+: `-d`
+  Ask `/net/dns` instead, for the IPv4 addresses of <name>: each line is <name> as given, `ip` and an address.
+
+Each run opens the file anew, a query of its own; the write is held while the name is looked up.
+
+# EXAMPLES
+
+```rc
+% cs tcp!10.0.2.100!echo
+/net/tcp/clone 10.0.2.100!7
+% cs tcp!localhost!9fs
+/net/tcp/clone 127.0.0.1!564
+% cs -d LocalHost.
+LocalHost. ip 127.0.0.1
+% cs udp!nothing.invalid!53
+cs: udp!nothing.invalid!53: no such name
+% cs tcp!10.0.2.2
+cs: tcp!10.0.2.2: bad message
+```
+
+# FILES
+
+: `/net/cs`
+  The connection server.
+: `/net/dns`
+  The name server's queries.
+
+# SEE ALSO
+
+ping(8), netd(4)
+
+# DIAGNOSTICS
+
+A failure prints `cs:`, the query and the error.
+A name with no address is `no such name`, and that is the exit string; any other failure exits `error`.
+A query netd cannot parse, such as an unknown <net> or <service>, or one missing a part, is `bad message`.
+A query longer than 250 bytes, or any other arguments, print the usage message and exit `usage`.
+
+# BUGS
+
+`-d` asks only for IPv4 addresses, `ip`; there are no other record types.
+The service names are netd's own short table; there is no services file.

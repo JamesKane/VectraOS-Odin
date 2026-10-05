@@ -1,0 +1,81 @@
+page=open sect=5 summary="prepare a fid for I/O on an existing or new file"
+    names=Topen,Ropen,Tcreate,Rcreate,open
+    src=lib/vx-9p/messages.def,lib/vx-9p/codec.c,lib/vx-9p/server.c,lib/vx-9p/client.c
+    keys=9p,9px,open,create,mode,perm,iounit,truncate,append,clone
+
+# SYNOPSIS
+
+```text
+size[4] Topen tag[2] fid[4] mode[1]
+size[4] Ropen tag[2] qid[13] iounit[4]
+
+size[4] Tcreate tag[2] fid[4] name[s] perm[4] mode[1]
+size[4] Rcreate tag[2] qid[13] iounit[4]
+```
+
+# DESCRIPTION
+
+`Topen` asks the server to check permissions and prepare <fid> for reading and writing with read(5)'s messages.
+The low two bits of <mode> say how: 0 `OREAD` for reading, 1 `OWRITE` for writing, 2 `ORDWR` for both and 3 `OEXEC` for execution, each checked against the file's permissions.
+`OTRUNC` (`0x10`) truncates the file as well, which needs write permission; `ORCLOSE` (`0x40`) asks that the file be removed when the fid is clunked, which VectraOS's servers do not do (see BUGS).
+9Px adds `OAPPEND` (`0x80`) for the `posix` extension: the fid's open file appends, as below.
+The bit `0x20` is the framework's own, never a client's, and is taken out of every mode a client sends; any other bit goes to the file server unchecked.
+These messages are 9P2000's, types 112 to 115, unchanged on the wire, and need no extension.
+
+<fid> must be known and not already open.
+A directory may be opened only to read or execute: one opened for writing or with `OTRUNC` is refused before the file server sees it.
+The file server checks the rest, at the open: fsd(4) asks `r` for reading, `w` for writing or truncating and `x` for execution, as Plan 9's servers do, and a later change to the file's permissions does not change what an open fid may do.
+
+An open may move the fid.
+Opening a clone file, such as netd(4)'s `/net/tcp/clone`, makes a new file, the new connection's `ctl`, and the fid then refers to that, open; <qid> in `Ropen` is the new file's.
+An open the server cannot make yet, such as a `listen` file's before a call comes, gets no reply until it can, and the fid is not open until then.
+
+With the `posix` extension (see version(5)), opening a file that is not a directory makes an open file at the server: the file, the mode, an offset that `Tread` and `Twrite` at `P9_OFFSET_CURRENT` use, and whether writes append, which `OAPPEND` sets from the start.
+share(5) describes how other fids, on any of the server's connections, come to share it.
+A server keeps 256 open files across all its connections, and an open when they are all in use fails.
+
+`Tcreate` asks the server to make a file called <name> in the directory <fid> refers to, and then open it with <mode>, as `Topen` would; <fid> then refers to the new file, open.
+It needs write permission in the directory.
+<fid> must be a directory, known and not open.
+<name> follows walk(5)'s rules, and may not be `..` either.
+The `DMDIR` bit (`0x80000000`) of <perm> makes a directory, which may be opened only `OREAD`.
+A name already in the directory is refused: `Tcreate` never truncates an existing file, so a client wanting that walks to it and opens it with `OTRUNC`.
+The `posix` extension's open file is made as `Topen` makes it, `OAPPEND` included.
+
+The file server decides the new file's owner and permissions.
+fsd(4) does as Plan 9's servers do: the owner is the request's user, the group is the directory's, and the permissions are <perm> `& (~0666 | (dir.perm & 0666))` for a file and <perm> `& (dir.perm & 0777)` for a directory, so a file may have no permission its directory denies.
+tmpfs(4) keeps <perm> `& 0777`, and has no owners.
+Every VectraOS server keeps only `DMDIR` and the low nine bits of <perm>.
+
+The <iounit> in `Ropen` and `Rcreate` is the negotiated msize less 24, `P9_IOHDRSZ`: the most one `Tread` or `Twrite` carries.
+VectraOS's servers always send it, never zero.
+
+# SEE ALSO
+
+intro(5), walk(5), read(5), clunk(5), remove(5), share(5), fsd(4), tmpfs(4)
+
+# DIAGNOSTICS
+
+A VectraOS server answers with these:
+
+: `unknown fid`
+  <fid> is not in use.
+: `fid already in use`
+  <fid> is already open.
+: `permission denied`
+  A directory opened for writing or with `OTRUNC`; a server that makes no files; or the file server's own check.
+: `bad message`
+  A `Tcreate` whose <fid> is not a directory, or whose <name> is refused.
+: `file already exists`
+  A `Tcreate` of a name the directory has.
+: `out of memory`
+  The server's 256 open files are in use (`posix`).
+
+# BUGS
+
+`ORCLOSE` is not done: no server removes the file at the clunk.
+tmpfs(4), fsd(4), nullfs(4), ptyd(4) and a writable dosfs(4) open the file as if the bit were not there; the others refuse the open with `permission denied`.
+
+`DMEXCL` and `DMAPPEND` in a `Tcreate`'s <perm> are dropped without an error, so exclusive-use and append-only files cannot be made, and no open is refused for exclusive use.
+
+A `Tcreate` that fails after the file is made, when the server's open files are all in use, leaves the file in the directory and <fid> referring to it, not open, rather than to the directory.

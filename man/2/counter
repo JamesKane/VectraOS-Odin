@@ -1,0 +1,82 @@
+page=counter sect=2 summary="monotonic counters: timelines that only go up"
+    names=counter_create,counter_signal,counter_read
+    src=kernel/obj/counter.c,kernel/syscall/syscall.c,lib/vx-rt/base.c
+    keys=fence,timeline,doorbell,signal,monotonic
+
+# SYNOPSIS
+
+```c
+vx_status vx_counter_create(uint64_t initial, vx_handle *out);
+vx_status vx_counter_signal(vx_handle c, uint64_t value);
+int64_t vx_counter_read(vx_handle c);
+```
+
+# DESCRIPTION
+
+A counter is a kernel object holding a 64-bit value that never goes down (see the kernel's design, 01 §4.4).
+It is a timeline: a producer raises it as work completes, and anyone holding a handle waits for it to reach a value by binding it to a port with `VX_TRIGGER_COUNTER_GE` (see port(2)).
+Ring doorbells are counters, and GPU fences are to be.
+
+`vx_counter_create` makes a counter holding <initial> and stores a handle to it in <*out>.
+The handle carries `VX_RIGHT_READ`, `VX_RIGHT_SIGNAL`, `VX_RIGHT_WAIT`, `VX_RIGHT_DUPLICATE`, `VX_RIGHT_TRANSFER` and `VX_RIGHT_INSPECT`.
+A handle duplicated with `VX_RIGHT_READ` and `VX_RIGHT_WAIT` alone lets its holder watch the counter but not move it.
+
+`vx_counter_signal` sets the counter to the larger of its value and <value>.
+If that raises it, every `VX_TRIGGER_COUNTER_GE` binding whose threshold the new value reaches fires, carrying the new value.
+A <value> at or below the current one changes nothing and still succeeds.
+<c> needs `VX_RIGHT_SIGNAL`.
+
+`vx_counter_read` returns the counter's value.
+<c> may also be a ring end, whose own doorbell it reads (see the kernel's design, 01 §4.3).
+<c> needs `VX_RIGHT_READ`.
+
+The counter is destroyed with its last handle, and its unfired bindings with it.
+
+# EXAMPLES
+
+From the kernel's tests: a binding fires when the counter reaches its threshold, and the counter never goes back.
+
+```c
+  CHECK(vx_counter_create(0, &c) == VX_OK);
+  CHECK(vx_port_bind(port, c, VX_TRIGGER_COUNTER_GE, 14, 5) == VX_OK);
+  CHECK(vx_counter_signal(c, 3) == VX_OK);
+  CHECK(vx_port_wait(port, after_ms(1), 0, pk, 4) == VX_ERR_TIMED_OUT);
+  CHECK(vx_counter_signal(c, 7) == VX_OK);
+  CHECK(vx_port_wait(port, after_ms(100), 0, pk, 4) == 1 && pk[0].key == 14 &&
+        pk[0].value == 7);
+  CHECK(vx_counter_signal(c, 6) == VX_OK && vx_counter_read(c) == 7);
+```
+
+# SEE ALSO
+
+port(2), channel(2), intro(2)
+
+# DIAGNOSTICS
+
+`vx_counter_create` and `vx_counter_signal` return `VX_OK`, or:
+
+: `VX_ERR_BAD_HANDLE`
+  <c> is not a counter's handle.
+: `VX_ERR_ACCESS`
+  <c> lacks `VX_RIGHT_SIGNAL`.
+: `VX_ERR_NO_MEMORY`
+  The kernel's pool of counters, or the caller's handle table, is full.
+: `VX_ERR_INVALID`
+  <out> is not writable memory.
+
+`vx_counter_read` returns the value, or:
+
+: `VX_ERR_BAD_HANDLE`
+  <c> is neither a counter's handle nor a ring end's.
+: `VX_ERR_ACCESS`
+  <c> is a ring end's handle without `VX_RIGHT_READ`.
+: `VX_ERR_RANGE`
+  The value is above `INT64_MAX` and cannot be returned.
+
+# BUGS
+
+`vx_counter_read` on a counter whose handle lacks `VX_RIGHT_READ` returns `VX_ERR_BAD_HANDLE`, not `VX_ERR_ACCESS`: the kernel retries the handle as a ring end and reports that failure instead.
+
+A counter above `INT64_MAX` can be signalled and waited for but not read.
+
+The design's read-only shared page, which lets a program read a counter without entering the kernel, is not there yet: every read is a system call.

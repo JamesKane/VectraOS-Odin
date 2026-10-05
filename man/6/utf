@@ -1,0 +1,81 @@
+page=utf sect=6 summary="text is UTF-8: runes and their encoding"
+    names=utf,rune,unicode,ascii
+    src=lib/vx-utf/utf.h
+    keys=utf-8,character,encoding,runeerror,name,locale
+
+# SYNOPSIS
+
+```text
+U+0000  - U+007F    0bbbbbbb
+U+0080  - U+07FF    110bbbbb 10bbbbbb
+U+0800  - U+FFFF    1110bbbb 10bbbbbb 10bbbbbb
+U+10000 - U+10FFFF  11110bbb 10bbbbbb 10bbbbbb 10bbbbbb
+```
+
+# DESCRIPTION
+
+All text in VectraOS is UTF-8, as in Plan 9.
+Text is every string that crosses a kernel, 9P or file boundary as text: names and paths, exit strings and notes, `ctl` messages, ndb(6), namespace(6) files, manual pages (guide(6)) and the console.
+The contents of files and pipes are bytes, and are never checked; see {text and bytes|#bytes}.
+
+A rune is a Unicode code point, U+0000 to U+10FFFF, held in C as a `vx_rune`, C23's `char32_t`.
+Programs may hold text as runes inside, but outside a program, in files and between programs, it is UTF-8: each rune is one to four bytes, as SYNOPSIS shows, its bits written most significant first.
+The 7-bit ASCII set, `00` to `7F`, appears only as itself, and the bytes of a longer sequence are all `80` or above, so a program that handles only ASCII, or passes bytes through, works on UTF-8 unchanged.
+A program that looks inside text steps through it a rune at a time, with `lib/vx-utf`.
+
+The constants keep Plan 9's names: `VX_UTFMAX`, 4, the most bytes a rune takes; `VX_RUNESELF`, `0x80`, below which a byte is a rune by itself; `VX_RUNEERROR`, U+FFFD; and `VX_RUNEMAX`, U+10FFFF.
+
+Decoding is strict, and never fails.
+These are not UTF-8: a byte that cannot start a sequence (`80` to `C1`, and `F5` and above), a sequence cut short or broken by a byte that does not continue it, an overlong form (rune 0 is only `00`), a surrogate (U+D800 to U+DFFF), and anything above U+10FFFF.
+Each decodes to `VX_RUNEERROR` and uses up exactly one byte, as Plan 9's `chartorune` does, so a decoder always moves on and valid text after a bad byte still decodes.
+U+FFFD written properly, `EF BF BD`, is valid and stays so.
+A program that must refuse bad text asks `vx_utf_valid` instead of decoding it.
+Encoding a rune that has no UTF-8 form, a surrogate or one above U+10FFFF, writes `VX_RUNEERROR`.
+
+Text is cut only at a rune's boundary.
+Every bounded copy of text, of an exit string, a note, `$status`, a task's name, cuts with `vx_utf_cut` at the last whole rune that fits, as Plan 9's kernel cuts with `kstrcpy`, so a cut never makes valid text invalid.
+The kernel cuts but does not validate.
+
+A name, a path's component, is valid UTF-8 holding no control character, `00` to `1F` or `7F`: Plan 9's `validname`, made strict about UTF-8.
+vx-ns refuses any other on every path a program gives it, before it walks; vx-9p's server refuses one in a walk, a create or a rename, so a server is safe from a client that does not use vx-ns; and `vx-tar` refuses one in the boot image.
+The C library checks a path the same way, and reports `EILSEQ`.
+So a namespace never holds a newline, and namespace(6) text needs no escape for one.
+
+ndb writes a value that is not valid UTF-8, or holds a control character, as hexadecimal bytes, `x"…"`, so bad bytes that reach a record, in an exit string, say, are shown, not lost.
+A manual page that is not UTF-8 is refused.
+
+The line editors of the serial console and of ptyd(4) erase and kill a whole rune at a time, and end a full line at the last whole rune that fits.
+The console always does; ptyd does when the terminal's `IUTF8` input flag is set, which it is by default.
+A terminal counts one column per rune.
+
+A POSIX program that calls `setlocale(LC_CTYPE, "")` with no `LANG` or `LC_*` set gets musl's `C.UTF-8`, with `MB_CUR_MAX` 4; one that never calls it keeps the byte-based `C` locale POSIX requires.
+VectraOS sets no locale variable.
+
+Source files are UTF-8 and the compiler's execution character set is UTF-8, so a plain string literal holding `é` is UTF-8 bytes; house code never writes `u8"…"`.
+
+@node=bytes title="Text and bytes"
+
+What a file or a pipe holds is bytes.
+cat(1), echo(1), tail(1), pipes, files and 9P's data pass bytes through unchanged, never checking or repairing them, so a file of any bytes survives a copy.
+Only where a program treats bytes as text, a name, a line to edit, a record, does UTF-8 matter, and there the rules above apply.
+
+# EXAMPLES
+
+From `tests/qemu/cons.ndb`: `café` typed, then delete, `e` and return; the console's erase takes back `é`'s two bytes, `C3 A9`, as one rune.
+
+```ndb
+type=x"636166c3a97f650d"
+expect="constest: got [cafe]"
+```
+
+# SEE ALSO
+
+ndb(6), namespace(6), ptyd(4); ADR-0013 and `tests/host/utf_test.c` in the repository; {The Unicode Standard|https://www.unicode.org/versions/latest/}
+
+# BUGS
+
+There are no rune classes (`isalpharune` and the rest) and no case mapping; they come with the first program that needs them.
+
+Display width is not handled: a wide character, CJK say, takes two columns but a terminal counts it as one.
+
+rc(1)'s pattern matching decodes runes with a decoder of its own, which takes an overlong form, a surrogate or a value above U+10FFFF as a rune, not as `VX_RUNEERROR`.

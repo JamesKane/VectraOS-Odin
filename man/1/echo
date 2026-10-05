@@ -1,0 +1,52 @@
+page=echo sect=1 summary="print arguments"
+    src=cmd/echo.c,third_party/sbase/echo.c
+
+# SYNOPSIS
+
+```usage
+echo [arg ...]
+```
+
+# DESCRIPTION
+
+`echo` writes its arguments separated by blanks and terminated by a newline on standard output.
+With no <arg> it writes the newline alone.
+
+`echo` takes no flags: `-n` is printed like any other <arg>, and the newline is always written.
+
+In the POSIX namespace `echo` is sbase's command instead (see {The POSIX command|#posix}).
+
+# EXAMPLES
+
+```rc
+% echo /tmp/*.x; echo '/tmp/*.x'
+/tmp/a.x /tmp/b.x
+/tmp/*.x
+```
+
+# SEE ALSO
+
+rc(1)
+
+# DIAGNOSTICS
+
+The exit string is empty.
+
+# BUGS
+
+A failed write is not reported: the exit string is empty whatever happens to the output.
+
+@node=posix title="The POSIX command"
+
+```text
+echo [-n] [string ...]
+```
+
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)), `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so `echo` runs sbase's command, as POSIX specifies.
+It writes each <string> separated by blanks and terminated by a newline on standard output, and exits non-zero if the write fails.
+It does not interpret backslashes.
+
+: `-n`
+  Do not write the newline; only a first argument of exactly `-n` is taken as the flag.
+
+sbase's page is `third_party/sbase/echo.1` in the repository.

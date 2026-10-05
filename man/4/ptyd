@@ -1,0 +1,110 @@
+page=ptyd sect=4 summary="pseudo-terminals and their line discipline"
+    src=servers/ptyd/ptyd.c
+    keys=pty,terminal,tty,ptmx,pts,termios,line,discipline,job,control,signal,interrupt
+
+# SYNOPSIS
+
+```usage
+ptyd
+```
+
+# DESCRIPTION
+
+`ptyd` serves pseudo-terminals: a master, which a terminal program reads and writes, and a slave, which the program running on the terminal reads and writes, with a line discipline between them, as Linux's has.
+svcd(8) starts it from `boot/svc/ptyd.ndb`, with the boot image at `/` and procfs(4) at `/proc`, and posts it as `/srv/ptyd`; `/lib/ns/posix` mounts it after the null devices on `/dev`, so a POSIX program finds `/dev/ptmx` and `/dev/pts/`.
+It is not restarted: its terminals live only in it.
+
+The terminals' settings are POSIX's termios, with Linux's numbers, as the POSIX personality has them; the musl back end's `tcgetattr`, `tcsetattr`, `TIOCGWINSZ`, `TIOCSWINSZ`, `tcsetpgrp` and the rest read and write a terminal's `ctl` file.
+
+: `ptmx`
+  Opening it, in any mode, makes a new terminal, and the fid opened becomes its master.
+  A stat of the master gives the terminal's number as its name, which is how a program finds its slave.
+  Reading the master returns what the slave's program wrote, and the echo of what was typed, waiting while there is none.
+  Writing it is typing at the terminal: each byte goes through the line discipline.
+  More fids for the master, made by a fork's `Tjoin` or an open of the same file, keep it open until each is closed.
+: `pts/`
+  A directory holding `<n>` and `<n>.ctl` for each terminal whose master is open.
+: `pts/<n>`
+  Terminal <n>'s slave, a device of mode 0620.
+  Reading it returns typed input: in canonical mode one line at most, up to and including its newline or to where a `^D` sent it; otherwise the bytes there are.
+  A read waits while there is none.
+  A `^D` typed on an empty line makes the next read return nothing, the end of the file; so does a read once the master is closed and every byte typed has been read.
+  Writing it sends output to the master, a newline becoming a carriage return and a newline when the terminal's `oflag` has `OPOST` and `ONLCR`.
+  A write takes as much as there is room for, and waits for the master to read when there is none.
+  Once the master is closed, an open or a write of the slave fails with `i/o on hungup channel`.
+: `pts/<n>.ctl`
+  The terminal's settings, one ndb record (see ndb(6)): `iflag`, `oflag`, `cflag` and `lflag`, in decimal; `cc`, the 32 control characters, in hexadecimal as `x"..."`; `rows` and `cols`; `pgrp`, the foreground process group, 0 for none; and `avail`, the bytes of input waiting to be read.
+  Writing a record sets the settings it names and leaves the rest; a `cc` that is not 32 bytes and keys it does not know are ignored.
+  The flag `flush` throws away the input waiting and the line being typed.
+  A change of `rows` or `cols` sends `SIGWINCH` to the foreground group.
+
+A terminal goes when its master's fids and its slave's are all closed.
+
+A new terminal has Linux's defaults: `iflag` `ICRNL` and `IUTF8`, `oflag` `OPOST` and `ONLCR`, `cflag` 0277 (`CS8`, `CREAD` and `B38400`), and `lflag` `ISIG`, `ICANON`, `ECHO`, `ECHOE` and `ECHOK`; `^C` interrupts, `^\` quits, DEL erases, `^U` kills the line, `^D` ends the file and `^Z` suspends; 80 columns by 24 rows.
+
+@node=discipline title="The line discipline"
+
+Each byte typed at the master is taken through these steps, as the terminal's settings say:
+
+- With `ICRNL`, a carriage return becomes a newline.
+- With `ISIG`, the `VINTR`, `VQUIT` and `VSUSP` characters are echoed with a newline, the line being typed is thrown away, and the signal is sent to the foreground group: `SIGINT`, `SIGQUIT` or `SIGTSTP`.
+- Without `ICANON`, the byte is input at once, and echoed.
+- In canonical mode, `VERASE` or a backspace takes back the last character typed, a whole rune with `IUTF8` and a byte without; `VKILL` takes back the whole line; `VEOF` sends the line as it is, with no newline, or on an empty line the end of the file; any other byte is added to the line, which a newline sends.
+- With `ECHO`, what is typed is echoed to the master: a control character other than newline and tab as `^` and a letter, a newline as a carriage return and a newline under `OPOST` and `ONLCR`, and an erased character as a backspace, a space and a backspace.
+
+A line that reaches 4096 bytes is sent at the last whole rune that fits, and the rest starts the next line.
+
+A signal is a note, written to `/proc/<pgrp>/notepg`, so it reaches every process in the group (ADR-0011): `interrupt` for `SIGINT`, as in Plan 9, and `posix: SIGQUIT`, `posix: SIGTSTP` or `posix: SIGWINCH` for the others.
+A slave read waiting when ptyd sends a signal ends with `interrupted`, unless input has come meanwhile, so `^C` at a prompt is seen at once; a change of size ends none.
+
+# EXAMPLES
+
+The manifest that starts it, `boot/svc/ptyd.ndb`:
+
+```ndb
+service=ptyd program=/boot/bin/ptyd post=ptyd console entropy
+mount=/ srv=bootfs
+mount=/proc srv=proc
+```
+
+and the lines of `/lib/ns/posix` that put the terminals in a POSIX program's `/dev`:
+
+```text
+mount /srv/null /dev
+mount -a /srv/ptyd /dev
+```
+
+# FILES
+
+: `/srv/ptyd`
+  ptyd's post.
+: `/dev/ptmx`, `/dev/pts/`
+  Where a POSIX namespace has its files.
+: `/proc/<pgrp>/notepg`
+  Where a signal is written.
+
+# SEE ALSO
+
+procfs(4), svcd(8), namespace(6); `docs/01-kernel-ipc.md` §9 in the repository
+
+# DIAGNOSTICS
+
+It prints `ptyd: serving /srv/ptyd` when it starts, or `ptyd: serving /srv/ptyd, without /proc: no signals` when its namespace has no `/proc`, in which case no signal is sent.
+Without a listen channel it prints `ptyd: no listen channel` and exits with `no listen channel`; it exits `cannot serve` if serving fails.
+
+An open of `ptmx` when 16 terminals are in use fails with `out of memory`, a write to a `ctl` file that is not a record with `bad message`, and an open of a directory for writing with `permission denied`.
+
+# BUGS
+
+It holds 16 terminals, and is not restarted.
+
+Job control is partial: there is no `SIGTTIN` or `SIGTTOU` for a background group's reads and writes, and no controlling terminal is kept for a session.
+Whoever can write a terminal's `ctl` can set its foreground group, with no session check, and so send `^C` and `^Z` to any group.
+
+A signal goes to the note group of the process whose pid is the group's number; when that process has ended, its group gets none.
+Closing the master sends no `SIGHUP`, and the master's reader is not told when the slaves are closed: its read waits.
+
+`VMIN` and `VTIME` are ignored: a read in non-canonical mode returns what is there, waiting only while there is nothing.
+Of the termios flags only `ICRNL`, `IUTF8`, `OPOST`, `ONLCR`, `ISIG`, `ICANON` and `ECHO` are acted on; the others, flow control and `cflag` among them, are kept and reported only.
+
+Input typed while 4096 bytes wait to be read, and echo while 4096 bytes wait for the master, are dropped, as a terminal drops them, with no error; only the slave's own writes are held instead.

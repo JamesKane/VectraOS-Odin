@@ -1,0 +1,93 @@
+page=ls sect=1 summary="list contents of directory"
+    src=cmd/ls.c,third_party/sbase/ls.c
+    keys=directory,list,files,names
+
+# SYNOPSIS
+
+```usage
+ls [file ...]
+```
+
+# DESCRIPTION
+
+For each directory argument, `ls` prints the names in the directory, sorted by their bytes, on one line, two spaces apart, then a newline; an empty directory prints an empty line.
+For each other <file> it prints the argument as given, on a line of its own.
+With no <file> it lists `/`: there is no current directory.
+
+Each <file> is looked up in the namespace `ls` was started with, and must be an absolute path.
+A directory that is a union (see ns(1)) is read as each member in turn, and every member's names are listed.
+
+`ls` takes no flags: an argument beginning with `-` is a file's name.
+It prints names only, never a file's mode, size, owner or time, and never quotes a name.
+It lists the first 512 names of a directory, holding at most 8192 bytes of them; the rest are left out.
+
+In the POSIX namespace `ls` is sbase's command instead (see {The POSIX command|#posix}).
+
+# EXAMPLES
+
+```rc
+% ls /
+adm  bin  boot  dev  dist  lib  n  net  proc  rc  srv  sys  tmp
+% ls /nothing | tail -1; if(~ $status 'ls '*': error|') echo status ok
+ls: /nothing: file does not exist
+status ok
+```
+
+# SEE ALSO
+
+ns(1), rc(1)
+
+# DIAGNOSTICS
+
+When a <file> cannot be found, `ls` says so on standard error, as `ls: /nothing: file does not exist`, and goes on to the next.
+If any <file> fails the exit string is `error`; it is `no namespace` when `ls` was started without one.
+
+# BUGS
+
+A relative path is refused as `bad message`, the error a malformed path is given.
+
+A directory found but not opened, or not read to its end, fails with no message; what was read of it is still printed.
+
+Names past the 512th, or past 8192 bytes, are dropped without a word.
+A name in two members of a union is listed twice.
+
+@node=posix title="The POSIX command"
+
+```text
+ls [-1AacdFfHhiLlnpqRrSUu] [file ...]
+```
+
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)), `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so `ls` runs sbase's command, as POSIX specifies.
+It lists each <file> given, and the contents of each directory; with none it lists the current directory.
+Names are sorted and printed one to a line; with more than one argument each directory's listing is headed by its name.
+
+: `-A`
+  List names beginning with `.` too, but not `.` and `..` themselves.
+: `-a`
+  List names beginning with `.` too.
+: `-c`, `-u`
+  Use the time of the last status change, or of the last access, instead of the last modification, to sort or print.
+: `-d`
+  List a directory itself, not its contents.
+: `-F`, `-p`
+  Append a mark of the file's type to every special file, or `/` to directories only.
+: `-f`
+  As `-U` with `-a`, and with `-r`, `-S` and `-t` turned off.
+: `-H`, `-L`
+  Follow symbolic links named as arguments, or all symbolic links.
+: `-h`
+  Print sizes in human-readable units.
+: `-i`
+  Print each file's index number.
+: `-l`, `-n`
+  List the type, permissions, links, owner, group, size and time of each file; `-n` prints the owner and group as numbers.
+: `-q`, `-1`
+  Print `?` for each unprintable character of a name.
+: `-R`
+  List directories recursively.
+: `-r`
+  Reverse the order.
+: `-S`, `-t`, `-U`
+  Sort by size, largest first, or by time, latest first; or do not sort.
+
+sbase's page is `third_party/sbase/ls.1` in the repository.

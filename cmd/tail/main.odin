@@ -7,6 +7,7 @@ import "vx:p9"
 import "vx:procns"
 import "vx:rt"
 import "vx:str"
+import usage "gen:usage/tail"
 
 text: [64 * 1024]u8 // the end of the input, as a ring
 total: u64
@@ -35,7 +36,7 @@ run :: proc() -> string {
 		// The digits stop being taken once they make more than 100000, so
 		// the largest count is 1000009.
 		if !ok || n / 10 > 100_000 {
-			rt.eprint("usage: tail [-N] [file]\n")
+			rt.eprint(usage.TEXT, "\n")
 			return "usage"
 		}
 		lines = n

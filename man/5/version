@@ -1,0 +1,85 @@
+page=version sect=5 summary="negotiate the protocol version, its extensions and the message size"
+    names=version,Tversion,Rversion
+    src=lib/vx-9p/codec.c,lib/vx-9p/server.c,lib/vx-9p/client.c,lib/vx-9p/messages.def
+    keys=9p,9px,msize,negotiate,extension,dialect,session,9P2000.x
+
+# SYNOPSIS
+
+```text
+size[4] Tversion tag[2] msize[4] version[s]
+size[4] Rversion tag[2] msize[4] version[s]
+```
+
+# DESCRIPTION
+
+The `version` request negotiates the protocol, its extensions and the largest message on a connection, and starts a session on it.
+`Tversion` is type 100 and `Rversion` 101.
+It must be the first message: a VectraOS server answers any other request before it with an `Rerror`, and the client sends nothing else until `Rversion` has come.
+The <tag> is `NOTAG`, `0xffff`; the client sends it, and the server does not check it.
+
+The client offers <msize>, the largest message, in bytes from <size> on, that it will send or take.
+The server answers with the smaller of that and its own largest: 16384 on a ring (see intro(5)), 65536 for vx9pserve(8).
+A client asking for less than 256 is refused with an `Rerror`, and the connection stays without a session.
+Thereafter neither side sends a larger message; a read or write carries at most <msize> less 24 bytes (see read(5)).
+VectraOS's client asks for 16384, on a ring and over TCP alike, and refuses an answer smaller than 256 or larger than it asked for.
+
+The <version> string is a dialect, then, for 9Px, the extensions, each a word `+`<name> after a space:
+
+```text
+9P2000.x/1 +dref +map +xattr +posix
+```
+
+`9P2000.x/1` is 9Px, version 1.
+The words are `dref`, `map`, `lease`, `notify`, `xattr` and `posix`; a word the reader does not know, or one without its `+`, is ignored.
+The server answers with the extensions it has of those offered, in that order, and the session has exactly those.
+A client offering `9P2000`, or any string that starts with it, such as `9P2000.L` or `9P2000.u`, is answered with `9P2000`: plain 9P2000, with no extensions and no dialect's messages, so Linux's v9fs falls back to 9P2000 too.
+Any other string is answered with an `Rversion` whose <version> is `unknown`, as Plan 9 has it, and the connection stays without a session, so the client may try again.
+
+The extensions and what they add:
+
+: `posix`
+  9P2000.L's `Tsymlink`, `Treadlink`, `Trenameat`, `Tlink`, `Tfsync`, `Tlock` and `Tgetlock`, and 9Px's `Tshare`, `Tjoin`, `Tseek` and `Tdesc`, with open files whose offsets the server keeps: symlink(5), link(5), fsync(5), lock(5), share(5).
+: `xattr`
+  9P2000.L's `Tgetattr` and `Tsetattr`: getattr(5).
+: `map`
+  `Tmap`, a file's range as a VMO: map(5).
+: `dref`
+  `Treadref` and `Twriteref`, whose data is in a VMO, not the message: dref(5).
+: `lease`, `notify`
+  Nothing yet.
+
+Each server says which it has: fsd(4) has `posix`, `xattr`, `map` and `dref`; tmpfs(4), dosfs(4), isofs(4), distd(8) and ptyd(4) `posix` and `xattr`; bootfs(4), sysfs(4) and nullfs(4) `xattr`; vx9pserve(8) none.
+A message of an extension not negotiated is answered with an `Rerror`, `operation not supported`.
+VectraOS's client offers `+dref +map +xattr +posix` on a ring, and only `9P2000.x/1`, no extensions, over TCP, since the extensions are for rings; a Plan 9 server answers that with `9P2000`.
+9Px's errors are 9P2000's `Rerror` strings (see error(5)), never 9P2000.L's `Rlerror` numbers, whatever the extensions.
+
+A `Tversion` that succeeds starts a new session: the server first clunks every fid the connection had, as clunk(5) describes, letting go of their open files and locks.
+A `Tversion` sent in the middle of a session does the same, even when it is then refused.
+
+# EXAMPLES
+
+The exchanges `tests/host/p9_server_test.c` makes and checks, written in Plan 9's trace form. The client asks a server whose largest message is 8192 and which has `dref` and `notify` for `dref` and `map`:
+
+```text
+Tversion tag 65535 msize 16384 version '9P2000.x/1 +dref +map'
+Rversion tag 65535 msize 8192 version '9P2000.x/1 +dref'
+```
+
+A 9P2000.L client, from the same test:
+
+```text
+Tversion tag 65535 msize 4096 version '9P2000.L'
+Rversion tag 65535 msize 4096 version '9P2000'
+```
+
+# SEE ALSO
+
+intro(5), attach(5), clunk(5), error(5); the extensions' specifications are `docs/proto/posix.md`, `docs/proto/map.md` and `docs/proto/dref.md`, and the negotiation `docs/02` §3.1
+
+# BUGS
+
+A request before `Tversion` is answered `fid already in use`, and an <msize> under 256 `message too large for msize`, though the message is too small: both are statuses whose strings were chosen for other errors (see error(5)).
+
+`lease` and `notify` are negotiated words with no messages behind them, and no server has them.
+
+The server does not check that `Tversion`'s <tag> is `NOTAG`.

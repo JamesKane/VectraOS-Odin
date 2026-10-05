@@ -1,0 +1,80 @@
+page=stat sect=5 summary="inquire or change file attributes"
+    names=Tstat,Rstat,Twstat,Rwstat,stat
+    src=lib/vx-9p/messages.def,lib/vx-9p/codec.c,lib/vx-9p/server.c,lib/vx-9p/client.c
+    keys=9p,9px,stat,wstat,dir,entry,qid,mode,permissions,rename,chmod,truncate
+
+# SYNOPSIS
+
+```text
+size[4] Tstat tag[2] fid[4]
+size[4] Rstat tag[2] stat[n]
+
+size[4] Twstat tag[2] fid[4] stat[n]
+size[4] Rwstat tag[2]
+```
+
+# DESCRIPTION
+
+`Tstat` asks about the file <fid> refers to, and `Rstat` answers with its directory entry, <stat>.
+It needs no permission, and the fid may be open or not.
+These messages are 9P2000's, types 124 to 127, unchanged on the wire.
+
+A directory entry is laid out as follows, its integers little-endian, as every integer in 9P is:
+
+: <size>`[2]`
+  The number of bytes after this field.
+: <type>`[2]`, <dev>`[4]`
+  For the kernel's use in Plan 9; VectraOS's servers send zero, and nothing uses them.
+: <qid.type>`[1]`
+  The kind of file, as a bit vector: `QTDIR` (`0x80`) for a directory.
+  VectraOS's servers send `QTDIR` or `QTFILE` (0), never 9P2000's other bits.
+: <qid.vers>`[4]`
+  The version of the file, which changes as it does.
+: <qid.path>`[8]`
+  The server's unique identification for the file.
+: <mode>`[4]`
+  The permissions, `0777` for owner, group and others as Plan 9's, and flags: `DMDIR` (`0x80000000`) for a directory, and two from 9P2000.u, `DMSYMLINK` (`0x02000000`) for a symbolic link (see symlink(5)) and `DMDEVICE` (`0x00800000`) for a device, which ptyd(4)'s terminals are.
+: <atime>`[4]`
+  The time of the last read, in seconds since 1970.
+: <mtime>`[4]`
+  The time of the last change of contents, in seconds since 1970.
+: <length>`[8]`
+  The file's length in bytes; zero for a directory.
+: <name>`[s]`
+  The file's name: `/` for the root of the tree served, except that fsd(4)'s dump view names a snapshot's root by its branch.
+: <uid>`[s]`, <gid>`[s]`, <muid>`[s]`
+  The file's owner, its group, and the user who last changed it.
+  fsd(4) names its users (see users(6)); tmpfs(4), which has none, says `posix` for each.
+
+The entry keeps its own <size>, so in `Rstat` and `Twstat` the size comes twice: the message's <n>`[2]`, then the entry's <size>`[2]`, two less.
+A read of a directory (see read(5)) returns entries in this layout, one after another.
+A VectraOS server builds an `Rstat` entry in 1024 bytes and refuses one longer; vx-9p's client refuses an entry that does not decode exactly, such as one with a string holding a NUL.
+
+The musl back end asks for `Tgetattr` (see getattr(5)) where the server has the `xattr` extension, for times to the nanosecond and the file's type in POSIX's terms, and `Tstat` elsewhere; ls(1) and rc(1) use `Tstat`.
+
+In 9P2000 `Twstat` changes some of a file's entry: its name, by anyone with write permission in its directory; its length, by anyone with write permission on it; its mode and mtime, by its owner or its group's leader; and its group.
+A field the client leaves alone holds a don't-touch value, an empty string or all ones, and an entry all of don't-touch values asks that the file be committed to stable storage.
+The changes happen together or not at all.
+
+VectraOS maps none of this.
+Every VectraOS server refuses every `Twstat`, before its file server sees it, and vx-9p's client never sends one.
+What `Twstat` does is done with the `posix` and `xattr` extensions' messages instead: `Tsetattr` (see getattr(5)) for the mode, the owner, the group, the length and the times, `Trenameat` for a name, in any directory of the connection, which `Twstat` cannot do, and `Tfsync` (see fsync(5)) for the commit.
+
+# SEE ALSO
+
+intro(5), read(5), getattr(5), symlink(5), fsync(5), fsd(4), tmpfs(4), users(6)
+
+# DIAGNOSTICS
+
+A VectraOS server answers with these:
+
+: `unknown fid`
+  A `Tstat`'s <fid> is not in use.
+: `message too large for msize`
+  The entry is longer than 1024 bytes.
+: `operation not supported`
+  Every `Twstat`.
+
+# BUGS
+
+Since VectraOS sends only `Tsetattr` and `Trenameat`, which 9front and `u9fs` lack, and refuses the `Twstat` they send, renaming a file and changing its mode or length fail both ways between VectraOS and Plan 9's servers and clients.

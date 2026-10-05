@@ -1,0 +1,503 @@
+page=rc sect=1 summary="command language"
+    names=rc,bind,mount,unmount,builtin,eval,exec,exit,flag,shift,wait,whatis
+    src=cmd/rc.c,lib/vx-rc/rc.c,lib/vx-rc/rc.h,boot/rc/lib/rcmain
+    keys=shell,script,command,language,pipeline,redirection,variable,function,glob,namespace
+
+# SYNOPSIS
+
+```usage
+rc [-srdiIlxebpvV] [-c command] [-m initial] [file [arg ...]]
+. [-biq] file [arg ...]
+builtin command ...
+eval arg ...
+exec command ...
+exit [status]
+flag letter [+-]
+shift [n]
+wait [pid]
+whatis name ...
+~ subject pattern ...
+bind [-abc] new old
+mount [-abc] srv old [aname]
+unmount [new] old
+```
+
+# DESCRIPTION
+
+`rc` is the shell: Tom Duff's language, as 9front's rc has it.
+It runs command lines read from the console, from a file or, with `-c`, from its argument list.
+Its language is meant to be 9front's, and a script written for 9front's rc runs unchanged unless it uses what BUGS lists.
+What follows describes the language in 9front's order, and says where VectraOS's rc differs.
+
+VectraOS has no `fork`.
+The interpreter runs every function, block and builtin in the shell's own task, and starts only programs as tasks of their own; that is the source of most of the differences.
+
+@node=commands title="Command lines"
+
+A command line is a sequence of commands, separated by `&` or `;`, and ended by a newline.
+The commands run in order from left to right.
+`rc` does not wait for a command followed by `&` before starting the next, and sets `$apid` to its process id.
+When a command not followed by `&` ends, `$status` is set to the wait message of the program it ran: the program's name, its process id, a colon and a space, then its exit string, such as `ls 12: error`.
+It is empty if the program succeeded.
+
+A backslash followed by a newline is a blank, wherever it is, even in the middle of a word.
+A backslash is not otherwise special.
+
+A `#` and the characters after it up to the newline are ignored, except in quotes.
+
+@node=simple title="Simple commands"
+
+A simple command is a sequence of arguments with redirections among them.
+If the first argument names a function or one of `rc`'s builtins, `rc` runs it itself.
+Otherwise it names a program.
+A name starting with `/`, `./`, `../` or `#` is the program's path as written; any other is looked for in each directory of `$path`, in order, the first that has it winning.
+A directory of `$path` that is empty or `.` means the name as written.
+
+`rc` reads the program through its namespace and starts it as a task of its own, with a copy of the namespace, the console, and its standard input, output and error.
+Each of the three is `rc`'s own, a pipe, or a channel that `rc` copies to or from a file, a here document or a capture; `rc` serves those channels while it waits for the command.
+The task's name is the program's name without its directory.
+
+The program must be an ELF executable for the machine.
+A script starting `#!` is not run: give it to `rc` as its <file>.
+
+A program that cannot be started prints its name and why on the command's standard error, `nosuch: file does not exist`, and the why is `$status`.
+
+The first word of a simple command cannot be a keyword unless it is quoted.
+The keywords are
+
+```text
+for in while if not switch fn ~ ! @
+```
+
+@node=arguments title="Arguments and variables"
+
+Several constructions may stand where an argument may, and many of them give a list of arguments rather than one.
+
+The simplest is the unquoted word: one or more characters, none of them a blank, tab or newline, nor any of
+
+```text
+# ; & | ^ $ = ` ' { } ( ) < >
+```
+
+An unquoted word holding `*`, `?` or `[` is a pattern, matched against file names.
+`*` matches any sequence of characters, `?` any one character, and `[`<class>`]` any character in the class.
+A class starting `~` is complemented, and may hold ranges, two characters with `-` between them, either way round.
+A character is a UTF-8 rune, not a byte.
+`/` must be written in a pattern, and so must the `.` that starts the names `.` and `..`; other names starting `.` are matched as any others.
+A pattern is replaced by the names it matches, sorted; one that matches nothing stands for itself.
+A plain name after a pattern, as in `*/one.c`, must exist.
+Matching is done after every other operation, so `x=/tmp echo $x^/*.c` matches `/tmp/*.c`.
+
+A quoted word is characters between single quotes, `'`.
+A quote inside one is written twice, `''`.
+Nothing is special inside, a newline included.
+
+Each of these is an argument:
+
+: `(`<arguments>`)`
+  The members of each of the arguments, as one list.
+  Lists do not nest: `((echo) (hi there) everybody)` is `echo hi there everybody`.
+: `$`<argument>
+  The value of the variable the argument names.
+  A value is a list of strings.
+  If the argument is a number <n>, the value is the <n>th element of `$*`, or empty if `$*` has fewer.
+  The argument must be a single word; `$` before a list of several is an error.
+: `$`<argument>`(`<subscripts>`)`
+  The elements the subscripts name, counting from 1, with the parenthesis right after the name.
+  A subscript `m-n` names elements <m> to <n>, and `m-` those from <m> on; one out of range names nothing.
+: `$#`<argument>
+  The number of elements in the variable; one never set has none.
+: `$"`<argument>
+  The elements joined by spaces into one string; an empty variable gives the empty string.
+: `` `{command} ``
+: `` `split{command} ``
+  `rc` runs the command, capturing its standard output, and splits what it wrote into arguments at the characters of `$ifs`, or of <split> in the second form.
+  With `ifs=()` the output is one argument.
+  The command runs in the shell itself, so what it assigns is seen after.
+: <argument>`^`<argument>
+  The concatenation of the two.
+  Lists of one length are joined pairwise; otherwise one must have one element, which is joined to each of the other's.
+  Two empty lists give an empty list; one empty and one not is an error, `null list in concatenation`.
+
+`rc` has no `<{...}` or `>{...}`.
+
+Variable names are any characters but blanks, control characters and
+
+```text
+! " # $ % & ' ( ) + , - . / : ; < = > ? @ [ \ ] ^ ` { | } ~
+```
+
+@node=carets title="Free carets"
+
+`rc` puts a `^` between two words written with nothing between them, as 9front's does: when `$`, `'` or `` ` `` follows a word, or a word follows a quoted one.
+After a variable's name, the name ends at the first character a name cannot hold, and a `^` goes before it.
+So `cc -$flags $stem.c` is `cc -^$flags $stem^.c`.
+No caret is put after a keyword: `echo for$x` is two words.
+
+@node=redirection title="I/O redirections"
+
+: `>`<file>
+  Standard output into <file>, which is emptied, or made, mode 0644, if it does not exist.
+: `>>`<file>
+  Standard output onto the end of <file>, which is made if need be.
+: `<`<file>
+  Standard input from <file>.
+: `<>`<file>
+  Standard input from <file>, opened once for reading and writing; it is not made.
+: `<<`<eof-marker>
+  Standard input from a here document: the lines after the command's line, up to one holding only <eof-marker>, quoted or not.
+  If the marker is unquoted, `$`<word> in the text is replaced by the variable's value, its elements joined by spaces, a `^` right after it dropped, and `$$` is a `$`.
+  If it is quoted, the text is taken as it is.
+
+Each may be given a descriptor in brackets instead of 0 or 1, from 0 to 9: `cc junk.c >[2]junk`.
+`>[`<fd0>`=`<fd1>`]`, `<>[`<fd0>`=`<fd1>`]` and `<[`<fd0>`=`<fd1>`]` make <fd0> a copy of <fd1>; `>[`<fd0>`=]` and `<[`<fd0>`=]` close it.
+
+Redirections are done from left to right, so `cc junk.c >/tmp/x >[2=1]` puts both outputs in `/tmp/x`, where `cc junk.c >[2=1] >/tmp/x` puts the errors where the output was.
+A redirection's file is opened once, where the redirection is, and one on a block is the whole block's: in `{ cat; cat } <f` the second `cat` reads what the first left.
+
+A file that cannot be opened is an error, `< can't open:` and the name, and its why is `$status`.
+
+Descriptors 3 to 9 can be redirected, but a program is given only 0, 1 and 2.
+
+@node=compound title="Compound commands"
+
+Two commands with `|` between them are a command: the standard output of the left goes through a pipe to the standard input of the right.
+`|[`<fd>`]` pipes the left's descriptor <fd> instead of 1, and `|[`<fd0>`=`<fd1>`]` the left's <fd0> into the right's <fd1>.
+`rc` starts every stage at once and waits for all of them; `$status` is their statuses joined by `|`, the `|` left out while what comes before it is empty, as 9front's `concstatus` does.
+Each stage must be a program: a block as a stage is refused when the line is compiled, and a function when the pipeline runs, `rc: a pipeline's stages must be programs (for now)`; a builtin is looked for as a program.
+
+Two commands with `&&` or `||` between them are a command.
+The left runs and its status is examined: with `&&` the right runs if the status is true, with `||` if it is false.
+
+`!` before a command inverts its status: a true status becomes `false`, any other the empty string.
+
+`|` binds tightest, and to the left; then `!` and `@`; then `&&` and `||`.
+
+A status is true when its first word holds nothing but `0` and `|`: the empty string, a pipeline of successes, or `0`.
+
+`@` before a command runs it in a subshell in 9front's rc; here it runs in the shell itself, so what it assigns is seen after.
+
+Each of these is a command:
+
+: `if(`<list>`)` <command>
+  The <list>, commands separated by `&`, `;` or newlines, runs; if its status is true, <command> runs.
+: `if not` <command>
+  Runs <command> if the condition of the `if` just before was false.
+  It must follow `if(...)` <command> directly, or it is refused when compiled, `` `if not' does not follow `if(...)' ``.
+: `for(`<name>` in `<arguments>`)` <command>
+: `for(`<name>`)` <command>
+  Runs <command> once for each argument, the argument assigned to <name>; without the arguments, `$*` is used.
+  <name> is local to the loop.
+: `while(`<list>`)` <command>
+  Runs <list>, and <command> while its status is true.
+  An empty <list> is true.
+: `switch(`<argument>`){`<list>`}`
+  The <argument>, its words joined by spaces, is matched against the words after each top-level `case` in <list>, as `~` matches.
+  The commands after the first `case` that matches run, up to the next `case` or the `}`.
+  <list> must start with a `case`; a quoted `'case'` is a command, not a label.
+: `{`<list>`}`
+  The <list>, grouped.
+: `fn` <name> `{`<list>`}`
+: `fn` <name>
+  The first form defines a function, or several when more names are given; the second removes it.
+  A command whose first word is <name> then runs <list> with the rest of its words as `$*`, which is restored after.
+  Functions are global: a local variable of the same name does not hide one.
+: <name>`=`<argument> <command>
+  Any command may be preceded by assignments, with redirections among them.
+  They last until the command ends, and programs it runs see them, unless there is no command, when they last until changed.
+  The name may be any word, even a variable's value: `x=y; $x=hello` sets `y`.
+
+@node=builtins title="Built-in commands"
+
+`rc` runs these itself, because they change or depend on its state.
+They write to the command's own descriptors, redirections followed, and capture as programs do.
+
+: `.` `[-biq]` <file> [<arg> ...]
+  Runs the commands in <file>, reading and running one at a time, with `$*` set to the arguments and `$0` to <file> for the while.
+  <file> is looked for through `$path` unless it starts `/`, `./` or `../`, and must fit 256 KiB.
+  The name `'#d/0'` is `rc`'s own standard input.
+  `-b` compiles the whole file before running any of it, so a syntax error anywhere stops it before it starts; `-i` reads it interactively; `-q` says nothing if the file does not exist, and turns `-e` off in it.
+: `builtin` <command> ...
+  Runs <command> as usual, except that a function of its name is ignored.
+: `eval` <arg> ...
+  Joins the arguments with spaces, and runs the result as a command line.
+: `exec` <command> ...
+  Replaces `rc` with the program <command>, which takes the task's place.
+  If it cannot be started, `rc` says why, and exits all the same.
+  A command with a file, here document or capture redirected is refused, `exec redirection`, as `rc` would have to stay to serve it.
+: `exit` [<status>]
+  Exits with <status>, or with `$status` if there is none.
+  `sigexit` runs first.
+: `flag` <letter> [`+-`]
+  Sets (`+`) or clears (`-`) the flag <letter>, one of `rc`'s flags (see {invocation|#invocation}), or tests it, `$status` being `flag not set` if it is not.
+: `shift` [<n>]
+  Removes the first <n> elements of `$*`, 1 if <n> is not given.
+  <n> is read as `atoi` reads it, so a word that is no number is 0.
+: `wait` [<pid>]
+  Waits for the command started with `&` whose process id is <pid>, or with no <pid> for all of them; `$status` is the wait message of the last.
+  `rc` keeps 16 such commands; it lets go of more without being able to wait for them.
+: `whatis` <name> ...
+  Prints each <name> as input for `rc` would give it: an assignment for a variable, the definition for a function, `builtin` <name> for a builtin, and the path `$path` finds for a program.
+  `$status` is `not found` if any <name> is none of these.
+: `~` <subject> <pattern> ...
+  Matches <subject>, its words joined by spaces, against each <pattern>; `$status` is empty if one matches, and `no match` if none does.
+  Patterns are as for file names, except that `/` and a leading `.` need not be written, and they are not matched against file names first, so they need no quotes.
+
+The namespace's commands are builtins here; in Plan 9 they are programs.
+They change `rc`'s namespace, and so what every program it starts afterwards is given; if the namespace belongs to a group (see namespace(6)), the group sees the change too.
+A failure prints `rc:`, the command's name and why on the command's standard error, and the why is `$status`; wrong arguments print the usage and set `$status` to `usage`.
+
+: `bind` `[-abc]` <new> <old>
+  Makes <old> refer to <new>.
+  With `-a` <new> is added to a union at <old>, after what is there; with `-b`, before it; with neither, it replaces it.
+  `-c` lets files be created in <new> through the union.
+: `mount` `[-abc]` <srv> <old> [<aname>]
+  Mounts a file server on <old>, with the flags as for `bind`, attaching to <aname> if one is given.
+  <srv> is `/srv/`<name>, a service this namespace has a connection to, as ns(1) prints it, so its output can be run again; or a 9P server over TCP, `tcp!`<host>`!`<port> or `9p://`<host>`:`<port>.
+: `unmount` [<new>] <old>
+  Undoes a `bind` or `mount` of <new> on <old>, or everything on <old> if <new> is not given.
+
+`rc` has no `cd` and no `rfork`.
+
+@node=environment title="Environment"
+
+A program is given an environment entry for each variable with a value, as `rc` sees it then, a local hiding a global of its name, and one for each function.
+A variable's entry is its name, `=`, and its value, the elements separated by the byte 0x01, which 9front's rc separates with a NUL.
+`$*`, `$0`, `$1` and the like are not given, nor any variable whose name a POSIX program could not read: only letters, digits and `_`, not starting with a digit.
+A function's entry is named `fn#` and its name, and its text is the `rc` input that defines it, `fn` <name> `{`<body>`}`.
+A program whose arguments and environment do not fit what a spawn carries is not started: `argument list too long`.
+
+When `rc` starts, it makes a variable of each entry of its environment, splitting the value at 0x01, and, unless `-p` is given, runs each `fn#` entry, defining the function.
+VectraOS has no `/env` device; the environment is all there is.
+
+@node=variables title="Special variables"
+
+: `$*`
+  `rc`'s arguments after <file>; while a function or a `.` file runs, its arguments, the earlier value restored after.
+: `$0`
+  The name of the file `.` is reading.
+: `$apid`
+  The process id of the last program started with `&`.
+: `$cflag`
+  The <command> given with `-c`.
+: `$home`
+  Set to `/` by `rcmain` if it is not set.
+: `$ifs`
+  The separators for `` `{...} ``; a blank, a tab and a newline unless set.
+: `$path`
+  The directories programs and `.` files are looked for in; `rcmain` sets it to `(/bin .)` if it is not set, and to `/bin` with `-p`.
+: `$pid`
+  `rc`'s process id.
+: `$prompt`
+  When `rc` is interactive, it prints the first element on its standard error before reading a command, and the second before each further line a command needs.
+  `rcmain` sets it to `('% ' '`<tab>`')` if it is not set.
+: `$rcname`
+  `rc`.
+: `$status`
+  The wait message of the last program run, as above, or what a builtin, `!`, `~` or an error set.
+  `&&`, `||`, `if` and `while` test it.
+  When `rc` exits at the end of its input, or by `exit` with no argument, it exits with its first word, or with nothing, success, if it is true.
+  Each program's wait message is cut to 128 bytes, a whole rune at a time.
+
+@node=notes title="Notes"
+
+A function with one of these names runs when `rc` receives a note that starts as the table says, before its next instruction:
+
+| Function | Note |
+| `sighup` | `hangup` |
+| `sigint` | `interrupt` |
+| `sigquit` | `quit` |
+| `sigalrm` | `alarm` |
+| `sigkill` | `kill` |
+| `sigfpe` | `sys: fp:` |
+| `sigterm` | `term` |
+
+Without its function, an interrupt or quit stops what `rc` is doing and goes back to reading commands if it is interactive, and ends it if not; any other of these notes ends `rc`.
+A note `rc` has no name for is handled as the system does by default.
+`fn` <name> with no body removes the function, restoring the default.
+
+`sigexit` is not a note: its function runs once, when `rc` is about to exit, by `exit`, after an error or at the end of its input.
+`rcmain` removes any `sigexit` the environment brought.
+
+@node=invocation title="Invocation"
+
+`rc` reads its flags, sets `$pid`, `$rcname` and `$cflag`, and `$*` to the arguments after them, then runs `. -bq /rc/lib/rcmain $*`.
+`rcmain` sets `$home`, `$ifs`, `$prompt` and `$path` if they are not set, and then runs one of:
+
+- the <command> given with `-c`, by `eval`;
+- if interactive, <file> if one was given, then its standard input, interactively;
+- its standard input, if there is no <file>;
+- the <file>, with the arguments after it as `$*`.
+
+With `-l`, and `-c` or interactive, it first runs `/rc/lib/rcmain.local` and `$home/lib/profile`, if they exist.
+
+`rc` is interactive with `-i`, or when there is no <file> and its standard input is the console; `-I` makes it not.
+Interactive, it prompts on its standard error, and an error goes back to the prompt where it would otherwise end `rc`.
+`--` ends the flags.
+
+: `-c` <command>
+  Run <command>.
+: `-m` <initial>
+  Run <initial> instead of `/rc/lib/rcmain`.
+: `-s`
+  Print `status=` and `$status` before each command read when the status is not true.
+: `-e`
+  Exit when the status of a simple command, or of `~`, is not true; not in the condition of `if`, `while`, `&&` or `||`.
+: `-i`
+  Interactive.
+: `-I`
+  Not interactive.
+: `-l`
+  Run the profiles, as above.
+: `-p`
+  Do not define the environment's functions, and set `$path` to `/bin`.
+: `-d`
+  Does nothing.
+: `-v`, `-V`
+  Write the input on standard error as it is read.
+: `-x`
+  Write each simple command on standard error, quoted, before running it.
+: `-r`
+  Write each of the interpreter's instructions on standard error as it runs.
+: `-b`
+  Compile the input whole before running it.
+
+# EXAMPLES
+
+Lists, subscripts and concatenation:
+
+```rc
+% x=(a b c); echo $#x $x(2) pre^$x
+3 b prea preb prec
+```
+
+A pattern, and the same quoted:
+
+```rc
+% echo /tmp/*.x; echo '/tmp/*.x'
+/tmp/a.x /tmp/b.x
+/tmp/*.x
+```
+
+A pipeline's status, and a program that is not there:
+
+```rc
+% ls /nothing | tail -1 || if(~ $status 'ls '*': error|') echo failed error
+ls: /nothing: file does not exist
+failed error
+% nosuch; echo $status
+nosuch: file does not exist
+file does not exist
+```
+
+A script's arguments, and its exit status as its wait message:
+
+```rc
+% echo 'for(a in $*) echo arg $a' > /tmp/t.rc; echo 'exit $#*' >> /tmp/t.rc
+% rc /tmp/t.rc x 'y z'; if(~ $status 'rc '*': 2') echo status 2
+arg x
+arg y z
+status 2
+```
+
+A function, printed, and exported to a child:
+
+```rc
+% fn greet {echo hello $1}; whatis greet; rc -c 'greet bob'
+fn greet {echo hello $1}
+hello bob
+```
+
+What `-x` shows of `rcmain`:
+
+```rc
+% rc -x -c 'echo traced'
+. -bq /rc/lib/rcmain
+flag p
+flag l
+eval 'echo traced'
+echo traced
+traced
+```
+
+The namespace's builtins:
+
+```rc
+% bind /nothing /n; echo 'bind='$status; echo ok; echo 'after='$status
+rc: bind: file does not exist
+bind=file does not exist
+ok
+after=
+% mount /srv/bootfs /n; ls /n; ns | tail -1
+adm  bin  boot  dev  dist  lib  n  net  proc  rc  srv  sys  tmp
+mount /srv/bootfs /n
+```
+
+A function with a `switch`, from the shell's tests:
+
+```rc
+fn kind {
+  switch($1){
+  case *.c *.h
+    echo source
+  case *.rc
+    echo script
+  case *
+    echo other
+  }
+}
+```
+
+# FILES
+
+: `/rc/lib/rcmain`
+  The start-up script.
+: `/rc/lib/rcmain.local`
+  The site's start-up script, run with `-l`.
+: `$home/lib/profile`
+  The user's start-up script, run with `-l`.
+
+# SEE ALSO
+
+ns(1), namespace(6); {Tom Duff, Rc: The Plan 9 Shell|https://9p.io/sys/doc/rc.html}
+
+# DIAGNOSTICS
+
+`rc`'s own messages go to its standard error, whatever a command's redirections; a builtin's go to the command's descriptor 2.
+A syntax error says where it is, as `file:line:`, then what is wrong, such as `unbalanced brackets`; standard input is named `#d/0`, and a command line run by `eval` has ` *eval*` after where `eval` ran.
+The message is `$status`, and the commands before it on earlier lines have run.
+An error while running, such as `null list in concatenation`, is said the same way, and ends `rc` unless it is interactive; `$status` is then `error` unless the message says otherwise.
+Input that ends inside a construct says `unexpected end of file`.
+
+`rc` exits with the first word of `$status`, or with nothing when the status is true.
+
+# BUGS
+
+There is no `fork`, so what 9front's rc runs in a child is refused or differs:
+a pipeline's stages must be programs, not functions, builtins or blocks;
+`&` runs programs only, and refuses a function, `rc: a function run with & needs a child (for now)`, or a block;
+`@`, `{...}` and `` `{...} `` run in the shell, so what they assign is seen after;
+and there is no `<{...}`, `>{...}` or `rfork`.
+
+A command run with `&` is given no file, here document or capture as a redirection, since `rc` does not serve them while it goes on; its standard input, unless redirected, reads nothing.
+
+A builtin followed by `&` runs in the foreground.
+
+A command run with `&` that has ended is let go when `rc` next starts a program, after which `wait` does not find it and leaves `$status` empty.
+
+Descriptors past 2 are not given to programs.
+
+There is no `cd`, nor a current directory to change.
+
+`exec` with a file, here document or capture redirected is refused.
+
+A file that is not an ELF executable, a `#!` script among them, is not run, and neither is a program whose loaded part is larger than 4 MiB: both say `file does not exist`.
+
+`whatis` prints a function's body as it was written, where 9front's prints it as its parser rebuilds it.
+
+`-v` writes `rcmain`'s text too, since `-q` does not turn it off in a file as 9front's does; `-V` is the same as `-v`.
+
+`-l` is not implied by a first argument starting `-`, as it is in 9front.
+
+There should be a way to match patterns against whole lists rather than single strings.
+Using `~` to test `$status` changes `$status`.

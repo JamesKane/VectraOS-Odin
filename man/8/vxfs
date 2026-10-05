@@ -1,0 +1,113 @@
+page=vxfs sect=8 summary="make, fill and inspect vx-fs volume images on the host"
+    host
+    src=host/vxfs/main.c,lib/vx-fs/vol.c,lib/vx-fs/file.c,lib/vx-fs/check.c
+    keys=vx-fs,volume,image,mkfs,snapshot,branch,label,fsck
+
+# SYNOPSIS
+
+```usage
+vxfs mkfs [-u user] image mib branch ...
+vxfs put image branch dir
+vxfs ls image label [path]
+vxfs cat image label path
+vxfs verify image label dir
+vxfs check image
+vxfs info image
+vxfs snap image branch label
+vxfs fork image label branch
+vxfs del image label
+vxfs rollback image branch label
+```
+
+# DESCRIPTION
+
+`vxfs` makes, fills, reads and checks images of vx-fs volumes (see vxfs(6)) on the development machine, with `lib/vx-fs`, the library fsd(4) uses.
+An image is an ordinary file holding the volume, as a partition would.
+build(1) uses it to make the volumes its test scenarios boot with, and its `check` makes one, fills it and checks it.
+
+A <label> names a tree: a snapshot's label, or a branch's name, which means the branch's last commit.
+Each command that changes the volume does all its work, then commits once; if it fails before then, the volume is as its last commit left it.
+The commands:
+
+: `mkfs` [`-u` <user>] <image> <mib> <branch> ...
+  Make <image> a new volume of <mib> MiB, 1 to 4194304, replacing whatever the file held, with each <branch> given an empty root directory, mode 0755, owned by user 0.
+  If one branch is `adm`, its root gets `users`, the users file (see users(6)) as gefs writes it: `adm`, user 0, whose group holds <user>; `none`, user 1; and <user>, user 1000, `vectra` unless `-u` names another.
+  If one branch is also `home`, its root is given to user 1000.
+: `put` <image> <branch> <dir>
+  Copy the host tree under <dir> into the root of <branch>: directories, regular files and symbolic links, with their permission bits and modification times, each owned by the branch root's owner and group.
+  Devices, sockets and FIFOs are skipped.
+  It prints how many bytes of files it copied.
+: `ls` <image> <label> [<path>]
+  List a directory of the tree, `/` by default: for each entry a line of its kind (`d` a directory, `L` a symbolic link, `-` a file) and permission bits in octal, its owner's id, its length and its name, in the directory's order.
+: `cat` <image> <label> <path>
+  Write a file's contents to standard output.
+: `verify` <image> <label> <dir>
+  Compare the tree with the host tree under <dir>: the same names, kinds and link targets, and for each file the same permission bits, modification time and bytes, with nothing else in either.
+  It names each host path that differs, and exits with status 0 only if none does.
+: `check` <image>
+  Run the volume checker: every snapshot, label and deadlist, and every block's allocation.
+  It prints what it counted; on a volume that is not clean it prints `NOT CLEAN:` and the blocks leaked, unallocated, shared or damaged, and the bad snapshots and deadlists, and exits with status 1.
+: `info` <image>
+  Print the last commit's number, the arenas and the next generation, the space used, and each label, saying whether it is a branch, with its snapshot.
+: `snap` <image> <branch> <label>
+  Label the branch's last commit <label>, read-only.
+: `fork` <image> <label> <branch>
+  Make <branch>, a new branch whose tree starts as <label>'s.
+: `del` <image> <label>
+  Delete a label or a branch.
+: `rollback` <image> <branch> <label>
+  Set <branch> back to <label>'s tree.
+
+`snap`, `fork`, `del` and `rollback` are the commands of the volume's `/adm/ctl` in fsd(4), done on an image.
+
+# EXAMPLES
+
+A volume with the system volume's four branches, a tree put in `home`, a snapshot, and a look at it:
+
+```rc
+% vxfs mkfs v.img 64 store cfg home adm
+% vxfs put v.img home t
+vxfs: 6 bytes into home
+% vxfs ls v.img home
+d0755 1000          0 notes
+% vxfs ls v.img adm
+-0664    0         46 users
+% vxfs cat v.img home /notes/hello.txt
+hello
+% vxfs snap v.img home home@1
+% vxfs info v.img
+commit 5, 1 arenas, next generation 19
+used 112 of 65472 KiB
+branch adm: snapshot 14
+branch cfg: snapshot 8
+branch home: snapshot 17
+label home@1: snapshot 17
+branch store: snapshot 7
+% vxfs check v.img
+4 snapshots, 5 labels, 0 deadlists; 7 blocks in use: 5 in trees, 2 else
+% vxfs verify v.img home@1 t
+```
+
+build(1) is the usual caller: it runs `vxfs` from `out/host/vxfs`, which it builds from source when the source has changed.
+
+# FILES
+
+: `out/host/vxfs`
+  The program, as build(1) builds it.
+: `out/vxfs/check.img`
+  The image build(1)'s `check` makes, and its log beside it.
+
+# SEE ALSO
+
+build(1), fsd(4), vxfs(6), users(6), vxstore(8)
+
+# DIAGNOSTICS
+
+A failure prints `vxfs:` and what failed, with the library's status number when there is one, such as `vxfs: no label home@2: status -15`, and exits with status 1.
+A command it does not know, or the wrong number of arguments, prints its own usage message, which spells the parameters in capitals, and exits with status 2.
+
+# BUGS
+
+`put` cannot replace: a name the branch's root already holds makes it fail, so it fills only directories that do not yet have what it copies.
+Hard links are copied as separate files, and the host's owners are not kept.
+`verify` compares the permission bits and times of files, but not of directories.

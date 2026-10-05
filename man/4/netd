@@ -1,0 +1,230 @@
+page=netd sect=4 summary="the network: TCP/IP served as /net"
+    src=servers/netd/netd.c,lib/vx-net/net.c,lib/vx-net/tcp.c,lib/vx-net/dns.c,boot/svc/netd.ndb
+    keys=network,net,tcp,udp,icmp,ip,ipifc,dhcp,dns,cs,clone,listen,announce,connect,socket
+
+# SYNOPSIS
+
+```usage
+netd
+```
+
+# DESCRIPTION
+
+`netd` is the network.
+It runs the TCP/IP stack `vx-net` over the Ethernet frames of the network driver posted as `/srv/ether0`, such as drv-virtio-net(3), and serves the tree Plan 9's `ip(3)` has, mounted on `/net`: the interface, a directory of conversations for each protocol, the connection server and the name server.
+It takes no arguments.
+
+svcd(8) starts it from its manifest, gives it a connector to `/srv/ether0` (`connect=ether0`) and posts it as `/srv/net`, restarting it if it exits.
+The console shell's namespace mounts it on `/net`, as the POSIX namespace does, where the C library's sockets use it.
+
+`/net` is served from the start, with or without a driver, since every namespace that mounts it connects when its program starts.
+`netd` asks the driver for a session at once, and every second until one is made; once the driver says its MAC address and MTU, `netd` starts DHCP.
+When the driver goes, `netd` asks again, and the stack keeps its state meanwhile.
+
+The stack is IPv4 alone: Ethernet, ARP, IP without fragments (a fragment that arrives is dropped, and nothing sent is larger than the MTU), ICMP echo, UDP, TCP, a DHCP client and a DNS stub resolver.
+A packet for 127/8, or for the interface's own address, never reaches the wire: it is looped back, so programs on one machine talk over `localhost`.
+A packet from 127/8 that arrives on the wire is dropped.
+`netd` answers ICMP echo requests for its addresses itself.
+
+The address comes from DHCP (RFC 2131), as the interface's `ctl` file may set instead.
+`netd` asks for a mask, a router and a DNS server, renews the lease at the server's T1, or half the lease, and rebinds past T2, or seven eighths; a lease that runs out, or a NAK, starts DHCP again.
+A missing mask, or one whose ones are not contiguous, is taken as /24, and a lease under 60 seconds as 60.
+Each time the address changes `netd` says so on the console.
+
+Every file is owned by `net`.
+The tree is:
+
+```text
+/net/ipifc/0/ctl
+/net/ipifc/0/status
+/net/icmp/clone   /net/icmp/N/...
+/net/udp/clone    /net/udp/N/...
+/net/tcp/clone    /net/tcp/N/...
+/net/cs
+/net/dns
+```
+
+@node=ipifc title="The interface" keys=ipifc,address,dhcp,static
+
+There is one interface, `0`.
+
+: `/net/ipifc/0/status`
+  One line: `dev=` and the driver's post, `ether0`, or `none` with no driver; `addr=` and the address and mask length, or `none`; with an address, `gw=` and the gateway; then `dhcp`, with `lease=` and the seconds granted once there is an address, or `static`.
+  Before the driver has said its MAC address, the line ends after `addr=none`.
+: `/net/ipifc/0/ctl`
+  Takes a message, as below.
+  Reading it returns nothing.
+
+A write to `ctl` is one message, its words separated by spaces, a final newline ignored.
+Before the driver has first answered, every message fails.
+
+: `add` <addr>`/`<bits> [<gw>]
+  Sets a static address: <addr> a dotted IPv4 address, <bits> the mask's length, 1 to 32, and <gw> the gateway, none if left out.
+  DHCP stops.
+: `dhcp`
+  Forgets the address and starts DHCP from the beginning.
+
+@node=conv title="Conversations" keys=conversation,clone,ctl,data,listen,announce,connect,hangup,headers
+
+`/net/icmp`, `/net/udp` and `/net/tcp` each hold a `clone` file and a directory for each of the protocol's conversations, named by its number.
+A conversation is an endpoint: one protocol, a local port and, once connected, a remote address.
+An ICMP conversation's port is the echo identifier, as in Plan 9.
+
+Opening `clone` makes a conversation, and the fid opened becomes its `ctl`; reading it says the number.
+A conversation lasts while any of its files is open; when the last is closed it goes, though a TCP connection finishes closing first.
+A fid that outlives its conversation finds nothing there, even if the number has been reused.
+
+Opening `clone` before the driver has first answered fails.
+
+## Files
+
+: `clone`
+  Opened, makes a conversation, as above.
+: <n>`/ctl`
+  Reading returns the conversation's number, <n>.
+  Writing takes a message, as below.
+: <n>`/data`
+  UDP and ICMP: a read returns one datagram, waiting for one, and a write sends one, all of it or none.
+  A read too short for the datagram loses the rest.
+  An ICMP write is the whole message, type and code first, at least 8 bytes; `netd` fills in the identifier and the checksum.
+  ICMP reads return the echo replies sent to the conversation's identifier, and nothing else.
+  TCP: the data is a stream.
+  A read returns what has arrived, waiting until something has, and 0 at the end of the stream; a write takes what fits in the connection's 64 KiB of buffer, waiting only if nothing does.
+  Data written before the connection is made goes once it is.
+: <n>`/local`
+  The local address and port, as <addr>`!`<port>: the interface's address, or the remote's when that is in 127/8.
+: <n>`/remote`
+  The remote address and port, `0.0.0.0!0` until connected.
+: <n>`/status`
+  TCP: the connection's state, as Plan 9 names it: `Closed`, `Listen`, `Syn_sent`, `Syn_received`, `Established`, `Finwait1`, `Finwait2`, `Closing`, `Time_wait`, `Close_wait` or `Last_ack`.
+  UDP and ICMP: `Open` once connected, `Announced` once it has a local port, else `Closed`.
+: <n>`/listen`
+  TCP only, once announced.
+  Opening it waits for a connection to come, and the fid opened becomes the new conversation's `ctl`, as `clone`'s does.
+  Up to 4 connections wait to be taken; more are refused.
+
+Only `ctl`, `data`, `clone` and `listen` may be opened for writing.
+
+## Control
+
+A write to a conversation's `ctl` is one message, its words separated by spaces, a final newline ignored.
+
+: `connect` <addr>[`!`<port>]
+  Connects to <addr>, a dotted IPv4 address; `netd` does not look up names, which `/net/cs` does.
+  UDP and TCP need a <port>.
+  A conversation with no local port is given a free one, from 49152 to 65535.
+  The conversation then sends only there, and takes only what comes from there.
+  For TCP the write returns once the connection is made, or fails with why it was not: `connection refused`, `connection timed out` or `i/o on hungup channel` (a reset).
+: `announce` <port>
+  Binds the local port <port>, which may be written `*!`<port>; `0` picks a free one.
+  On TCP it listens: connections that come to the port wait for `listen` to be opened.
+  On UDP the conversation receives what comes to the port, from anywhere, broadcasts included.
+: `hangup`
+  TCP: closes our side; a FIN follows the data written, and reading goes on to the end of the stream.
+  UDP and ICMP: does nothing.
+: `headers`
+  UDP only.
+  Each datagram is then read and written after a 52-byte header, as Plan 9's is: the remote address, the local address and the interface's address, 16 bytes each with the IPv4 address mapped into IPv6 (ten zero bytes, two of 0xff, then the four), then the remote port and the local port, two bytes each, high byte first.
+  A write's header says where the datagram goes, from the conversation's own port; its local address, interface address and local port are ignored.
+  An announced conversation in this mode serves many peers.
+
+@node=cs title="The connection server and DNS" keys=cs,dns,name,resolve,lookup,service
+
+: `/net/cs`
+  The connection server.
+  Write <net>`!`<host>`!`<service>; then each read returns one line, `/net/`<proto>`/clone `<addr>`!`<port>, one for each address, and 0 after the last.
+  <net> is `tcp`, `udp` or `icmp`, and `net` means `tcp`.
+  <host> is a dotted address or a name, which is looked up; `*` means any address, for announcing, and is answered as `*`.
+  <service> is a port number or one of `echo` (7), `ssh` (22), `domain` (53), `http` (80), `https` (443) and `9fs` (564).
+  For `icmp` there is no service, and the query is `icmp!`<host>, answered with no port.
+: `/net/dns`
+  The name server.
+  Write <name> `ip`, or <name> alone; then each read returns one line, <name> `ip` <addr>, one for each address.
+
+Each open of either file is a query of its own, and its answer is kept for that open until another query on it succeeds.
+A write is held while the name is looked up, then succeeds or fails with why.
+Names are asked of the DNS server DHCP named, over UDP from a random port with a random ID; a reply's lengths are checked, compression pointers are followed only backwards, and only A records for the name asked, or for a name a CNAME chain of at most 8 leads to, are taken.
+Answers are kept for their TTL, from 5 seconds to a day, and failures for 10 seconds; at most 4 addresses are kept for a name.
+A dotted address is its own answer, asked of no one.
+Names are compared in lower case without a final dot.
+
+# EXAMPLES
+
+The manifest that starts it, `boot/svc/netd.ndb`:
+
+```ndb
+service=netd program=/boot/bin/netd post=net console restart
+connect=ether0
+```
+
+What it says as the system starts, under QEMU, and the interface's status:
+
+```text
+netd: serving /srv/net
+devmgr: started drv-virtio-net
+drv-virtio-net: 52:54:00:12:34:56, serving /srv/ether0
+netd: 10.0.2.15/24 from dhcp, gateway 10.0.2.2
+```
+
+```rc
+% cat /net/ipifc/0/status
+dev=ether0 addr=10.0.2.15/24 gw=10.0.2.2 dhcp lease=86400s
+% ls /net/icmp
+clone
+```
+
+ping(8) and cs(1) are clients of `/net/icmp` and `/net/cs`, and their pages show what they see.
+
+# FILES
+
+: `/srv/net`
+  `netd`'s post.
+: `/srv/ether0`
+  The network driver's post, which `netd` dials.
+: `/net`
+  Where namespaces mount it.
+
+# SEE ALSO
+
+cs(1), ping(8), drv-virtio-net(3), svcd(8), devmgr(8); Plan 9's `ip(3)`; the stack, `lib/vx-net`, and the net class protocol, `lib/vx-driver/netproto.h`, in the repository
+
+# DIAGNOSTICS
+
+On the console:
+
+: `netd: serving /srv/net`
+  It has started.
+: `netd:` <addr>`/`<bits> `from dhcp, gateway` <gw>
+  The address changed; `, static` in place of `from dhcp` for one set by `add`, and `netd: no address` when it is lost.
+: `netd: the driver is gone; asking again`
+  The driver's session ended, or the driver broke the protocol.
+: `netd: FAILED: no connector to /srv/ether0, or no listen channel`
+  Its manifest gave it neither; it exits with the words after `FAILED: `.
+
+It exits `cannot serve` if serving fails.
+
+Errors come back as 9P's words, so some read oddly: a malformed message, a bad address or a query `netd` cannot parse is `bad message`; a name with no address is `file does not exist`; a lookup with no address or DNS server yet, a `clone` opened before the driver has answered, a data write on a conversation neither connected nor announced, an `announce` of a conversation that already has a port, or a `connect` to a TCP conversation connected elsewhere, is `fid already in use`; a port in use is `file already exists`; all 32 conversations, or all 16 queries, in use is `out of memory`.
+
+# BUGS
+
+`netd` serves one interface on one driver, `/srv/ether0`; there is no `bind` or `unbind`, and `add` replaces the address rather than adding one.
+There is no `/net/arp`, `/net/iproute`, `/net/ndb`, `/net/log` or interface `stats`: the stack counts packets in, out, dropped and bad, and shows none of it.
+
+IPv4 only; no fragments, sent or reassembled; no routes but the one gateway.
+Only echo replies reach an ICMP conversation: an ICMP error, such as port unreachable, is told to no one, so a UDP send to a closed port fails silently.
+
+Conversations are numbered from one table of 32 shared by the three protocols, not one per protocol as in Plan 9, so `/net/udp` may hold `3` and `7`.
+Each process that mounts a `tcp!` path dials its own connection, which then waits 10 seconds in `Time_wait`, so a fast script can use up the 32.
+Each socket that a POSIX program polls or reads takes one of `netd`'s 64 ring connections (two, writing without waiting).
+
+TCP has no SACK and no timestamps, drops segments that arrive out of order (the peer's fast retransmit fills the hole), and keeps `Time_wait` 10 seconds.
+A connection cannot choose its local port: `connect` always goes from a free one, so a socket's `bind` port is used only by `listen`.
+
+A UDP datagram with the header is at most what one 9P message carries, 16 KiB: a larger write fails, and a larger datagram arriving is cut.
+`headers` mode is tested only through `vx-net`'s host tests, not in QEMU.
+
+DNS asks for A records only: no AAAA, no TCP for a truncated reply, no search domains.
+The service names are `netd`'s own short table; there is no services file.
+An answer to a query is at most 256 bytes.
+
+Restarting the driver under `netd` is not tested.

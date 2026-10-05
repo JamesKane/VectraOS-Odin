@@ -1,0 +1,170 @@
+page=devmgr sect=8 summary="the device manager: find devices, start and restart their drivers"
+    src=servers/devmgr/devmgr.c,lib/vx-pci/pci.c,lib/vx-acpi/mint.h,lib/vx-driver/clockproto.h
+    keys=devices,drivers,pci,acpi,dma,iommu,msi,flr,restart,clock,rtc,psci
+
+# SYNOPSIS
+
+```usage
+devmgr
+```
+
+# DESCRIPTION
+
+`devmgr` finds the machine's devices, starts a driver for each one a driver manifest matches, and starts it again when it exits.
+It holds the root Resource, which svcd(8) gives it alone, and mints from it each driver's device and nothing more: the driver gets its registers, interrupts and DMA domain, never the authority to make others.
+It starts bus-acpi(8), answers its requests for the memory and ports its AML touches, sets the kernel's wall clock from a clock driver, and powers the machine off for bus-acpi where ACPI cannot.
+It serves no files and posts nothing of its own: the posts its drivers serve are the ones its manifest claims.
+
+svcd starts it with the root Resource, the ACPI tables, the console, the kernel command line, the boot image mounted on `/` and a claim on each post a driver may serve.
+It takes no arguments.
+
+@node=buses title="Finding devices"
+
+`devmgr` finds PCI through the ACPI tables' MCFG: it maps each ECAM region's configuration space a bus (1 MiB) at a time, the first bus of the region and then whatever buses bridges lead to, and lists each function it finds on the console with its vendor, device, class, MSI-X and memory and I/O BARs.
+Only segment 0 is scanned.
+
+ACPI's devices are bus-acpi's to find: `devmgr` starts it once the PCI drivers are started, giving it the tables, the console, `/srv/acpi`'s server end to serve and a channel to `devmgr`, on which bus-acpi reports each present device's hardware ID and `_CRS` resources.
+
+@node=matching title="Matching drivers"
+
+The driver manifests are `/boot/drv/*.ndb` (see driver(6)), each record a match:
+
+- `match=pci` with `vendor=` and `device=`, or with `class=` (class, subclass and programming interface, `0x010802` for any NVMe controller), matches PCI functions.
+  `msi=<n>` is how many MSIs the driver gets, at most 8.
+- `match=acpi hid=<id>` matches a device bus-acpi reports with that hardware ID, as `PNP0B00`, the PC's CMOS clock.
+  `clock` says the driver keeps time.
+- `program=` names the driver's program in the boot image; `post=` the post it serves, which must be one svcd gave `devmgr` a claim on.
+  A post ending in `#` is numbered: every match of every record with that post, across drivers, gets `disk0`, `disk1`, ... in the order `devmgr` found the functions, so `/srv/disk0` is the first disk found, virtio or NVMe.
+  A PCI match without a post is not started; an ACPI match may have none.
+
+One device gets one driver: the first match to take a post's claim has it, and a later one is told `no claim`.
+
+@node=grants title="What a driver is given"
+
+A driver's spawn message holds its device as handles and records, each record saying which part of the device a handle is:
+
+: `config`
+  A PCI function's 4 KiB of configuration space.
+: `bar<n>`
+  Each memory BAR, whole, rounded up to pages, with a record `bar=<n> size=<bytes>`.
+  I/O BARs, and memory BARs not on a page boundary, are not given.
+: `msi<n>`
+  Each MSI, with a record of its `address=` and `data=` for the driver to program.
+: `dma`
+  The function's DMA domain, for its requester ID, through the IOMMU where there is one.
+  `devmgr` makes it once and keeps it across restarts; the driver's duplicate maps, and cannot revoke what it mapped.
+: `io<n>`, `mem<n>`, `irq<n>`
+  An ACPI device's `_CRS` resources, exactly: an IoRange for each port range, a physical VMO for each memory range, an IRQ for each interrupt, each with a record such as `io=0 base=0x70 size=8`.
+  If any port or memory range is the kernel's or another driver's, the driver is not started.
+: `devmgr`
+  For a clock driver, a channel to say the time on; with the FADT's CMOS century register as a record `fadt century=<reg>`.
+: `listen`
+  The server end of its post.
+: `console`
+  A connector to the console.
+
+and the records `start=<n>`, which start this is, 1 and then 2 after a restart, and `cmdline=`, the kernel command line, whose `<program>.<key>=<value>` words are the driver's options (`drv-nvme.reset=N`).
+
+@node=restarts title="Restarts"
+
+When a PCI driver exits, `devmgr` revokes its DMA domain's mappings, turns off the function's bus mastering, resets the function with PCIe's function-level reset where it has one (its configuration header saved and put back, mastering left off), and only then lets the domain release the pages the device could still have reached.
+It then starts the driver again, on the same domain and post, so its clients' connections wait for it rather than fail.
+
+A driver is started five times at most, in all; after the fifth exit `devmgr` leaves it.
+
+@node=regions title="bus-acpi's regions"
+
+bus-acpi asks, when its AML first touches it, for memory (a physical VMO, page-aligned, at most 1 GiB), I/O ports (an IoRange, x86_64 only) or a PCI function's configuration space (segment 0).
+`devmgr` refuses RAM (the kernel does), the kernel's own registers as the MADT, DMAR and IORT place them (the local APIC, IOAPICs, VT-d, the GIC, ITS and SMMU), the PIC's, the PIT's and the console's ports, and every memory BAR and ACPI resource a driver was given; it grants the rest, and says each answer.
+
+bus-acpi asks the same channel to power off where ACPI has no sleep registers, as on aarch64; `devmgr` makes the kernel's `system_power` call (see power(2)), PSCI's `SYSTEM_OFF`, which returns only if the machine is still on.
+
+@node=clock title="The wall clock"
+
+A clock driver tells `devmgr` the time on its channel (`lib/vx-driver/clockproto.h`): UTC, and the monotonic clock when it read it.
+`devmgr` adds the time since, sets the kernel's wall clock with `clock_set` (see clock(2)), and says so.
+It does this each time a report comes; drv-rtc-cmos reports once, at boot.
+
+# EXAMPLES
+
+Its manifest, `boot/svc/devmgr.ndb`:
+
+```ndb
+service=devmgr program=/boot/bin/devmgr resource acpi console cmdline restart
+mount=/ srv=bootfs
+claim=ether0
+claim=disk0
+claim=disk1
+claim=disk2
+claim=disk3
+claim=acpi
+```
+
+Two driver manifests, from `boot/drv`:
+
+```ndb
+match=pci class=0x010802 program=/boot/bin/drv-nvme post=disk# msi=8
+match=acpi hid=PNP0B00 program=/boot/bin/drv-rtc-cmos clock
+```
+
+Lines from a boot on QEMU's x86_64 with an NVMe disk, whose driver is made to exit:
+
+```text
+devmgr: 00:02.0 1af4:1042 storage msi-x bar1=4K bar4=16K
+devmgr: 00:03.0 1b36:0010 storage msi-x bar0=16K
+devmgr: 00:04.0 1af4:1041 net msi-x bar1=4K bar4=16K
+devmgr: 8 PCI functions
+devmgr: started drv-nvme
+devmgr: started drv-virtio-blk
+devmgr: started drv-virtio-net
+devmgr: started bus-acpi
+devmgr: bus-acpi gets I/O ports 0x604/2
+devmgr: \_SB.PCI0.SF8.RTC PNP0B00: /boot/bin/drv-rtc-cmos
+devmgr: started drv-rtc-cmos
+devmgr: the wall clock is 2026-10-04 19:04:02 UTC, from /boot/bin/drv-rtc-cmos
+devmgr: reset the function (FLR)
+devmgr: /boot/bin/drv-nvme exited: drv-nvme.die
+devmgr: started drv-nvme
+```
+
+# FILES
+
+: `/boot/drv/*.ndb`
+  The driver manifests.
+: `/boot/bin/bus-acpi`
+  bus-acpi, which `devmgr` starts.
+
+# SEE ALSO
+
+driver(6), svc(6), svcd(8), bus-acpi(8), drv-nvme(3), drv-virtio-blk(3), dma(2), power(2), clock(2), intro(3)
+
+# DIAGNOSTICS
+
+Without the root Resource or the ACPI tables `devmgr` prints `devmgr: FAILED: no Resource or ACPI tables` and exits with `no Resource or ACPI tables`; without a namespace, `no namespace`.
+With no MCFG it prints `devmgr: no MCFG, so no PCI` and exits successfully.
+
+On the console it says `started <program>`, `<program> exited` with the exit string, `<program> keeps exiting; it is not started again`, `cannot start <program>` and `cannot restart <program>`.
+`no claim on /srv/<post> for its driver` means a match names a post svcd gave it no claim on, or one another device took.
+`not starting <program>: a resource is the kernel's or a driver's` refuses an ACPI device.
+Each of bus-acpi's requests is said as `bus-acpi gets` or `bus-acpi refused`, with the kind, base and size.
+
+# BUGS
+
+With no MCFG it exits before starting bus-acpi, so a machine without PCI has no `/srv/acpi` and no ACPI devices; and since its manifest says `restart`, svcd starts it again until it gives up.
+
+Its drivers outlive it: a task's children pass to its parent.
+A restarted `devmgr` scans and starts every driver and bus-acpi again beside the ones still running; this is untested.
+
+bus-acpi is started once and never restarted.
+
+It holds 64 PCI functions, 16 drivers and 8 `match=acpi` records; only functions with a type 0 header are matched, and only segment 0 is scanned.
+Its manifest claims four disks: a fifth is not started.
+A record whose `match=` is anything but `acpi` is taken as PCI.
+
+A driver's five starts are counted over its life, not in a window, and a restart that fails is not tried again.
+A device's volatile write cache is trusted to survive the function reset, so a disk that drops it could lose writes completed before the crash and not yet flushed.
+
+An ACPI device's interrupt is not checked against the kernel's or other drivers'; its driver gets only the line, not an extended IRQ's polarity and trigger, and a device with a choice of lines gets the first.
+An ACPI device with I/O ports cannot be started on aarch64.
+
+The wall clock is set once at boot, a step, never slewed or written back to the RTC; on aarch64 there is no clock driver, and dates read as 1970.

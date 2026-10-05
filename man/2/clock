@@ -1,0 +1,89 @@
+page=clock sect=2 summary="read the clock, or set the wall clock"
+    names=clock_read,clock_set
+    src=kernel/time.c,kernel/syscall/syscall.c,lib/vx-rt/base.c
+    keys=time,clock,monotonic,utc,realtime,wall,counter,cycles
+
+# SYNOPSIS
+
+```c
+vx_instant vx_clock_read(void);
+vx_status vx_clock_info_read(vx_clock_info *info);
+int64_t vx_clock_utc(void);
+vx_status vx_clock_set(vx_handle resource, int64_t utc);
+```
+
+# DESCRIPTION
+
+The system has one clock, monotonic, in nanoseconds (`vx_instant`).
+Every timestamp and every deadline is on it, and nothing changes it.
+It is made from the CPU's cycle counter, the TSC on x86_64 and the virtual counter on aarch64, as the counter times 10^9 divided by the counter's frequency, exactly, so it counts from the counter's zero, about when the machine was reset, not from the kernel's boot.
+
+`vx_clock_read` returns the time on that clock.
+It cannot fail.
+
+`vx_clock_info_read` fills <info> with the counter the clock is made from, which sysfs(4) shows as `/sys/clock/info`:
+
+: `counter_hz`
+  The counter's frequency, as the kernel calibrated it at boot.
+: `flags`
+  `VX_CLOCK_INVARIANT` if the counter keeps one rate in every power state, `VX_CLOCK_USER` if user code may read it, `VX_CLOCK_TSC` or `VX_CLOCK_CNTVCT` for which counter it is, and `VX_CLOCK_UTC` once the wall clock has been set.
+: `utc_offset`
+  The wall clock, as UTC's offset from the monotonic clock: UTC in nanoseconds since 1970 is the monotonic time plus `utc_offset`.
+  It is 0 until `VX_CLOCK_UTC`.
+
+User code may always read the counter itself, without a call: `vx_cycles`, in the same header, does it with `rdtsc` or `mrs cntvct_el0`, and `counter_hz` converts what it returns to the clock.
+
+`vx_clock_utc` returns UTC, in nanoseconds since 1970: the monotonic time plus `utc_offset`.
+Until the wall clock is set the offset is 0, so it counts from the clock's zero, as do musl's realtime clocks, file times in fsd and tmpfs, and the `realtime` of `/sys/clock/now`, all of which add the same offset.
+
+`vx_clock_set` sets the wall clock to <utc>, nanoseconds since 1970 at the moment of the call: the kernel keeps `utc` less the monotonic time as the offset, and sets `VX_CLOCK_UTC`.
+The offset changes in one step; the monotonic clock does not change at all.
+<resource> must be the root Resource, with `VX_RIGHT_MANAGE`.
+Only devmgr(8) holds it, and it calls `vx_clock_set` when a clock driver reports the time its hardware keeps, as ADR-0031 decides.
+
+The first three make the call `clock_read`, given a pointer to a `vx_clock_info` or none; `vx_clock_set` makes `clock_set`.
+
+# EXAMPLES
+
+The cycle counter, read in user mode and converted to the clock, from `tests/user/proctest.c`:
+
+```c
+vx_clock_info clock = {};
+CHECK(vx_clock_info_read(&clock) == VX_OK && clock.counter_hz > 1'000'000);
+uint64_t c0 = vx_cycles();
+nap(10);
+uint64_t c1 = vx_cycles();
+CHECK(c1 > c0 && (c1 - c0) * 1000 / clock.counter_hz >= 9);
+```
+
+# SEE ALSO
+
+futex(2), devmgr(8), sysfs(4)
+
+# DIAGNOSTICS
+
+`vx_clock_read` returns the time.
+
+`vx_clock_info_read` returns `VX_OK`, or `VX_ERR_INVALID` if <info> is not writable memory of the caller's.
+`vx_clock_utc` returns the time; if the call fails it returns the monotonic time.
+
+`vx_clock_set` returns:
+
+: `VX_OK`
+  The wall clock is set.
+: `VX_ERR_INVALID`
+  <utc> is 0 or negative; this is checked before <resource>.
+: `VX_ERR_BAD_HANDLE`
+  <resource> is not a handle to a Resource.
+: `VX_ERR_ACCESS`
+  The handle lacks `VX_RIGHT_MANAGE`.
+
+# BUGS
+
+`clock_read` always enters the kernel: the vDSO page the design reads the clock from (01 §3) does not exist yet.
+
+The offset is stepped, never slewed, and a sleep already armed against the wall clock keeps its old deadline on the monotonic clock.
+
+Nothing orders services after the wall clock is set, so one that starts before devmgr hears from the clock driver stamps times counted from the clock's zero, which read as 1970.
+
+`clock_set` is gated on the root Resource, the coarsest right there is; ADR-0031 accepts this while devmgr is its only caller.

@@ -1,0 +1,131 @@
+page=exception sect=2 summary="handle faults: exception ports, in-task handlers and debuggers"
+    names=exception_bind,exception_resume
+    src=kernel/obj/exception.c,lib/vx-rt/base.c,lib/vx-rt/note.c
+    keys=fault,trap,signal,handler,debugger,breakpoint,step,notify
+
+# SYNOPSIS
+
+```c
+vx_status vx_exception_bind(vx_handle task, vx_handle port, uint64_t key,
+                            uint32_t options);
+vx_status vx_exception_resume(vx_handle task, uint64_t thread,
+                              uint32_t action, const vx_regs *regs);
+```
+
+# DESCRIPTION
+
+A fault in user mode, such as a page fault, an illegal instruction or a breakpoint, is an exception.
+It goes to whoever is bound to take it, in this order (see the kernel's design, 01 §9):
+
+- a debugger's port, bound with `VX_EXCEPTION_FIRST_CHANCE`, which may handle it, step the thread, kill the task, or pass the exception on;
+- the task's in-task handler, bound with `VX_EXCEPTION_IN_TASK`;
+- the task's exception port, bound with options 0;
+- the default: the kernel reports the fault on the console and kills the task, its exit string the trap in Plan 9's words, such as `sys: trap: fault read addr=0x0 pc=0x401000`.
+
+A page fault on memory a pager supplies is first given to the pager; if the page does not come by the pager's deadline, the exception is `VX_EXCEPTION_PAGER_TIMEOUT`.
+A note posted by `thread_interrupt` (thread(2)) is an exception too, of kind `VX_EXCEPTION_INTERRUPT`, but goes only to the in-task handler.
+
+An exception is described by a `vx_exception`: its <kind>, a <code> and an <address> whose meaning the kind gives (abi.h has them), the id of the <thread> it happened to, the thread's registers, and for an interrupt the note.
+
+## Binding
+
+`vx_exception_bind` binds <task>'s exceptions, by <options>:
+
+: `0`
+  Faults go to <port>: the faulting thread stops, and a packet is posted with trigger `VX_TRIGGER_EXCEPTION`, the binding's <key>, and as its value the thread's id.
+  The port's holder reads the exception with `thread_state`, may change the registers, and resumes the thread with `vx_exception_resume`.
+  A <port> of `VX_HANDLE_NONE` unbinds.
+: `VX_EXCEPTION_IN_TASK`
+  <key> is the address of a handler in the task, and <port> is ignored; 0 unbinds.
+  The kernel puts the `vx_exception` on the faulting thread's own stack, 16-aligned, below the 128 bytes under its stack pointer, and starts the thread at `handler(exception)`.
+  A handler never returns: it resumes the thread with `vx_exception_resume` and thread 0.
+  If the stack cannot take the exception, the fault goes on to the exception port.
+: `VX_EXCEPTION_FIRST_CHANCE`
+  A debugger's port, as with options 0 but before the rest; it also gets `VX_EXCEPTION_STEP` exceptions, which go to no one else.
+
+Each binding replaces the one of its kind before it.
+A task's in-task handler is cleared by `task_exec` (task(2)) and kept by a fork; its ports are kept by an exec and not copied by a fork.
+
+## Resuming
+
+`vx_exception_resume` resumes the thread <thread> of <task>, stopped at a port, by <action>:
+
+: `VX_RESUME_CONTINUE`
+  It goes on with the registers at <regs>, or with none given as it stopped, which retries the instruction that faulted.
+: `VX_RESUME_KILL`
+  The exception goes to the default, which kills the task.
+: `VX_RESUME_PASS`
+  From a debugger's port: the exception goes on to the in-task handler, then the exception port, with the registers as the debugger left them.
+: `VX_RESUME_STEP`
+  From a debugger's port: as `VX_RESUME_CONTINUE`, for one instruction, then a `VX_EXCEPTION_STEP` to the debugger.
+
+A thread is resumed once for each stop.
+While it is stopped, a note waits, and a kill ends it.
+
+With <thread> 0, the calling thread resumes itself from its in-task handler: <action> must be `VX_RESUME_CONTINUE`, and <regs>, the registers its `vx_exception` held, perhaps changed, are loaded whole.
+The call then does not return to the handler: the thread goes on where <regs> say, and the value the call leaves in the return register is the one restored there.
+
+Registers given are checked: a program counter or stack pointer outside user space is refused, and flags user code may not set are dropped.
+
+## Rights
+
+`vx_exception_bind` needs `VX_RIGHT_MANAGE` on <task>, or `VX_RIGHT_DEBUG` with `VX_EXCEPTION_FIRST_CHANCE`, and `VX_RIGHT_SIGNAL` on <port>.
+`vx_exception_resume` needs `VX_RIGHT_MANAGE` on <task>.
+
+# EXAMPLES
+
+vx-rt's `vx_notify` binds its entry as the task's handler, and the entry resumes the thread where it was diverted from, from `lib/vx-rt/note.c`:
+
+```c
+[[maybe_unused]] static vx_status vx_notify(vx_note_handler *handler) {
+  vx_note_fn = handler;
+  return vx_exception_bind(vx_self, VX_HANDLE_NONE,
+                           handler ? (uint64_t)vx_note_entry : 0,
+                           VX_EXCEPTION_IN_TASK);
+}
+```
+
+```c
+[[gnu::used, noreturn]] static void vx_note_resume(vx_exception *e) {
+  vx_exception_resume(vx_self, 0, VX_RESUME_CONTINUE, &e->regs);
+  __builtin_trap(); // exception_resume does not return
+}
+```
+
+# SEE ALSO
+
+thread(2), task(2), dbg(1); ADR-0010 in `docs/adr`
+
+# DIAGNOSTICS
+
+Both calls return `VX_ERR_BAD_HANDLE` for a handle that is not open or of the wrong type, and `VX_ERR_ACCESS` for one without the right it needs.
+
+`vx_exception_bind` returns:
+
+: `VX_OK`
+  Bound, or unbound.
+: `VX_ERR_INVALID`
+  An unknown option, both options at once, or a handler outside user space.
+: `VX_ERR_BAD_STATE`
+  A port bound to a task that has ended.
+
+`vx_exception_resume` returns:
+
+: `VX_OK`
+  The thread goes on.
+: `VX_ERR_INVALID`
+  <action> is unknown; <regs> is not mapped or is refused; or, with thread 0, <task> is not the caller's, <action> is not `VX_RESUME_CONTINUE`, or <regs> is null.
+: `VX_ERR_NOT_FOUND`
+  The task has no live thread <thread>.
+: `VX_ERR_BAD_STATE`
+  The thread is not stopped at a port, has been resumed already, or was not stopped at a debugger's port for `VX_RESUME_PASS` or `VX_RESUME_STEP`.
+
+With thread 0 and success, the call returns the restored return register, not a status.
+
+# BUGS
+
+If the packet cannot be posted to a bound port, the thread is not stopped and the task is killed, as if no one were bound.
+
+Any holder of `VX_RIGHT_MANAGE` on the task may resume a stopped thread, not only the port's holder, and may answer a debugger's stop with `VX_RESUME_PASS` or `VX_RESUME_STEP` without `VX_RIGHT_DEBUG`.
+
+`vx_exception_resume` with thread 0 does not check that the caller is in a handler: any thread may load its own registers so.

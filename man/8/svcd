@@ -1,0 +1,132 @@
+page=svcd sect=8 summary="the service manager: start the system's services and restart them"
+    src=servers/svcd/svcd.c,kernel/root.c
+    keys=services,manifest,init,root,restart,boot,srv,post
+
+# SYNOPSIS
+
+```usage
+svcd
+```
+
+# DESCRIPTION
+
+`svcd` is the first process: the kernel starts it as the root task, task 1, from the boot module of that name, unless the kernel command line's `vx.root=<name>` names another.
+It takes no arguments.
+Its spawn message holds what the kernel gives no one else: a handle to itself, the boot image, the store image on an install medium, the ACPI tables, the root Resource, the kernel command line and the bootloader's entropy.
+
+It reads the service manifests (see svc(6)) under `boot/svc/` straight from the boot image, because bootfs(4), which serves that image as files, is one of the services it starts.
+It starts each service the manifests describe, giving it what its manifest names and nothing more, and waits for them to exit.
+It serves no files and never exits.
+
+It starts the drivers first, the services whose manifests name device registers or interrupts, so the console is there for the rest; then the other services.
+Each group starts in the boot image's order: the manifests of `boot/svc` by file name, then those a test image adds, each manifest's services in the order written.
+Once a service has posted `/srv/cons`, `svcd` writes its own messages there too.
+
+@node=manifest title="Manifests"
+
+A manifest is ndb records: a `service=` record, then the records that belong to it, up to the next `service=`.
+svc(6) defines the keys; this is what `svcd` does with them.
+
+- A manifest with an ndb error anywhere, or a key svc(6) does not define, is used not at all, rather than with a service cut short at the typo.
+- A service whose `arch=` names the other architecture is left out, as is one the command line's `vx.skip=<name>,...` names, or one whose `when=<word>` is not a word of the command line (`vx.live` on an install medium, `vx.system` on an installed system).
+- `post=<srv>` makes a post: a channel whose client end `svcd` keeps as `/srv/<srv>` and whose server end the service gets as `listen`.
+  `svcd` keeps a second handle to the server end, so a connection made while the service is restarting waits for it.
+  A post is a rendezvous: whichever manifest names it first, by `post=`, `claim=` or `connect=`, makes it, and connections wait for a server.
+- `claim=<srv>` gives the service the post's server end, to hand on, as devmgr(8) hands `/srv/disk0` to the driver it starts; `connect=<srv>` gives it a connector to the post.
+- `mount=` and `bind=` records, and the lines of a namespace template `ns=<name>` (`/lib/ns/<name>` in the boot image, a namespace(6) file), become the mounts and binds of the service's namespace, which vx-rt replays before `vx_main` runs.
+  A mount names a post, not a path: `mount=/ srv=bootfs` mounts `/srv/bootfs` on `/`.
+- `ioport=`, `mmio=` and `irq=` records make a service a driver: `svcd` mints the device objects they name from the root Resource once, when it reads the manifest, keeps them, and gives each start of the driver its own duplicates, so a restarted driver gets the same device.
+- `arg=` and `env=` records become its arguments and environment, in order; `part=` records and the device records are passed on as they are, for partd(8) and the driver; `user=<name>` is who it runs as, `none` without it.
+- `restart`: when the service exits, for any reason, `svcd` starts it again, unless it has exited more than five times within ten seconds of the first of those exits; then it says so and leaves it.
+
+Each service runs in a session and note group of its own, as Plan 9's daemons do, so a note to one group never reaches the rest of the system.
+`svcd` registers each with procfs(4) before it runs; what it started before procfs it registers once procfs serves, and again whenever procfs restarts.
+
+@node=given title="What a service is given"
+
+A service's spawn message holds these, each only when its manifest asks:
+
+| Flag | Handle | What it is |
+| `bootimage` | `bootimage` | the boot image, read-only, with its size |
+| `storeimage` | `storeimage` | the store image, read-only, on an install medium |
+| `post=` | `listen` | the server end of its post |
+| `console` | `console` | a connector to `/srv/cons` |
+| `resource` | `resource` | the root Resource: authority over every device (devmgr) |
+| `pager` | `pager` | the root Resource with only the right to make pagers (fsd(4)) |
+| `acpi` | `acpi` | the ACPI tables, with their size |
+| `tasks` | `tasks` | `svcd`'s own task, and through it every task (procfs) |
+| `cmdline` | | the kernel command line, as a record |
+| `entropy` | | a 32-byte seed of its own, from `svcd`'s generator |
+| `claim=` | `claim:<srv>` | a post's server end |
+| `connect=` | `srv:<srv>` | a connector to a post |
+| `mount=` | `ns.<nn>` | a connector to the mounted post |
+
+and a driver gets `ioport`, `mmio` and `irq` handles for its device records.
+
+# EXAMPLES
+
+The network service, from `boot/svc/netd.ndb`:
+
+```ndb
+service=netd program=/boot/bin/netd post=net console restart
+connect=ether0
+```
+
+The console, a driver with its device minted by `svcd`, on x86_64:
+
+```ndb
+service=uart program=/boot/bin/drv-uart-16550 arch=x86_64 post=cons restart
+ioport=0x3f8 count=8
+irq=4
+```
+
+The start of a boot:
+
+```text
+svcd: hello from user space (task 1)
+svcd: started uart (task 2)
+svcd: started bootfs (task 3)
+svcd: started devmgr (task 4)
+svcd: started netd (task 5)
+svcd: started nsd (task 6)
+```
+
+# FILES
+
+: `/boot/svc/*.ndb`
+  The service manifests, read from the boot image.
+: `/lib/ns/<name>`
+  The namespace templates `ns=` names, read from the boot image.
+: `/srv/<srv>`
+  The posts, as mounts and connectors name them.
+
+# SEE ALSO
+
+svc(6), devmgr(8), bootfs(4), procfs(4), namespace(6), intro(8)
+
+# DIAGNOSTICS
+
+`svcd` says what it does on the console: `svcd: started <name> (task <n>)`, and `svcd: <name> exited` followed by the exit string when there is one.
+A restarted service's new start is said before its exit, since the service may be the console.
+`svcd: <name> keeps exiting; it is not restarted again` ends its restarts.
+
+A manifest with an error is reported with the error and `so none of it is used`; a service with no name or program, or past the 32nd, is skipped; one whose post or device cannot be made is reported and never started.
+`cannot start <name>` and `cannot restart <name>` give the error, as does `no program <path> in the boot image`.
+
+When the boot image is missing, cannot be mapped or is malformed, `svcd` prints `svcd: FAILED:` and the reason, and waits forever: the root task never exits.
+
+# BUGS
+
+It holds 32 services and 32 posts, and a post's name is at most 31 bytes.
+
+`/srv` is not a file tree: posts come only from manifests, `ls /srv` fails, and a program cannot post a service at run time.
+
+Namespace templates are applied only by `svcd`, and only their `mount /srv/<name>` and `bind` lines; any other line stops the service from starting.
+
+A service is restarted whatever its exit string, success included, and `svcd` never stops one: there is no orderly shutdown, and no ordering beyond the manifests' (nothing waits for the wall clock, or for a post to be served).
+
+A restarted procfs has lost its table: `svcd` registers its services again, and every other process is gone from `/proc`.
+
+Kernel messages after the console hand-off reach nowhere unless `vx.kconsole` keeps them on the serial port, so a fault in a service shows only as its exit string, such as `sys: trap: fault read addr=… pc=…`.
+
+Entropy is the bootloader's alone, seeded once; a service gets it only if its manifest says `entropy`.

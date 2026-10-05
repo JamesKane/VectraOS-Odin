@@ -1,0 +1,158 @@
+page=channel sect=2 summary="channels: messages and handles between two ends"
+    names=channel_create,channel_write,channel_read,channel_call
+    src=kernel/obj/channel.c,kernel/syscall/syscall.c,lib/vx-rt/base.c
+    keys=message,ipc,rpc,call,reply,txid,handle,transfer
+
+# SYNOPSIS
+
+```c
+vx_status vx_channel_create(uint32_t options, vx_handle out[2]);
+vx_status vx_channel_write(vx_handle ch, const void *bytes, uint32_t len,
+                           const vx_handle *handles, uint32_t count);
+vx_status vx_channel_read(vx_handle ch, void *bytes, uint32_t cap,
+                          vx_handle *handles, uint32_t count_cap,
+                          vx_msg_size *actual);
+vx_status vx_channel_call(vx_handle ch, vx_call *args, vx_instant deadline);
+```
+
+# DESCRIPTION
+
+A channel is a pair of ends, and the control plane of the system: bootstrap, passing handles, and rare control requests (see the kernel's design, 01 §4.2).
+Bulk data goes through rings instead.
+A message written to one end is queued at the other.
+It is a datagram, not part of a byte stream: a body of 16 to 65536 bytes, `VX_CHANNEL_MAX_BYTES`, that starts with a header, and up to 64 handles, `VX_CHANNEL_MAX_HANDLES`.
+
+```c
+typedef struct vx_msg_header {
+  uint32_t txid;    // matches a reply to its call;
+                    // 0 for a message that wants none
+  uint32_t ordinal; // the protocol's operation
+  uint32_t flags;
+  uint32_t sender_intent; // enum vx_intent of the sending thread
+} vx_msg_header;
+
+typedef struct vx_msg_size { // what channel_read and channel_call report
+  uint32_t bytes;
+  uint32_t handles;
+} vx_msg_size;
+```
+
+The kernel writes <sender_intent> in every message it carries, so a reader can trust it; <ordinal> and <flags> are the protocol's.
+The body is copied twice, in and out; the handles move, leaving the writer's table and arriving in the reader's with the rights they had.
+
+`vx_channel_create` makes a channel and stores handles to its two ends in <out>.
+<options> must be 0.
+Each handle carries `VX_RIGHT_READ`, `VX_RIGHT_WRITE`, `VX_RIGHT_WAIT`, `VX_RIGHT_SIGNAL`, `VX_RIGHT_DUPLICATE`, `VX_RIGHT_TRANSFER` and `VX_RIGHT_INSPECT`.
+An end is destroyed with its last handle; the other end then sees its peer closed.
+
+`vx_channel_write` sends the <len> bytes at <bytes> and the <count> handles in <handles> to the other end of <ch>.
+<ch> needs `VX_RIGHT_WRITE`, and each handle sent `VX_RIGHT_TRANSFER`; a handle may appear once, and neither end of the channel may travel through it.
+The handles are checked all together before any moves: if one is refused, or the length is wrong, nothing is sent and every handle stays.
+Once the message is built the handles have left the caller's table, and a write that fails after that closes them.
+Each end's queue holds at most 64 messages and 1 MiB; a write to a full queue fails with `VX_ERR_SHOULD_WAIT`, and a program waits for room as it sees fit.
+A message whose <txid> matches a `vx_channel_call` waiting at the other end is that call's reply: it goes straight to the caller, never through the queue.
+
+`vx_channel_read` takes the next message queued at <ch>, copying its body to <bytes> and storing its handles, as new handles in the caller's table, in <handles>.
+It never blocks: to wait for a message, bind the end to a port with `VX_TRIGGER_READABLE` (see port(2)).
+If the message is larger than <cap> bytes or carries more than <count_cap> handles, it stays queued and the call fails with `VX_ERR_TOO_SMALL`.
+Either way <*actual> is set to the message's size.
+Messages queued before the other end closed are still read in order; only then does the call report `VX_ERR_PEER_CLOSED`.
+<ch> needs `VX_RIGHT_READ`.
+
+`vx_channel_call` writes a request and waits for its reply in one call, as a client does to a server:
+
+```c
+typedef struct vx_call {
+  const void *wr_bytes;
+  const vx_handle *wr_handles;
+  void *rd_bytes;
+  vx_handle *rd_handles;
+  uint32_t wr_len, wr_count;
+  uint32_t rd_cap, rd_count_cap;
+  vx_msg_size actual;
+} vx_call;
+```
+
+The request is <wr_len> bytes at <wr_bytes> and <wr_count> handles at <wr_handles>, checked and moved as `vx_channel_write`'s are.
+The kernel picks the request's <txid>, a fresh value with the top bit set, and writes it in the header in place of the caller's.
+The server replies by writing a message with the same <txid> to its end; the reply's body goes to <rd_bytes>, its handles to <rd_handles>, and its size to <actual>.
+<ch> needs `VX_RIGHT_READ` and `VX_RIGHT_WRITE`.
+
+A call that ends without its reply, by its <deadline>, an interrupt or a kill, takes back its request if the server has not read it yet: the server never sees it, and its handles are closed.
+An interrupted call whose request the server has read goes on waiting, until the reply or <deadline>, so no answer is lost; the interrupt is delivered when it returns.
+A server that holds a call answers it before it interrupts the caller.
+
+# EXAMPLES
+
+From the kernel's tests, a client:
+
+```c
+    request rq = {.n = n}, reply = {};
+    vx_call call = {.wr_bytes = &rq, .wr_len = sizeof rq, .rd_bytes = &reply,
+                    .rd_cap = sizeof reply};
+    CHECK(vx_channel_call(ch[0], &call, after_ms(2000)) == VX_OK);
+```
+
+and its server, which waits on a port and answers each request with its own header, and so its <txid>:
+
+```c
+  for (int served = 0; served < 2;) {
+    vx_packet pk;
+    vx_port_bind(port, s->server_end, VX_TRIGGER_READABLE, 1, 0);
+    if (vx_port_wait(port, after_ms(2000), 0, &pk, 1) != 1) break;
+    request rq;
+    vx_msg_size size;
+    while (vx_channel_read(s->server_end, &rq, sizeof rq, nullptr, 0,
+                           &size) == VX_OK) {
+      rq.n *= 2;
+      vx_channel_write(s->server_end, &rq, sizeof rq, nullptr, 0);
+      served++;
+    }
+  }
+```
+
+# SEE ALSO
+
+port(2), counter(2), intro(2)
+
+# DIAGNOSTICS
+
+`vx_channel_create` returns `VX_OK`, or `VX_ERR_INVALID` when <options> is not 0 or <out> is not writable memory, or `VX_ERR_NO_MEMORY` when the kernel's pool or the caller's handle table is full.
+
+`vx_channel_write`, `vx_channel_read` and `vx_channel_call` return `VX_OK`, or:
+
+: `VX_ERR_BAD_HANDLE`
+  <ch> is not a channel end, or a handle to send is not a handle.
+: `VX_ERR_ACCESS`
+  <ch> lacks a right the call needs, or a handle to send lacks `VX_RIGHT_TRANSFER`.
+: `VX_ERR_INVALID`
+  A message is shorter than its header or longer than 65536 bytes, carries more than 64 handles, names a handle twice or names an end of <ch>; <cap> or <count_cap> is above those limits; or a buffer is not mapped.
+: `VX_ERR_SHOULD_WAIT`
+  `vx_channel_write` or `vx_channel_call`: the other end's queue is full.
+  `vx_channel_read`: nothing is queued.
+: `VX_ERR_PEER_CLOSED`
+  The other end is gone, before the write or call, or while the call waited, or with nothing left to read.
+: `VX_ERR_TOO_SMALL`
+  The message does not fit <cap> and <count_cap>, or the reply does not fit <rd_cap> and <rd_count_cap>; the sizes needed are in <*actual> or <actual>.
+: `VX_ERR_NO_MEMORY`
+  The kernel has no memory for the message, or the caller's handle table has no room for its handles.
+: `VX_ERR_TIMED_OUT`
+  `vx_channel_call`: <deadline> passed.
+: `VX_ERR_INTERRUPTED`
+  `vx_channel_call`: `thread_interrupt` woke it before the server read the request.
+: `VX_ERR_KILLED`
+  `vx_channel_call`: the calling task is being killed.
+
+# BUGS
+
+A reply too large for the call's buffers is thrown away, its handles closed: the call returns `VX_ERR_TOO_SMALL` with the reply's size, but the reply cannot be read again.
+
+A read whose handles do not fit the caller's handle table, or whose buffer is unmapped between the check and the copy, loses the message.
+
+A reply that comes after its call has given up, past its deadline or killed, finds no call waiting and is queued at the caller's end as an ordinary message.
+
+The design says the handles leave the writer's table whether or not the write succeeds; the kernel keeps them when it refuses the message before building it.
+
+Every message's <sender_intent> is `VX_INTENT_INTERACTIVE` until scheduling contexts come; with them, `vx_channel_call` is to switch straight to a waiting server on the caller's scheduling context, and to lend handles for the length of a call (01 §4.5).
+Neither is there yet.
+Queues are not yet charged to the writer's budget.

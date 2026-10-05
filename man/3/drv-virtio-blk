@@ -1,0 +1,104 @@
+page=drv-virtio-blk sect=3 summary="virtio block device driver"
+    src=drivers/drv-virtio-blk/blk.c,boot/drv/virtio-blk.ndb,lib/vx-driver/virtio.c,lib/vx-driver/blockproto.h
+    keys=virtio,disk,block,qemu,pci
+
+# SYNOPSIS
+
+```ndb
+match=pci vendor=0x1af4 device=0x1042 program=/boot/bin/drv-virtio-blk
+    post=disk# msi=1
+```
+
+```text
+/srv/disk0, /srv/disk1, ...
+```
+
+# DESCRIPTION
+
+`drv-virtio-blk` drives a virtio block device, as virtio 1.x §5.2 describes it, and serves it as a disk of the block class on its post in `/srv`.
+It is the disk QEMU gives a guest, the boot disk among them.
+
+devmgr(8) starts it for every PCI function 1af4:1042, the modern virtio block device, by the manifest in `/boot/drv/virtio-blk.ndb` shown above.
+The driver gets the function's configuration space, its memory BARs, a DMA domain, one MSI-X interrupt (`msi=1`), for the request queue, and the listen end of its post, and nothing else; it takes no arguments and reads no options.
+The post is numbered with the other disks in the order devmgr finds the functions on the bus, whichever driver serves them: `/srv/disk0` is the first disk found, virtio or NVMe.
+partd(8) holds a connector to it, and hands out its partitions as posts of their own, which fsd(4) and the other file servers use.
+
+At start it negotiates the features it uses: `VERSION_1`, `ACCESS_PLATFORM` when the device offers it, indirect descriptors, which it requires, and the device's segment limit, read-only flag, block size, flush and discard where offered.
+It refuses, and exits, if the device is not a modern virtio device with MSI-X, lacks indirect descriptors, takes fewer than two segments a request, or has a request queue of fewer than 64 entries.
+The sector size is the device's block size if that is a power of two from 512 to 4096, and 512 otherwise.
+
+## Sessions
+
+The block class is defined in `docs/proto/block.md`; in short:
+a client sends `CONNECT` on the post, naming a window of the disk (a first sector and a count, 0 for the rest) and whether it is read-only, and gets back a ring session (see ring(2)) that reaches that window and nothing else.
+Each request on the ring is one submission, completed by one completion with the same `user_data`, in any order.
+The driver serves 8 sessions at once.
+A `CONNECT` it cannot take is refused: `INVALID` for a message that is not one, `RANGE` for a window outside the disk, `NO_MEMORY` when 8 sessions are open.
+On a device that says it is read-only, every session is read-only.
+
+The client arena, 1 MiB, is given to the device through the DMA domain when the session opens, and every transfer is described to the device as the arena's own pages, so nothing is copied.
+Each request in flight holds one of 64 slots, shared by all sessions: an indirect descriptor table, the request's header and its status byte, in memory the device reaches; the device sees one queue descriptor pointing at the table.
+The requests:
+
+: `INFO`
+  Completes at once with the most bytes one transfer moves (128 KiB, or less if the device takes fewer segments: 4 KiB for each segment past the first), the sector size, the window's sectors, and the flags `INFO_READONLY` for a read-only session, `INFO_CACHE` if the device offers flush, and `INFO_DISCARD` if it offers discard.
+: `READ`, `WRITE`
+  A virtio-blk read or write of whole sectors, one segment for each physically contiguous run of the arena.
+  A transfer that is empty, not a multiple of the sector size, not aligned to one in the arena, or longer than `INFO` says completes with `INVALID`; one outside the window or the arena with `RANGE`; a write in a read-only session with `ACCESS`; none of these reaches the device.
+: `WRITE_FUA`
+  virtio-blk has no FUA: a write, then, once it has succeeded, a flush on the same slot, and the request completes after both.
+  Without flush it is a plain write.
+: `FLUSH`
+  A virtio-blk flush; it completes at once in a read-only session or when the device has no flush.
+: `DISCARD`
+  A virtio-blk discard of at most the device's `max_discard_sectors`; what lies beyond is left as it is, since a discard is a hint.
+  It completes at once, as done, if the device cannot discard.
+
+A device's I/O error completes the request with `IO`, and an unsupported request with `UNSUPPORTED`.
+While every slot is busy the driver stops taking submissions, and takes them again as requests complete; sessions take slots in turn.
+A session that does not drain its completions is dropped.
+When a session goes with requests in flight, its arena stays given to the device until they complete.
+
+If the driver exits, devmgr revokes its DMA domain, turns off bus mastering, resets the function where it can, and starts it again on the same post, with nothing kept; clients see their sessions close, dial again and submit again what had not completed (see `docs/proto/block.md` §4).
+devmgr gives up after five starts.
+
+# EXAMPLES
+
+What devmgr and the drivers print at boot under QEMU, with the boot disk and a second disk of 64 MiB, and then after both drivers are killed:
+
+```text
+devmgr: 00:02.0 1af4:1042 storage msi-x bar1=4K bar4=16K
+devmgr: 00:03.0 1af4:1042 storage msi-x bar1=4K bar4=16K
+devmgr: started drv-virtio-blk
+drv-virtio-blk: 66 MiB, 512-byte sectors, write cache, discard
+devmgr: started drv-virtio-blk
+drv-virtio-blk: 64 MiB, 512-byte sectors, write cache, discard
+devmgr: /boot/bin/drv-virtio-blk exited: killed
+devmgr: started drv-virtio-blk
+```
+
+# FILES
+
+: `/boot/drv/virtio-blk.ndb`
+  The manifest devmgr matches.
+: `/srv/disk`<n>
+  The post: the whole disk, as the block class.
+
+# SEE ALSO
+
+drv-nvme(3), devmgr(8), partd(8), fsd(4), intro(3); the block class is `docs/proto/block.md` in the repository
+
+# DIAGNOSTICS
+
+Once serving, the driver prints the disk's size and sector size, and `read-only`, `write cache` and `discard` where they apply.
+A failure prints `drv-virtio-blk: FAILED:` and what failed, such as `no indirect descriptors` or `not a modern virtio device with MSI-X`, and the driver exits with what failed as its exit string.
+
+# BUGS
+
+There is no deadline: a request the device never completes holds its slot, and its session, for as long as the driver runs.
+
+A write session asked of a read-only device is opened read-only, where `docs/proto/block.md` says it is refused with `ACCESS`; its writes then complete with `ACCESS`.
+
+`UNSUPPORTED` is not a completion the block class lists.
+
+Legacy and transitional virtio block devices (1af4:1001) are not matched.

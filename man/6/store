@@ -1,0 +1,124 @@
+page=store sect=6 summary="the content store's objects and tree format"
+    src=lib/vx-store/store.c,host/vxstore/main.c
+    keys=content,object,hash,blake2b,tree,index,vxsf,directory,dist
+
+# SYNOPSIS
+
+```text
+b2/<xx>/<64 hex digits>                       an object, named by its hash
+
+"vxsf" size[8] hash[32] ...                   a file's index
+
+name=bin mode=040555 hash=b2:<hex>            a directory: one entry a line
+name=svcd mode=0100555 size=324896 hash=b2:<hex>
+name=sh mode=0120777 link=/bin/rc
+```
+
+# DESCRIPTION
+
+The content store holds trees of files as objects, each named by the BLAKE2b-256 hash of what it is.
+A name is written `b2:` and 64 lower-case hex digits; a name in any other form is refused.
+An object is stored as the file `b2/`<xx>`/`<hex> under the store's root, <hex> its 64 digits and <xx> the first two.
+
+`./build release` and install media make stores on the build machine with vxstore(8).
+install(8) reads one from its medium and copies it into the system volume's `store` branch, where distd(8) serves it, checking each object against its name before it uses it.
+All of them read and write the format with `lib/vx-store`, and nothing else does.
+
+There are three kinds of object: a block, a file's index and a directory.
+A tree is named by its root directory's hash, so two trees with the same names, contents and links have the same name, and an object two trees share is stored once.
+
+## Blocks
+
+A file is cut into blocks of 64 KiB, the last one shorter; an empty file is one empty block.
+A block is stored as its bytes, and named by BLAKE2b-256 of the byte `0x00` followed by them, its leaf hash.
+
+## A file's index
+
+A file is named by the hash of its index, which is:
+
+| Bytes | Holds |
+| 4 | `vxsf` |
+| 8 | the file's size, little-endian |
+| 32 each | each block's leaf hash, in order |
+
+The number of hashes is the number of blocks the size makes, and an index of any other length is refused.
+The index's name is BLAKE2b-256 of the byte `0x02`, the size's 8 bytes, and the root of a hash tree over the block hashes.
+The tree is shaped as RFC 6962's: one hash is its own root; more are split at the largest power of two below their count, and the root is BLAKE2b-256 of the byte `0x01`, the left part's root and the right part's.
+The index is not hashed whole; only the size and the root are.
+
+So a reader checks an index against its name once, and then any block against the index, without reading the rest of the file.
+A size above 2^48 bytes is refused.
+The prefix bytes keep a leaf from passing for an inner node, and a directory's text, which never starts with `0x00`, `0x01` or `0x02`, from passing for either.
+
+## Directories
+
+A directory is ndb text (see ndb(6)), one record for each entry, and is named by BLAKE2b-256 of the text itself.
+The text is written in one canonical form, so one directory has one name: one line a record, its tuples in the order below, separated by one space, and the records sorted by name, comparing bytes.
+There is no record for `.` or `..`.
+An entry's keys are:
+
+: `name`
+  The entry's name: not empty, without `/` or a NUL byte, and neither `.` nor `..`.
+  Required.
+: `mode`
+  The entry's type and permissions in octal, with a leading `0`: `040555` a directory, `0100444` a file, `0100555` an executable file, `0120777` a symbolic link.
+  Its type is required to be one of those three; its permissions are read as written, but vxstore(8) writes only these four modes, since the build machine's permissions, owners and times are not kept.
+  Required, 2 to 7 characters.
+: `size`
+  A file's size in bytes, decimal.
+  Required for a file; not written for a directory or a link, and not read for either.
+: `hash`
+  The name of a file's index or of a directory's text: `b2:` and 64 hex digits.
+  Required for a file and a directory; not written for a link.
+: `link`
+  A symbolic link's target, as written; not checked, and never followed by the store.
+  Required, and not empty, for a link.
+
+A record without the keys its type needs, with a key not defined here, or with a value that is not one, makes the whole directory unreadable.
+
+# EXAMPLES
+
+The root of the distd test's tree, as the store holds it:
+
+```ndb
+name=README.txt mode=0100444 size=7
+    hash=b2:2012d25c757a989f666f061efd271ab85e58f2d771381075641806a61e82bd76
+name=big.bin mode=0100444 size=300000
+    hash=b2:43419eaea527aaf52c17de5dec59f79f38dac9b46ed16034d1c8646a8d8990b7
+name=bin mode=040555
+    hash=b2:db59937b598c6eda18c40b79986318331f828cb38cfd0d2822f8aa5893a80039
+name=other.bin mode=0100444 size=200000
+    hash=b2:491a88139f564f8f7bb57b6ac0643f2e04092d4bd5a46279403df2cec7ad64e1
+name=readme-link mode=0120777 link=README.txt
+name=Ünïcode.txt mode=0100444 size=8
+    hash=b2:e0c9f2f0b5678388019fdba92e638c7e421b90db7e3d045dd5ba42665cfa32c6
+```
+
+`Ünïcode.txt` sorts last because its first byte is above every ASCII letter's.
+The index of `README.txt`, 7 bytes in one block, is 44 bytes:
+
+```text
+0000000 76 78 73 66 07 00 00 00 00 00 00 00 6d a8 5f f8
+0000016 f1 bb cd ef 67 2d a5 ca ff b1 e2 2b 3c 66 f2 85
+0000032 25 bc e6 f7 59 d5 9f 1c 4f e5 2b 3d
+```
+
+# FILES
+
+: `/n/b2/`
+  The objects, in distd's namespace: the system volume's `store` branch.
+: `/dist/store/`
+  The same objects as distd(8) serves them to peers, unchecked.
+: `out/release/store/`
+  The store `./build release` makes on the build machine.
+
+# SEE ALSO
+
+distd(8), install(8), vxstore(8), release(6), ndb(6); `docs/06-install-update.md` §4 in the repository
+
+# BUGS
+
+The canonical form is written but not checked: a directory whose records are out of order, or which names an entry twice, is read if it hashes to its name, and a lookup finds the first entry of a name.
+The permission bits of `mode` are not checked either, so a directory may carry modes vxstore never writes.
+
+distd(8) reads an index or a directory whole into a buffer of 68 KiB, so it cannot serve a file larger than about 135 MiB, nor a directory of more than some 600 entries.

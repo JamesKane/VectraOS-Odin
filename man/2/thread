@@ -1,0 +1,165 @@
+page=thread sect=2 summary="make, start, end, interrupt, stop and examine threads"
+    names=thread_create,thread_start,thread_exit,thread_interrupt,thread_state,thread_suspend,thread_resume
+    src=kernel/syscall/syscall.c,kernel/obj/task.c,kernel/obj/process.c,kernel/obj/exception.c,lib/vx-rt/base.c
+    keys=thread,note,interrupt,registers,suspend,stop,tls,watchpoint,debugger
+
+# SYNOPSIS
+
+```c
+vx_status vx_thread_create(vx_handle task, vx_handle *out);
+vx_status vx_thread_create_id(vx_handle task, vx_handle *out, uint32_t *id);
+vx_status vx_thread_start(vx_handle thread, uint64_t entry, uint64_t sp,
+                          vx_handle handle, uint64_t arg2);
+void vx_thread_exit(void);
+
+vx_status vx_thread_interrupt(vx_handle task, uint64_t thread, vx_str note);
+
+vx_status vx_thread_state(vx_handle task, uint64_t thread, uint32_t op,
+                          void *buf, uint64_t size);
+vx_status vx_thread_suspend(vx_handle task, uint64_t thread);
+vx_status vx_thread_resume(vx_handle task, uint64_t thread);
+```
+
+# DESCRIPTION
+
+A thread runs in a task (task(2)), and a task runs while it has a live thread.
+Each thread has an id in its task, from 1, in the order the threads were made.
+Every call but the first two names a thread by its task's handle and that id; the thread's own handle only starts it, and closing it does not stop the thread.
+
+`vx_thread_create` makes a thread in <task> that has not started, and gives the caller a handle to it with every right.
+`vx_thread_create_id` also writes the thread's id to <id>.
+
+`vx_thread_start` starts it, once, at <entry> on the stack whose top is <sp>, 16-aligned, as if `entry(handle, arg2)` were called: on x86_64 with a zero return address just below <sp>, so any C function can be the entry.
+<handle>, unless `VX_HANDLE_NONE`, moves from the caller's table to the thread's task, and the thread gets its value there; this is how a new program gets its bootstrap channel.
+A thread in the caller's own task gets its handles directly and passes 0.
+
+`vx_thread_exit` ends the calling thread, and never returns.
+If it was its task's last live thread, the task ends with the empty exit string, or with the kill's if it was killed.
+
+## Notes
+
+`vx_thread_interrupt` posts <note>, a string of 1 to `VX_ERRMAX` (128) bytes, to the thread <thread> of <task>, or with <thread> 0 to any of its threads not stopped at an exception (ADR-0010).
+A call the thread is blocked in returns `VX_ERR_INTERRUPTED`, and on its way back to user mode the thread is diverted to the task's in-task handler (exception(2)) with an exception of kind `VX_EXCEPTION_INTERRUPT` holding the note.
+Up to eight notes wait for each thread, delivered oldest first, each its own exception; a handler may be entered again before the last has resumed, as POSIX's do.
+
+A task with no in-task handler ends instead, with the note as its exit string, as a Plan 9 process that has not called `notify` does.
+If the handler has gone, or the thread's stack cannot take the exception, when the note is delivered, the note ends the task the same way.
+
+## Stopping a thread
+
+`vx_thread_suspend` stops <thread> before it next returns to user mode, and returns once it has: parked there, or blocked in a call, which will park it on the way out.
+With <thread> 0 it stops every thread of the task, as a process is stopped whole.
+Suspensions are counted: `vx_thread_resume` takes one away, and the thread goes on when none is left.
+A thread that suspends itself returns from the call and parks on its way out.
+Stopping a process is this, not a note (ADR-0011).
+
+## Registers
+
+`vx_thread_state` reads or changes a thread's state, by <op>, through <buf>, which holds at least <size> bytes:
+
+: `VX_STATE_GET_EXCEPTION`
+  The `vx_exception` a thread stopped at an exception port stopped at (exception(2)).
+: `VX_STATE_GET_REGS`, `VX_STATE_SET_REGS`
+  Its user registers, a `vx_regs`.
+: `VX_STATE_GET_FPREGS`, `VX_STATE_SET_FPREGS`
+  Its FP/SIMD registers, a `vx_fpregs`: x86_64's FXSAVE image, aarch64's V0 to V31 with FPCR and FPSR.
+: `VX_STATE_GET_TLS`, `VX_STATE_SET_TLS`
+  Its thread pointer, a `uint64_t`: x86_64's FS base, aarch64's `TPIDR_EL0`.
+  With <thread> 0, the caller's own, at any time (musl's `__set_thread_area`).
+: `VX_STATE_NEXT_THREAD`
+  At any time, the live thread with the next id after <thread> (0 for the first) in a `vx_thread_info`: its id, whether it is running, blocked, stopped at an exception port or suspended, its suspend count, and whether it stopped at a debugger's port.
+  This is how procfs(4) lists a process's threads.
+: `VX_STATE_GET_WATCH`, `VX_STATE_SET_WATCH`
+  With <thread> 0, the task's watchpoints, a `vx_watches`, which all its threads take from when each next runs.
+  Each slot is off, or watches writes or reads and writes at an address aligned to its length of 1, 2, 4 or 8 bytes; GET says in `count` how many the hardware has (x86_64 four, aarch64 two to sixteen).
+  A watched access raises `VX_EXCEPTION_WATCHPOINT`.
+
+The register operations work on a thread stopped at an exception port, or, for a holder of `VX_RIGHT_DEBUG`, a suspended one that holds still; a running thread is neither read nor changed.
+Registers set are checked: a thread may be given any user-mode state and never a privileged one, so a program counter or stack pointer outside user space is refused, and flags a user may not set are dropped.
+FP/SIMD registers set are made safe to load the same way.
+
+## Rights
+
+`vx_thread_create` needs `VX_RIGHT_MANAGE` on <task>, and `vx_thread_start` `VX_RIGHT_MANAGE` on <thread> and `VX_RIGHT_TRANSFER` on <handle>.
+`vx_thread_interrupt` and `vx_thread_state` need `VX_RIGHT_MANAGE` on <task>, except the caller's own thread pointer, which needs only a handle to its own task, and the watchpoints, which need `VX_RIGHT_DEBUG` alone.
+`vx_thread_suspend` and `vx_thread_resume` need `VX_RIGHT_DEBUG`.
+
+# EXAMPLES
+
+A second thread in the caller's own task, from `tests/kernel/ktest.c`; a thread starts only once:
+
+```c
+CHECK(vx_thread_create(self, &th) == VX_OK);
+CHECK(vx_thread_start(th, (uint64_t)worker, sp, 0, (uint64_t)&s) == VX_OK);
+CHECK(vx_thread_start(th, (uint64_t)worker, sp, 0, (uint64_t)&s) ==
+      VX_ERR_BAD_STATE);
+```
+
+# SEE ALSO
+
+task(2), exception(2), futex(2), dbg(1), procfs(4); ADR-0010 and ADR-0011 in `docs/adr`
+
+# DIAGNOSTICS
+
+Every call returns `VX_ERR_BAD_HANDLE` for a handle that is not open or of the wrong type, and `VX_ERR_ACCESS` for one without the right it needs.
+
+`vx_thread_create` and `vx_thread_create_id` return:
+
+: `VX_OK`
+  The handle is in <out>.
+: `VX_ERR_BAD_STATE`
+  <task> is ending or has ended.
+: `VX_ERR_NO_MEMORY`
+  No room for the thread or its kernel stack.
+: `VX_ERR_INVALID`
+  <out> or <id> is not mapped writable.
+
+`vx_thread_start` returns:
+
+: `VX_OK`
+  The thread runs.
+: `VX_ERR_INVALID`
+  <entry> or <sp> is outside user space.
+: `VX_ERR_BAD_STATE`
+  The thread has started already, or its task is ending, has ended, or is in an exec.
+: `VX_ERR_NO_MEMORY`
+  The task's handle table is full.
+
+`vx_thread_interrupt` returns:
+
+: `VX_OK`
+  The note is queued, or, with no handler, the task is ending with it.
+: `VX_ERR_INVALID`
+  <note> is empty, longer than `VX_ERRMAX`, or not mapped.
+: `VX_ERR_BAD_STATE`
+  The task is ending or has ended.
+: `VX_ERR_NOT_FOUND`
+  No thread <thread>, or with 0, every thread is stopped at an exception.
+: `VX_ERR_SHOULD_WAIT`
+  Eight notes already wait for the thread; the caller may try again.
+
+`vx_thread_state` returns:
+
+: `VX_OK`
+  Done.
+: `VX_ERR_INVALID`
+  <op> is unknown; <buf> is not mapped; a register set is refused; a watchpoint is malformed or beyond the hardware's count; a watch operation names a thread; or a thread pointer of thread 0 is asked of another task.
+: `VX_ERR_TOO_SMALL`
+  <size> is smaller than what <op> reads or writes.
+: `VX_ERR_RANGE`
+  A thread pointer outside user space.
+: `VX_ERR_NOT_FOUND`
+  No live thread <thread>, or none after it.
+: `VX_ERR_BAD_STATE`
+  The thread is running: neither stopped at an exception port nor, for a debugger, suspended and still; or `VX_STATE_GET_EXCEPTION` of a thread that is only suspended.
+
+`vx_thread_suspend` and `vx_thread_resume` return `VX_OK`; `VX_ERR_NOT_FOUND` when the task has no thread <thread>, or with 0 none at all; and with 0, the first failure among its threads, the rest still done.
+`vx_thread_suspend` returns `VX_ERR_TIMED_OUT` when the thread has not stopped within a second; it stays counted, and `vx_thread_resume` undoes it.
+`vx_thread_resume` returns `VX_ERR_BAD_STATE` for a thread that is not suspended.
+
+# BUGS
+
+When `vx_thread_start` fails after taking <handle>, the handle is closed in the thread's task: the caller has lost it.
+<handle> is taken before <entry> and <sp> are checked, so even a bad address loses it.
+
+The design queues notes per task (ADR-0010); the kernel queues them per thread, so a note to thread 0 goes to one thread chosen when it is posted.

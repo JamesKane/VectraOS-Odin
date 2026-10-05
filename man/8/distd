@@ -1,0 +1,173 @@
+page=distd sect=8 summary="the content store, its releases, and the boot slots"
+    src=servers/distd/distd.c,lib/vx-store/store.c,lib/vx-slots/slots.c
+    keys=dist,store,release,update,apply,rollback,slot,verified,blake2b,limine
+
+# SYNOPSIS
+
+```usage
+distd
+```
+
+# DESCRIPTION
+
+`distd` serves the content store and the releases in it as `/dist`.
+A release's base tree is served read-only, and every byte read from it is first checked against the tree's hash.
+On an installed system it also stages a release in one of the ESP's boot slots, and rolls back to the slot before.
+
+svcd(8) starts it from a manifest (see svc(6)) whose `post=` it serves, usually `post=dist`, as `/srv/dist`.
+It takes no arguments.
+Its namespace, from the manifest's `mount=` lines, holds:
+
+: `/n`
+  The store: the system volume's `store` branch, served by fsd(4).
+  Objects are files `b2/`<xx>`/`<hash>, named by the 64 hex digits of their BLAKE2b-256 hash, <xx> the first two; release records are `records/*.ndb`.
+: `/tmp`
+  The ESP, served by dosfs(4), for the boot slots.
+: `/adm`
+  fsd's `adm` branch, whose `ctl` snapshots and rolls back `/cfg`.
+
+and, with the manifest's `cmdline`, the kernel's command line, whose `vx.slot=`<x> says which slot booted.
+Only `/n` is needed to serve the store; `/tmp`, `/adm` and `vx.slot=` are for the slots, and an installed system's manifest runs `distd` as `adm` with all of them.
+
+At its start, and on `rescan`, `distd` reads every record in `/n/records`.
+A release is one whose record has a `release=`<n> and a `set=base` record for its own architecture with a `tree=` hash (see release(6)); others are skipped.
+It keeps 16 at most, and skips a record over 16 KiB.
+
+@node=verified title="Verified reads"
+
+The store's formats are store(6)'s: a file is an index naming its 64 KiB blocks, and a directory is ndb text naming its entries, each object named by its hash.
+`distd` reads a release's tree from the top: each directory is checked against its hash before an entry of it is used, and each file's index against the file's hash, and the size the index gives against the size its directory gives.
+A read of a file then checks each block it touches against the index before a byte of it is returned.
+
+A block or index that does not match is refused: the read fails with an I/O error, nothing of the block is returned, and `distd` says the file's path in the tree on the console.
+A directory that does not match is refused with an I/O error too.
+Objects that matched are kept in a cache of 24, and are not checked again while they stay there.
+
+`/dist/store` is not checked: it gives the objects as the store holds them, for a peer, which checks them itself.
+
+@node=slots title="Slots"
+
+The ESP holds three boot slots, `\EFI\vectra\a`, `b` and `c`, each one release's kernel, root-task modules and bootfs, and a table of them, `\EFI\vectra\slots.ndb` (see slots(6)), which says what each slot holds, which slot boots, and which booted before.
+Limine's configuration, `\boot\limine\limine.conf`, is made from the table alone: an entry for each slot in use, each file with its BLAKE2b-512 hash, which Limine checks, and the slot that boots as the default.
+install(8) writes slot a and both files; `distd` changes them.
+
+`apply` <n> stages release <n>:
+
+- its whole tree is checked: every directory, index and block present and matching its hash;
+- `/cfg` is snapshotted as `cfg@apply-`<n>, through `/adm/ctl`, replacing a snapshot of that name from an earlier apply;
+- the release's `boot/vx/kernel.elf`, `svcd`, `ktest` and `bootfs.tar` are written to the slot that neither boots nor booted before, each checked block by block as it is read from the store, then read back from the ESP and compared with its hash;
+- the table is rewritten with the slot holding release <n> and booting, the slot that booted before as the previous, and Limine's configuration made again from it.
+
+`rollback` makes the previous slot the one that boots and the one that boots the previous, rewrites the table and Limine's configuration, then rolls `/cfg` back to `cfg@apply-`<n>, <n> the release of the slot being left: `/cfg` as it was before that release was applied.
+
+Both take effect at the next boot.
+Neither reboots, and the running system's base stays the bootfs it booted with: `distd` serves the store, it does not switch to it.
+
+@node=reference title="Files, examples and diagnostics"
+
+# EXAMPLES
+
+The installed system's manifest, from `/boot/svc/system.ndb`:
+
+```ndb
+service=sys-distd program=/boot/bin/distd post=dist console cmdline
+    when=vx.system
+user=adm
+mount=/ srv=bootfs
+mount=/n srv=fsd aname=store
+mount=/adm srv=fsd aname=adm
+mount=/tmp srv=esp
+```
+
+A second release's record copied into the store by hand (its objects before it), found and applied, as the slots test does:
+
+```rc
+% cp /m/records/2.ndb /n/records/
+% echo rescan >/dist/ctl
+% echo apply 2 >/dist/ctl
+```
+
+and, on the boot of release 2 that follows, rolled back:
+
+```rc
+% echo rollback >/dist/ctl
+```
+
+What `distd` says:
+
+```text
+distd: 1 releases for x86_64; serving /srv/dist
+distd: release 2 staged: the next boot is its slot's
+distd: 2 releases for x86_64; serving /srv/dist
+distd: rolled back: the next boot is release 1's slot
+```
+
+A block rewritten in the store, read:
+
+```text
+distd: a block does not match its hash: /other.bin (refused)
+```
+
+# FILES
+
+: `/dist/status`
+  `state=idle releases=`<n>` arch=`<arch>: the releases found, and the architecture `distd` serves.
+  On an installed system, booted from a slot, it adds `current=` (the release in the slot that booted), `slot=` (that slot's letter) and `boot=` (the release the next boot is).
+: `/dist/ctl`
+  Write-only; each write is one command, a trailing newline ignored.
+  `rescan` reads the records again.
+  `apply` <n> stages release <n>, and `rollback` returns to the previous slot, as {Slots|#slots} says.
+  A command that fails fails the write, with the error.
+: `/dist/releases/`<n>`/record`
+  Release <n>'s record, as the store holds it.
+: `/dist/releases/`<n>`/status`
+  `state=fetched missing=0`, or `state=seen missing=1` when the tree's root directory is not in the store or does not match its hash.
+: `/dist/releases/`<n>`/tree/`
+  Release <n>'s base tree for this architecture, read-only, with its files' modes and symbolic links, every read verified.
+: `/dist/store/`
+  The objects, read-only, as the store holds them: `b2`, its directories of two hex digits, and the objects in them.
+: `/srv/dist`
+  The usual post.
+: `\EFI\vectra\slots.ndb`, `\boot\limine\limine.conf`
+  On the ESP, at `/tmp`: the slot table and Limine's configuration, which `apply` and `rollback` rewrite.
+
+Every file is owned by `dist`.
+
+# SEE ALSO
+
+install(8), fsd(4), dosfs(4), store(6), release(6), slots(6), svc(6); `docs/06-install-update.md` in the repository
+
+# DIAGNOSTICS
+
+At its start `distd` says how many releases it found and for which architecture.
+It exits, printing `distd: FAILED:` and the reason, with `no listen channel (post=)` or `no namespace`, and with `cannot serve` if serving fails.
+
+A read refused is said with the file's path in its tree: `distd: a block does not match its hash:` or `a file's index does not match its hash:`, then the path and `(refused)`.
+
+`apply` and `rollback` say what they did, `release `<n>` staged: the next boot is its slot's` and `rolled back: the next boot is release `<n>`'s slot`, or the step that failed and the error: `release `<n>` is not whole and sound in the store (`<error>`): not applied`, `apply: no such release`, `apply: cannot read the slot table`, `apply: cannot snapshot /cfg`, `apply: cannot write the slot`, `apply: cannot write the slot table`, `rollback: cannot read the slot table`, `rollback: no previous slot`, `rollback: cannot write the slot table`.
+A rollback with no snapshot of `/cfg` to restore still changes the slots, and says `no snapshot of /cfg to roll back to`.
+
+# BUGS
+
+`distd` checks no user: anyone whose namespace holds `/dist` may `apply` and `rollback`.
+
+`ctl` has `rescan`, `apply` and `rollback` alone: there is no `fetch`, so a release's objects are put in the store by hand, and no `gc`, so nothing collects a dropped release's objects.
+Records are found, not checked: releases are unsigned.
+There are no `.help` and `.schema` files.
+
+`apply` writes into the slot that neither boots nor booted before even when it holds a release, which it drops; while it is written, Limine's entry for that slot names the old files' hashes.
+A release goes straight into the default slot with no trial boot; one that does not come up is left by choosing the previous slot in Limine's menu, which `timeout: 0` hides (press a key early).
+The table and Limine's configuration are rewritten in place, not by a rename, so a power cut mid-write can leave a configuration Limine cannot read.
+`rollback` restores `/cfg` only from a snapshot `apply` took.
+
+A release's `status` checks only that its tree's root directory is there.
+
+Its table of nodes (8192: `/dist`'s files and every tree entry and store object reached) is never let go, so a long-running `distd` stops answering walks.
+Objects are read whole, so an index or directory larger than 68 KiB (a file past about 130 MiB, a directory of some hundreds of entries) cannot be read, and `apply` refuses a slot file past 64 MiB.
+Verified objects are kept in memory, so the store changing under them is seen only once they leave the cache.
+It serves one architecture's trees, its own, and at most 16 releases.
+
+The objects under `/dist/store` show a length of 0.
+`/dist/store` does not list the store's `records`, but a walk to it succeeds, and its files then appear as directories.
+
+A refused read whose index is missing from the store, rather than corrupt, is still said to not match its hash.

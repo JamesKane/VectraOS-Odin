@@ -1,0 +1,86 @@
+page=lock sect=5 summary="POSIX byte-range locks, kept by the server"
+    names=lock,Tlock,Rlock,Tgetlock,Rgetlock
+    src=lib/vx-9p/server.c,lib/vx-9p/client.c,lib/vx-9p/ring_server.c,lib/vx-9p/messages.def,lib/vx-9p/fields.def,docs/proto/posix.md
+    keys=9p,9px,9p2000.l,posix,lock,fcntl,f_setlk,f_setlkw,f_getlk,byte-range,record,locking
+
+# SYNOPSIS
+
+```text
+size[4] Tlock tag[2] fid[4] type[1] flags[4] start[8] length[8]
+        proc_id[4] client_id[s]
+size[4] Rlock tag[2] status[1]
+
+size[4] Tgetlock tag[2] fid[4] type[1] start[8] length[8]
+        proc_id[4] client_id[s]
+size[4] Rgetlock tag[2] type[1] start[8] length[8] proc_id[4]
+        client_id[s]
+```
+
+# DESCRIPTION
+
+These are 9P2000.L's messages, unchanged on the wire, and belong to the `posix` extension: a server answers them only once `Tversion` has negotiated `+posix` (see version(5)), and before that with `operation not supported`.
+`Tlock` is type 52, `Rlock` 53, `Tgetlock` 54 and `Rgetlock` 55.
+As every 9Px message does, they fail with an `Rerror` and its string, not 9P2000.L's `Rlerror` and an errno (see error(5)).
+
+A lock is POSIX's, as `fcntl` takes it: a read lock or a write lock over a range of a file's bytes, `[`<start>`, `<start>` + `<length>`)`, or from <start> to the end of the file and past it when <length> is 0.
+Its <type> is 0 for a read lock, 1 for a write lock, and 2 for none, unlock.
+Locks are advisory: they stop other locks, never reads or writes.
+Two locks on a file conflict when their owners differ, their ranges overlap, and either is a write lock.
+
+The server keeps them, in one table of 256 shared by all its connections.
+A lock's owner is the connection and <proc_id> together: two processes on one connection with different <proc_id>s are different owners, and so are two connections with the same one.
+<client_id> is ignored.
+A connection's locks on a file go when it lets go of any fid it has open on that file, by `Tclunk` or `Tremove`, a new `Tversion`, or hanging up: every one of its locks on the file, whatever their <proc_id>, as a POSIX process's go when it closes any descriptor of the file.
+Every VectraOS server with `posix` keeps locks, read-only ones too.
+
+<fid> must be in use on the connection, or the answer is `unknown fid`, and open, or the answer is `fid already in use`.
+<type> past 2 is refused with `bad message`, and a range whose end does not fit in 64 bits with `offset out of range`.
+
+## Lock
+
+The `lock` request takes a lock of <type> over the range for the owner, replacing whatever that owner held of the range; unlock lets go of it.
+A read lock needs <fid> open for reading and a write lock one open for writing, as POSIX has it; otherwise the answer is `permission denied`.
+Unlock needs either.
+
+`Rlock`'s <status> is one of:
+
+: 0, success
+  The owner now holds the range as asked: its old locks there, of either type, are gone, cut short or split around it, and the new one is in their place.
+  Locks beside each other are not joined.
+: 1, blocked
+  Another owner's lock is in the way, and nothing has changed.
+: 2, error
+  The table has no room for the new lock, or for the second piece of one of the owner's locks that it would split, and nothing has changed.
+
+The server never waits: <flags>, 9P2000.L's `BLOCK` (1) and `RECLAIM` (2), is ignored, and a lock in the way is always answered blocked at once.
+9P2000.L's fourth status, grace, is never sent.
+
+## Getlock
+
+The `getlock` request asks whether the owner could take a lock of <type> over the range.
+`Rgetlock` names the first lock in the server's table that is in the way: its <type>, its <start>, its <length> (0 if it runs to the end), and its owner's <proc_id>, with an empty <client_id>.
+If none is, or <type> is unlock, `Rgetlock` has <type> 2 and the request's <start>, <length>, <proc_id> and <client_id>.
+<fid> may be open in any mode.
+
+## The client
+
+VectraOS's client sends <flags> 0 and an empty <client_id>, and only on a connection that negotiated `posix`.
+The POSIX library's `fcntl` sends `Tgetlock` for `F_GETLK` and `Tlock` for `F_SETLK` and `F_SETLKW`, with the process's id as <proc_id>; POSIX's `F_RDLCK`, `F_WRLCK` and `F_UNLCK` are 0, 1 and 2 there too.
+For `F_SETLK` blocked is `EAGAIN`, and for `F_SETLKW` the library sends the request again every 10 ms until it succeeds or a signal comes; error is `ENOLCK`.
+It lets go of its fid when the last of the process's descriptors for the open file closes, and sends an unlock of the whole file when another of them closes.
+
+# SEE ALSO
+
+intro(5), open(5), clunk(5), share(5), version(5); the extension is `docs/proto/posix.md` in the repository
+
+# BUGS
+
+A blocked `F_SETLKW` polls every 10 ms rather than waiting on the server, so waiters are served in no order and none is told of a deadlock.
+
+The 256 locks are shared by every client of a server, and any one can take them all.
+
+`Rgetlock`'s <proc_id> may be a process's on another connection, perhaps another machine's, and its <client_id> is always empty.
+
+A `Tlock` or `Tgetlock` on a fid that is not open is refused with `fid already in use`, the string every request refused for its fid's state gets.
+
+The POSIX library has no `flock` and no open-file-description locks, and a `dup2` or `dup3` that closes a descriptor of a locked file lets none of its locks go.

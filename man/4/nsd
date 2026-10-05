@@ -1,0 +1,134 @@
+page=nsd sect=4 summary="namespace group server"
+    src=servers/nsd/nsd.c,lib/vx-ns/nsd.h,lib/vx-ns/spawn.c
+    keys=namespace,group,share,rfork,mount,bind,connector
+
+# SYNOPSIS
+
+```usage
+nsd
+```
+
+# DESCRIPTION
+
+`nsd` holds the system's namespace groups (ADR-0009).
+A group is a namespace that several processes share, as a Plan 9 `Pgrp` is: a `bind` or `mount` one member makes is seen by every other.
+svcd(8) starts it from `boot/svc/nsd.ndb` and posts it as `/srv/nsd`.
+It is not restarted: the groups live only in it.
+
+`nsd` serves no files.
+Its post, and each member's channel, take the calls of `lib/vx-ns/nsd.h`, which vx-ns makes for every process; a process reaches the post through the connector `srv:nsd` its spawn message carries, which a manifest's `connect=nsd` gives a service (see svc(6)).
+
+A group is three things:
+
+- its namespace, as namespace(6) text, the lines ns(1) prints, at most 16 KiB;
+- the connectors its `mount` lines name, at most 8, each under the source name it is mounted as (`bootfs`, `proc`), of fewer than 64 bytes;
+- a VMO holding a sequence number and the text, which `nsd` writes and each member maps read-only.
+
+The sequence is odd while `nsd` writes the text and even after, so a member reads the text whole.
+Each member keeps a mount table of its own, made from the text: before it resolves a name it looks at the sequence, and if it has moved it empties its table and replays the text.
+So resolving a name takes no call to `nsd`, and a member opens its own connection to each server, through a duplicate of the group's connector.
+
+A member changes the namespace by binding, mounting or unmounting in its own table, then sending `nsd` the text it now prints with the sequence it started from.
+`nsd` takes the text only if no other member changed the group meanwhile; otherwise the member catches up and tries again.
+
+vx-ns makes a group the first time a process spawns a child that shares its namespace, with the process as the first member, and gives the child a member channel of its own (`nsgroup` in its spawn message).
+A process that never shares never talks to `nsd`, and without `nsd` a child gets a copy.
+A fork's child gets a channel of its own and maps the text again.
+svcd gives each service a namespace of its own, not a group.
+
+Each member has its own channel, and the channel says which group it is in.
+`nsd` waits on one port for its post and every member channel; a member whose channel closes leaves its group, and a group goes when its last member does.
+It holds 32 groups and 128 members in all.
+
+@node=calls title="The calls"
+
+A call is a channel message: a `vx_msg_header`, whose ordinal names the call, then the arguments, then bytes:
+
+```text
+typedef struct nsd_args {
+  uint64_t seq;       // UPDATE: the sequence the text was made from;
+                      // a reply: the group's sequence now
+  uint64_t task;      // NEW, HELLO: the caller's task id;
+                      // TEXT: the one asked about
+  uint32_t text_len;  // the bytes after nsd_args that are text
+  uint32_t count;     // NEW, UPDATE: connectors given
+} nsd_args;
+```
+
+The reply has the same shape; its header's flags are 0 or a status.
+Connectors travel as the message's handles, each named in order by a line, the source's name and a newline, after the text.
+On `/srv/nsd`:
+
+: `NSD_NEW`
+  A new group, from the namespace's text and its connectors.
+  The reply carries the caller's member channel and a read-only handle to the group's VMO.
+  `INVALID` if the text is longer than 16 KiB or longer than the message, the count does not match the handles, or a name is empty, too long or there is no room for the connectors; `NO_MEMORY` if 32 groups exist or no member slot is free.
+: `NSD_TEXT`
+  The text of the group task `task` is in, after the arguments in the reply: what procfs(4) serves as `/proc/<pid>/ns`.
+  `NOT_FOUND` if no member said it was that task.
+
+On a member's channel:
+
+: `NSD_SHARE`
+  A member channel for another member of the same group, to give a child; the reply carries it.
+: `NSD_HELLO`
+  A new member saying which task it is; the reply carries a read-only handle to the group's VMO.
+: `NSD_UPDATE`
+  The group's new text, made from sequence `seq`, and any connectors new to it.
+  `BAD_STATE` (stale) if the group's sequence is no longer `seq`; `INVALID` for a text too long or a count that does not match; `NO_MEMORY` if the connectors cannot be taken.
+: `NSD_CONNECTOR`
+  A duplicate of the connector for the source named by the text; `NOT_FOUND` if the group has none.
+
+Any other ordinal is answered with `INVALID`.
+The connectors a call carries are taken all or none: a source the group has already keeps its connector, and the new handle is closed; when they cannot all be taken, every handle sent is closed.
+
+# EXAMPLES
+
+The manifest that starts it, `boot/svc/nsd.ndb`:
+
+```ndb
+service=nsd program=/boot/bin/nsd post=nsd console
+```
+
+The console shell's manifest, `boot/svc/shell.ndb`, ends with `connect=nsd`, so the commands it runs share its namespace group:
+
+```ndb
+service=rc program=/boot/bin/rc console restart
+mount=/ srv=bootfs
+bind=/bin new=/boot/bin flags=a
+mount=/proc srv=proc
+mount=/net srv=net
+mount=/sys srv=sys
+mount=/tmp srv=tmpfs
+connect=nsd
+```
+
+# FILES
+
+: `/srv/nsd`
+  nsd's post.
+: `/proc/<pid>/ns`
+  A process's group's text, through procfs(4).
+
+# SEE ALSO
+
+ns(1), rc(1), procfs(4), namespace(6), svc(6), svcd(8); ADR-0009 in the repository
+
+# DIAGNOSTICS
+
+It prints `nsd: serving /srv/nsd` when it starts.
+Without a listen channel it prints `nsd: no listen channel` and exits with `no listen channel`; otherwise it never exits.
+Its replies carry statuses, as the calls above say.
+
+# BUGS
+
+`nsd` is not restarted, and its groups would be lost if it were; members would keep resolving with the last text, but binds, mounts and spawns that share would fail.
+
+A group's text is at most 16 KiB; a member whose namespace has grown past that keeps its change to itself.
+A member replays the whole text after any change.
+
+A group's connectors are never let go, so a group can take only 8 sources over its life, and a long-lived one stops taking new mounts; nor are a member's connections closed when the text no longer uses them.
+
+`nsd` takes a caller's word: `NSD_TEXT` answers anyone holding `srv:nsd` with any task's namespace, and `NSD_HELLO` takes whatever task id a member claims.
+
+A bad source name in an `NSD_UPDATE` is reported as `NO_MEMORY`, the same as no room.

@@ -1,0 +1,56 @@
+page=walk sect=5 summary="descend a directory hierarchy"
+    names=Twalk,Rwalk,walk
+    src=lib/vx-9p/messages.def,lib/vx-9p/codec.c,lib/vx-9p/server.c,lib/vx-9p/client.c
+    keys=9p,9px,walk,fid,newfid,qid,path,dotdot
+
+# SYNOPSIS
+
+```text
+size[4] Twalk tag[2] fid[4] newfid[4] nwname[2] nwname*(wname[s])
+size[4] Rwalk tag[2] nwqid[2] nwqid*(qid[13])
+```
+
+# DESCRIPTION
+
+`Twalk` asks the server to make <newfid> refer to the file reached by walking from <fid>'s file through the names <wname>, one after another.
+<newfid> must not be in use, unless it is <fid> itself, and it may not be `NOFID` (`0xffffffff`).
+<fid> must be known on the connection and must not be open: a fid that `Topen` or `Tcreate` has opened (see open(5)) cannot walk.
+The message is 9P2000's, type 110 and 111, unchanged, and needs no extension.
+
+The names are walked in order.
+Each step needs the file reached so far to be a directory the request's user may search; the server decides that, and fsd(4) checks the directory's `x` bit.
+If the first name cannot be walked, the reply is `Rerror`.
+Otherwise the reply is `Rwalk`, with the qid of each file reached, in order: <nwqid> is <nwname> if every name was walked, or the index of the first that failed.
+Only when every name is walked is <newfid> made, or <fid> moved when <newfid> is <fid>; otherwise neither changes, as the reply's short <nwqid> says.
+A walk of no names makes <newfid> another fid for <fid>'s file, and succeeds.
+
+The name `..` is the parent directory.
+`..` at the root the fid was attached at (see attach(5)) is that root, so no walk leaves the tree its attach chose; the framework, not the file server, keeps this, and every fid a walk makes remembers its attach's root.
+The name `.` is not used in the protocol: a walk of `.` is refused, as is an empty name, a name holding `/`, a name that is not valid UTF-8 and a name holding a control character (ADR-0013).
+The framework refuses these before the file server sees them.
+
+A message carries at most 16 names or qids, `P9_MAXWELEM`; a `Twalk` or `Rwalk` with more does not decode, and the server hangs up rather than answering one.
+A path is not limited, only the names one message carries: vx-9p's client walks a longer path in messages of 16, each later one from the fid the one before made.
+The client counts a short `Rwalk` as `file does not exist`, and clunks the fid an earlier message of the same path made.
+
+A connection holds at most 256 fids, `P9_MAX_FIDS`.
+
+# SEE ALSO
+
+intro(5), attach(5), clunk(5), open(5), stat(5), fsd(4)
+
+# DIAGNOSTICS
+
+A VectraOS server answers with these:
+
+: `unknown fid`
+  <fid> is not in use.
+: `fid already in use`
+  <fid> is open, or <newfid> is in use or `NOFID`.
+: `bad message`
+  The first name is `.`, empty, holds `/`, is not UTF-8 or holds a control character.
+: `out of memory`
+  Every name was walked, but the connection already holds 256 fids.
+: `file does not exist`, `permission denied`
+  The file server's, for a first name not there or a directory not searchable.
+

@@ -1,0 +1,168 @@
+page=dbg sect=1 summary="debugger"
+    src=cmd/dbg.c,lib/vx-debug/eval.c,lib/vx-debug/index.c,lib/vx-debug/dwarf.c,servers/procfs/debug.c,servers/procfs/crash.c
+    keys=debug,debugger,breakpoint,backtrace,crash,dwarf
+
+# SYNOPSIS
+
+```usage
+dbg [-c] [-x file] program [arg ...]
+dbg [-c] [-x file] -p pid
+dbg [-c] [-x file] crashdir
+```
+
+# DESCRIPTION
+
+`dbg` is a source-level debugger for C programs.
+It has one face yet, the command line, which `-c` names: it reads commands, one to a line, and writes what they show.
+Without `-x` the commands come from standard input, each after the prompt `(dbg) `; with `-x` they come from <file>, each echoed after the prompt, and `dbg` ends at the file's end.
+
+`dbg` does everything through the debug files of `/proc` (see procfs(4)), as `acid` did on Plan 9, so what it does a script can do with `echo` and `cat`.
+When it starts it reads the program's ELF whole and indexes its DWARF 5 and its symbol table, then says how many functions and lines it found.
+
+There are three kinds of target:
+
+: <program>
+  A program to launch, at `run`, with the arguments <arg>.
+  Its breakpoints are set before its first instruction.
+  `dbg` is its parent: the program is killed when `dbg` quits.
+: `-p` <pid>
+  A running process to attach to.
+  Its program is `/boot/bin/` and the name in its `images` file.
+  It goes on running until a breakpoint stops it, and is detached, not killed, when `dbg` quits.
+: <crashdir>
+  A crash directory, `/tmp/crash/<name>.<pid>`, which procfs(4) saves when a process faults and nothing handles the fault.
+  It is shaped like `/proc/<pid>`, so `bt` and `print` work on it with the code they use for a live process: the writable memory comes from its `mem` directory and the rest from the program's ELF.
+  Its program is found as for `-p`.
+
+A launched program that crashes leaves a crash directory, and `dbg` turns to it: after the program has gone, `bt` and `print` show it as it died.
+
+@node=commands title="Commands"
+
+A command is a word and what follows it.
+A blank line, or one starting `#`, does nothing; an unknown word prints the list of commands.
+
+: `break` <func>, `break` <file>`:`<line>, `break` <addr>
+  Set a breakpoint at the body of function <func>, past its prologue; at the lowest address of a statement on <line> of the source file whose path ends with <file>; or at the address <addr>, decimal or `0x` hex.
+  Before `run`, up to 32 are kept and set when the program starts; after, each is set at once.
+: `run`
+  Start the program, and wait for it to stop.
+: `cont`, `continue`
+  Resume the process, and wait for it to stop.
+  A fault it stopped at is passed on, to the program's handler or to procfs(4).
+: `step`
+  Step the current thread one instruction, and wait.
+: `bt`, `where`
+  Print the call stack, innermost first: each frame's number, its pc, and its function, file and line.
+  The chosen frame is marked `*`.
+: `frame` <n>
+  Choose frame <n> for `print`.
+: `print` <expr>, `p` <expr>
+  Evaluate the C expression <expr> in the chosen frame and print `=` and its value (see {expressions|#expressions}).
+: `regs`
+  Print the current thread's registers, its `regs.ndb` file.
+: `info`
+  Print the process's images and mappings, its `images` and `maps` files.
+: `kill`
+  Kill the process.
+: `quit`
+  Quit.
+
+Whenever the process stops, `dbg` says why and where: `dbg: stopped:`, the event (`break`, `step`, `fault` with its address, `trap`, `watch`), then the function, file and line.
+The thread the event names becomes the current thread, and frame 0 the chosen one.
+When it ends, `dbg` prints its exit string from its wait record, and, for a trap, the crash directory.
+
+@node=expressions title="Expressions"
+
+`print` takes a C expression over the program's own types and variables:
+
+- integer literals, decimal or `0x` hex, with any `u` and `l` suffixes, and character literals such as `'a'`;
+- variables: the frame's locals and parameters in scope at its pc, then globals, then enumerators;
+- registers: `$pc`, `$sp` and `$fp` on both machines, `$rip`, `$rax` to `$r15` on x86_64, `$x0` to `$x30` on aarch64; only `$pc`, `$sp` and `$fp` are known in a frame other than 0;
+- unary `-`, `+`, `!`, `~`, `*` and `&`; casts to a named type with any `*`s; `sizeof` of a value or `sizeof(`<type>`)`;
+- the binary operators `* / % + - << >> < <= > >= == != & ^ | && ||`, with C's precedence, and pointer arithmetic;
+- members with `.` and `->`, indexing with `[]`, and parentheses.
+
+There are no calls: running the program's code would change the program being debugged.
+There is no assignment, and nothing changes the program's memory or registers.
+
+A value prints by its type: an integer in decimal, a `char` with its character, a pointer in hex, a `char *` or `char` array as a quoted string too, an enum by its name, a `bool` as `true` or `false`.
+A struct or union prints its members one level deep, inner aggregates as `{...}`; an array prints its first 8 elements.
+
+# EXAMPLES
+
+The debugger's test runs `dbg -c -x /boot/tests/dbgdemo.cmds /boot/bin/dbgdemo crash`, on a program whose third call to `leaf` reads address 16.
+Its output, less procfs(4)'s report of the crash on the same console:
+
+```text
+dbg: /boot/bin/dbgdemo: 114 functions, 7153 lines
+(dbg) break leaf
+dbg: breakpoint at 0x21af07 in leaf (tests/user/dbgdemo.c:21)
+(dbg) run
+dbg: stopped: break at leaf (tests/user/dbgdemo.c:21)
+(dbg) bt
+*#0 0x21af07 in leaf (tests/user/dbgdemo.c:21)
+ #1 0x206163 in middle (tests/user/dbgdemo.c:28)
+ #2 0x206070 in vx_main (tests/user/dbgdemo.c:35)
+ #3 0x204a17 in vx_start (tests/user/../../lib/vx-rt/rt.c:54)
+ #4 0x206143 in _start (tests/user/../../lib/vx-rt/rt.c:59)
+(dbg) print n
+= 1
+(dbg) print tally
+= {calls = 0, total = 0, label = 0x202455 "demo"}
+(dbg) cont
+dbg: stopped: break at leaf (tests/user/dbgdemo.c:21)
+(dbg) cont
+dbg: stopped: break at leaf (tests/user/dbgdemo.c:21)
+(dbg) frame 1
+ #1 in middle (tests/user/dbgdemo.c:28)
+(dbg) print n * 10
+= 30
+(dbg) cont
+dbg: stopped: fault addr=0x10 at leaf (tests/user/dbgdemo.c:23)
+(dbg) cont
+dbg: dbgdemo exited: sys: trap: fault read addr=0x10 pc=0x21afa0
+dbg: crash directory /tmp/crash/dbgdemo.17
+(dbg) print tally.total
+= 6
+(dbg) quit
+```
+
+# FILES
+
+: `/proc/<pid>/ctl`, `events`, `mem`, `maps`, `images`
+  The process's debug files: breakpoints and control, the events that stop it, its memory, its mappings and its images.
+: `/proc/<pid>/threads/<t>/regs`, `regs.ndb`, `ctl`
+  A thread's registers, binary and as text, and its stepping.
+: `/proc/<dbg's pid>/wait`
+  The wait record of a program `dbg` launched.
+: `/tmp/crash/<name>.<pid>/`
+  Crash directories.
+: `/boot/bin/<name>`
+  The program of an attached process or a crash directory.
+
+# SEE ALSO
+
+procfs(4); the design is `docs/05-debugger.md` in the repository
+
+# DIAGNOSTICS
+
+A command that cannot be done says why, after `dbg:`, such as `dbg: no such function or line`, `dbg: not running` or `dbg: no stack`; an expression that cannot be evaluated says why, such as `dbg: no such variable` or `dbg: variable not available here`.
+
+The exit string is `usage`, `no symbols` when the program's ELF cannot be read or indexed, `cannot read the script`, `path too long`, or `no namespace`; it is empty otherwise, whatever the commands met.
+
+# BUGS
+
+Only the command line exists, without the graphical debugger of the design, view rules, watch expressions, disassembly, or stepping by source line, over or out.
+`step` steps one instruction; on x86_64 a step over `syscall` stops one instruction late.
+
+The ELF is read and indexed each time `dbg` starts, and must be at most 8 MiB; symbols are not looked for by build ID, and an attached process or a crash directory must name a program in `/boot/bin`.
+A crash directory is recognised only by its path's starting `/tmp/crash/`, and is opened at its thread 1, whichever thread faulted.
+
+There is no `stop`: an attached process can be stopped only by a breakpoint.
+After a launched program ends, `run` refuses to start it again.
+`dbg` prints no exit string for an attached process that ends, since it has no wait record for it.
+
+The index has no inlined frames: an inlined function shows as its caller, and variables of optimised code may be `not available here`.
+The call stack is followed by frame pointers alone, so code built without them shows a short stack.
+Floating-point literals and arithmetic are not supported, though floating-point values print.
+Breakpoints with conditions and counts, and watchpoints, which procfs(4) has, cannot be set from `dbg`.

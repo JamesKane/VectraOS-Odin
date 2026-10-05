@@ -1,0 +1,140 @@
+page=ndb sect=6 summary="the one text format: records of key=value tuples"
+    src=lib/vx-ndb/ndb.h,lib/vx-ndb/ndb.c
+    keys=record,tuple,key,value,flag,quote,hex,comment,manifest,configuration
+
+# SYNOPSIS
+
+```ndb
+# a comment
+kind=name key=value flag text="a value with spaces" bytes=x"610a62"
+    more=value                  # an indented line continues the record
+```
+
+# DESCRIPTION
+
+Every structured text file in the system is ndb, the format of Plan 9's network database: the service and driver manifests (svc(6), driver(6)), the build's port files, the manual's page headers (guide(6)), the store's and the boot slots' records (store(6), release(6), slots(6)), the records of a spawn message, and what servers print in files such as `status` and `info`.
+There is no TOML, JSON or YAML in the base system.
+
+One parser and one writer, `lib/vx-ndb`, serve every program that reads or writes it: the kernel, svcd(8), devmgr(8), the servers, the C library's back end and `build` on the host.
+No program parses ndb or formats it by hand, so a value that comes from another program, a file name or a window title, can never forge a tuple or a record.
+
+ndb has no keys of its own.
+It is the syntax; what each key means, which are required, and whether an unknown one is refused belongs to the format built on it, and that format's page lists them.
+Unlike Plan 9's ndb, a key appears at most once in a record.
+
+The text is UTF-8 (see utf(6)), in lines ended by a newline.
+A space and a tab are the same everywhere.
+
+: record
+  One line of tuples, and the lines after it that start with a space or a tab, which continue it.
+  A line that starts with neither starts the next record.
+  Blank lines and comment lines may come between a record's lines without ending it.
+  A record holds at most 128 tuples and 64 KiB.
+: tuple
+  `key=value`, or a bare `key`, which is a flag that is set.
+  Tuples are separated by spaces and tabs; there may be any number of them on a line.
+: key
+  One or more bytes, none of them a space, a newline, `=`, `"` or a control character, that are valid UTF-8.
+  By convention a record's first tuple says what kind of record it is (`service=`, `port=`, `page=`), and dots group related keys (`mem.free`).
+: bare value
+  The bytes after `=` up to the next space or newline: at least one, valid UTF-8, with no `"` and no control character.
+  It may hold `=` and `#`.
+: quoted value
+  A `"`, then any valid UTF-8 but a control character, then a `"`, with `""` inside standing for one quote.
+  It ends on the line it starts on.
+  `""` is the empty value, which cannot be written bare.
+: hex value
+  `x"`, an even number of hexadecimal digits in either case, and `"`: the bytes the digits spell, whatever they are.
+  It is how a value holding a newline, a tab, another control character or invalid UTF-8 is written: a file named `a`, newline, `b` is `name=x"610a62"`.
+: comment
+  A `#` where a tuple could start, and the rest of its line.
+  Anywhere else `#` is an ordinary byte, so `key=a#b` has the value `a#b`.
+: list
+  Values separated by commas, in one value: `keys=formats,files`.
+  The parser does not split it; the format that reads the key does.
+: number
+  Decimal digits with no leading zero, or `0x` and lower-case hexadecimal digits, with no sign and within 64 bits, as `vx_ndb_get_u64` reads a value.
+  The writer writes numbers in decimal, and a negative one with a leading `-`, which a format reads itself.
+
+There are no types and no nesting in the file.
+
+The parser is strict.
+A record with a duplicate key, bad quoting, a control character, invalid UTF-8, or too many tuples or bytes is refused whole, with the line of the fault, and never repaired, so two readers can never read one record differently.
+A carriage return is a control character, so a file with CRLF line ends is refused.
+The parser stops at the first error.
+
+The writer chooses each value's form itself: bare when the value is not empty and holds no space, `"` or control character and is valid UTF-8; quoted when it is valid UTF-8 with no control character but is empty or holds a space or a `"`; hex otherwise.
+A tab is a control character, so a value holding one is written in hex.
+It writes a record as one line, its tuples separated by one space, and never writes continuation lines or comments.
+It refuses a key it could not read back, one that is empty, starts with `#`, or holds a space, a newline, `=`, `"`, a control character or invalid UTF-8, and a record that does not fit the caller's buffer; a refused record is not used.
+
+# EXAMPLES
+
+A manifest, from `boot/svc/system.ndb`, with flags and two records:
+
+```ndb
+service=sys-fsd program=/boot/bin/fsd post=fsd console entropy pager
+    when=vx.system
+connect=disk0.system
+```
+
+A record continued on an indented line, and a quoted value: this page's header.
+
+```ndb
+page=ndb sect=6 summary="the one text format: records of key=value tuples"
+    src=lib/vx-ndb/ndb.h,lib/vx-ndb/ndb.c
+```
+
+Hex values, from `tests/qemu/cons.ndb`, where the bytes typed include backspace, delete and carriage return:
+
+```ndb
+# "café", DEL, "e", return: the erase takes back é's two bytes (ADR-0013)
+type=x"636166c3a97f650d"
+expect="constest: got [cafe]"
+```
+
+# FILES
+
+: `/boot/svc/*.ndb`
+  Service manifests; see svc(6).
+: `/boot/drv/*.ndb`
+  Driver manifests; see driver(6).
+: `ports/*/port.ndb`
+  How `build` builds each vendored port, in the repository.
+
+# SEE ALSO
+
+guide(6), svc(6), driver(6), utf(6); docs/02 §4.1 and D14 in the repository; {Plan 9's ndb(6)|https://9p.io/magic/man2html/6/ndb}
+
+# DIAGNOSTICS
+
+The parser's errors, each with the line it refers to, are:
+
+| Error | Cause |
+| `unterminated quoted value` | a quoted value with no closing `"` on its line |
+| `control character in a quoted value; use x"…"` | a control character inside quotes |
+| `invalid UTF-8 in a quoted value` | the bytes inside quotes are not UTF-8 |
+| `bad hex value` | a byte that is not a hexadecimal digit, or no closing `"` |
+| `odd number of digits in a hex value` | half a byte |
+| `control character in a key` | a control character in a key |
+| `empty key` | a `=` or a `"` where a key should start |
+| `invalid UTF-8 in a key` | a key that is not UTF-8 |
+| `quote inside a bare value` | a `"` inside a value written bare |
+| `control character in a value; use x"…"` | a control character in a bare value |
+| `empty bare value; write ""` | `key=` with nothing after it |
+| `invalid UTF-8 in a value; use x"…"` | a bare value that is not UTF-8 |
+| `quote inside a key` | a `"` straight after a key |
+| `junk after a value` | a quoted or hex value not followed by a space or the end of the line |
+| `duplicate key` | a key twice in one record |
+| `too many tuples in one record` | more than 128 |
+| `indented line with no record above it` | the first line of tuples is indented |
+| `record longer than 64 KiB` | too long |
+| `scratch space exhausted` | the caller's buffer for decoded values is too small |
+
+# BUGS
+
+The writer does not refuse a duplicate key, a 129th tuple or a record longer than 64 KiB, so it can write a record the parser refuses, though `ndb.h` says nothing is written that would read back differently.
+
+A record's length is measured to the end of the blank and comment lines that follow it, so trailing comments count against its 64 KiB.
+
+A number's hexadecimal digits must be lower case, though a hex value's may be either.

@@ -1,0 +1,267 @@
+page=svc sect=6 summary="service manifests, and the spawn message they become"
+    src=servers/svcd/svcd.c,lib/vx-rt/base.c,lib/vx-rt/spawn.c,lib/vx-ns/spawn.c,servers/partd/partd.c
+    keys=manifest,services,boot,spawn,post,claim,connect,restart,grant
+
+# SYNOPSIS
+
+```text
+service=name program=/boot/bin/prog [post=srv] [arch=arch] [when=word]
+    [restart] [console] [bootimage] [storeimage] [resource] [pager]
+    [acpi] [tasks] [cmdline] [entropy]
+arg=value
+env=name=value
+user=name
+ns=template
+mount=old srv=srv [aname=spec] [flags=abc]
+bind=old new=new [flags=abc]
+connect=srv
+claim=srv
+part=srv type=guid | part=srv name=label
+ioport=port count=n | mmio=address size=n | irq=line
+```
+
+# DESCRIPTION
+
+A service manifest says what svcd(8) starts and what each service it starts is given.
+The manifests are the files `boot/svc/*.ndb` in the repository, installed in the boot image as `/boot/svc/*.ndb`; a test image adds `tests/user/<name>.ndb` as `/boot/svc/<name>.ndb` beside them.
+They are written by hand, and only svcd reads them, straight from the boot image, since bootfs(4), which serves that image as files, is one of the services they start.
+svcd reads every manifest in the image's order, by file name with the test manifests last, and starts the services in that order, the drivers first.
+
+A manifest is ndb records (see ndb(6)).
+A record with `service=` starts a service; the records after it, up to the next `service=`, belong to it.
+A manifest with an ndb error anywhere, or a key not defined below, is used not at all: svcd says so, naming the file and the key.
+
+Each service becomes a task whose spawn message (below) holds what its manifest names, as handles and records, and nothing more: a service has no authority its manifest does not give it.
+
+Numbers are decimal, without leading zeros, or hexadecimal after `0x`, in lower case.
+A flag is a key with no value; a service has it if its record has the key, whatever its value.
+
+@node=service title="The service record"
+
+The keys of a `service=` record:
+
+: `service`
+  The service's name, at most 31 bytes: the task's name, and what svcd's messages and the command line's `vx.skip=` call it.
+  A record with no name is skipped, as is the 33rd service.
+: `program`
+  The program's path in the boot image, from `/`, such as `/boot/bin/netd`.
+  Required.
+: `post`
+  A post, `/srv/<srv>`, that the service serves.
+  svcd makes a channel, keeps its client end as `/srv/<srv>` for mounts and connectors, and gives the service its server end as the handle `listen`; it keeps a duplicate of that end too, so connections made while the service restarts wait for it.
+  A service posting `cons` becomes svcd's console, and one posting `proc` is procfs(4), with which svcd then registers every service.
+: `arch`
+  `x86_64` or `aarch64`: the service exists only on that architecture.
+  Without it, on both.
+: `when`
+  A word that must be one of the kernel command line's for the service to start: `vx.live` on an install medium, `vx.system` on an installed system, `never` for a manifest that is a marker.
+  It is looked at once, at boot.
+: `restart`
+  A flag: when the service exits, for any reason, svcd starts it again, unless it has exited more than five times within ten seconds; then it is left.
+: `console`
+  A flag: a connector to `/srv/cons`, as the handle `console`, which vx-rt and musl write standard output and errors to.
+: `bootimage`
+  A flag: the boot image, read-only, as the handle `bootimage`, with a record `bootimage size=<bytes>`.
+: `storeimage`
+  A flag: the store image of an install medium, read-only, as the handle `storeimage`, with a record `storeimage size=<bytes>`; nothing on a medium without one.
+: `resource`
+  A flag: the root Resource, authority over every device, as the handle `resource`.
+  devmgr(8) alone has it.
+: `pager`
+  A flag: the root Resource with only the right to make pagers, as the handle `pager`, for fsd(4).
+: `acpi`
+  A flag: the ACPI tables, as the handle `acpi`, with a record `acpi size=<bytes>`.
+: `tasks`
+  A flag: svcd's own task, as the handle `tasks`, and through it every task, for procfs(4) and tests.
+: `cmdline`
+  A flag: the kernel command line, as a record `cmdline=<text>`.
+: `entropy`
+  A flag: a 32-byte seed of the service's own, from svcd's generator, as a record `entropy=<bytes>`.
+
+@node=records title="The records after it"
+
+Each record after the service record is one of these, decided by the first of these keys it has, in this order: `ns`, `arg`, `env`, `mount`, `claim` or `connect`, `ioport`, `mmio`, `irq` or `part`, `bind`, `user`.
+Arguments, environment, mounts and binds keep the manifest's order.
+
+: `arg`
+  One argument, `arg=<value>`; the first is the program's first argument, not its name.
+: `env`
+  One environment variable, `env=<name>=<value>`.
+: `user`
+  Who the service runs as, at most 64 bytes, and whom its attaches name (see users(6)).
+  Without it, `none`.
+: `ns`
+  A namespace template, `/lib/ns/<template>` in the boot image, a namespace(6) file whose lines become mounts and binds here, in place.
+  A template may hold only `mount` lines whose server is a post, `/srv/<srv>`, and `bind` lines, each with its flags; any other line stops the service from starting.
+: `mount`
+  A mount in the service's namespace: `mount=<old>` with the keys below.
+  svcd gives the service a connector to the post, as a handle `ns.<nn>`.
+: `srv`
+  The post the mount is of, without `/srv/`; it must be one some manifest makes, by `post=`, `claim=` or `connect=`.
+: `aname`
+  The attach name the mount gives its server, such as one of fsd's branches.
+: `flags`
+  The mount's or bind's letters: `a` after, `b` before, `c` allow create, as namespace(6) has them.
+: `bind`
+  A bind in the service's namespace: `bind=<old> new=<new>` puts <new> on <old>.
+: `new`
+  What a bind puts on its <old>.
+: `connect`
+  A connector to the post `/srv/<srv>`, as the handle `srv:<srv>`.
+  `connect=nsd` lets the service's programs make namespace groups.
+: `claim`
+  The post's server end, as the handle `claim:<srv>`, for the service to hand on: devmgr gives a driver its post this way, and partd(8) serves a partition on one.
+  A post is a rendezvous: whichever manifest names it first, by `post=`, `claim=` or `connect=`, makes it, and connections wait for a server.
+: `ioport`
+  A driver's I/O ports, `ioport=<port> count=<n>`, x86_64 only, at most 65536 from a port below 65536.
+: `count`
+  How many ports an `ioport` record names.
+: `mmio`
+  A driver's registers, `mmio=<address> size=<n>`.
+: `size`
+  The bytes an `mmio` record names.
+: `irq`
+  A driver's interrupt line.
+: `part`
+  A partition partd serves on the post `<srv>`, which a `claim=` must give it: the first GPT entry with the type or name the record's other key gives.
+: `type`
+  A `part` record's partition type, a GUID as GPT has it.
+  It is looked at before `name`.
+: `name`
+  A `part` record's partition name, as GPT has it.
+
+A service with `ioport`, `mmio` or `irq` records is a driver.
+svcd mints the device object each names from the root Resource once, when it reads the manifest, and gives each start of the driver its own duplicates, as handles named for the record's first key, so a restarted driver gets the same device; a device that cannot be made keeps the driver from ever starting.
+Device and `part` records are given to the service as they are written, every key with them.
+
+A record with none of these keys is ignored.
+
+@node=spawn title="The spawn message"
+
+A program's first message, on the channel its thread starts with, is its spawn message: a header with the ordinal `VX_SPAWN`, then ndb records, then up to 64 handles.
+svcd, devmgr, rc, dbg and musl's `posix_spawn` and `exec` write one with `vx_spawn_elf` (`lib/vx-rt/spawn.c`); vx-rt reads it before `vx_main` runs, and a program finds the rest of it by key.
+Its records, besides those a manifest's flags and its device and `part` records give, are:
+
+: `spawn`
+  The task's name, first.
+: `handle`
+  A handle's name, `handle=<name> index=<i>`: the <i>th handle of the message is called <name>, and a program takes it by that name, once.
+  The first is always `self`, the task itself.
+: `index`
+  The handle a `handle` record names, from 0; a handle named twice, or an index past the last handle, is an error.
+: `argv0`
+  The program's name as its parent gave it, from musl's `exec` and `posix_spawn`.
+: `cmdline`
+  The kernel command line.
+
+and `user`, `arg` and `env` as above, at most 4096 arguments and 4096 variables.
+A spawner that names no user gives the child its own.
+A spawn message that is not ndb, or breaks these rules, is reported as `vx-rt: malformed spawn message` and dropped: the program starts with no records and no handles.
+
+The namespace records are replayed, in order, by a program that builds its namespace from the message (vx-ns's `vx_ns_from_spawn`, which musl calls at its first file operation); one that never does has no namespace.
+A child sharing its parent's namespace group is given a handle `nsgroup` instead, and builds its table from the group's text.
+The records are:
+
+: `mount`
+  `mount=<old> handle=ns.<nn> src=/srv/<srv>`, with `aname` and `flags` if the manifest had them: a mount of the server behind the connector `ns.<nn>`.
+  Mounts naming one connector share one connection.
+  Or `mount=<old> dial=<address>`: a 9P server over TCP, which the program dials through the `/net` its earlier records gave it.
+: `src`
+  The mounted server's name, which the namespace's printed form shows (ns(1)).
+: `dial`
+  A network address to dial for a mount, `tcp!<host>!<port>` or `9p://<host>:<port>`.
+
+and `bind`, `new`, `aname` and `flags` as above.
+A record that cannot be replayed stops the replay, with `vx-ns: cannot replay the record on line <n> of the spawn message` and the error.
+
+# EXAMPLES
+
+The network service, `boot/svc/netd.ndb`:
+
+```ndb
+service=netd program=/boot/bin/netd post=net console restart
+connect=ether0
+```
+
+The console shell, `boot/svc/shell.ndb`:
+
+```ndb
+service=rc program=/boot/bin/rc console restart
+mount=/ srv=bootfs
+bind=/bin new=/boot/bin flags=a
+mount=/proc srv=proc
+mount=/net srv=net
+mount=/sys srv=sys
+mount=/tmp srv=tmpfs
+connect=nsd
+```
+
+Two drivers, one for each architecture, `boot/svc/cons.ndb`:
+
+```ndb
+service=uart program=/boot/bin/drv-uart-16550 arch=x86_64 post=cons restart
+ioport=0x3f8 count=8
+irq=4
+
+service=uart program=/boot/bin/drv-uart-pl011 arch=aarch64 post=cons restart
+mmio=0x9000000 size=4096
+irq=33
+```
+
+An installed system's partitions and file system, from `boot/svc/system.ndb`:
+
+```ndb
+service=sys-partd program=/boot/bin/partd console when=vx.system
+connect=disk0
+claim=disk0.esp
+part=disk0.esp type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+claim=disk0.system
+part=disk0.system type=7C6D3E1A-2B4F-4E0A-9C1D-56F2A8B90E35
+
+service=sys-fsd program=/boot/bin/fsd post=fsd console entropy pager
+    when=vx.system
+connect=disk0.system
+```
+
+A test run as a user, in the POSIX template's namespace with fsd's home branch on `/tmp`, from `tests/user/ctestfsd.ndb`:
+
+```ndb
+service=ctestfsd program=/boot/bin/ctestfsd console entropy
+user=vectra
+arg=one
+arg="two words"
+env=GREETING=hello
+ns=posix
+mount=/tmp srv=fsd aname=home flags=c
+mount=/n srv=tmpfs flags=c
+connect=nsd
+env=PATH=/bin
+```
+
+# FILES
+
+: `/boot/svc/*.ndb`
+  The manifests, in the boot image.
+: `boot/svc/*.ndb`, `tests/user/*.ndb`
+  The manifests in the repository: the system's, and the tests'.
+: `/lib/ns/<template>`
+  The namespace templates `ns=` names, in the boot image.
+
+# SEE ALSO
+
+svcd(8), driver(6), ndb(6), namespace(6), users(6), devmgr(8), partd(8), bootfs(4), procfs(4), fsd(4), task(2)
+
+# BUGS
+
+A flag is its key's presence, so `restart=no` restarts.
+
+The service record's keys are read only from it, and the other records' only from them: `user=` on the service record, or `console` on a record after it, is ignored.
+A record with two of the keys above is only the first, so `arg=x env=y` is one argument.
+
+A driver holds four device objects; a fifth keeps it from starting.
+
+`user=` is advisory until there is authentication: a manifest can name anyone.
+
+A malformed spawn message loses every handle it carried, with only vx-rt's one line to say so.
+
+The package manifests of ADR-0029, with `needs=`, do not exist yet; svcd reads only the boot image's.

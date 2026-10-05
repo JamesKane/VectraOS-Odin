@@ -1,0 +1,187 @@
+page=task sect=2 summary="make, run, inspect and end tasks"
+    names=task_create,task_exec,task_info,task_kill,task_mem_rw
+    src=kernel/syscall/syscall.c,kernel/obj/task.c,kernel/obj/process.c,kernel/obj/exception.c,lib/vx-rt/base.c
+    keys=process,fork,exec,exit,kill,exits,debugger,memory
+
+# SYNOPSIS
+
+```c
+vx_status vx_task_create(vx_str name, vx_handle *out);
+vx_status vx_task_fork(vx_str name, vx_handle *out);
+vx_status vx_task_exec(vx_handle scratch, vx_handle bootstrap, uint64_t entry,
+                       uint64_t sp);
+vx_status vx_task_info(vx_handle task, vx_task_summary *out);
+vx_status vx_task_info_of(vx_handle task, uint64_t id, uint32_t flags,
+                          vx_task_summary *out);
+vx_status vx_task_kill(vx_handle task, vx_str msg);
+vx_status vx_task_kill_id(vx_handle task, uint64_t id, vx_str msg);
+vx_status vx_task_mem_rw(vx_handle task, vx_mem_op *ops, uint32_t count);
+```
+
+# DESCRIPTION
+
+A task is an address space and a table of handles: what Plan 9 calls a process, less its threads, which thread(2) makes and starts.
+A task runs while it has a live thread.
+It ends when its last thread exits, with the empty exit string, or when it is killed, with the kill's; then its handles are closed, its mappings dropped and its page tables freed.
+The task object lives on while any handle to it is open, so its exit string can still be read.
+Each task has an id, from 1, never reused, and a parent, the task that made it; when a task is destroyed its children pass to its parent.
+
+## Making a task
+
+`vx_task_create` makes a task with nothing in it: no mappings, no handles and no threads.
+Its name is <name>, at most 23 bytes, cut at a NUL and to whole runes.
+The caller gets a handle to it with every right, and is its parent.
+It is filled from outside, with as_map(2) and handle_dup(2) on its handle, and started with `vx_thread_create` and `vx_thread_start`, as vx-rt's loader does.
+
+`vx_task_fork` is the same call with `VX_TASK_FORK`: the new task gets a copy of the caller's memory and of its handle table, made now and charged in full, as POSIX's `fork` wants (see the kernel's design, 01 §9).
+
+- Each mapping is copied to the same address with the same permissions.
+  A ring's memory and device memory are not copied: the child finds those addresses unmapped.
+  A VMO a pager supplies is shared, not copied, as a file mapped `MAP_SHARED` is.
+- Each handle keeps its value and its rights, so what the parent's memory says about its handles holds in the child.
+  A handle to the parent itself becomes one to the child.
+- The in-task exception handler is the parent's (exception(2)); exception ports, a debugger's binding, watchpoints and I/O ports are not copied.
+
+The copy has no threads: the caller starts one.
+
+## Exec
+
+`vx_task_exec` replaces the calling task's program, keeping the task (ADR-0012).
+<scratch> is a task the caller made and filled with the new image and its stack, and never started.
+The calling task takes <scratch>'s address space and its name; its old address space goes to <scratch>, which ends with the empty exit string.
+Every handle the caller holds is closed except <bootstrap>, which moves to the new program and is given to a new thread as its first argument, at <entry> with stack <sp>.
+The calling thread ends.
+The in-task exception handler is cleared; exception ports and a debugger's binding stay.
+The task keeps its id, its parent and its `EXIT` bindings, which fire only when it really ends.
+
+<bootstrap> is meant to be a channel end holding the spawn message, but any handle with `VX_RIGHT_TRANSFER` will do; it may not be the caller's own task or <scratch>.
+Only a task with one live thread may exec.
+On success the call does not return.
+
+## Reading a task
+
+`vx_task_info` fills a `vx_task_summary` for <task>:
+
+: `id`, `name`
+  The task's id and name, the name padded with NULs.
+: `state`
+  `VX_TASK_NEW` before any thread has started, `VX_TASK_RUNNING`, or `VX_TASK_EXITED` once it has been torn down.
+: `threads`, `blocked`
+  How many threads are live, and how many of those are waiting in a call.
+: `mapped`
+  The bytes mapped into its address space.
+: `exit_len`, `exit`
+  Its exit string, once it has ended: `exit_len` bytes, none for success.
+
+`vx_task_info_of` reads instead the task <id> in <task>'s tree: <task> itself or one of its descendants.
+With `VX_TASK_NEXT` in <flags>, it reads the task in the tree with the next id after <id>, so a holder of a task handle lists its tree by starting from 0 and asking again from each id, as procfs(4) does.
+There is no other way to reach a task: no global lookup.
+
+## Ending a task
+
+`vx_task_kill` ends <task> with <msg> as its exit string (ADR-0010): empty for success, else the reason, in at most `VX_ERRMAX` (128) bytes, cut to whole runes.
+Each of its threads exits the next time it heads back to user mode, so a thread blocked in a call is woken with `VX_ERR_KILLED` first.
+A task with no live thread, one never started among them, is torn down at once.
+Killing a task that is already ending changes nothing and succeeds: the first exit string stands.
+A task that kills itself does not return from the call.
+`vx_task_kill_id` ends the task <id> in <task>'s tree, as `vx_task_info_of` finds it.
+
+A task's end is seen through a binding of the trigger `VX_TRIGGER_EXIT` on it (port_bind(2)), whose packet's value is the exit string's length: 0 for success.
+
+The kernel writes the exit string itself when a fault no one handles kills a task, in Plan 9's words: `sys: trap: fault read addr=0x0 pc=0x401000`.
+A note sent to a task with no handler (thread(2)) ends it with the note.
+
+## Another task's memory
+
+`vx_task_mem_rw` copies between <task>'s memory and the caller's, a debugger's access (dbg(1)).
+It does <count> operations, at most 16, each a `vx_mem_op`: <size> bytes, at most 1 MiB, between <address> in the task and <buffer> in the caller, from the caller when <write> is 1, to it when 0.
+Each operation's result goes in its own <status>, and the call returns `VX_OK` once it has written them back.
+
+A write to a mapping that is not writable, such as code for a breakpoint, first gives that mapping a private copy of its pages, as `ptrace` does, and the write goes there: the task never gets a writable mapping of its code, and nobody else sharing the VMO sees the write.
+A write to a writable mapping goes to the VMO itself.
+
+## Rights
+
+`vx_task_create` needs no handle.
+`vx_task_exec` needs `VX_RIGHT_MANAGE` on <scratch> and `VX_RIGHT_TRANSFER` on <bootstrap>; `vx_task_info` needs `VX_RIGHT_INSPECT`, `vx_task_kill` `VX_RIGHT_MANAGE`, and `vx_task_mem_rw` `VX_RIGHT_DEBUG`.
+A task's maker holds every right to it, so it may debug what it starts.
+
+# EXAMPLES
+
+Kill every task named `drv-virtio-blk` in a tree, from `tests/user/blktest.c`:
+
+```c
+vx_task_summary info = {};
+uint64_t id = 0;
+int killed = 0;
+while (vx_task_info_of(tasks, id, VX_TASK_NEXT, &info) == VX_OK) {
+  id = info.id;
+  if (memcmp(info.name, "drv-virtio-blk", 15) == 0 &&
+      vx_task_kill_id(tasks, id, VX_STR("killed")) == VX_OK)
+    killed++;
+}
+```
+
+# SEE ALSO
+
+thread(2), exception(2), as_map(2), handle_dup(2), port_bind(2), procfs(4); ADR-0010 and ADR-0012 in `docs/adr`
+
+# DIAGNOSTICS
+
+Every call returns `VX_ERR_BAD_HANDLE` for a handle that is not open or not a task, and `VX_ERR_ACCESS` for one without the right it needs.
+
+`vx_task_create` and `vx_task_fork` return:
+
+: `VX_OK`
+  The handle is in <out>.
+: `VX_ERR_RANGE`
+  <name> is 24 bytes or longer.
+: `VX_ERR_INVALID`
+  <name> or <out> is not mapped in the caller, or an option other than `VX_TASK_FORK` was given.
+: `VX_ERR_NO_MEMORY`
+  The kernel has no room for the task or, for a fork, for the copy.
+: `VX_ERR_BAD_STATE`
+  A fork's caller is being torn down.
+
+`vx_task_exec` returns only on a failure, having changed nothing:
+
+: `VX_ERR_INVALID`
+  <entry> or <sp> is outside user space, <scratch> is the caller, or <bootstrap> is the caller or <scratch>.
+: `VX_ERR_BAD_STATE`
+  The caller has another live thread or is ending, or <scratch> has started, ended, or is another exec's.
+: `VX_ERR_BAD_HANDLE`, `VX_ERR_ACCESS`
+  Also for a <bootstrap> that is not open, or lacks `VX_RIGHT_TRANSFER`.
+: `VX_ERR_NO_MEMORY`
+  No room for the new thread.
+
+If the new program's thread cannot then be started, the task ends with the exit string `exec failed`.
+
+`vx_task_info` and `vx_task_info_of` return `VX_OK`; `VX_ERR_NOT_FOUND` when there is no task <id> in the tree, or none after it; `VX_ERR_INVALID` for a flag other than `VX_TASK_NEXT`, or an <out> not mapped writable.
+
+`vx_task_kill` and `vx_task_kill_id` return `VX_OK`; `VX_ERR_RANGE` for a <msg> longer than `VX_ERRMAX`; `VX_ERR_INVALID` when <msg> is not mapped; `VX_ERR_NOT_FOUND` as above.
+
+`vx_task_mem_rw` returns `VX_OK`, or `VX_ERR_INVALID` for a <count> of 0 or more than 16, or <ops> not mapped writable.
+An operation's <status> is:
+
+: `VX_OK`
+  All of it was copied.
+: `VX_ERR_RANGE`
+  It is longer than 1 MiB, or runs past the end of user space.
+: `VX_ERR_INVALID`
+  Part of it is mapped in neither the task nor, for <buffer>, the caller.
+: `VX_ERR_UNSUPPORTED`
+  It touches device memory, or writes to pages a pager supplies.
+: `VX_ERR_SHOULD_WAIT`
+  It reads a pager's page that has not been supplied.
+: `VX_ERR_NO_MEMORY`
+  No room for a private copy, or more than 16 mappings needed one in this call; the caller may try again.
+
+# BUGS
+
+An operation of `vx_task_mem_rw` that fails part way has copied the pages before the failure, and its <status> does not say how many bytes.
+
+A private copy made for a write is of the whole mapping, made at once; the mapping no longer sees later changes to the VMO it came from.
+
+A fork copies every page at once: pages shared until written, behind the same call, are later work.
+
+`vx_task_exec` starts the new program's thread after the old address space has gone, so a failure there can only end the task.

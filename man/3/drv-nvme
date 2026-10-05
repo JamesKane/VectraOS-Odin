@@ -1,0 +1,141 @@
+page=drv-nvme sect=3 summary="NVMe disk driver"
+    src=drivers/drv-nvme/nvme.c,boot/drv/nvme.ndb,lib/vx-driver/blockproto.h
+    keys=nvme,disk,ssd,block,controller,namespace,pci
+
+# SYNOPSIS
+
+```ndb
+match=pci class=0x010802 program=/boot/bin/drv-nvme post=disk# msi=8
+```
+
+```text
+/srv/disk0, /srv/disk1, ...
+drv-nvme.reset=n  drv-nvme.die=n  drv-nvme.fault=1
+```
+
+# DESCRIPTION
+
+`drv-nvme` drives an NVM Express controller, as the base specification 1.4 describes it, and serves the controller's first namespace as a disk of the block class on its post in `/srv`.
+
+devmgr(8) starts it for every PCI function of class 01:08:02, an NVMe I/O controller, whoever made it, by the manifest in `/boot/drv/nvme.ndb` shown above.
+The driver gets the function's configuration space, its memory BARs, a DMA domain, up to eight MSI-X interrupts (`msi=8`), and the listen end of its post, and nothing else; it takes no arguments.
+The post is numbered with the other disks in the order devmgr finds the functions on the bus, whichever driver serves them: `/srv/disk0` is the first disk found, virtio or NVMe.
+partd(8) holds a connector to it, and hands out its partitions as posts of their own, which fsd(4) and the other file servers use.
+
+At start it reads the controller's limits and brings it up, then identifies the controller, the namespaces it has, and the first namespace's size and format.
+It refuses, and exits, if there is no register BAR of at least 8 KiB, no MSI-X, no NVM command set, no support for 4 KiB memory pages, no namespace, a namespace format with metadata, or a sector size outside 512 to 4096 bytes.
+It then asks for eight I/O queue pairs and makes as many as the controller grants.
+The admin queue, 32 entries, uses vector 0 and is polled; the I/O queues share the other vectors in turn, or vector 0 when there is only one.
+A queue must be physically contiguous, so each is as deep as the controller allows (`CAP.MQES`), 256 at most, and as one contiguous run of the driver's memory gives the device: 64 entries through a pass-through DMA domain, 256 through VT-d or SMMUv3.
+
+## Sessions
+
+The block class is defined in `docs/proto/block.md`; in short:
+a client sends `CONNECT` on the post, naming a window of the disk (a first sector and a count, 0 for the rest) and whether it is read-only, and gets back a ring session (see ring(2)) that reaches that window and nothing else.
+Each request on the ring is one submission, completed by one completion with the same `user_data`, in any order.
+The driver serves 8 sessions at once, each given to an I/O queue pair in turn, so sessions share pairs when there are fewer than 8.
+A `CONNECT` it cannot take is refused: `INVALID` for a message that is not one, `RANGE` for a window outside the disk, `NO_MEMORY` when 8 sessions are open.
+
+The client arena, 1 MiB, is given to the controller through the DMA domain when the session opens, and every transfer names the arena's own pages, so nothing is copied.
+The requests:
+
+: `INFO`
+  Completes at once with the most bytes one transfer moves (128 KiB, or less if the controller's `MDTS` says so), the sector size, the window's sectors, and the flags `INFO_READONLY` for a read-only session, `INFO_CACHE` if the controller has a volatile write cache, and `INFO_DISCARD` if it takes Dataset Management.
+: `READ`, `WRITE`
+  An NVM Read or Write of whole sectors, its PRPs made from the arena's pages: the second page, or a list of the rest.
+  A transfer that is empty, not a multiple of the sector size, not aligned to one in the arena, or longer than `INFO` says completes with `INVALID`; one outside the window or the arena with `RANGE`; a write in a read-only session with `ACCESS`; none of these reaches the controller.
+: `WRITE_FUA`
+  A Write with Force Unit Access set.
+: `FLUSH`
+  An NVM Flush; it completes at once in a read-only session or when the controller has no volatile write cache.
+: `DISCARD`
+  A Dataset Management deallocate of one range of at most 2^32−1 sectors; what lies beyond is left as it is, since a discard is a hint.
+  It completes at once, as done, if the controller cannot discard.
+
+A controller error completes the request with `IO`.
+While a session's queue pair is full the driver stops taking its submissions, and takes them again as commands complete.
+A session that does not drain its completions is dropped.
+When a session goes with commands in flight, its arena stays given to the controller until they complete.
+
+## Recovery
+
+A command not done 10 seconds after it was submitted is aborted with the admin command Abort.
+If it is still not done 5 seconds later, or the controller reports a fatal status (`CSTS.CFS`), the driver resets the controller: it disables and enables it, makes its queues again, and submits again every command that was in flight, under its old id.
+Reads, writes of the same bytes, flushes and discards may be done twice without harm, so the clients see a delay rather than an error.
+If the controller does not come back after four tries, the driver exits.
+
+If the driver exits, devmgr revokes its DMA domain, turns off bus mastering, resets the function where it can, and starts it again on the same post, with nothing kept; clients see their sessions close, dial again and submit again what had not completed (see `docs/proto/block.md` §4).
+devmgr gives up after five starts.
+
+## Options
+
+The driver reads its options from the kernel command line, words of the form `drv-nvme.`<key>`=`<value>, which devmgr passes it.
+They are for tests:
+
+: `drv-nvme.reset=`<n>
+  Reset the controller after every <n> completions, with commands in flight.
+: `drv-nvme.die=`<n>
+  On its first start only, exit after <n> completions, as a crash would, with commands in flight.
+: `drv-nvme.fault=1`
+  Before serving, aim an Identify at a device address the DMA domain does not map, and report whether the IOMMU stopped it and counted the fault.
+
+# EXAMPLES
+
+What devmgr and the driver print at boot, on x86_64 under QEMU with an NVMe disk of 64 MiB (here and below, a line too long for the page is broken and indented):
+
+```text
+devmgr: 00:03.0 1b36:0010 storage msi-x bar0=16K
+devmgr: started drv-nvme
+drv-nvme: 64 MiB, 512-byte sectors, 8 queues of 256, 8 vectors,
+    write cache, discard
+```
+
+With `drv-nvme.die=100` on the command line, the restart, and the block client in fsd dialling again:
+
+```text
+drv-nvme: exiting, as asked (drv-nvme.die)
+devmgr: /boot/bin/drv-nvme exited: drv-nvme.die
+devmgr: started drv-nvme
+drv-nvme: 64 MiB, 512-byte sectors, 8 queues of 256, 8 vectors,
+    write cache, discard
+vx-blk: the disk's session went; dialled again, and the request done
+    again
+```
+
+With `drv-nvme.fault=1`:
+
+```text
+drv-nvme: a DMA fault, as asked: the command completed, the fault
+    reported, 1 counted
+```
+
+# FILES
+
+: `/boot/drv/nvme.ndb`
+  The manifest devmgr matches.
+: `/srv/disk`<n>
+  The post: the whole namespace, as the block class.
+
+# SEE ALSO
+
+drv-virtio-blk(3), devmgr(8), partd(8), fsd(4), intro(3); the block class is `docs/proto/block.md` in the repository
+
+# DIAGNOSTICS
+
+Once serving, the driver prints the namespace's size, its sector size, the queues and vectors it has, and `write cache`, `discard` and `a reset every` <n> where they apply.
+Each reset prints `drv-nvme: reset:` and why: `the controller reports a fatal status`, `a command not done after it was aborted`, or `drv-nvme.reset`.
+A failure prints `drv-nvme: FAILED:` and what failed, such as `no MSI-X` or `a format with metadata`, and the driver exits with what failed as its exit string.
+`drv-nvme.die` exits with `drv-nvme.die`.
+
+# BUGS
+
+Only the first namespace is served.
+There are no SGLs and no use of a controller memory buffer, and through a pass-through DMA domain the queues are 64 entries deep.
+
+A command that Abort ends completes with `IO`; only a reset submits commands again.
+The abort path has never run: QEMU's controller does not stall a command, so only resets are tested, through `drv-nvme.reset`.
+
+The controller is never told to shut down (`CC.SHN`), and its volatile write cache is not flushed before a reset or a restart's function reset: writes that completed but were not yet flushed are trusted to survive.
+A real disk that drops its cache then could lose writes fsd saw complete before its next commit's flush.
+
+`fsdnvmerestart`, the test of a restart under load, hung once after the block client dialled again; it is not explained.

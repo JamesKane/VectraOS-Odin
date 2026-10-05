@@ -1,0 +1,292 @@
+page=fsd sect=4 summary="the system volume's file server"
+    src=servers/fsd/fsd.c,lib/vx-fs/fs.h,lib/vx-fs/vol.c,lib/vx-fs/file.c,lib/vx-fs/tree.c,lib/vx-fs/blk.c,lib/vx-fs/check.c
+    keys=file,system,volume,branch,snapshot,rollback,dump,users,permissions,adm,pager,mmap,vx-fs
+
+# SYNOPSIS
+
+```usage
+fsd
+```
+
+# DESCRIPTION
+
+`fsd` serves a vx-fs volume, the system volume, over 9Px with the `posix`, `xattr`, `map` and `dref` extensions.
+The volume's format is vxfs(6); `fsd` mounts it from a block session and serves its branches, its snapshots and a dump view of its dated snapshots, each as a tree of its own.
+
+svcd(8) starts it from a manifest (see svc(6)) whose `connect=` names the disk: the post of a partition partd(8) serves, such as `disk0.system`.
+`fsd` takes no arguments.
+It posts itself where the manifest's `post=` says, `/srv/fsd` by convention, and serves until it is killed.
+Its manifest should give it `entropy`, the seed the 9P framework's open-file tokens need (a forked child joins its parent's open files with them), and `pager` to make it the system's pager for mapped files, as {the pager|#pager} describes.
+
+At the start it mounts the volume, reads the users file from the `adm` branch, as {users|#users} describes, and prints the volume's last commit, its arenas and how many users it knows.
+A mount takes the newer of the volume's two superblocks that is whole and, after a crash, makes the other copies agree with it before anything is written.
+The disk must be writable and its sector size must divide the volume's block, 16 KiB.
+
+The attach name chooses the tree, as {attaches|#attaches} describes: a branch by its name, `%` and a branch's name for the branch without permission checks, a snapshot's label for that snapshot, read-only, or `dump` for the dump view.
+On an installed system `/srv/fsd`'s branches are `store`, `cfg`, `home` and `adm`, which install(8) makes; a client mounts one as rc's `mount` does:
+
+```rc
+% mount /srv/fsd /home home
+```
+
+The `adm` branch's root holds two files `fsd` makes, `ctl` and `status`, beside the users file; they are described under FILES, and `ctl`'s commands under {ctl|#ctl}.
+Changes are committed every 5 seconds, and at each `Tfsync`; see {commits|#commits}.
+
+`fsd` is one loop and serves one request at a time, waiting for the disk when a request needs it.
+
+@node=attaches title="Attach names"
+
+A Tattach's `aname` is one of these:
+
+: <branch>
+  A branch: a label that moves to the newest state at every commit, which a client reads and changes.
+  The first attach of a branch since `fsd` started reaps the files a crash left removed while they were open.
+  Up to 16 branches are open at once, and `fsd` keeps each open, once attached, until it exits.
+: `%`<branch>
+  The branch, permissively: no permission is checked, and any attribute may be changed, as gefs's permissive attach.
+  Only a member of `adm` may attach so; anyone else is refused.
+  A `%` before a snapshot's label or `dump` attaches that permissively too, still read-only.
+: <label>
+  A label that names a snapshot rather than a branch: that snapshot as it was labelled, read-only.
+  Up to 32 snapshots are open at once, through this attach and the dump view together.
+: `dump`
+  The dump view: a directory for each year that has a dated snapshot, in each a directory `MMDD` for each day, and in each day a directory for each branch snapshotted that day, holding that snapshot read-only.
+  A dated snapshot is one whose label is <branch>`@`<YYYY>`-`<MM>`-`<DD>, such as `home@2027-03-14`, which the view shows as `/2027/0314/home`.
+  A branch's label of that shape is not listed.
+  `..` of a snapshot's root in the view is its day.
+  A branch called `dump` cannot be attached by its name.
+
+The attaching user is Tattach's `uname`, and every request on the fids that follow is checked as that user ({users|#users}).
+An empty `aname`, one longer than 255 bytes, and one naming no label are refused.
+
+Every tree but a branch is read-only: a create, write, remove, rename, symbolic link, setattr or writable mapping there is refused.
+Renames stay within one tree; a rename to another branch is refused.
+
+@node=users title="Users and permissions"
+
+The users are the file `users` at the root of the `adm` branch, in users(6)'s format: one line a user, `id:name:leader:members`, where <id> is a decimal number, <leader> a user's name or nothing, and <members> names separated by commas.
+Blank lines and lines starting `#` are skipped.
+A user is also the group of the same name and id.
+A file of up to 127 users is taken, each name up to 32 bytes and each group up to 32 members, and a leader or member must be a user the file names.
+
+`fsd` reads it at the start, and again whenever the last open of a file called `users` in the `adm` branch is closed.
+A file it cannot parse leaves the users as they were; with no file it can read at the start, the users are `adm` (id 0) and `none` (id 1).
+`none` is always a user: if the file does not name it, `fsd` adds it, with id 4294967294.
+A Tattach `uname` that names no user attaches as `none`.
+
+Permissions are Plan 9's, as gefs checks them.
+A request may do what the owner's bits allow if its user owns the entry, what the group's bits allow if its user is in the entry's group, and what the others' bits allow in any case; `none` gets only the others'.
+A directory's `x` bit is permission to walk in it.
+Opening for reading needs `r`; for writing or with `OTRUNC`, `w`; for execution, `x`; a create, remove, rename or symbolic link needs `w` in the directory.
+An open that joins another's open file (`OJOIN`) has that open's rights and is not checked again.
+
+A new entry is owned by its creator and in its directory's group.
+A new file takes no more of its directory's `r` and `w` bits than the directory has, and the `x` bits it asked for; a new directory takes no more of any of its directory's bits.
+
+A setattr is checked as gefs checks it:
+
+- the size, with permission to write;
+- the mode, by the owner or the group's leader;
+- the owner, by a member of `adm` only;
+- the group, by the owner, to a group the owner is in, or by a leader of both groups;
+- the times set to given values, by the owner; set to now, by the owner or a writer.
+
+A group with no leader is led by each of its members.
+A member of `adm` is a member of the group whose id is 0.
+
+These permissions are advisory: a client names whom it attaches as, and may name anyone, until keyd (M10) signs who a client is.
+
+@node=ctl title="The ctl file's commands"
+
+`/adm/ctl` takes one command a write, its words separated by blanks, tabs or newlines.
+Only a member of `adm` may open it, and only for writing.
+A command fails as the write does, with the reason as the write's error; a command that is not one of these, has the wrong number of words or has a word too long is refused, `bad message`.
+
+: `sync`
+  Commit now; the write returns once the commit is durable.
+: `check`
+  Commit, then check the volume whole: every block's hash and structure, each tree's order and height, the snapshots and labels agreeing, each deadlist, and every block in use reached and nothing else.
+  The verdict is `status`'s `check=` field; the write succeeds whatever it is.
+: `halt`
+  Commit, then refuse every change from then on, for shutdown: writes, creates, removes, renames, setattrs, opens for writing, writable mappings and the commands below.
+  Reads go on, and `sync`, `check` and `halt` are still taken.
+: `snap` <branch> <label>
+  Commit, then label the branch's state now <label>, a snapshot that stays.
+  <branch> may be any label; <label> must be new.
+: `fork` <label> <branch>
+  Commit, then make a new branch <branch> starting from the snapshot <label> names.
+  <label> may be a branch, whose state now is the start.
+: `del` <label>
+  Delete a label.
+  The snapshot it named goes when no other label names it and no branch was forked from it, and the space only it held is free again.
+  `adm` is refused, and so is a branch `fsd` has open; a snapshot open read-only is closed first, and fids on it find nothing from then on.
+: `rollback` <branch> <label>
+  Commit, label the branch's state now <branch>`@before-`<N>, <N> the commit just made, then point the branch at a fork of the snapshot <label> names.
+  A branch `fsd` has open is rolled back in place: its fids then see the snapshot's files, and its mapped files' pages are read again.
+  `adm` is refused.
+
+A `snap`, `fork`, `del` or `rollback` that succeeds is committed before the write returns, so it outlives a power cut right after.
+
+@node=snapshots title="Snapshots and branches"
+
+A volume holds trees, each a version of a file system, and labels that name them.
+A branch is a label that moves to the newest tree at every commit; every other label names a snapshot that does not change.
+Snapshots cost no space when they are made: a tree shares every block it has not changed with the one it came from, and deleting a snapshot frees what it alone held.
+
+`ctl`'s `snap` makes a snapshot, `fork` a branch from one, `rollback` moves a branch back to one, and `del` deletes either.
+A rollback keeps the head it leaves as a snapshot, `BRANCH@before-N`, which `del` removes when it is no longer wanted.
+
+A snapshot is read through its label as an attach name, or, if its label is dated, through the dump view; `fsd` keeps no retention policy of its own, and labels are made and deleted only through `ctl`.
+
+@node=commits title="Commits"
+
+A commit makes every change so far durable at once.
+`fsd` commits 5 seconds after the first change since the last commit, at each `Tfsync`, which is answered once its commit is durable, and before each `ctl` command but `del`.
+A crash loses the changes since the last commit, never the volume.
+
+A file removed while it is open stays, without a name, until the last fid open on it, or the last mapping of it, goes; then its data is freed.
+A crash before then leaves it to be freed when its branch is next attached.
+
+A commit that fails leaves the volume read-only.
+
+@node=pager title="The pager and mapped files"
+
+With `pager` in its manifest, `fsd` is the system's pager (see pager_create(2)), and answers `Tmap`: a mapping of a file is a pager-backed VMO, one for each file however many clients map it, as large as the file in pages.
+The kernel asks `fsd` for each page when it is first touched, and `fsd` reads it from the volume, zeros past the file's end, within 10 seconds.
+Without `pager`, `Tmap` is refused.
+
+Pages written through mappings are written to the file every 5 seconds while files are mapped, before each commit, before a read of the file and before its size changes, so a read sees them; a write to the file goes into its pages too.
+What a mapping writes past the file's end is lost.
+A file mapped keeps its VMO, and stays open, until nothing but `fsd` refers to the VMO; up to 64 files are mapped at once.
+
+A rollback of a branch reads its mapped files' pages again; deleting a snapshot that is mapped leaves its pages reading as zeros.
+
+A `dref` read or write, whose data is in a VMO of the client's, is copied 64 KiB at a time through a buffer of `fsd`'s own, never by mapping the client's VMO.
+
+# EXAMPLES
+
+The test volume's manifest, `tests/user/fsdvol.ndb`: partd(8) serves the test disk's system partition as `disk1.vectra`, and `fsd` serves the volume on it:
+
+```ndb
+service=partd program=/boot/bin/partd console
+connect=disk1
+claim=disk1.vectra
+part=disk1.vectra name=vectra
+
+service=fsd program=/boot/bin/fsd post=fsd console entropy pager
+connect=disk1.vectra
+```
+
+The installed system's, `boot/svc/system.ndb`, is the same with `connect=disk0.system`.
+A service that mounts its branches, as `tests/user/fsdadm.ndb` does: `home` on `/tmp`, `adm` on `/adm`, and `home` permissively on `/n`:
+
+```ndb
+service=fsdadm program=/boot/bin/rc console entropy
+user=vectra
+arg=/boot/tests/fsdadm.rc
+ns=posix
+mount=/tmp srv=fsd aname=home flags=c
+mount=/adm srv=fsd aname=adm
+mount=/n srv=fsd aname=%home
+connect=nsd
+env=PATH=/bin
+env=HOME=/tmp
+```
+
+What `fsd` prints at the start, from the `fsdadm` test:
+
+```text
+fsd: /srv/disk1.vectra: commit 4, 1 arenas, 3 users
+fsd: serving /srv/fsd
+```
+
+Commands to `ctl`, as `tests/user/fsdadm.rc` gives them, with `adm` on `/adm`; `tee` makes a refusal fail it and not the script:
+
+```rc
+% fn ctl { echo $* | tee /adm/ctl >/dev/null }
+% ctl snap home home@t1
+% ctl fork home@t1 exp
+% ctl del exp
+% ctl check
+% sed -n 1p /adm/status | tr ' ' '\n' | grep '^check='
+check=clean
+```
+
+Dated snapshots, and the dump view on `/n`, from `tests/user/fsddump.rc`:
+
+```rc
+% ctl snap home home@2027-03-14
+% ctl snap home home@2026-12-31
+% ls /n
+2026
+2027
+% cat /n/2027/0314/home/a.txt
+first
+```
+
+A snapshot mounted by its label:
+
+```rc
+% ctl snap home before-c-went
+% mount /srv/fsd /srv before-c-went
+```
+
+# FILES
+
+: `/srv/fsd`
+  Its post, by convention.
+: `/adm/ctl`
+  The `adm` branch's `ctl`, mode 0660, owned by `adm`: a member of `adm` writes a command to it ({ctl|#ctl}).
+  It cannot be read, made, removed or mapped.
+: `/adm/status`
+  The volume, as ndb records, mode 0444: made when it is opened and when it is read from the start.
+  The first record is `volume`, with `commit=`, the last commit's number; `arenas=`, how many; `used=` and `size=`, the arenas' bytes in use and in all; `users=`, how many users `fsd` knows, `none` included; `check=`, the last check's verdict; and `halted`, after `ctl`'s `halt`.
+  The verdict is `unchecked` until `ctl`'s `check`, then `clean`, or `NOT-CLEAN` followed by `,leaked=`<n>`,unallocated=`<n>`,damaged=`<n>`,bad-snapshots=`<n>`,bad-deadlists=`<n>.
+  Then a record for each label, in the order of their names: `label=`, its name; `snapshot=`, the snapshot's number; and `branch` if it is one.
+  Anyone may read it; it cannot be written.
+: `/adm/users`
+  The users, in users(6)'s format ({users|#users}): an ordinary file of the `adm` branch, read again when the last open of it closes.
+  install(8) and `host/vxfs mkfs` write the first one.
+
+`ctl` and `status` are listed first in the `adm` branch's root, where only `fsd` makes them; `/adm` is where a service's manifest mounts the `adm` branch.
+
+# SEE ALSO
+
+vxfs(6), users(6), svc(6), partd(8), distd(8), install(8), tmpfs(4), pager_create(2); the design is `docs/11-storage.md` in the repository, after Ori Bernstein's gefs in 9front
+
+# DIAGNOSTICS
+
+`fsd` prints `fsd: FAILED: ` and the reason, and exits with the reason without the status after it, when it cannot start:
+`no listen channel (post=)`, `no connector to a disk (connect=)`, `cannot open a session on the disk`, `the disk is read-only`, `the disk's sectors do not divide a block`, `no volume it can mount`, `no port` or `cannot be a pager`; what it prints of the four that a call's failure causes (opening the session, mounting, and the two of the pager) is followed by `: ` and the status.
+It exits `cannot serve` if its loop fails.
+
+It prints `fsd: no /adm/users it can read: adm and none only` when it starts without a users file it can parse, and `fsd: /adm/users is malformed: the users stay as they were` when one is changed so.
+A commit that fails prints `fsd: the commit failed, and the volume is read-only now: ` and the reason.
+
+Requests fail with the 9P framework's words: `permission denied` for a permission, `adm`'s files and the read-only trees; `file does not exist` for a name or label not there; `file already exists`; `file system full`; `out of memory` for a 33rd snapshot or 65th mapped file; `operation not supported` for `Tmap` without `pager`; and `fid already in use` for a change after `halt` and a `del` of an open branch; a `ctl` command whose commit fails, with the commit's reason.
+
+# BUGS
+
+`fsd` is single-threaded: a request that waits for the disk delays every other client.
+
+Its reasons are the framework's, not its own: a halted volume answers `fid already in use`, and a 17th branch `file does not exist`.
+A branch, once attached, stays open until `fsd` exits, so `del` refuses it, and 16 branches at most can ever be attached in one run.
+
+At most 32 snapshots are open at once, and one is closed only when its label is deleted; a slot freed by `del` is the next snapshot's, and fids still on it read that one's file of the same qid, unchecked.
+A 33rd snapshot, by label or through the dump view, which anyone can walk, fails until `fsd` restarts.
+
+Smaller review findings, due with M6's pipelined server: reloading the users file maps live fids to whoever now has their place in the table; `halt` still reaps orphans; `rename` and `symlink` can make a real `ctl` or `status` in `adm`'s root; a create counts no open when the 512-entry open table is full, and any client can fill it; the dump view shows the first 256 dated labels in key order; two readers of `status` at once share one buffer; `ORCLOSE` is ignored.
+Closing any file called `users` in the `adm` branch, not only the root's, reads the users again.
+
+`rollback` makes the `BRANCH@before-N` label before rolling back, and leaves it if the rollback then fails; a branch's name past 223 bytes is cut short in that label.
+
+A hostile volume image can make `fsd` free live blocks, spin through a cyclic deadlist chain (bounded by the device's size), or make the checker slow (quadratic in snapshots); only the system volume, which the system made, is mounted today.
+An upsert's room for its worst case, 32 blocks, is an estimate, past which the volume's sticky error still stands.
+
+Identity is advisory until keyd (M10).
+POSIX programs see no owners: `Tgetattr` reports uid and gid 0, and its ctime is the mtime.
+
+The design's `fsd -c`, a check of an unmounted volume, and `fsd -r`, which reams a new one, do not exist: `ctl`'s `check` checks the mounted volume, and install(8) and `host/vxfs` make volumes.
+`status` has no space by branch and no cache sizes, which the design gives it.
+
+`msync(MS_SYNC)` does not wait: mapped writes reach the volume within about 10 seconds, or at the file's next `fsync`.

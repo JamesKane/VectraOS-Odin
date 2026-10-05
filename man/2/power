@@ -1,0 +1,60 @@
+page=power sect=2 summary="turn the machine off"
+    names=system_power
+    src=kernel/syscall/syscall.c,kernel/arch/aarch64/arch.c,kernel/arch/x86_64/arch.c,lib/vx-rt/base.c
+    keys=power,off,shutdown,psci,acpi
+
+# SYNOPSIS
+
+```c
+vx_status vx_system_power(vx_handle resource, uint32_t op);
+```
+
+# DESCRIPTION
+
+`vx_system_power` does <op> to the whole machine.
+The only <op> is `VX_POWER_OFF`, which turns it off.
+
+On aarch64 the kernel makes PSCI's `SYSTEM_OFF` call, with `hvc` or `smc` as the FADT's ARM boot flags say; only the kernel can execute either.
+On x86_64, and where the FADT says there is no PSCI, turning the machine off is ACPI's, which bus-acpi(8) does in user space by entering S5, and the call returns `VX_ERR_UNSUPPORTED`.
+
+<resource> must be the root Resource, with `VX_RIGHT_MANAGE`.
+Only devmgr(8) holds it, and it makes the call when bus-acpi asks, because ACPI found no way to turn the machine off (ADR-0031).
+Programs ask bus-acpi, as poweroff(8) does; nothing else calls `vx_system_power`.
+
+The call returns only if the machine is still on.
+Nothing is stopped or synced first.
+
+# EXAMPLES
+
+devmgr, answering bus-acpi's request, from `servers/devmgr/devmgr.c`:
+
+```c
+} else if (m.kind == VX_ACPI_OFF) {
+  say(VX_STR("powering off"), VX_STR(" (PSCI)"), VX_STR("\n"));
+  st = vx_system_power(resource, VX_POWER_OFF);
+```
+
+# SEE ALSO
+
+bus-acpi(8), devmgr(8), poweroff(8)
+
+# DIAGNOSTICS
+
+`vx_system_power` returns only on failure:
+
+: `VX_ERR_INVALID`
+  <op> is not `VX_POWER_OFF`; this is checked before <resource>.
+: `VX_ERR_BAD_HANDLE`
+  <resource> is not a handle to a Resource.
+: `VX_ERR_ACCESS`
+  The handle lacks `VX_RIGHT_MANAGE`.
+: `VX_ERR_UNSUPPORTED`
+  The machine is x86_64, or its FADT says it has no PSCI.
+: `VX_ERR_IO`
+  The firmware's `SYSTEM_OFF` returned.
+
+# BUGS
+
+There is no reboot: PSCI's `SYSTEM_RESET` and ACPI's reset register are a later <op>, to come with their first user.
+
+The call is gated on the root Resource, the coarsest right there is; ADR-0031 accepts this while devmgr is its only caller.

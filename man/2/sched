@@ -1,0 +1,39 @@
+page=sched sect=2 summary="scheduling contexts and core reservations (reserved)"
+    names=sched_ctx_create,sched_ctx_bind,sched_ctx_configure,sched_reserve
+    src=kernel/syscall/syscall.c,abi/vx/syscalls.def
+    keys=schedule,scheduler,intent,realtime,budget,period,reserve,cores,affinity
+
+# SYNOPSIS
+
+There are no `vx-rt` wrappers.
+The calls are made raw, as `vx_syscall(VX_SYS_sched_ctx_create, ...)`, `vx_syscall(VX_SYS_sched_ctx_bind, ...)`, `vx_syscall(VX_SYS_sched_ctx_configure, ...)` and `vx_syscall(VX_SYS_sched_reserve, ...)`.
+
+# DESCRIPTION
+
+These calls are reserved.
+Their numbers are allotted, and the kernel implements none of them: each returns `VX_ERR_UNSUPPORTED`.
+
+They are meant to manage scheduling contexts, each a CPU budget, a period and an intent that threads are bound to and that `channel_call` donates to the server it calls (01 §8):
+
+: `sched_ctx_create`
+  Is to make a scheduling context for an intent, admitting a `realtime` budget or refusing it with a reason.
+: `sched_ctx_bind`
+  Is to bind a thread to a context, several threads sharing one context's budget and deadline, or to bind a thread to one core of a reservation.
+: `sched_ctx_configure`
+  Is to change a context's parameters, carrying a kernel-internal core mask for drivers that need a particular core.
+: `sched_reserve`
+  Is to reserve whole cores for a program, by tier, last-level cache or NUMA node, granted or refused and never degraded.
+
+Until they land, every thread runs as `VX_INTENT_INTERACTIVE`, the intent channel messages carry as `sender_intent`, and the kernel's threads share one round-robin ready queue in 10 ms slices.
+
+# SEE ALSO
+
+intro(2)
+
+# DIAGNOSTICS
+
+Each returns `VX_ERR_UNSUPPORTED`.
+
+# BUGS
+
+None of the design's scheduling exists: no intents but `interactive`, no admission test, no donation through `channel_call`, no reservations, and no placement on heterogeneous cores.

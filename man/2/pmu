@@ -1,0 +1,30 @@
+page=pmu sect=2 summary="program a task's performance counters (reserved)"
+    names=pmu_configure
+    src=kernel/syscall/syscall.c,abi/vx/syscalls.def
+    keys=performance,counters,profiling,pmu,rdpmc
+
+# SYNOPSIS
+
+There is no `vx-rt` wrapper.
+The call is made raw, as `vx_syscall(VX_SYS_pmu_configure, ...)`.
+
+# DESCRIPTION
+
+`pmu_configure` is reserved.
+Its number is allotted, and the kernel does not implement it: it returns `VX_ERR_UNSUPPORTED`.
+
+It is meant to program the hardware performance counters for a task's threads, which the kernel would save and restore on each context switch, so a program can read its own counters with `rdpmc` or `PMEVCNTR`; configuring another task would need `VX_RIGHT_INSPECT` on it (05 §9).
+
+The cycle counter is another matter: user code reads it now, without a call, as clock(2) says.
+
+# SEE ALSO
+
+clock(2), dbg(1)
+
+# DIAGNOSTICS
+
+`pmu_configure` returns `VX_ERR_UNSUPPORTED`.
+
+# BUGS
+
+There are no performance counters for programs: the kernel neither programs them nor switches them with threads.

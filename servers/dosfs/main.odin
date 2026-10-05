@@ -27,6 +27,7 @@ import "vx:p9"
 import "vx:p9ring"
 import "vx:rt"
 import "vx:str"
+import usage "gen:usage/dosfs"
 
 @(private="file")
 disk: driver.Blk
@@ -450,7 +451,7 @@ start :: proc() -> string {
 		case args[i] == "-r":
 			read_only = true
 		case:
-			fail("usage: dosfs [-r] [-u user]")
+			fail(usage.TEXT)
 		}
 	}
 	server.listen = rt.spawn_take("listen")

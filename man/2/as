@@ -1,0 +1,120 @@
+page=as sect=2 summary="map memory objects into a task's address space, unmap and list them"
+    names=as_reserve,as_map,as_unmap,as_protect,as_query
+    src=kernel/syscall/syscall.c,kernel/obj/task.c,kernel/obj/device.c,lib/vx-rt/base.c
+    keys=address,space,map,mmap,munmap,mapping,vmo,memory,ioport
+
+# SYNOPSIS
+
+```c
+vx_status vx_as_map(vx_handle task, vx_handle vmo, uint64_t offset,
+                    uint64_t size, uint32_t flags, uint64_t *addr);
+vx_status vx_as_unmap(vx_handle task, uint64_t addr, uint64_t size);
+vx_status vx_as_query(vx_handle task, uint64_t address, vx_map_info *info);
+```
+
+# DESCRIPTION
+
+A task's address space is the lower half of the virtual addresses, below `0x0000'8000'0000'0000`, and it holds what has been mapped there: ranges of VMOs, the kernel's memory objects (see the kernel's design, 01 §5).
+Each call names the task by a handle, so a task can map into a task it is building as well as into itself.
+Addresses, offsets and sizes are in bytes and are multiples of the page size, 4096.
+
+`vx_as_map` maps <size> bytes of <vmo>, starting <offset> bytes into it, into <task>.
+With `*`<addr> zero the kernel picks the address and writes it to `*`<addr>; otherwise the mapping goes at `*`<addr>, which must be page-aligned.
+<flags> is `VX_MAP_WRITE`, `VX_MAP_EXEC` or neither: a mapping is always readable, and is never both writable and executable, so a JIT maps one VMO twice, once each way.
+<task> needs `VX_RIGHT_MANAGE`; <vmo> needs `VX_RIGHT_MAP` and `VX_RIGHT_READ`, and `VX_RIGHT_WRITE` or `VX_RIGHT_EXEC` to match <flags>.
+The mapping holds a reference to the VMO, so the VMO's handle may be closed once it is mapped.
+A VMO of physical memory, a device's registers, is mapped as device memory; a pager's VMO is mapped as far as its pager has supplied the pages, the rest as they are touched, and a page of it is writable only once it is dirty.
+The kernel places mappings upward from `0x0000'1000'0000'0000`, leaving an unmapped guard page after each.
+A task holds at most 102 mappings.
+
+On x86, <vmo> may instead be an IoRange with `VX_RIGHT_MAP`, and <offset>, <size> and <flags> zero: then `vx_as_map` lets <task> use that range of I/O ports, its threads from their next switch onto a CPU, and does not touch `*`<addr>.
+A task holds at most 32 ranges.
+
+`vx_as_unmap` unmaps the pages of [<addr>, <addr> + <size>) from <task>: whole mappings, or the parts of them in the range.
+A mapping cut at one end shrinks; one cut in the middle becomes two.
+Pages nothing maps are left alone, so unmapping a range twice succeeds both times.
+When it returns, no CPU reaches those pages through those addresses, the kernel's own copies to and from user memory included.
+A VMO is freed when its last mapping and its last handle are gone.
+<task> needs `VX_RIGHT_MANAGE`.
+
+`vx_as_query` fills `*`<info> with the first of <task>'s mappings that ends after <address>: its `base` and `size`, the `offset` into its VMO, and its `flags`, `VX_MAP_WRITE` and `VX_MAP_EXEC`.
+Asking again from each mapping's end lists the address space, as a debugger or `/proc/N/maps` does.
+<task> needs `VX_RIGHT_INSPECT`.
+
+`as_reserve` is reserved.
+It is meant to reserve a range of address space with nothing committed, at a size and alignment the caller names and a random base, for `as_map` to fill (01 §5).
+It has no vx-rt wrapper, and `vx_syscall(VX_SYS_as_reserve, ...)` returns `VX_ERR_UNSUPPORTED` today.
+
+`as_protect` is reserved.
+It is meant to change the permissions of mapped pages, and to tag a mapping with a protection key (01 §5).
+It has no vx-rt wrapper, and `vx_syscall(VX_SYS_as_protect, ...)` returns `VX_ERR_UNSUPPORTED` today.
+
+# EXAMPLES
+
+A stack for a new thread, from the kernel's tests (`tests/kernel/ktest.c`):
+
+```c
+vx_handle vmo;
+uint64_t base = 0;
+if (vx_vmo_create(16ull * 1024, 0, &vmo) != VX_OK) return 0;
+if (vx_as_map(self, vmo, 0, 16ull * 1024, VX_MAP_WRITE, &base) != VX_OK)
+  return 0;
+vx_handle_close(vmo); // the mapping keeps it
+return base + 16ull * 1024;
+```
+
+# SEE ALSO
+
+handle(2), intro(2)
+
+# DIAGNOSTICS
+
+`vx_as_map` returns:
+
+: `VX_OK`
+  The range is mapped, or the I/O ports enabled.
+: `VX_ERR_BAD_HANDLE`
+  <task> is not a task, or <vmo> is neither a VMO nor an IoRange with `VX_RIGHT_MAP`.
+: `VX_ERR_ACCESS`
+  A handle lacks a right, or <flags> asks for both `VX_MAP_WRITE` and `VX_MAP_EXEC`.
+: `VX_ERR_INVALID`
+  <flags> has an unknown bit, <addr> is not a word of the caller's memory, or an IoRange came with <offset>, <size> or <flags> not zero.
+: `VX_ERR_RANGE`
+  <size> is zero, <offset> or <size> is not page-aligned, the range runs past the VMO's end, or `*`<addr> is misaligned or the mapping would end past the user half.
+: `VX_ERR_NO_MEMORY`
+  The task has no free mapping slot or I/O range, a page table could not be allocated, or a page of the range is already mapped.
+: `VX_ERR_BAD_STATE`
+  <task> has exited or is ending.
+
+`vx_as_unmap` returns `VX_OK`, or:
+
+: `VX_ERR_BAD_HANDLE`, `VX_ERR_ACCESS`
+  As above.
+: `VX_ERR_RANGE`
+  <size> is zero, <addr> or <size> is not page-aligned, or the range runs past the user half.
+: `VX_ERR_NO_MEMORY`
+  The range cuts more mappings in the middle than the task has free mapping slots; nothing is unmapped.
+: `VX_ERR_BAD_STATE`
+  As above.
+
+`vx_as_query` returns `VX_OK`, or:
+
+: `VX_ERR_BAD_HANDLE`, `VX_ERR_ACCESS`
+  As above.
+: `VX_ERR_NOT_FOUND`
+  No mapping ends after <address>.
+: `VX_ERR_INVALID`
+  <info> is not writable memory of the caller's.
+
+`as_reserve` and `as_protect` return `VX_ERR_UNSUPPORTED`.
+
+# BUGS
+
+There are no reservations yet, so `as_map` places a mapping anywhere free rather than inside one, and nothing keeps a range free between calls.
+The kernel's placement is not random: mappings go one after another from a fixed base, and space freed by `as_unmap` is never placed in again.
+A fixed address is checked page by page against the page tables, not against the task's mappings: an overlap with a mapped page fails with `VX_ERR_NO_MEMORY`, where the design says it fails and says what is there, and an overlap with a pager's pages not yet supplied is not noticed at all.
+Large pages, which the design lets `as_map` ask for, are not offered, and a mapping is made of 4 KiB pages.
+An IoRange without `VX_RIGHT_MAP` is reported as `VX_ERR_BAD_HANDLE`, not `VX_ERR_ACCESS`.
+Mapping the same IoRange twice takes two of the task's 32 ranges.
+A <addr> the caller can read but not write fails with `VX_ERR_INVALID` after the mapping is made, and the mapping stays.
+`vx_as_query` on a task that has exited walks a mapping table that is no longer there, through a null pointer: the kernel faults.

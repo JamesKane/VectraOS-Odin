@@ -1,0 +1,44 @@
+page=ns sect=1 summary="print the namespace"
+    src=cmd/ns.c,lib/vx-ns/ns.c
+    keys=namespace,mount,bind
+
+# SYNOPSIS
+
+```usage
+ns
+```
+
+# DESCRIPTION
+
+`ns` prints the namespace it was started in, which is its parent's, as namespace(6) text: a script of `mount` and `bind` lines that rebuilds it.
+There is a line for each member of each union, in the order the members were added, since a later one may need a path an earlier one made.
+
+A mounted member is printed as `mount`, its server's name, the mount point and, if it has one, the attach name; a bound one as `bind`, the path bound and the mount point.
+The first member of a union to be added has no flags; each later one has `-b` if it comes before every member added so far and `-a` otherwise; and a member that takes creates has `-c` as well.
+A word holding white space, a quote, `$` or `#`, or an empty one, is quoted as rc(1) quotes it.
+
+`ns` takes no arguments; any it is given are ignored.
+
+# EXAMPLES
+
+After two mounts of a host's file server:
+
+```rc
+% ns | tail -2
+mount tcp!10.0.2.100!5640 /n/host
+mount tcp!10.0.2.100!5640 /n/again
+```
+
+# SEE ALSO
+
+namespace(6), ps(1), rc(1)
+
+# DIAGNOSTICS
+
+`ns` exits `no namespace` when it was given none, and `too long`, printing nothing, when the text does not fit 8 KiB.
+
+# BUGS
+
+`ns` prints only its own namespace; it cannot print another process's, which `/proc/<pid>/ns` holds.
+
+An empty namespace also exits `too long`.

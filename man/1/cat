@@ -1,0 +1,63 @@
+page=cat sect=1 summary="catenate files"
+    src=cmd/cat.c,third_party/sbase/cat.c
+    keys=concatenate,print,file,copy
+
+# SYNOPSIS
+
+```usage
+cat [file ...]
+```
+
+# DESCRIPTION
+
+`cat` reads each <file> in order and writes it on standard output.
+With no <file> it reads standard input to its end.
+Data is copied as bytes, never checked or changed.
+Output goes out a line at a time, and in pieces when a line is long.
+
+Each <file> is opened in the namespace `cat` was started with, and must be an absolute path.
+A <file> that cannot be opened or read is reported and the next is read.
+
+`cat` takes no flags: an argument beginning with `-` is a file's name, and `-` does not mean standard input.
+
+In the POSIX namespace `cat` is sbase's command instead (see {The POSIX command|#posix}).
+
+# EXAMPLES
+
+```rc
+% cat /proc/1/status
+pid=1 name=svcd state=waiting threads=1 mem=30224K sid=1
+% cat /n/u9fs/nothing
+cat: /n/u9fs/nothing: file does not exist
+```
+
+# SEE ALSO
+
+ls(1), tail(1)
+
+# DIAGNOSTICS
+
+A <file> that fails is reported on standard error, as `cat: /n/u9fs/nothing: file does not exist`.
+If any <file> fails the exit string is `error`.
+Reading standard input, the exit string is `read error` when a read fails; it is `no namespace` when `cat` was started with <file> arguments and no namespace.
+
+# BUGS
+
+A relative path is refused as `bad message`, the error a malformed path is given.
+
+Beware of `cat a b >a` and `cat a b >b`, which destroy input files before reading them.
+
+@node=posix title="The POSIX command"
+
+```text
+cat [-u] [file ...]
+```
+
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)), `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so `cat` runs sbase's command, as POSIX specifies.
+It reads each <file> in order and writes it on standard output; with no <file>, or for a <file> of `-`, it reads standard input.
+A <file> that cannot be opened is reported and skipped; a failed write ends it.
+
+: `-u`
+  Accepted and ignored: output is never buffered beyond each read.
+
+sbase's page is `third_party/sbase/cat.1` in the repository.

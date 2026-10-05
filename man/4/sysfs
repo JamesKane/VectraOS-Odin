@@ -1,0 +1,56 @@
+page=sysfs sect=4 summary="system file system: the clock"
+    src=servers/sysfs/sysfs.c
+    keys=sys,clock,time,tsc,cntvct,counter,frequency,realtime,monotonic
+
+# SYNOPSIS
+
+```usage
+sysfs
+```
+
+# DESCRIPTION
+
+`sysfs` serves `/sys`, the files that describe the machine (`docs/02-namespace-swarm.md` §5).
+For now it serves only the clock.
+svcd(8) starts it from `boot/svc/sysfs.ndb`, posts it as `/srv/sys`, and starts it again when it exits; the console shell's manifest and `/lib/ns/posix` mount it on `/sys`.
+
+Every file is read-only and owned by `sys`, and is made afresh by each read from the kernel's `clock_read` (see clock(2)).
+
+: `/sys/clock/info`
+  The cycle counter the system's one clock is made from, as the kernel calibrated it, one ndb record (see ndb(6)).
+  On x86_64 it is `tsc.hz=` the counter's frequency, the flags `tsc.invariant` if the counter runs at a constant rate and `tsc.user` if user code may read it, and `source=tsc`.
+  On aarch64 the keys are `cntfrq.hz`, `cntvct.invariant`, `cntvct.user` and `source=cntvct`.
+  A program that times itself with `rdtsc` or `cntvct_el0`, as `vx_cycles` and procfs(4)'s profiling zones do, takes the frequency from here rather than calibrating.
+: `/sys/clock/now`
+  `monotonic=` the monotonic clock and `realtime=` the wall clock, both in nanoseconds.
+  `realtime` is UTC, counted from 1970, once a clock driver has set the kernel's wall clock (ADR-0031); until then it is the monotonic clock.
+
+# EXAMPLES
+
+The manifest that starts it, `boot/svc/sysfs.ndb`:
+
+```ndb
+service=sysfs program=/boot/bin/sysfs post=sys console restart
+```
+
+# FILES
+
+: `/srv/sys`
+  sysfs's post.
+
+# SEE ALSO
+
+clock(2), procfs(4), svcd(8); ADR-0031 and `docs/02-namespace-swarm.md` §5 in the repository
+
+# DIAGNOSTICS
+
+It prints `sysfs: serving /srv/sys` when it starts.
+Without a listen channel it prints `sysfs: no listen channel` and exits with `no listen channel`; it exits `cannot serve` if serving fails.
+An open for writing fails with `permission denied`.
+
+# BUGS
+
+Only the clock is served: `cpu/`, `mem/`, `power/` and the rest of `docs/02-namespace-swarm.md` §5.1 wait for what measures them.
+
+Each read makes the record again, so a file read in more than one piece may join two different moments.
+If the kernel does not answer, `info` reads as empty.

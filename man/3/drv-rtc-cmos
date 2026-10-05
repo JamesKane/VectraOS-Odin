@@ -1,0 +1,65 @@
+page=drv-rtc-cmos sect=3 summary="PC CMOS real-time clock driver"
+    src=drivers/drv-rtc-cmos/rtc.c,boot/drv/rtc-cmos.ndb,lib/vx-driver/clockproto.h
+    keys=rtc,cmos,clock,time,date,wall,utc,acpi,pnp0b00,x86_64
+
+# SYNOPSIS
+
+```ndb
+match=acpi hid=PNP0B00 program=/boot/bin/drv-rtc-cmos clock
+```
+
+# DESCRIPTION
+
+`drv-rtc-cmos` reads the PC's CMOS real-time clock once, at boot, and tells devmgr(8) the time, from which devmgr sets the kernel's wall clock.
+It serves no files and posts nothing.
+
+It is the first driver started from an ACPI device.
+bus-acpi(8) reports each device present in the firmware's ACPI namespace with its hardware ID and its `_CRS` resources; devmgr matches the clock's ID, `PNP0B00`, against the manifest in `/boot/drv/rtc-cmos.ndb` shown above, and starts the driver with exactly those resources, unless one is the kernel's or another driver's.
+That is its I/O ports, the handle `io0` with a record `io=0 base=... size=...` (the index and data ports 0x70 and 0x71 at least), and its interrupt, `irq0`, which it does not use.
+The manifest's `clock` gives it besides a channel, `devmgr`, to say the time on, and, when the FADT names a CMOS century register, a record `fadt century=`<reg>.
+It takes no arguments.
+It is x86_64's alone: aarch64 has no I/O ports, and QEMU's aarch64 tables list no clock.
+
+To read the clock it waits while the clock says an update is under way, reads seconds, minutes, hours, day, month, year and the century register, and reads them again until two readings agree, ten times at most, so an update between the reads cannot leave a mix of two seconds.
+It takes the registers as BCD or binary, and the hours as 12- or 24-hour, as status register B says.
+Without a century register the century is the 21st.
+The clock is taken to keep UTC.
+
+It sends devmgr one message, `VX_CLOCK_REPORT` of `lib/vx-driver/clockproto.h`: the time in nanoseconds since 1970 and the monotonic clock's reading when it was read.
+devmgr, which holds the root Resource the driver does not, adds the time since and sets the wall clock with `clock_set`, then says what it set.
+The driver then waits forever, holding the clock's ports.
+
+# EXAMPLES
+
+Under QEMU with its clock started at 2030-01-02T03:04:05, as the rtc test runs it:
+
+```text
+devmgr: \_SB.PCI0.SF8.RTC PNP0B00: /boot/bin/drv-rtc-cmos
+devmgr: started drv-rtc-cmos
+devmgr: the wall clock is 2030-01-02 03:04:06 UTC, from /boot/bin/drv-rtc-cmos
+drv-rtc-cmos: the clock says 1893553446 s since 1970
+```
+
+# FILES
+
+: `/boot/drv/rtc-cmos.ndb`
+  Its manifest.
+
+# SEE ALSO
+
+devmgr(8), bus-acpi(8), clock(2)
+
+# DIAGNOSTICS
+
+It prints `drv-rtc-cmos: the clock says` and the seconds since 1970 once it has told devmgr.
+It exits `no CMOS ports` without its ports, its channel or a range of at least two ports; `cannot use the CMOS ports` if they cannot be mapped; `the clock's registers make no time` for a reading out of range; and `cannot tell devmgr the time` if the message cannot be sent.
+devmgr starts it again after an exit, up to five starts in all.
+
+# BUGS
+
+The clock is read once: the wall clock is set at boot, as a step, and never read again, slewed or written back to the clock, and nothing sets the clock.
+The interrupt and alarms are unused.
+A clock that keeps local time, as one set by Windows does, gives a wall clock off by the zone's offset.
+Nothing orders services after the wall clock is set: one started before it stamps times in 1970.
+The wait for an update to end gives up after a million reads and reads anyway; a day is checked only to be 1 to 31, not against its month.
+There is no clock on aarch64, where dates read as 1970: there is no driver for its PL031.

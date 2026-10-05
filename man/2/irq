@@ -1,0 +1,112 @@
+page=irq sect=2 summary="interrupts and I/O ports for user-space drivers"
+    names=irq_create,irq_ack,iorange_create
+    src=kernel/obj/device.c,kernel/syscall/syscall.c,kernel/arch/x86_64/arch.c,kernel/arch/aarch64/arch.c,lib/vx-rt/base.c
+    keys=interrupt,msi,msi-x,gsi,spi,lpi,ioport,driver,resource
+
+# SYNOPSIS
+
+```c
+vx_status vx_irq_create(vx_handle resource, uint32_t line, vx_handle *out);
+vx_status vx_irq_create_msi(vx_handle resource, uint32_t source,
+                            vx_handle *out, vx_msi *msi);
+vx_status vx_irq_ack(vx_handle irq);
+vx_status vx_iorange_create(vx_handle resource, uint16_t base, uint32_t count,
+                            vx_handle *out);
+```
+
+# DESCRIPTION
+
+Drivers run in user space (see the kernel's design, 01 §7).
+What they need of the hardware the kernel gives them as objects: device memory as physical VMOs (`vmo_create`), DMA through domains (dma(2)), and the interrupts and I/O ports this page describes.
+Each is made from a Resource, the root authority over device space, whose handle needs MANAGE; the kernel gives it to the root task, and devmgr and svcd mint each driver's objects from it and give the driver handles to them.
+
+`vx_irq_create` makes an Irq for an interrupt line.
+On x86_64 <line> is an ISA IRQ below 16, through the firmware's overrides, or a GSI, routed through the IOAPICs to the boot CPU; ISA lines are edge-triggered and the rest level-triggered, unless an override says otherwise.
+On aarch64 it is a GIC SPI's INTID, 32 or more; SGIs and PPIs are the kernel's.
+A line has at most one Irq; once the Irq's last handle goes, the line is masked and free again.
+
+`vx_irq_create_msi` makes an Irq for an MSI or MSI-X interrupt of the PCI function whose requester ID (`bus << 8 | device << 3 | function`) is <source>.
+The kernel picks the interrupt and writes into <msi> what the device must write to raise it: `data` at `address`.
+On x86_64 it is a local-APIC vector on the boot CPU; on aarch64 an LPI through the GIC's ITS, which knows the device by its requester ID and is set up the first time an MSI is made.
+A function may have several, each with its own `data`.
+Both wrappers make the one call `irq_create`, the second with `VX_IRQ_MSI`.
+
+An Irq handle has WAIT, WRITE, DUPLICATE, TRANSFER and INSPECT.
+A driver binds it to a port with `VX_TRIGGER_IRQ` (`port_bind`, which needs WAIT); when the line fires, the kernel counts it, and the packet's value is the count since the Irq was made.
+A binding is one-shot: if the line fires with no binding, the kernel remembers, and the next binding fires at once.
+A level-triggered line is masked when it fires, since it would fire again at once, and stays masked until `vx_irq_ack`.
+An edge-triggered line, and every MSI, is never masked, because an edge that came while it was masked would be lost, and the device with it; the driver therefore handles everything the device has pending before it binds again.
+
+`vx_irq_ack` unmasks the line of <irq>, which needs WRITE, if the kernel masked it; otherwise it does nothing.
+
+`vx_iorange_create` makes an IoRange for the <count> I/O ports from <base>, at most up to port `0xffff`; x86_64 alone has them.
+Its handle has MAP, DUPLICATE, TRANSFER and INSPECT.
+A task uses the ports once `as_map` has been called with the task's handle (MANAGE), the IoRange (MAP) in place of a VMO, and the offset, size and flags 0; its threads may then use `in` and `out` on them, the calling thread at once and the others from their next switch onto a CPU.
+A task has room for 32 ranges.
+
+The kernel's console is the kernel's until a driver is given its device: an IoRange covering COM1 on x86_64, or a physical VMO over the PL011 on aarch64, takes it, and from then on the kernel writes there only to report a panic, unless `vx.kconsole` is on the command line.
+
+# EXAMPLES
+
+From the kernel's tests (`tests/kernel/ktest.c`), on x86_64, where line 3 is COM2's, which nothing uses:
+
+```c
+CHECK(vx_irq_create(res, SPARE_LINE, &h) == VX_OK);
+CHECK(vx_irq_create(res, SPARE_LINE, &h2) == VX_ERR_EXISTS); // one Irq a line
+vx_handle port;
+vx_packet pk;
+CHECK(vx_port_create(0, &port) == VX_OK);
+CHECK(vx_port_bind(port, h, VX_TRIGGER_COUNTER_GE, 1, 1) == VX_ERR_INVALID);
+CHECK(vx_port_bind(port, h, VX_TRIGGER_IRQ, 1, 0) == VX_OK);
+```
+
+and COM2's ports:
+
+```c
+CHECK(vx_iorange_create(res, 0x2f8, 8, &h) == VX_OK); // COM2's ports
+CHECK(vx_as_map(self, h, 0, 4096, 0, &at) == VX_ERR_INVALID);
+CHECK(vx_as_map(self, h, 0, 0, 0, &at) == VX_OK);
+```
+
+# SEE ALSO
+
+dma(2), port_bind(2), as_map(2), vmo_create(2), devmgr(8), svcd(8)
+
+# DIAGNOSTICS
+
+`vx_irq_create` and `vx_irq_create_msi` return:
+
+: `VX_OK`
+  The Irq is made, and its handle is in <out>.
+: `VX_ERR_BAD_HANDLE`
+  <resource> is not a Resource.
+: `VX_ERR_ACCESS`
+  <resource> lacks MANAGE.
+: `VX_ERR_RANGE`
+  There is no such line: on x86_64 no IOAPIC serves it, on aarch64 it is not an SPI the GIC has; or, for an MSI on aarch64, <source> is beyond the device IDs the ITS has room for.
+: `VX_ERR_EXISTS`
+  The line already has an Irq.
+: `VX_ERR_NO_MEMORY`
+  There is no memory for the Irq, no free vector or LPI, or no room in the caller's handle table.
+: `VX_ERR_UNSUPPORTED`
+  An MSI cannot be made: on aarch64 the GIC has no LPIs or no usable ITS; on x86_64 the boot CPU's APIC ID is above 255.
+: `VX_ERR_INVALID`
+  <out> or <msi> is not writable.
+: `VX_ERR_BAD_STATE`
+  The caller's handle table is gone.
+
+`vx_irq_ack` returns `VX_OK`, `VX_ERR_BAD_HANDLE` if <irq> is not an Irq, or `VX_ERR_ACCESS` if it lacks WRITE.
+
+`vx_iorange_create` returns `VX_OK`; `VX_ERR_UNSUPPORTED` on a machine without I/O ports; `VX_ERR_RANGE` if <count> is 0 or the range runs past port `0xffff`; and otherwise as `vx_irq_create` does.
+`as_map` with an IoRange returns `VX_ERR_INVALID` if the offset, size or flags are not 0, and `VX_ERR_NO_MEMORY` once the task has 32 ranges.
+
+# BUGS
+
+On aarch64 every SPI is configured level-triggered, whatever the device's line is.
+
+Every line and MSI is delivered to the boot CPU.
+On x86_64 the IOMMU does not remap interrupts yet, so a device can raise any MSI vector, not only those made for it; <source> is not used there.
+
+An IoRange cannot be taken back from a task: closing its handle, or the task's, leaves the ports usable until the task ends.
+
+A Resource is all or nothing: narrower Resources, which would let devmgr hand on part of device space, do not exist yet.

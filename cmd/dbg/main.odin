@@ -38,6 +38,7 @@ import "vx:procns"
 import "vx:rt"
 import "vx:str"
 import "vx:utf"
+import usage "gen:usage/dbg"
 
 space: ns.Namespace
 me: u64 // dbg's own pid: its wait records are read from /proc/ME/wait
@@ -814,7 +815,7 @@ session :: proc(argv: []string) -> string {
 		a += 2
 	}
 	if a >= len(argv) {
-		rt.print("usage: dbg -c [-x FILE] PROGRAM [ARG ...] | -p PID | CRASHDIR\n")
+		rt.print(usage.TEXT, "\n")
 		return "usage"
 	}
 	target_arg := argv[a]

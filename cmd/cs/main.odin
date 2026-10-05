@@ -9,6 +9,7 @@ import "vx:p9"
 import "vx:procns"
 import "vx:rt"
 import "vx:str"
+import usage "gen:usage/cs"
 
 space: ns.Namespace
 
@@ -34,7 +35,7 @@ run :: proc() -> string {
 	args := rt.args()
 	dns := len(args) == 2 && args[0] == "-d"
 	if len(args) != (dns ? 2 : 1) || len(args[dns ? 1 : 0]) > 250 {
-		rt.eprint("usage: cs NET!HOST!SERVICE, or cs -d NAME\n")
+		rt.eprint(usage.TEXT, "\n")
 		return "usage"
 	}
 	q := args[dns ? 1 : 0]

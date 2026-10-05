@@ -9,8 +9,8 @@ import "vx:guide"
 import "vx:ndb"
 import "vx:p9"
 
-// The manual (upstream docs/12-manual.md; its M6 steps 6a1-6a5): pages in
-// man/<sect>/<page>, written in guide and read through lib/guide.
+// The manual (upstream docs/12-manual.md; its M6 steps 6a1-6a5 and 6b): pages
+// in man/<sect>/<page>, written in guide and read through lib/guide.
 //
 // ./build man [section ...] title [node] renders a page as man(1) does, so
 // the manual can be read before an image boots; ./build man --check runs
@@ -20,7 +20,7 @@ import "vx:p9"
 // written from the pages and every link resolves through it, or to a page
 // man/missing promises; everything the inventory lists has a page or a
 // record in man/missing, the ledger that only shrinks, never both; and a
-// program with a page takes its usage message from it (usage.odin).
+// program with a page takes its usage message from it.
 
 // What must have a page: kind and name, and the sections a page may be in.
 @(private="file")
@@ -482,9 +482,9 @@ usage_page :: proc(name: string) -> string {
 	return ""
 }
 
-// The usage message the page gives the program: "usage: " and the lines of
-// its first usage fence that start with name. ok is false if there is none.
-usage_text :: proc(page, name: string) -> (text: string, ok: bool) {
+// A page's first usage fence. ok is false if it has none.
+@(private="file")
+usage_fence :: proc(page: string) -> (fence: string, ok: bool) {
 	data, err := os.read_entire_file(page, context.temp_allocator)
 	if err != nil {
 		return "", false
@@ -494,26 +494,62 @@ usage_text :: proc(page, name: string) -> (text: string, ok: bool) {
 		return "", false // the manual's check says why
 	}
 	for b in guide.next(g) {
-		if b.kind != .Fence || b.fence != "usage" {
-			continue
+		if b.kind == .Fence && b.fence == "usage" {
+			return strings.clone(b.text, context.temp_allocator), true
 		}
-		sb := strings.builder_make(context.temp_allocator)
-		strings.write_string(&sb, "usage: ")
-		lines := 0
-		rest := b.text
-		for l in strings.split_lines_iterator(&rest) {
-			if !strings.has_prefix(l, name) || (len(l) > len(name) && l[len(name)] != ' ') {
-				continue
-			}
-			if lines > 0 {
-				strings.write_string(&sb, "\n       ")
-			}
-			strings.write_string(&sb, l)
-			lines += 1
-		}
-		return strings.to_string(sb), lines > 0
 	}
 	return "", false
+}
+
+// A fence line's first word.
+@(private="file")
+usage_word :: proc(line: string) -> string {
+	sp := strings.index_byte(line, ' ')
+	return sp < 0 ? line : line[:sp]
+}
+
+// The usage message a fence gives word: "usage: " and the fence's lines
+// whose first word it is, each after the first under the first's command.
+// ok is false if there are none.
+@(private="file")
+usage_lines :: proc(fence, word: string) -> (text: string, ok: bool) {
+	sb := strings.builder_make(context.temp_allocator)
+	strings.write_string(&sb, "usage: ")
+	lines := 0
+	rest := fence
+	for l in strings.split_lines_iterator(&rest) {
+		if usage_word(l) != word {
+			continue
+		}
+		if lines > 0 {
+			strings.write_string(&sb, "\n       ")
+		}
+		strings.write_string(&sb, l)
+		lines += 1
+	}
+	return strings.to_string(sb), lines > 0
+}
+
+// The usage message the page gives the program: "usage: " and the lines of
+// its first usage fence that start with name. ok is false if there is none.
+usage_text :: proc(page, name: string) -> (text: string, ok: bool) {
+	fence := usage_fence(page) or_return
+	return usage_lines(fence, name)
+}
+
+// Whether a fence line's first word can name a constant, TEXT_word: a C
+// name, as upstream's VX_USAGE_word takes.
+@(private="file")
+usage_ident :: proc(word: string) -> bool {
+	if word == "" || (word[0] >= '0' && word[0] <= '9') {
+		return false
+	}
+	for ch in transmute([]u8)word {
+		if !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 // Writes out/gen/usage/NAME/usage.odin for each program with a usage line
@@ -527,13 +563,33 @@ make_usage :: proc() -> bool {
 		if page == "" {
 			continue
 		}
-		text, ok := usage_text(page, p.name)
+		fence, has := usage_fence(page)
+		if !has {
+			continue
+		}
+		text, ok := usage_lines(fence, p.name)
 		if !ok {
 			continue
 		}
 		dir := fmt.tprintf("%s/%s", USAGE_GEN, p.name)
 		make_dirs(dir) or_return
-		src := fmt.tprintf("// Made by ./build from %s's usage fence (upstream docs/12 §7). Not to be edited.\npackage usage\n\nTEXT :: %q\n", page, text)
+		sb := strings.builder_make(context.temp_allocator)
+		fmt.sbprintf(&sb, "// Made by ./build from %s's usage fence (upstream docs/12 §7). Not to be edited.\npackage usage\n\nTEXT :: %q\n", page, text)
+		// The fence's lines for other words (rc(1)'s builtins: bind, mount,
+		// unmount), each word its own TEXT_word, as upstream's VX_USAGE_word,
+		// for the program that has those as builtins.
+		rest := fence
+		done := make([dynamic]string, context.temp_allocator)
+		for l in strings.split_lines_iterator(&rest) {
+			word := usage_word(l)
+			if word == p.name || !usage_ident(word) || slice.contains(done[:], word) {
+				continue
+			}
+			append(&done, word)
+			words, _ := usage_lines(fence, word)
+			fmt.sbprintf(&sb, "TEXT_%s :: %q\n", word, words)
+		}
+		src := strings.to_string(sb)
 		path := fmt.tprintf("%s/usage.odin", dir)
 		if old, rerr := os.read_entire_file(path, context.temp_allocator); rerr == nil && string(old) == src {
 			continue
@@ -543,8 +599,9 @@ make_usage :: proc() -> bool {
 	return true
 }
 
-// A program with a page takes its usage message from it: it imports
-// gen:usage/NAME, and keeps no "usage: string of its own.
+// A program with a page takes its usage message from it: it keeps no "usage:
+// string of its own, so one that prints a usage message imports
+// gen:usage/NAME. A program that prints none needs none.
 @(private="file")
 check_usage :: proc(c: ^Man_Check) {
 	for p in PROGRAMS {
@@ -556,18 +613,16 @@ check_usage :: proc(c: ^Man_Check) {
 			continue
 		}
 		files, _ := tree_files(p.dir)
-		uses, own := false, false
-		import_path := fmt.tprintf("\"gen:usage/%s\"", p.name)
+		own := false
 		for f in files {
 			if !strings.has_suffix(f, ".odin") {
 				continue
 			}
 			src, _ := os.read_entire_file(f, context.temp_allocator)
-			uses = uses || strings.contains(string(src), import_path)
 			own = own || strings.contains(string(src), "\"usage:")
 		}
 		_, has := usage_text(page, p.name)
-		if has && (!uses || own) {
+		if has && own {
 			man_error(c, p.dir, 0, fmt.tprintf("a program with a page takes its usage message from it: gen:usage/%s, not its own", p.name))
 		}
 		if !has && own {

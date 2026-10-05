@@ -1,0 +1,81 @@
+page=handle sect=2 summary="duplicate and close handles"
+    names=handle_dup,handle_close,handle_replace
+    src=kernel/syscall/syscall.c,kernel/obj/task.c,abi/vx/rights.def,lib/vx-rt/base.c
+    keys=handle,capability,rights,dup,close,generation
+
+# SYNOPSIS
+
+```c
+vx_status vx_handle_dup(vx_handle h, uint32_t rights, vx_handle *out);
+vx_status vx_handle_close(vx_handle h);
+```
+
+# DESCRIPTION
+
+A task names each kernel object it may use by a handle: a 32-bit value that is an index into the task's handle table in its low 16 bits and that slot's generation in its high 16 (see the kernel's design, 01 §3).
+The generation is bumped each time the slot is freed, so a handle kept after it was closed fails with `VX_ERR_BAD_HANDLE` instead of reaching whatever took the slot next.
+No valid handle is 0, which is `VX_HANDLE_NONE`.
+Slots are taken lowest first, so a program run twice sees the same handle values.
+A table holds 255 handles.
+
+Each handle carries rights, the bits named in `abi/vx/rights.def`: `VX_RIGHT_READ`, `WRITE`, `EXEC`, `MAP`, `DUPLICATE`, `TRANSFER`, `SIGNAL`, `WAIT`, `MANAGE`, `INSPECT`, `DEBUG` and `PAGER`.
+Every call checks that its handles carry the rights it needs, and refuses with `VX_ERR_ACCESS` if they do not; each call's page says which.
+
+`vx_handle_dup` makes a second handle, in the caller's table, to the object <h> names, with <rights>, and writes it to `*`<out>.
+<rights> may only be the same as <h>'s or fewer, never more; `VX_RIGHTS_SAME` gives the new handle exactly <h>'s rights.
+<h> needs `VX_RIGHT_DUPLICATE`.
+A handle given away with fewer rights is how a task shares an object it must not let others change: a VMO to read but not write, a task to inspect but not kill.
+
+`vx_handle_close` removes <h> from the caller's table and drops its reference to the object.
+It needs no rights.
+The object lives on while anything else holds it: another handle, a mapping of a VMO (see as(2)), a message in flight.
+When the last goes the object is destroyed, and what that means is the object's: closing a channel's or ring's end tells its peer, which sees `VX_ERR_PEER_CLOSED`.
+
+Handles move between tasks only in channel and ring messages, and only with `VX_RIGHT_TRANSFER`; the write moves them out of the writer's table.
+
+`handle_replace` is reserved.
+The design names it among the handle calls without describing it (01 §3): it is meant to swap a handle for a new one with the same or fewer rights in one step, the old one closed.
+It has no vx-rt wrapper, and `vx_syscall(VX_SYS_handle_replace, ...)` returns `VX_ERR_UNSUPPORTED` today.
+
+# EXAMPLES
+
+A handle duplicated with fewer rights, never more, from the kernel's tests (`tests/kernel/ktest.c`):
+
+```c
+vx_handle weak;
+CHECK(vx_handle_dup(got, VX_RIGHT_READ, &weak) == VX_OK);
+CHECK(vx_counter_read(weak) == 5);
+CHECK(vx_counter_signal(weak, 9) == VX_ERR_ACCESS);
+vx_handle strong;
+CHECK(vx_handle_dup(weak, VX_RIGHT_READ | VX_RIGHT_SIGNAL, &strong) ==
+      VX_ERR_ACCESS);
+vx_handle_close(weak);
+```
+
+# SEE ALSO
+
+as(2), intro(2)
+
+# DIAGNOSTICS
+
+`vx_handle_dup` returns:
+
+: `VX_OK`
+  `*`<out> holds the new handle.
+: `VX_ERR_BAD_HANDLE`
+  <h> is closed, stale or was never valid.
+: `VX_ERR_ACCESS`
+  <h> lacks `VX_RIGHT_DUPLICATE`, or <rights> asks for a right <h> does not have.
+: `VX_ERR_NO_MEMORY`
+  The caller's handle table is full.
+: `VX_ERR_INVALID`
+  <out> is not writable memory of the caller's; the new handle is closed again.
+
+`vx_handle_close` returns `VX_OK`, or `VX_ERR_BAD_HANDLE` as above.
+
+`handle_replace` returns `VX_ERR_UNSUPPORTED`.
+
+# BUGS
+
+The design's handle entries carry a badge, a value the minter attaches for a server to tell its clients apart; there are none yet.
+`handle_close` takes one handle, though the design lists it among the calls that take arrays.
