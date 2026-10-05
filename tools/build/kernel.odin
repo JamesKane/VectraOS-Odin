@@ -43,6 +43,7 @@ compile_ir :: proc(a: ^Arch, mode: Mode, pkg, asm_dir, out: string, odin_flags, 
 	_ = os.remove_all(out)
 	make_dirs(ir) or_return
 	make_dirs(obj) or_return
+	make_dirs("out/gen") or_return // the gen collection must exist before any package names it
 
 	oc := cmd_make(ODIN, "build", pkg, fmt.tprintf("-target:%s", a.odin_target), fmt.tprintf("-out:%s", ir))
 	append(&oc, ..IR_ODIN_FLAGS)
