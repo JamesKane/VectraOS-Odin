@@ -284,6 +284,12 @@ open :: proc "contextless" (g: ^Guide, page: string) -> bool {
 		return fail(g, "a page starts with a header whose first tuple is page=", first)
 	}
 	for t in rec.tuples {
+		// The page is UTF-8, but ndb's hex form (x"C0") decodes to any bytes:
+		// a header value is checked once decoded (upstream's guide_fuzz found
+		// it, 705fd16).
+		if !utf.valid(t.value) {
+			return fail(g, "a header value that is not UTF-8", first)
+		}
 		header_tuple(g, t, &rec, first) or_return
 	}
 	// The header's values are kept; the record is free for the next one.

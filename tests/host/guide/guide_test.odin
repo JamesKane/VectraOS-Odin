@@ -92,6 +92,16 @@ CAT_44 :: "CAT(1)                                CAT(1)\n" +
 	"SEE ALSO\n" +
 	"     tail(1), read(2)\n"
 
+// A header value decoded from ndb's hex form must be UTF-8 too (upstream's
+// guide_fuzz's find, 705fd16).
+@(test)
+test_header_utf8 :: proc(t: ^testing.T) {
+	_, ok := render("page=t sect=7 summary=x\"C0\"\n\nText.\n", 80)
+	testing.expect(t, !ok)
+	_, ok = render("page=t sect=7 summary=x\"C3A9\"\n\nText.\n", 80) // é
+	testing.expect(t, ok)
+}
+
 @(test)
 test_render :: proc(t: ^testing.T) {
 	got, ok := render(CAT, 44)

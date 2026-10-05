@@ -1,4 +1,4 @@
-// The cross-check against upstream's lib/vx-guide (025911e), built with
+// The cross-check against upstream's lib/vx-guide (f9c14e9), built with
 // clang and driven exactly as transcript drives lib/guide: every page is
 // rendered whole at four widths and node by node, then walked block by
 // block, each block's spans and each row's cells listed, and every value,
@@ -8,10 +8,10 @@
 // reads outside the page (bounds checks and ASan), never loops (each loop is
 // bounded), and gives UTF-8 whenever the page was accepted.
 //
-// The inputs: upstream's fuzz corpus (corpus/), the manual's pages as
-// upstream had them at 025911e (pages/, fixed here so the digests are), and
-// inputs the mutator below makes from them, which upstream's C was run on
-// with the same mutator.
+// The inputs: upstream's fuzz corpus (corpus/, as at f9c14e9), the manual's
+// pages as upstream had them at 025911e (pages/, fixed here so the digests
+// are), and inputs the mutator below makes from them, which upstream's C was
+// run on with the same mutator.
 package guide_test
 
 import "base:runtime"
@@ -172,7 +172,7 @@ transcript :: proc(t: ^testing.T, x: ^Transcript, page: string) {
 // The seeds, in the oracle's order: the corpus, then the pages.
 seeds :: proc() -> []string {
 	s := make([dynamic]string, context.temp_allocator)
-	for name in ([]string{"cat1", "guide6", "table"}) {
+	for name in ([]string{"cat1", "guide6", "header-hex-not-utf8", "table"}) {
 		append(&s, file_in(CORPUS, name))
 	}
 	for name in ([]string{"1-intro", "1-man", "2-futex", "2-intro", "3-intro", "4-intro", "5-intro", "6-guide", "6-intro", "7-intro", "8-install", "8-intro"}) {
@@ -196,6 +196,7 @@ test_seeds :: proc(t: ^testing.T) {
 	want := []u64 {
 		0xce5e8ccdf9acf331, // corpus/cat1
 		0xee10b7f92db8324e, // corpus/guide6
+		0x6bb3fa83df748aae, // corpus/header-hex-not-utf8 (upstream's 705fd16)
 		0x0905be128e85ae96, // corpus/table
 		0xfd8810196c229e35, // pages/1-intro
 		0xfe12955109b7f74d, // pages/1-man
@@ -221,7 +222,7 @@ test_seeds :: proc(t: ^testing.T) {
 		testing.expect_value(t, x.bad_utf, 0)
 		fold = (fold ~ x.h) * FNV_PRIME
 	}
-	testing.expectf(t, fold == 0x97ec51cd985d8337, "seeds: fold %x", fold)
+	testing.expectf(t, fold == 0x2b17ac57d9259c99, "seeds: fold %x", fold)
 }
 
 // --- The mutator: the oracle has the same ---
@@ -305,7 +306,7 @@ test_mutated :: proc(t: ^testing.T) {
 		count: u64,
 		fold:  u64,
 	}
-	folds := []Fold{{5000, 0x91d07e5ae368cc5f}, {20000, 0xa42ded177580a836}, {1_000_000, 0xcfd3f243cb598af1}}
+	folds := []Fold{{5000, 0x09fddc240ca82495}, {20000, 0x3ced3bc5c576c739}, {1_000_000, 0x7e8eb6c85fda2e54}}
 	m := Mutator{seeds = seeds(), text = make([dynamic]u8, 0, MAX_INPUT + 1024)}
 	defer delete(m.text)
 	fold := FNV_OFFSET
