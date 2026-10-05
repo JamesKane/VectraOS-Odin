@@ -19,26 +19,27 @@
 // block); and `{...} and @{...} run in the shell itself, so what they assign
 // is seen after (upstream docs/milestones.md, known gaps).
 //
-// A host drives it like this (upstream's shell's shape):
+// A host drives it like this (upstream's shell's shape, 9front's start):
 //
 //	sh: rc.Rc // large (the machine's stacks): a global
 //	heap: [4 << 20]u8
 //	if !rc.init(&sh, heap[:], rc.Host{ctx = &state, run = run, write = write, ...}) { ... }
-//	rc.set_var(&sh, "*", ..args) // and "0", and the environment, a list per variable
-//	switch rc.run(&sh, text) {
-//	case .Incomplete: // read another line, append it, and run the whole again
-//	case .Syntax, .Failed: print(rc.err(&sh))
-//	case .Exit: // exit ran
-//	case .Ok:
-//	}
-//	// The exit status: rc.get_var(&sh, "status"), its words joined.
+//	sh.flag['i'] = true // its flags, as rc's arguments set them
+//	rc.set_var(&sh, "*", ..args) // and the environment, a list per variable
+//	_ = rc.run(&sh, ". -bq /rc/lib/rcmain $*\n")
+//	// The exit status: rc.get_var(&sh, "status")'s first word.
+//
+// rc.run reads a command at a time, as rc does; `. -i '#d/0'` reads the
+// shell's standard input a line at a time through Host.read_line, prompting
+// on its standard error. An error is written to the shell's standard error
+// where it happens (Host.write, Fd_Inherit{2}), and rc.err keeps it.
 //
 // Its run callback starts each stage with the descriptors it is given
 // (rc.Fd's variants: the shell's own, a file its open callback opened, a pipe
-// between stages, closed, or a capture), feeds what a stage writes to an
-// Fd_Capture to rc.capture_write, waits, and sets $status with rc.set_status
-// (the stages' exit strings joined by |). To pass variables to a program it
-// walks rc.vars/rc.next_var.
+// between stages, closed, a capture, or a here document's text), feeds what a
+// stage writes to an Fd_Capture to rc.capture_write, waits, and sets $status
+// with rc.set_status (the stages' statuses joined by rc.concstatus). To pass
+// variables to a program it walks rc.vars/rc.next_var.
 package rc
 
 import "vx:str"
@@ -74,6 +75,7 @@ Fd :: union #no_nil {
 	Fd_Capture,
 	Fd_Pipe_Out,
 	Fd_Pipe_In,
+	Fd_Here,
 }
 Fd_Inherit :: struct {
 	which: u8, // which of the shell's own
@@ -92,6 +94,9 @@ Fd_Capture :: struct {
 }
 Fd_Pipe_Out :: struct {} // a pipeline's: into the next stage
 Fd_Pipe_In :: struct {} // from the stage before
+Fd_Here :: struct {
+	text: string, // a here document's, substituted: the host feeds it
+}
 
 // A program to run: its words, and its descriptors after redirections (a
 // pipeline's stages are joined by the host).
@@ -131,6 +136,10 @@ Host :: struct {
 	// Whether a path exists, for globbing: a plain name after a pattern must
 	// (rc's access check). Optional: without it, such names are kept.
 	exists:    proc "contextless" (ctx: rawptr, path: string) -> bool,
+	// A line of rc's own standard input (rc's '#d/0', which `. -i` reads),
+	// its newline with it, into buf: its length, or 0 at the end or on an
+	// error. Optional: without it, standard input is empty.
+	read_line: proc "contextless" (ctx: rawptr, buf: []u8) -> int,
 }
 
 // What run made of a text.
@@ -184,7 +193,13 @@ Rc :: struct {
 	failed:   bool, // a run-time error ended the script
 	failset:  bool, // and fail set $status for it
 	exiting:  bool,
-	src:      [dynamic; SRC_MAX]u8, // where the code being run came from, for errors: a file's name, or rc
+	syntax:   bool, // a run's reader met a syntax error
+	incomplete: bool, // or the text's end inside a construct
+	src:      [dynamic; SRC_MAX]u8, // where the code being compiled comes from, for errors: a file's name, or rc
+	// rc's flags, -e -x -s -v -r and the rest, as flag in rc(1) sets them:
+	// the host sets them from its arguments before it runs anything.
+	flag:     [128]bool,
+	rdcode:   ^Code, // the code a reading frame runs: one Rdcmds
 	err:      [dynamic; ERR_MAX]u8, // the last error, for the host to show
 }
 
@@ -203,10 +218,12 @@ Redir :: struct {
 
 @(private)
 Frame :: struct { // a thread of rc's: what runs, and where it goes back to
-	code:   ^Code,
-	pc:     u32,
-	locals: ^Var,
-	redirs: u32, // the redirection stack's height when it started
+	code:          ^Code,
+	pc:            u32,
+	locals:        ^Var,
+	redirs:        u32, // the redirection stack's height when it started
+	rd:            ^Reader, // a frame that reads its commands as it goes (rc's Xrdcmds): where from
+	sp, ncaptures: u32, // the stacks' heights when it started, for an error's unwinding to it
 }
 
 @(private)
@@ -236,23 +253,44 @@ init :: proc "contextless" (r: ^Rc, heap: []u8, host: Host) -> bool {
 	set_var_words(r, "ifs", new_word(r, " \t\n"))
 	set_status(r, "")
 	append(&r.src, "rc")
+	r.rdcode = heap_new(r, Code)
+	one := heap_new(r, Inst)
+	if r.rdcode == nil || one == nil {
+		return false
+	}
+	one.op = .Rdcmds
+	r.rdcode^ = {
+		refs = 1, // its own reference: never freed
+		n    = 1,
+		inst = one,
+	}
 	return true
 }
 
-// Runs text (a line, or a whole script).
+// Runs text (a line, or a whole script), read and run a command at a time,
+// as rc's Xrdcmds: a syntax error stops it where it is (.Syntax), after the
+// commands before it have run; .Incomplete if it ends inside a construct
+// (the caller may add the next line and run the whole again).
 @(require_results)
 run :: proc "contextless" (r: ^Rc, text: string) -> Result {
 	clear(&r.err)
 	r.failed = false
 	r.failset = false
 	r.exiting = false
-	code, incomplete := compile_text(r, text, 1)
-	if code == nil {
-		return incomplete ? .Incomplete : .Syntax
+	r.syntax = false
+	r.incomplete = false
+	rd := reader_new(r, c_name(string(r.src[:])))
+	buf := rd != nil ? heap_alloc(r, len(text) + 1) : nil
+	if buf == nil {
+		reader_free(r, rd)
+		return .Failed
 	}
+	rd.buf = ([^]u8)(buf)[:len(text) + 1]
+	rd.len = copy(rd.buf, text)
 	base := u32(len(r.frames))
-	_ = push_frame(r, code, 0, nil)
-	code_release(r, code)
+	if !push_reader(r, rd, nil) {
+		return .Failed
+	}
 	execute(r, base)
 	for u32(len(r.frames)) > base { // after an error or exit: what was running
 		pop_frame(r)
@@ -274,7 +312,10 @@ run :: proc "contextless" (r: ^Rc, text: string) -> Result {
 		}
 		return .Failed
 	}
-	return .Ok
+	if r.incomplete {
+		return .Incomplete
+	}
+	return r.syntax ? .Syntax : .Ok
 }
 
 // Where the code run next comes from, for errors (file:line): a script's

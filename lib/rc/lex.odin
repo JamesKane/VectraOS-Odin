@@ -44,6 +44,17 @@ Keyword :: enum u8 {
 @(private)
 CLOSE_FD :: 255 // [n=]: fd1 of a close
 
+// How a redirection opens its file, or a here document.
+@(private)
+Redir_Kind :: enum u8 {
+	Read, // <
+	Write, // >, which empties the file
+	Append, // >>
+	Rdwr, // <>
+	Here, // <<tag
+}
+#assert(u8(Redir_Kind.Rdwr) == u8(Open_Kind.Rdwr)) // the first four are Open_Kind's
+
 @(private)
 Token :: struct {
 	kind:   Token_Kind,
@@ -52,13 +63,26 @@ Token :: struct {
 	adj:    bool, // nothing between it and the token before
 	fd0:    u8,
 	fd1:    u8,
-	rkind:  Open_Kind,
+	rkind:  Redir_Kind,
+	here:   u8, // a here document's tag: its place in the lexer's heres, plus 1
 	s:      string, // a word's text, unquoted, its glob characters marked (GLOB before them)
 	line:   u32,
 }
 
 @(private)
 GLOB :: '\x01' // before a * ? or [ written bare: they glob
+
+// A here document: its tag, then (once its line has ended) its text.
+@(private)
+Here :: struct {
+	tag:    string,
+	body:   string,
+	quoted: bool, // <<'tag': no substitution
+	read:   bool,
+}
+
+@(private)
+HERES :: 32
 
 @(private)
 Lexer :: struct {
@@ -76,9 +100,11 @@ Lexer :: struct {
 	after_dollar: bool,
 	failed:       bool,
 	incomplete:   bool, // it failed only for the text ending: in a quote, or after a \ that ends a line
+	want_tag:     bool, // the word next is a here document's tag
+	heres:        [dynamic; HERES]Here,
 }
 
-@(private = "file")
+@(private)
 word_char :: proc "contextless" (c: u8) -> bool {
 	switch c {
 	case '\n', ' ', '\t', '#', ';', '&', '|', '^', '$', '=', '`', '\'', '{', '}', '(', ')', '<', '>', 0:
@@ -87,7 +113,7 @@ word_char :: proc "contextless" (c: u8) -> bool {
 	return true
 }
 
-@(private = "file")
+@(private)
 name_char :: proc "contextless" (c: u8) -> bool { // a variable name's characters
 	if c <= ' ' {
 		return false
@@ -161,18 +187,26 @@ lex_fds :: proc "contextless" (lx: ^Lexer, fd0, fd1: ^u8) -> (eq: bool, ok: bool
 		return false, true
 	}
 	lx.p += 1
+	// Numbers of any length, as rc's lexer reads them; past the descriptors
+	// there are, refused.
+	number :: proc "contextless" (lx: ^Lexer) -> (fd: u8, ok: bool) {
+		n: u32
+		for digit(lx) && n < 1000 {
+			n = n * 10 + u32(lx.text[lx.p] - '0')
+			lx.p += 1
+		}
+		return u8(n), n < FDS
+	}
 	if !digit(lx) {
 		return false, false
 	}
-	fd0^ = lx.text[lx.p] - '0'
-	lx.p += 1
+	fd0^ = number(lx) or_return
 	if at(lx, '=') {
 		lx.p += 1
 		eq = true
 		fd1^ = CLOSE_FD
 		if digit(lx) {
-			fd1^ = lx.text[lx.p] - '0'
-			lx.p += 1
+			fd1^ = number(lx) or_return
 		}
 	}
 	if !at(lx, ']') {
@@ -194,6 +228,44 @@ lex_fail :: proc "contextless" (lx: ^Lexer, why: string, incomplete := false) {
 	lx.why = why
 	if incomplete {
 		lx.incomplete = true
+	}
+}
+
+// At a line's end, the bodies of the here documents begun on it: each the
+// lines up to one that is its tag alone (rc's readhere).
+@(private = "file")
+lex_heres :: proc "contextless" (lx: ^Lexer) {
+	text := lx.text
+	for &h in lx.heres {
+		if h.read {
+			continue
+		}
+		start := lx.p
+		for {
+			if lx.p >= len(text) {
+				lex_fail(lx, "here document never ended", true)
+				return
+			}
+			ln := lx.p
+			for lx.p < len(text) && text[lx.p] != '\n' {
+				lx.p += 1
+			}
+			full := lx.p < len(text)
+			line := text[ln:lx.p]
+			if full {
+				lx.p += 1
+				lx.line += 1
+			}
+			if full && line == h.tag {
+				h.body = text[start:ln]
+				h.read = true
+				break
+			}
+			if !full {
+				lex_fail(lx, "here document never ended", true)
+				return
+			}
+		}
 	}
 }
 
@@ -250,6 +322,7 @@ lex_raw :: proc "contextless" (lx: ^Lexer) -> (t: Token) {
 	switch c {
 	case '\n':
 		lx.line += 1
+		lex_heres(lx)
 		t.kind = .Nl
 	case ';':
 		t.kind = .Semi
@@ -304,6 +377,10 @@ lex_raw :: proc "contextless" (lx: ^Lexer) -> (t: Token) {
 		} else if c == '<' && at(lx, '>') {
 			lx.p += 1
 			t.rkind = .Rdwr
+		} else if c == '<' && at(lx, '<') { // <<tag: a here document, read once its line ends
+			lx.p += 1
+			t.rkind = .Here
+			lx.want_tag = true
 		}
 		eq, ok := lex_fds(lx, &t.fd0, &t.fd1)
 		if !ok {
@@ -392,8 +469,27 @@ lex :: proc "contextless" (lx: ^Lexer) -> Token {
 		lx.prev_plain = plain(lx.pending)
 		return lx.pending
 	}
-	name := lx.after_dollar
+	name, tag := lx.after_dollar, lx.want_tag
 	t := lex_raw(lx)
+	if tag && t.kind == .Word { // a here document's tag: its body is read when the line ends, as rc's
+		lx.want_tag = false
+		if len(lx.heres) == HERES {
+			lex_fail(lx, "too many here documents")
+		} else {
+			// The tag's text without its glob marks: in place, in the scratch.
+			s := transmute([]u8)t.s
+			k := 0
+			for i in 0 ..< len(s) {
+				if s[i] != GLOB || i + 1 == len(s) || s[i + 1] == GLOB {
+					s[k] = s[i]
+					k += 1
+				}
+			}
+			t.s = t.s[:k]
+			append(&lx.heres, Here{tag = t.s, quoted = t.quoted})
+			t.here = u8(len(lx.heres))
+		}
+	}
 	if name {
 		t.kw = .None // a variable's name: never a keyword
 	}

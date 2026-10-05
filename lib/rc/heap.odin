@@ -278,16 +278,24 @@ add_error :: proc "contextless" (r: ^Rc, parts: ..string) {
 	}
 }
 
-// Where an error is, as rc's pfln: file:line, or the file alone.
+// Where an error is, as rc's pfln: file:line, or the file alone, into buf,
+// cut as upstream's rc_where cuts it for a buffer of that size (its NUL
+// included).
 @(private)
-place :: proc "contextless" (buf: ^[96]u8, src: string, line: u32) -> string {
-	b := str.Buf {
-		buf = buf[:],
+place :: proc "contextless" (buf: []u8, src: string, line: u32) -> string {
+	n := 0
+	for c in transmute([]u8)c_name(src) {
+		if n + 1 >= len(buf) {
+			break
+		}
+		buf[n] = c
+		n += 1
 	}
-	str.write_string(&b, c_name(src))
-	if line != 0 {
-		str.write_byte(&b, ':')
-		str.write_u64(&b, u64(line))
+	if line != 0 && n + 12 < len(buf) {
+		buf[n] = ':'
+		n += 1
+		digits: [str.U64_DIGITS]u8
+		n += copy(buf[n:], str.format_u64(digits[:], u64(line)))
 	}
-	return str.to_string(&b)
+	return string(buf[:n])
 }

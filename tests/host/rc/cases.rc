@@ -103,3 +103,19 @@ if(~ é [à-ï]) echo class
 echo data > f; { cat; cat } < f
 cat < nosuchfile
 echo )
+echo x >[10] f
+flag z; echo $status
+flag
+echo 'echo $0 $* $#*' > d.rc
+. d.rc a b
+path=(/x .); . d.rc z
+. -q nofile; echo q
+. nofile
+.
+echo 'echo first' > bad.rc; echo 'echo )' >> bad.rc
+. bad.rc
+eval
+eval 'y=5'; echo $y
+eval 'echo )'
+. -i '#d/0'
+. '#d/0'

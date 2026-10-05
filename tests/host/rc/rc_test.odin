@@ -324,3 +324,76 @@ test_9front :: proc(t: ^testing.T) {
 	testing.expect(t, status_now(b) != "")
 	testing.expectf(t, strings.contains(rc.err(b.sh), status_now(b)), "error %q, status %q", rc.err(b.sh), status_now(b))
 }
+
+// What the shell wrote on its standard error contains want.
+expect_errout :: proc(t: ^testing.T, b: ^rt.Bench, want: string, loc := #caller_location) {
+	testing.expectf(t, strings.contains(string(b.host.err[:]), want), "standard error %q, wanted %q in it", string(b.host.err[:]), want, loc = loc)
+}
+
+// The second part (upstream's M6 step 6a6b): reading a command at a time,
+// here documents, flag and the flags it sets, ., eval, and interactive input.
+@(test)
+test_9front_reading :: proc(t: ^testing.T) {
+	b := shell(t)
+	defer rt.bench_destroy(b)
+	// A script runs as it is read: a syntax error stops at its line, the lines
+	// before it run.
+	expect_result(t, b, "echo ok\necho )\necho after", .Syntax)
+	testing.expect_value(t, string(b.host.out[:]), "ok\n")
+	// Here documents: substituted unless the tag is quoted; several on a line,
+	// in order; a block's; [n]; one that never ends asks for more.
+	expect_cases(t, b, {
+		{"x=(a b); cat <<EOF\nv=$x $$x $x^y\nEOF\n", "v=a b $x a by\n"},
+		{"cat <<'EOF'\nraw $x\nEOF\n", "raw $x\n"},
+		{"fn f { cat <<EOF\n$1 $2\nEOF\n}; f p q", "p q\n"},
+		{"cat <<A; cat <<B\none\nA\ntwo\nB\n", "one\ntwo\n"},
+		{"{ cat } <<EOF\nblock\nEOF\n", "block\n"},
+		{"cat <<[0]EOF\nzero\nEOF\n", "zero\n"},
+	})
+	expect_result(t, b, "cat <<EOF\nnever ends\n", .Incomplete)
+	// Descriptors of more digits lex, and past the ones there are, are refused.
+	expect_result(t, b, "echo x >[10] f\n", .Syntax)
+	// flag, and what the flags do.
+	expect_out(t, b, "flag z; echo $status", "flag not set\n")
+	expect_err(t, b, "flag", .Failed, "Usage: flag [letter] [+-]")
+	expect_result(t, b, "flag x +\necho hi 'a b'\nflag x -", .Ok)
+	expect_errout(t, b, "echo hi 'a b'\n")
+	expect_result(t, b, "flag e +\nif(false) echo no\necho yes\nfalse\necho never\n", .Exit)
+	testing.expect_value(t, string(b.host.out[:]), "yes\n")
+	_ = script(b, "flag e -")
+	expect_result(t, b, "flag s +\nfalse\nflag s -", .Ok)
+	expect_errout(t, b, "status=false\n")
+	expect_result(t, b, "flag v +\necho v\nflag v -", .Ok)
+	expect_errout(t, b, "echo v\n")
+	expect_result(t, b, "flag r +\ntrue\nflag r -", .Ok)
+	expect_errout(t, b, "Xsimple")
+	// .: $0 and $*, $path, -q; refused with no file, or one not there.
+	expect_result(t, b, "echo 'echo $0 $* $#*' > d.rc", .Ok)
+	expect_out(t, b, ". d.rc a b", "d.rc a b 2\n")
+	expect_out(t, b, "path=(/x .); . d.rc z", "d.rc z 1\n")
+	expect_out(t, b, ". -q nofile; echo q", "q\n")
+	expect_err(t, b, ". nofile", .Failed, ". can't open: nofile: file does not exist")
+	expect_err(t, b, ".", .Failed, "Usage: . [-biq] file [arg ...]")
+	expect_result(t, b, "echo 'echo first' > bad.rc; echo 'echo )' >> bad.rc", .Ok)
+	expect_err(t, b, ". bad.rc", .Syntax, "bad.rc:2:")
+	testing.expect_value(t, string(b.host.out[:]), "first\n")
+	_ = script(b, "path=()")
+	// eval.
+	expect_err(t, b, "eval", .Failed, "Usage: eval cmd ...")
+	expect_out(t, b, "eval 'y=5'; echo $y", "5\n")
+	expect_err(t, b, "eval 'echo )'", .Syntax, "*eval*")
+	// Interactive: prompts on rc's standard error; an error goes back to it,
+	// and the next line runs.
+	b.host.stdin, b.host.stdin_at = "x=(); echo a^$x\necho two\n", 0
+	expect_out(t, b, ". -i '#d/0'", "two\n")
+	expect_errout(t, b, "% ")
+	expect_errout(t, b, "null list")
+	b.host.stdin, b.host.stdin_at = "prompt=('> ' '>> ')\nif(true) {\necho in\n}\n", 0
+	expect_out(t, b, ". -i '#d/0'", "in\n")
+	expect_errout(t, b, ">> ")
+	_ = script(b, "prompt=()")
+	b.host.stdin, b.host.stdin_at = "echo s1\nx=(); echo a^$x\necho s2\n", 0 // not interactive: an error ends it
+	expect_result(t, b, ". '#d/0'", .Failed)
+	testing.expect_value(t, string(b.host.out[:]), "s1\n")
+	b.host.stdin = ""
+}

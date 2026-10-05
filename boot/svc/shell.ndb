@@ -1,11 +1,13 @@
 # boot/svc/shell.ndb: the console shell (docs/01 §10), in a namespace of the
 # boot image at /, the processes at /proc, the network at /net, /sys, and
 # scratch files at /tmp (tmpfs: rc scripts write there, M4 step 7a). Its
-# commands share its namespace group, through nsd (ADR-0009). svcd starts it
+# commands share its namespace group, through nsd (ADR-0009); /boot/bin is
+# bound after /bin, where rc's $path finds commands. svcd starts it
 # again when it exits.
 
 service=rc program=/boot/bin/rc console restart
 mount=/ srv=bootfs
+bind=/bin new=/boot/bin flags=a
 mount=/proc srv=proc
 mount=/net srv=net
 mount=/sys srv=sys

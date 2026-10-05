@@ -59,13 +59,14 @@ Node :: struct {
 @(private)
 Node_Io :: struct {
 	fd0, fd1: u8,
-	rkind:    Open_Kind,
+	rkind:    Redir_Kind,
 }
 
 // A Word's.
 @(private)
 Node_Word :: struct {
 	quoted: bool, // written in quotes: never a switch's case
+	here:   u8, // a here document's tag: its place in the lexer's heres, plus 1
 }
 // Upstream's rc_node is 40 bytes, and the parse takes room for len+32 of
 // them from the heap: so does this one.
@@ -124,7 +125,7 @@ Pframe :: struct {
 	purpose:    Purpose,
 	term:       Token_Kind,
 	fd0, fd1:   u8,
-	rkind:      Open_Kind,
+	rkind:      Redir_Kind,
 	a, b, c, d: i32,
 }
 #assert(size_of(Pframe) == 24)
@@ -149,7 +150,7 @@ Parser :: struct {
 }
 // Upstream's parser takes this much of the heap; this one lives in as much.
 @(private)
-PARSER_BYTES :: 7424
+PARSER_BYTES :: 8720
 #assert(size_of(Parser) <= PARSER_BYTES)
 
 @(private = "file")
@@ -201,7 +202,7 @@ node_new :: proc "contextless" (p: ^Parser, kind: Node_Kind, a, b, c: i32) -> i3
 
 // node n's fields from a token or frame, if it was made.
 @(private = "file")
-set_fds :: proc "contextless" (p: ^Parser, n: i32, fd0, fd1: u8, rkind: Open_Kind = .Read) {
+set_fds :: proc "contextless" (p: ^Parser, n: i32, fd0, fd1: u8, rkind: Redir_Kind = .Read) {
 	if n != NONE {
 		p.nodes[n].fd0 = fd0
 		p.nodes[n].fd1 = fd1
@@ -714,6 +715,7 @@ atom :: proc "contextless" (p: ^Parser) -> State {
 		}
 		p.nodes[n].s = t.s
 		p.nodes[n].quoted = t.quoted
+		p.nodes[n].here = t.here
 		_ = push_val(p, n)
 		return .After_Atom
 	case .Dollar, .Count, .Join:

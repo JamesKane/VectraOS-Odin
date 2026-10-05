@@ -1,28 +1,24 @@
 // rc: the shell, Plan 9's rc (upstream docs/04 §5; M2, its language since M4
-// step 7, named gsh until upstream's M6 step 6a4).
-// Its language is rc's, from vx:rc: lists, quoting, ^, $#x and $x(n), if, if
-// not, for, while, switch, ~, fn, !, && and ||, pipes, redirections, `{...},
-// globbing, $status, $*:
+// step 7, named gsh until upstream's M6 step 6a4, made 9front's in step 6a6).
+// Its language is vx:rc's; this is the host it runs on, and its start.
 //
-//   ls /; cat /proc/1/status            commands, separated by ; or newlines
-//   ns | tail -1                        pipes
-//   echo kill > /proc/2/ctl             redirections: > >> < >[2=1] >[2]
-//   for(p in `{ls /proc}) echo $p       command substitution
-//   bind -a /boot/bin /bin              builtins: bind, mount, unmount, and rc's
-//   rc script.rc a b                    a script, its arguments in $*
+//   rc [-srdiIlxebpvV] [-c command] [-m initial] [file [arg ...]]
 //
-// A command is a program found as given (a path) or in /bin, then /boot/bin,
-// through the shell's namespace. It is loaded by the shell and spawned with a
-// copy of the namespace, the console, and its standard input, output and
-// error: the shell's own, a pipe, or a channel the shell copies to or from a
-// file (or into `{...}'s capture). The shell waits for a pipeline's commands,
-// unless it ends with &, and $status is their exit strings, joined by |, as
-// rc's (ADR-0010). Without fork, a pipeline's stages and & must be programs
-// (vx:rc); descriptors past 2 are not given to programs yet.
+// As 9front's rc, it reads its flags, sets $pid, $rcname and $cflag, and runs
+// `. -bq /rc/lib/rcmain $*` (-m names another rcmain), which sets $home,
+// $prompt and $path and then runs the command, the file, or standard input,
+// interactively with -i, or when there is no file and standard input is the
+// console (never with -I). It exits with $status's first word.
 //
-// With no arguments the shell reads commands from its input, prompting; a
-// construct left open (a brace, an if's condition) continues on the next line.
-// At the end of its input, or of a script, or at exit, it exits with $status.
+// A command is a program found through $path in the shell's namespace (a name
+// that starts / ./ ../ or # as written). It is loaded by the shell and spawned
+// with a copy of the namespace, the console, and its standard input, output
+// and error: the shell's own, a pipe, or a channel the shell copies to or from
+// a file, a here document or `{...}'s capture. The shell waits for a
+// pipeline's commands, unless it ends with &, and $status is each one's wait
+// message (name pid: exit string) joined as rc's concstatus (ADR-0010).
+// Without fork, a pipeline's stages and & must be programs (vx:rc);
+// descriptors past 2 are not given to programs yet.
 //
 // rc's Host callbacks are contextless, so everything they reach is too; only
 // vx_main has a context.
@@ -390,38 +386,62 @@ elf_needs :: proc "contextless" (have: int) -> (n: int, needs: Needs) {
 	return int(end), .Bytes
 }
 
-// Loads a program through the namespace: the path as given, or /bin/NAME,
-// then /boot/bin/NAME. Returns its size (what a spawn needs of it), or 0.
+// Loads a program through the namespace, found as rc's searchpath finds it:
+// a name that starts / ./ ../ or # as written, any other in each of $path's
+// directories ("" and . meaning as written). Returns its size (what a spawn
+// needs of it), or 0.
 load :: proc "contextless" (name: string) -> int {
-	DIRS := [3]string{"", "/bin/", "/boot/bin/"}
-	has_slash := str.index_byte(name, '/') >= 0
-	for dir, d in DIRS {
-		if (d == 0) != has_slash {
-			continue
-		}
-		path_buf: [256]u8
-		path := str.join(path_buf[:], dir, name) or_continue
-		f: ns.File
-		if ns.open(&space, path, p9.OREAD, &f) != .Ok {
-			continue
-		}
-		size, need := 0, 4096
-		for size < need { // the headers, then as much as they say
-			n, _ := ns.read(&f, image[size:][:min(need - size, 65536)])
-			if n <= 0 {
-				break
-			}
-			size += n
-			want, needs := elf_needs(size)
-			if needs != .Bytes {
-				break
-			}
-			need = max(want, need)
-		}
-		ns.close(&f)
-		if want, needs := elf_needs(size); needs == .Bytes && size >= want {
+	here := str.has_prefix(name, "/") || str.has_prefix(name, "#") || str.has_prefix(name, "./") || str.has_prefix(name, "../")
+	dirs := here ? nil : rc.get_var(&sh, "path")
+	if dirs == nil {
+		return load_in("", name)
+	}
+	for d := dirs; d != nil; d = d.next {
+		if size := load_in(rc.text(d), name); size != 0 {
 			return size
 		}
+	}
+	return 0
+}
+
+// Loads dir/name into image: its size, or 0.
+load_in :: proc "contextless" (dir, name: string) -> int {
+	path_buf: [256]u8
+	n := 0
+	if dir != "" && dir != "." {
+		if len(dir) + 1 > len(path_buf) {
+			return 0
+		}
+		n = copy(path_buf[:], dir)
+		if path_buf[n - 1] != '/' {
+			path_buf[n] = '/'
+			n += 1
+		}
+	}
+	if n + len(name) > len(path_buf) {
+		return 0
+	}
+	n += copy(path_buf[n:], name)
+	f: ns.File
+	if ns.open(&space, string(path_buf[:n]), p9.OREAD, &f) != .Ok {
+		return 0
+	}
+	size, need := 0, 4096
+	for size < need { // the headers, then as much as they say
+		got, _ := ns.read(&f, image[size:][:min(need - size, 65536)])
+		if got <= 0 {
+			break
+		}
+		size += got
+		want, needs := elf_needs(size)
+		if needs != .Bytes {
+			break
+		}
+		need = max(want, need)
+	}
+	ns.close(&f)
+	if want, needs := elf_needs(size); needs == .Bytes && size >= want {
+		return size
 	}
 	return 0
 }
@@ -552,9 +572,10 @@ spawn :: proc "contextless" (argv: ^rc.Word, io: [3]vx.Handle) -> (task: vx.Hand
 // capture) or into (a file, as a program's input).
 Relay :: struct {
 	end:   vx.Handle, // the shell's end
-	to:    rc.Fd, // a file's, or a capture's
-	feed:  bool, // into the channel, from the file
+	to:    rc.Fd, // a file's, a here document's, or a capture's
+	feed:  bool, // into the channel, from the file or the here document
 	armed: bool,
+	off:   int, // a here document's: what has been fed
 }
 
 relays: [dynamic; MAX_RELAYS]Relay
@@ -581,9 +602,13 @@ relay_run :: proc "contextless" (rl: ^Relay, broken: ^bool) -> bool {
 	msg := memory.ptr_to_bytes(&relay_msg)
 	if rl.feed {
 		file := rl.to.(rc.Fd_File) or_else rc.Fd_File{handle = MAX_FILES}
+		here, is_here := rl.to.(rc.Fd_Here)
 		for {
 			n := 0
-			if file.handle < MAX_FILES && files[file.handle].used {
+			if is_here { // from the here document's text
+				n = copy(relay_msg.bytes[:], here.text[rl.off:])
+				rl.off += n
+			} else if file.handle < MAX_FILES && files[file.handle].used {
 				n, _ = ns.read(&files[file.handle].f, relay_msg.bytes[:])
 			}
 			if n <= 0 {
@@ -592,7 +617,11 @@ relay_run :: proc "contextless" (rl: ^Relay, broken: ^bool) -> bool {
 			relay_msg.header = {}
 			st := rt.channel_write(rl.end, msg[:size_of(vx.Msg_Header) + n])
 			if st == .Err_Should_Wait { // full: the rest later, from where this left off
-				files[file.handle].f.offset -= u64(n)
+				if is_here {
+					rl.off -= n
+				} else {
+					files[file.handle].f.offset -= u64(n)
+				}
 				return true
 			}
 			if st != .Ok {
@@ -614,7 +643,7 @@ relay_run :: proc "contextless" (rl: ^Relay, broken: ^bool) -> bool {
 			rc.capture_write(&sh, rl.to, s)
 		case rc.Fd_File:
 			write_file(v.handle, s, broken)
-		case rc.Fd_Inherit, rc.Fd_Dup, rc.Fd_Closed, rc.Fd_Pipe_Out, rc.Fd_Pipe_In: // never relayed
+		case rc.Fd_Inherit, rc.Fd_Dup, rc.Fd_Closed, rc.Fd_Pipe_Out, rc.Fd_Pipe_In, rc.Fd_Here: // never relayed out
 		}
 	}
 }
@@ -663,7 +692,7 @@ stage_io :: proc "contextless" (fd: rc.Fd, i: int, pipe_in, pipe_out: vx.Handle)
 		a, b := rt.channel_create() or_return
 		_ = rt.handle_close(b)
 		return a, .Ok
-	case rc.Fd_File, rc.Fd_Capture:
+	case rc.Fd_File, rc.Fd_Capture, rc.Fd_Here:
 		return relay_for(fd, i == 0)
 	}
 	if share == vx.HANDLE_NONE {
@@ -885,7 +914,6 @@ wait_message :: proc "contextless" (m: ^[dynamic; vx.ERRMAX]u8, info: ^vx.Task_S
 // --- The shell ---
 
 heap: [4 << 20]u8
-text: [256 * 1024]u8 // a script's, or the lines of a construct still open
 
 // The last $status, as rc exits with it: its first word, or nothing when it
 // is true (0s and |s), as rc's Exit; cut to whole runes (ADR-0013).
@@ -904,15 +932,66 @@ exit_status :: proc "contextless" () -> string {
 	return ""
 }
 
-show_error :: proc "contextless" () {
-	rt.eprint(rc.err(&sh), "\n")
+// What a read gave past the line Host.read_line asked for.
+pending: [dynamic; 4096]u8
+
+// Host.read_line: a line of the shell's standard input ('#d/0').
+read_line :: proc "contextless" (ctx: rawptr, buf: []u8) -> int {
+	n := 0
+	for {
+		for len(pending) > 0 && n < len(buf) {
+			c := pending[0]
+			ordered_remove_first(&pending)
+			buf[n] = c
+			n += 1
+			if c == '\n' {
+				return n
+			}
+		}
+		if n == len(buf) {
+			return n
+		}
+		resize(&pending, cap(pending))
+		got, _ := rt.read(pending[:])
+		resize(&pending, max(got, 0))
+		if got <= 0 {
+			return n
+		}
+	}
 }
+
+// The first byte of a fixed array taken off, the rest moved down.
+ordered_remove_first :: proc "contextless" (a: ^[dynamic; 4096]u8) {
+	copy(a[:], a[1:])
+	resize(a, len(a) - 1)
+}
+
+// Writes s into b as an rc word, quoted, as upstream's bootstrap does: cut
+// to leave room for what follows it.
+quoted :: proc "contextless" (b: ^[dynamic; 512]u8, room: int, s: string) {
+	limit := cap(b) - room
+	if len(b) < limit {
+		append(b, '\'')
+	}
+	for i := 0; i < len(s) && len(b) + 2 < limit; i += 1 {
+		if s[i] == '\'' {
+			append(b, '\'')
+		}
+		append(b, s[i])
+	}
+	if len(b) < limit {
+		append(b, '\'')
+	}
+}
+
+USAGE :: "usage: rc [-srdiIlxebpvV] [-c command] [-m initial] [file [arg ...]]\n"
 
 @(export, link_name="vx_main")
 vx_main :: proc() -> int {
 	rt.exits(shell())
 }
 
+// As 9front's rc: the flags, $pid $rcname and $cflag, then rcmain.
 shell :: proc() -> string {
 	if procns.from_spawn(&space) != .Ok {
 		rt.eprint("rc: the namespace is incomplete\n")
@@ -926,78 +1005,77 @@ shell :: proc() -> string {
 		open      = open_file,
 		close     = close_file,
 		exists    = exists,
+		read_line = read_line,
 	}
 	if !rc.init(&sh, heap[:], host) {
 		return "no memory"
 	}
 	import_env()
 
-	if args := rt.args(); len(args) > 0 { // rc FILE ARG ...: a script, its arguments in $*, its name in $0
-		rc.set_var(&sh, "*", ..args[1:])
-		rc.set_var(&sh, "0", args[0])
-		rc.source(&sh, args[0]) // its errors at file:line
-		n, ok := read_whole(nil, args[0], text[:])
-		if !ok {
-			say("rc: ", args[0], ": cannot read it\n")
-			return "cannot read the script"
+	// The flags, as rc's getflags("srdiIlxebpvVc:1m:1").
+	args := rt.args()
+	cflag, rcmain := "", "/rc/lib/rcmain"
+	i := 0
+	flags: for ; i < len(args); i += 1 {
+		a := args[i]
+		if len(a) < 2 || a[0] != '-' {
+			break
 		}
-		switch rc.run(&sh, string(text[:n])) {
-		case .Incomplete:
-			rt.eprint("rc: the script ends inside a construct\n")
-			return "syntax error"
-		case .Syntax:
-			show_error()
-			return "syntax error"
-		case .Failed:
-			show_error()
-		case .Ok, .Exit:
+		if a == "--" {
+			i += 1
+			break
 		}
-		return exit_status()
+		for k in 1 ..< len(a) {
+			f := a[k]
+			if f == 'c' || f == 'm' { // its argument: the rest of the word, or the next
+				v := a[k + 1:]
+				if v == "" && i + 1 < len(args) {
+					i += 1
+					v = args[i]
+				}
+				if v == "" {
+					rt.eprint(USAGE)
+					return "usage"
+				}
+				if f == 'c' {
+					cflag = v
+				} else {
+					rcmain = v
+				}
+				sh.flag[f] = true
+				continue flags
+			}
+			if str.index_byte("srdiIlxebpvV", f) < 0 {
+				rt.eprint(USAGE)
+				return "usage"
+			}
+			sh.flag[f] = true
+		}
+	}
+	input, _, _ := rt.stdio_handles()
+	if sh.flag['I'] {
+		sh.flag['i'] = false
+	} else if !sh.flag['i'] && i == len(args) && input == vx.HANDLE_NONE { // no file, and the console: interactive
+		sh.flag['i'] = true
 	}
 
-	length := 0 // of text: the lines of a construct still open
-	for {
-		rt.print(length > 0 ? "\t" : "vx% ")
-		start := length
-		n := 0
-		for {
-			n, _ = rt.read(text[length:])
-			if n <= 0 {
-				break
-			}
-			length += n
-			if text[length - 1] == '\n' || length == len(text) {
-				break
-			}
-		}
-		if n <= 0 && length == start {
-			break // the end of the input
-		}
-		if length == len(text) && text[length - 1] != '\n' { // too long: refused whole, never run in pieces
-			rest: [64]u8
-			for {
-				got, _ := rt.read(rest[:])
-				if got <= 0 || rest[got - 1] == '\n' {
-					break
-				}
-			}
-			say("rc: line too long", "", "\n")
-			set_status("line too long")
-			length = 0
-			continue
-		}
-		res := rc.run(&sh, string(text[:length]))
-		if res == .Incomplete {
-			continue // the next line continues it
-		}
-		length = 0
-		#partial switch res {
-		case .Syntax, .Failed:
-			show_error()
-		case .Exit:
-			return exit_status()
-		}
+	id: u64
+	if me, st := rt.task_info(rt.self); rt.self != vx.HANDLE_NONE && st == .Ok {
+		id = me.id
 	}
-	rt.print("\n")
+	digits: [str.U64_DIGITS]u8
+	rc.set_var(&sh, "pid", str.format_u64(digits[:], id))
+	rc.set_var(&sh, "rcname", "rc")
+	if cflag != "" {
+		rc.set_var(&sh, "cflag", cflag)
+	}
+	rc.set_var(&sh, "*", ..args[i:][:min(len(args) - i, CHILD_MAX_ARGS)])
+
+	// rc's bootstrap: . -bq rcmain $*, then exit.
+	boot: [dynamic; 512]u8
+	append(&boot, ". -bq ")
+	quoted(&boot, 8, rcmain)
+	append(&boot, " $*\n")
+	_ = rc.run(&sh, string(boot[:]))
 	return exit_status()
 }

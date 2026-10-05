@@ -12,13 +12,14 @@ package rctest
 import "base:runtime"
 import "core:fmt"
 import "core:mem"
+import "core:strings"
 import "vx:rc"
 import "vx:str"
 
 // Upstream's struct rc, which its heap holds too (rc_new takes it from the
 // front): a heap this much smaller is the same heap to the allocator, so the
 // port runs out of memory where upstream does.
-C_RC_SIZE :: 17936
+C_RC_SIZE :: 19104
 
 FILES :: 8
 
@@ -37,7 +38,12 @@ Host :: struct {
 	out, err:    [dynamic]u8,
 	exported:    [dynamic]u8, // exportx's: x's value as rc.next_var gives it
 	log:         [dynamic]u8, // the transcript
+	stdin:       string, // what rc's own standard input holds, a line at a time
+	stdin_at:    int,
 }
+
+// The standard input transcripts give the shell, for `. -i '#d/0'`.
+STDIN :: "echo in\nif(true) {\necho more\n}\nx=(); echo a^$x\necho last\n"
 
 // Up to the first NUL, as C reads a string.
 c_str :: proc(s: string) -> string {
@@ -55,6 +61,7 @@ callbacks :: proc(h: ^Host) -> rc.Host {
 		open = open_fake,
 		close = close_fake,
 		exists = exists_fake,
+		read_line = read_line_fake,
 	}
 }
 
@@ -122,6 +129,11 @@ fd_desc :: proc(b: ^[dynamic]u8, fd: rc.Fd, with_path := true) {
 		put(b, " po")
 	case rc.Fd_Pipe_In:
 		put(b, " pi")
+	case rc.Fd_Here:
+		put(b, " h")
+		if with_path {
+			esc(b, v.text)
+		}
 	}
 }
 
@@ -185,7 +197,7 @@ emit :: proc(h: ^Host, fds: ^[rc.FDS]rc.Fd, which: int, s: string, pipe: ^[dynam
 		}
 	case rc.Fd_Closed:
 		return
-	case rc.Fd_Inherit, rc.Fd_Dup, rc.Fd_Pipe_In:
+	case rc.Fd_Inherit, rc.Fd_Dup, rc.Fd_Pipe_In, rc.Fd_Here:
 	}
 	if v, is := fd.(rc.Fd_Inherit); is && v.which == 2 {
 		put(&h.log, "  e")
@@ -241,6 +253,11 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 		}
 		if f, is := fds[0].(rc.Fd_File); is && f.kind == .Read && f.handle < FILES {
 			input = h.files[f.handle].data[:]
+		}
+		// A here document's text; not a pipeline stage's, which upstream has
+		// freed by now: not compared.
+		if here, is := fds[0].(rc.Fd_Here); is && len(stages) == 1 {
+			input = transmute([]u8)here.text
 		}
 		in_copy := make([]u8, len(input))
 		defer delete(in_copy)
@@ -363,6 +380,26 @@ readdir_fake :: proc "contextless" (ctx: rawptr, path: string, g: ^rc.Glob) -> b
 		return true
 	}
 	return false
+}
+
+// A line of rc's own standard input.
+read_line_fake :: proc "contextless" (ctx: rawptr, buf: []u8) -> int {
+	context = runtime.default_context()
+	h := (^Host)(ctx)
+	n := 0
+	for h.stdin_at < len(h.stdin) && n < len(buf) {
+		c := h.stdin[h.stdin_at]
+		h.stdin_at += 1
+		buf[n] = c
+		n += 1
+		if c == '\n' {
+			break
+		}
+	}
+	put(&h.log, "read_line ")
+	esc(&h.log, string(buf[:n]))
+	put(&h.log, "\n")
+	return n
 }
 
 // Whether a path exists: the directory's names, and the files written.
@@ -518,6 +555,7 @@ bench_destroy :: proc(b: ^Bench) {
 // fuzzer runs it), with a step budget against loops: in b.host.log.
 transcript :: proc(b: ^Bench, text: string) -> bool {
 	reset(&b.host)
+	b.host.stdin = STDIN
 	if !rc.init(b.sh, b.heap, b.minimal ? minimal_callbacks(&b.host) : callbacks(&b.host)) {
 		return false
 	}
@@ -577,8 +615,9 @@ next_line :: proc(rest: ^string) -> (line: string, ok: bool) {
 }
 
 // The seeds, in the oracle's order: the corpus (script, words), the lines of
-// cases.rc and xcheck.rc, then rctest.rc.
-mutator_make :: proc(script, words, cases, xcheck, rctest: string) -> Mutator {
+// cases.rc and xcheck.rc, rctest.rc, then the blocks of blocks.rc (scripts of
+// several lines, each ending at a line that is %% alone).
+mutator_make :: proc(script, words, cases, xcheck, rctest, blocks: string) -> Mutator {
 	m: Mutator
 	append(&m.seeds, script, words)
 	for lines in ([]string{cases, xcheck}) {
@@ -588,6 +627,16 @@ mutator_make :: proc(script, words, cases, xcheck, rctest: string) -> Mutator {
 		}
 	}
 	append(&m.seeds, rctest)
+	rest := blocks
+	for len(rest) > 0 {
+		end := strings.index(rest, "\n%%\n")
+		if end < 0 {
+			append(&m.seeds, rest)
+			break
+		}
+		append(&m.seeds, rest[:end + 1])
+		rest = rest[end + 4:]
+	}
 	return m
 }
 

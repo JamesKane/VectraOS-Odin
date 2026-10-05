@@ -11,7 +11,7 @@ expect="svcd: started uart (task 2)"
 expect="svcd: started bootfs (task 3)"
 # bootfs says it is serving before or after svcd says it started it, as the
 # CPUs fall; the shell's prompt comes only once its namespace has mounted it.
-prompt="vx% "
+prompt="% "
 fail="vx: panic"
 fail=") killed: "
 fail="FAILED"

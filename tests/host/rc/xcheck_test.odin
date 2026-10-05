@@ -9,10 +9,15 @@
 // scripts in cases.rc, more in xcheck.rc, and tests/user/rctest.rc); and
 // inputs the mutator makes from them. Each at upstream's heap sizes from 4 MiB
 // down to 64 KiB, where scripts run out of memory as they compile or run.
-// The digests are those of upstream's rc.c at its M6 step 6a6a (439b30a),
-// whose host has exists too (logged as the others are), and joins a
-// pipeline's statuses with rc_concstatus; the seeds have that step's
-// single-line cases from rc_test.c.
+// The digests are those of upstream's rc.c at its M6 step 6a6b (57e7c3a),
+// whose host has exists and read_line too (logged as the others are; its
+// standard input is rctest's STDIN), and joins a pipeline's statuses with
+// rc_concstatus. The seeds have rc_test.c's 9front cases: those of one line
+// in cases.rc, the others in blocks.rc. Two differences are kept out of the
+// comparison: the oracle's rc.c is patched to call no close as a here
+// document's redirection is undone (upstream closes handle 0), and a
+// pipeline stage's here document is not read (upstream's text has been
+// freed by then); api_test checks both.
 package rc_test
 
 import "core:testing"
@@ -22,6 +27,7 @@ CORPUS := #load_directory("corpus")
 CASES :: #load("cases.rc", string)
 XCHECK :: #load("xcheck.rc", string)
 RCTEST :: #load("../../user/rctest.rc", string)
+BLOCKS :: #load("blocks.rc", string)
 
 corpus_file :: proc(name: string) -> string {
 	for f in CORPUS {
@@ -33,7 +39,7 @@ corpus_file :: proc(name: string) -> string {
 }
 
 mutator :: proc() -> rt.Mutator {
-	return rt.mutator_make(corpus_file("script"), corpus_file("words"), CASES, XCHECK, RCTEST)
+	return rt.mutator_make(corpus_file("script"), corpus_file("words"), CASES, XCHECK, RCTEST, BLOCKS)
 }
 
 // Heaps as upstream's: its size, less its interpreter.
@@ -51,7 +57,7 @@ test_corpus :: proc(t: ^testing.T) {
 	// From upstream's rc_fuzz.c driver and host, built with clang, logging.
 	cases := []Case {
 		{"script", 0xcee067c8e8737338}, // lists, for, if, `{}, switch, ||, |, fn, $*, $"*
-		{"words", 0x93fd6ef74dc6157e}, // quotes, subscripts, = in a word, globs, >[2=1], <<<, a continued line
+		{"words", 0xd6616c534890f036}, // quotes, subscripts, = in a word, globs, >[2=1], <<<, a continued line
 	}
 	testing.expect_value(t, len(CORPUS), len(cases))
 	b := rt.bench_make(FUZZ_HEAP, minimal = true)
@@ -78,12 +84,12 @@ Fold :: struct {
 test_seeds :: proc(t: ^testing.T) {
 	m := mutator()
 	defer rt.mutator_destroy(&m)
-	testing.expect_value(t, len(m.seeds), 157)
+	testing.expect_value(t, len(m.seeds), 188)
 	folds := []Fold {
-		{BIG_HEAP, false, 0x7c35d332d6db9885},
-		{MID_HEAP, false, 0x73e3e810aea412a7},
-		{SMALL_HEAP, false, 0x10b1c55e14c8d117},
-		{SMALL_HEAP, true, 0xcb6eaa9a6addeffb},
+		{BIG_HEAP, false, 0x06481b601bfccc9e},
+		{MID_HEAP, false, 0x22030d5c3dcedc70},
+		{SMALL_HEAP, false, 0x5d2731f396d6fa8f},
+		{SMALL_HEAP, true, 0x4fddde80b9152394},
 	}
 	for f in folds {
 		b := rt.bench_make(f.heap, f.minimal)
@@ -104,11 +110,11 @@ test_mutated :: proc(t: ^testing.T) {
 	m := mutator()
 	defer rt.mutator_destroy(&m)
 	folds := []Fold {
-		{BIG_HEAP, false, 0xc6f94147f1261a00},
-		{MID_HEAP, false, 0x278a68437ee76e78},
-		{SMALL_HEAP, false, 0xeeadeb8c4e682b8a},
-		{FUZZ_HEAP, true, 0x2d753ea9af652974},
-		{SMALL_HEAP, true, 0xe495dfb32cfd73c7},
+		{BIG_HEAP, false, 0x81a1c13cd792a527},
+		{MID_HEAP, false, 0xfa3333df2225b61f},
+		{SMALL_HEAP, false, 0xeb9920ac6714d842},
+		{FUZZ_HEAP, true, 0x1bb6d9185c032f25},
+		{SMALL_HEAP, true, 0xeacada1deeb78d78},
 	}
 	text: [dynamic]u8
 	defer delete(text)

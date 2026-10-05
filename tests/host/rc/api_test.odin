@@ -82,6 +82,29 @@ test_stage_path :: proc(t: ^testing.T) {
 	testing.expect_value(t, b.host.closed, b.host.opened)
 }
 
+// A stage's here document keeps its text until the stage has run, and has no
+// file to close: upstream frees the text when the redirection is undone,
+// before its pipeline runs, and closes handle 0 for it.
+@(test)
+test_here_stage :: proc(t: ^testing.T) {
+	b := shell(t)
+	defer rt.bench_destroy(b)
+	b.sh.host.run = proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: bool) -> (pid: u64, ok: bool) {
+		context = runtime.default_context()
+		h := (^rt.Host)(ctx)
+		for &c in stages {
+			if here, is := c.fds[0].(rc.Fd_Here); is {
+				append(&h.out, here.text)
+			}
+		}
+		rc.set_status(r, "")
+		return 0, true
+	}
+	expect_out(t, b, "cat <<EOF | wc\na b c\nEOF\necho x > f; { cat <<A; cat <<B } > g\none\nA\ntwo\nB\n", "a b c\none\ntwo\n")
+	testing.expect_value(t, b.host.opened, 2)
+	testing.expect_value(t, b.host.closed, b.host.opened) // and none closed twice
+}
+
 // Output a program writes to anything but a capture is not the shell's.
 @(test)
 test_capture_write :: proc(t: ^testing.T) {

@@ -45,6 +45,8 @@ Op :: enum u8 {
 	Redir, // f0: fd, f1: kind; the top list is the file
 	Dup, // f0 = f1 (f1 CLOSE_FD: closed)
 	Popredir, // a: how many
+	Rdcmds, // the frame's reader: the next command read, compiled and run, then this again (rc's Xrdcmds)
+	Eflag, // -e: exit unless $status is true
 }
 
 @(private)
@@ -62,8 +64,14 @@ Code :: struct {
 	n:       u32,
 	inst:    ^Inst, // in the heap: code_inst
 	strings: ^u8, // in the heap: code_strings
+	src:     [64]u8, // the file it came from, for errors at file:line: to its first NUL, as upstream's
 }
-#assert(size_of(Code) == 24) // upstream's rc_code
+#assert(size_of(Code) == 88) // upstream's rc_code
+
+@(private)
+code_src :: proc "contextless" (c: ^Code) -> string {
+	return c_name(string(c.src[:]))
+}
 
 @(private)
 code_inst :: proc "contextless" (c: ^Code) -> []Inst {
@@ -85,6 +93,8 @@ Compiler :: struct {
 	nstr:  int,
 	why:   string,
 	line:  u32, // the line of the node being compiled
+	noe:   bool, // the item being compiled is in a condition: -e does not apply in it (rc's outcode(c, 0))
+	heres: []Here, // the here documents' texts, by a tag word's here (plus 1)
 }
 
 @(private)
@@ -96,6 +106,7 @@ Citem :: struct {
 	at:            u32, // a jump to patch, or where a loop starts
 	cur:           i32, // a list being walked
 	count:         u32,
+	noe:           bool, // a condition's: -e does not apply in it
 }
 
 @(private)
@@ -140,6 +151,31 @@ emit_word :: proc "contextless" (c: ^Compiler, s: string) {
 	c.str[c.nstr + len(s)] = 0
 	emit(c, .Word, a = u32(c.nstr), b = u32(len(s)))
 	c.nstr += len(s) + 1
+}
+
+// A here document's redirection: its text as the word, then Redir (b: quoted).
+@(private = "file")
+emit_here :: proc "contextless" (c: ^Compiler, rd: ^Node) {
+	k := 0
+	if rd.a != NONE && c.nodes[rd.a].kind == .Word {
+		k = int(c.nodes[rd.a].here)
+	}
+	if k == 0 || k > len(c.heres) || !c.heres[k - 1].read {
+		c.why = "here document never ended"
+		return
+	}
+	h := &c.heres[k - 1]
+	emit(c, .Mark)
+	emit_word(c, h.body)
+	emit(c, .Redir, rd.fd0, u8(Redir_Kind.Here), b = u32(h.quoted))
+}
+
+// -e after a command, as rc's Xeflag, unless in a condition.
+@(private = "file")
+eflag :: proc "contextless" (c: ^Compiler) {
+	if c.r.flag['e'] && !c.noe {
+		emit(c, .Eflag)
+	}
 }
 
 @(private = "file")
@@ -212,9 +248,10 @@ is_cmd :: proc "contextless" (k: Node_Kind) -> bool { // a command, not a word
 compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 	items := &c.r.compiler.items
 	ni := 0
-	// Pushes an item for node nd at phase ph: false (the compile failed) if
-	// there is no room.
-	push :: proc "contextless" (c: ^Compiler, items: ^[CITEMS]Citem, ni: ^int, nd: i32, ph: u8) -> bool {
+	// Pushes an item for node nd at phase ph, in a condition if the item
+	// being compiled is or cond says it is one: false (the compile failed)
+	// if there is no room.
+	push :: proc "contextless" (c: ^Compiler, items: ^[CITEMS]Citem, ni: ^int, nd: i32, ph: u8, cond := false) -> bool {
 		if ni^ == CITEMS {
 			c.why = "nested too deeply"
 			return false
@@ -222,6 +259,7 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 		items[ni^] = Citem {
 			node  = nd,
 			phase = ph,
+			noe   = c.noe || cond,
 		}
 		ni^ += 1
 		return true
@@ -242,6 +280,7 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 		if it.node == NONE {
 			continue
 		}
+		c.noe = it.noe
 		t := &c.nodes[it.node]
 		if t.line != 0 {
 			c.line = t.line
@@ -354,6 +393,9 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 					if rd.kind == .Dup {
 						emit(c, .Dup, rd.fd0, rd.fd1)
 						again(items, &ni, &it, 1)
+					} else if rd.rkind == .Here {
+						emit_here(c, rd)
+						again(items, &ni, &it, 1)
 					} else {
 						emit(c, .Mark)
 						it.at = u32(r)
@@ -371,6 +413,7 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 						emit(c, .Stage, it.out_fd, it.in_fd, it.count)
 					} else {
 						emit(c, .Simple)
+						eflag(c)
 					}
 					if it.count != 0 {
 						emit(c, .Popredir, a = it.count)
@@ -443,7 +486,7 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 		case .And, .Or:
 			if it.phase == 0 {
 				again(items, &ni, &it, 1)
-				push(c, items, &ni, t.a, 0) or_return
+				push(c, items, &ni, t.a, 0, cond = true) or_return
 			} else if it.phase == 1 {
 				it.at = emit(c, t.kind == .And ? .True : .False)
 				again(items, &ni, &it, 2)
@@ -461,7 +504,7 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 		case .If:
 			if it.phase == 0 {
 				again(items, &ni, &it, 1)
-				push(c, items, &ni, t.a, 0) or_return
+				push(c, items, &ni, t.a, 0, cond = true) or_return
 			} else if it.phase == 1 {
 				it.at = emit(c, .If)
 				again(items, &ni, &it, 2)
@@ -482,7 +525,7 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 			if it.phase == 0 {
 				it.count = c.n // where the condition starts
 				again(items, &ni, &it, 1)
-				push(c, items, &ni, t.a, 0) or_return
+				push(c, items, &ni, t.a, 0, cond = true) or_return
 			} else if it.phase == 1 {
 				if c.n == it.count {
 					emit(c, .Settrue) // while(): an empty condition is true
@@ -556,6 +599,12 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 		case .Redir:
 			switch it.phase {
 			case 0:
+				if t.rkind == .Here {
+					emit_here(c, t)
+					again(items, &ni, &it, 2)
+					push(c, items, &ni, t.b, 0) or_return
+					break
+				}
 				emit(c, .Mark)
 				again(items, &ni, &it, 1)
 				push(c, items, &ni, t.a, 0) or_return
@@ -594,6 +643,7 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 			case:
 				emit(c, .Qw) // the subject one word, as rc's
 				emit(c, .Match)
+				eflag(c)
 			}
 		case .Fn: // fn names { body }: the names, Fn, the body inline, Return
 			switch it.phase {
@@ -692,12 +742,13 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 }
 
 // The text compiled into code: nil on a syntax error (in err), or if more
-// text could finish it (incomplete).
+// text could finish it (incomplete^ set). As upstream's, incomplete^ is left
+// as it was when there is no memory to parse the text at all.
 @(private)
-compile_text :: proc "contextless" (r: ^Rc, text: string, line: u32) -> (code: ^Code, incomplete: bool) {
+compile_text :: proc "contextless" (r: ^Rc, text: string, line: u32, incomplete: ^bool) -> (code: ^Code) {
 	p := (^Parser)(heap_alloc(r, PARSER_BYTES))
 	if p == nil {
-		return nil, false
+		return nil
 	}
 	scratch := 2 * len(text) + 64
 	nodes := len(text) + 32
@@ -714,17 +765,18 @@ compile_text :: proc "contextless" (r: ^Rc, text: string, line: u32) -> (code: ^
 	p.line = line
 	if p.lx.scratch != nil && p.nodes != nil {
 		root := parse(p)
-		incomplete = p.incomplete || p.lx.incomplete
+		incomplete^ = p.incomplete || p.lx.incomplete
 		if p.why != "" { // as rc's yyerror: file:line: message, which is $status too
 			buf: [96]u8
-			set_error(r, place(&buf, string(r.src[:]), p.line), ": ", p.why)
-			if !incomplete {
+			set_error(r, place(buf[:], string(r.src[:]), p.line), ": ", p.why)
+			if !incomplete^ {
 				set_status(r, p.why)
 			}
 		} else {
 			c := Compiler {
 				r     = r,
 				nodes = p.nodes,
+				heres = p.lx.heres[:],
 			}
 			insts := nodes * 4 + 16
 			strs := scratch + 64
@@ -743,6 +795,7 @@ compile_text :: proc "contextless" (r: ^Rc, text: string, line: u32) -> (code: ^
 						inst    = raw_data(c.inst),
 						strings = raw_data(c.str),
 					}
+					copy(code.src[:len(code.src) - 1], c_name(string(r.src[:])))
 				} else {
 					heap_free(r, raw_data(c.inst))
 					heap_free(r, raw_data(c.str))
@@ -750,7 +803,7 @@ compile_text :: proc "contextless" (r: ^Rc, text: string, line: u32) -> (code: ^
 			} else {
 				buf: [96]u8
 				why := c.why != "" ? c.why : "out of memory"
-				set_error(r, place(&buf, string(r.src[:]), c.line), ": ", why)
+				set_error(r, place(buf[:], string(r.src[:]), c.line), ": ", why)
 				set_status(r, why)
 				heap_free(r, raw_data(c.inst))
 				heap_free(r, raw_data(c.str))

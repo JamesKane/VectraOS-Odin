@@ -129,6 +129,8 @@ make_bootfs :: proc(a: ^Arch, mode: Mode, out: string, with := "") -> bool {
 		}
 	}
 	append(&entries, Bootfs_Entry{path = "lib/man/index/base", data = read_file(MAN_INDEX) or_return, mode = 0o644})
+	// rc's start, as 9front's (upstream's M6 step 6a6b): /rc/lib/rcmain.
+	append(&entries, Bootfs_Entry{path = "rc/lib/rcmain", data = read_file("boot/rc/lib/rcmain") or_return, mode = 0o644})
 	// The service manifests, the driver manifests devmgr matches (M3), and
 	// the namespace templates: boot/lib/ns/NAME is /lib/ns/NAME in the image.
 	for dir in ([]string{"boot/svc", "boot/drv", "boot/lib/ns"}) {

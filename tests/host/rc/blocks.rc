@@ -1,0 +1,67 @@
+if(false) echo a
+if not echo b
+%%
+echo ok
+echo )
+echo after
+%%
+x=(a b); cat <<EOF
+v=$x $$x $x^y
+EOF
+%%
+cat <<'EOF'
+raw $x
+EOF
+%%
+fn f { cat <<EOF
+$1 $2
+EOF
+}; f p q
+%%
+cat <<A; cat <<B
+one
+A
+two
+B
+%%
+{ cat } <<EOF
+block
+EOF
+%%
+cat <<[0]EOF
+zero
+EOF
+%%
+cat <<EOF
+never ends
+%%
+flag x +
+echo hi 'a b'
+flag x -
+%%
+flag e +
+if(false) echo no
+echo yes
+false
+echo never
+%%
+flag s +
+false
+flag s -
+%%
+flag v +
+echo v
+flag v -
+%%
+flag r +
+true
+flag r -
+%%
+cat <<EOF | wc
+a b c
+EOF
+echo x > f; { cat <<A; cat <<B } > g
+one
+A
+two
+B

@@ -463,28 +463,38 @@ pop_redirs :: proc "contextless" (r: ^Rc, to: int) {
 			continue
 		}
 		// A file the host opened: closed, or once a stage that may have been
-		// given it has run. Its path waits with it, for that stage's Fd_File;
-		// upstream frees it here, and a stage's path is read after the free.
-		file, _ := d.to.(Fd_File)
+		// given it has run. Its path waits with it, for that stage's Fd_File,
+		// as a here document's text does for its Fd_Here; upstream frees them
+		// here, and a stage's are read after the free. A here document has no
+		// file to close; upstream closes handle 0 for it.
+		file, is_file := d.to.(Fd_File)
 		if len(r.stages) > 0 && len(r.closes) < cap(r.closes) {
-			append(&r.closes, Pending_Close{handle = file.handle, level = u32(len(r.stages)), path = d.path, close = r.host.close != nil})
+			append(&r.closes, Pending_Close{handle = file.handle, level = u32(len(r.stages)), path = d.path, close = is_file && r.host.close != nil})
 			continue
 		}
-		if r.host.close != nil {
+		if is_file && r.host.close != nil {
 			r.host.close(r.host.ctx, file.handle)
 		}
-		forget_path(r, file.path)
+		forget(r, raw_data(text(d.path)))
 		free_words(r, d.path)
 	}
 }
 
-// No gathered stage keeps a path about to be freed: it reads as empty.
+// No gathered stage keeps a path or here document about to be freed: it
+// reads as empty.
 @(private = "file")
-forget_path :: proc "contextless" (r: ^Rc, path: string) {
+forget :: proc "contextless" (r: ^Rc, s: [^]u8) {
 	for &st in r.stages {
 		for &fd in st.fds {
-			if f, is := &fd.(Fd_File); is && raw_data(f.path) == raw_data(path) {
-				f.path = ""
+			#partial switch &v in fd {
+			case Fd_File:
+				if raw_data(v.path) == s {
+					v.path = ""
+				}
+			case Fd_Here:
+				if raw_data(v.text) == s {
+					v.text = ""
+				}
 			}
 		}
 	}
@@ -499,7 +509,7 @@ push_frame :: proc "contextless" (r: ^Rc, code: ^Code, pc: u32, locals: ^Var) ->
 		return false
 	}
 	code.refs += 1
-	append(&r.frames, Frame{code = code, pc = pc, locals = locals, redirs = u32(len(r.redirs))})
+	append(&r.frames, Frame{code = code, pc = pc, locals = locals, redirs = u32(len(r.redirs)), sp = u32(len(r.stack)), ncaptures = u32(len(r.captures))})
 	return true
 }
 
@@ -510,6 +520,7 @@ pop_frame :: proc "contextless" (r: ^Rc) {
 	free_locals(r, f.locals)
 	pop_redirs(r, int(f.redirs))
 	code_release(r, f.code)
+	reader_free(r, f.rd)
 }
 
 @(private = "file")
@@ -521,6 +532,228 @@ new_local :: proc "contextless" (r: ^Rc, name: string, val: ^Word) -> ^Var {
 	}
 	v.val = val
 	return v
+}
+
+// --- Reading commands as they come (rc's Xrdcmds) ---
+
+@(private)
+Reader :: struct {
+	buf:         []u8, // a file's whole text, or what has been read of standard input: in the heap
+	len, pos:    int, // its length, and what has been read of it
+	line:        u32, // the lines read so far
+	interactive: bool, // -i: prompts, and an error goes back to it rather than ending everything
+	tty:         bool, // its text comes a line at a time from rc's standard input
+	whole:       bool, // -b: the whole text compiled at once
+	quiet:       bool, // -q: -e does not apply to it
+	eof:         bool,
+	name:        [64]u8, // for errors, file:line: to its first NUL, as upstream's
+}
+#assert(size_of(Reader) == 112) // upstream's rc_reader: the heap's sizes are its
+
+@(private)
+reader_new :: proc "contextless" (r: ^Rc, name: string) -> ^Reader {
+	rd := heap_new(r, Reader)
+	if rd != nil {
+		copy(rd.name[:len(rd.name) - 1], name)
+	}
+	return rd
+}
+
+@(private)
+reader_free :: proc "contextless" (r: ^Rc, rd: ^Reader) {
+	if rd == nil {
+		return
+	}
+	heap_free(r, raw_data(rd.buf))
+	heap_free(r, rd)
+}
+
+@(private = "file")
+reader_name :: proc "contextless" (rd: ^Reader) -> string {
+	return c_name(string(rd.name[:]))
+}
+
+// A frame that reads from rd (which it takes), with locals (which it takes).
+@(private)
+push_reader :: proc "contextless" (r: ^Rc, rd: ^Reader, locals: ^Var) -> bool {
+	if rd == nil {
+		free_locals(r, locals)
+		return false
+	}
+	if !push_frame(r, r.rdcode, 0, locals) {
+		reader_free(r, rd)
+		return false
+	}
+	r.frames[len(r.frames) - 1].rd = rd
+	return true
+}
+
+// rc's own standard error, whatever a command's redirections are: rc's
+// messages go there, as rc's err.
+@(private = "file")
+errout :: proc "contextless" (r: ^Rc, s: string) {
+	if r.host.write != nil {
+		r.host.write(r.host.ctx, Fd_Inherit{2}, 2, s)
+	}
+}
+
+// Whether a word is written bare by rc's %q: else in quotes.
+@(private = "file")
+bare :: proc "contextless" (s: string) -> bool {
+	if len(s) == 0 {
+		return false
+	}
+	for c in transmute([]u8)s {
+		if !word_char(c) || c == GLOB {
+			return false
+		}
+	}
+	return true
+}
+
+// A word as rc quotes it (%q), to out: bare when it can be, else in '' with
+// '' for a quote.
+@(private = "file")
+quote :: proc "contextless" (r: ^Rc, s: string, out: proc "contextless" (r: ^Rc, s: string)) {
+	if bare(s) {
+		out(r, s)
+		return
+	}
+	out(r, "'")
+	for i in 0 ..< len(s) {
+		if s[i] == '\'' {
+			out(r, "'")
+		}
+		out(r, s[i:][:1])
+	}
+	out(r, "'")
+}
+
+@(private = "file")
+errwords :: proc "contextless" (r: ^Rc, w: ^Word) { // rc's %v
+	for x := w; x != nil; x = x.next {
+		quote(r, text(x), errout)
+		errout(r, x.next != nil ? " " : "")
+	}
+}
+
+// One more line of rd's standard input onto its text: false at the end.
+@(private = "file")
+reader_more :: proc "contextless" (r: ^Rc, rd: ^Reader, first: bool) -> bool {
+	if rd.eof || r.host.read_line == nil {
+		rd.eof = true
+		return false
+	}
+	if rd.interactive { // the prompt: $prompt's first word for a command, its second for a line that goes on
+		use := get_var(r, "prompt")
+		if !first && use != nil {
+			use = use.next
+		}
+		if use != nil {
+			errout(r, text(use))
+		} else {
+			errout(r, first ? "% " : "\t")
+		}
+	}
+	if len(rd.buf) - rd.len < 4096 { // room for a line
+		size := len(rd.buf) != 0 ? len(rd.buf) * 2 : 8192
+		if size > 1 << 20 {
+			errout(r, "rc: line too long\n")
+			rd.eof = true
+			return false
+		}
+		more := heap_alloc(r, size)
+		if more == nil {
+			rd.eof = true
+			return false
+		}
+		copy(([^]u8)(more)[:size], rd.buf[:rd.len])
+		heap_free(r, raw_data(rd.buf))
+		rd.buf = ([^]u8)(more)[:size]
+	}
+	n := r.host.read_line(r.host.ctx, rd.buf[rd.len:])
+	if n <= 0 {
+		rd.eof = true
+		return false
+	}
+	rd.len += min(n, len(rd.buf) - rd.len)
+	return true
+}
+
+// The next command of the frame's reader, compiled and run in a frame of its
+// own; this frame goes back to read the one after.
+@(private = "file")
+rdcmds :: proc "contextless" (r: ^Rc, f: ^Frame) {
+	rd := f.rd
+	if r.flag['s'] && !true_status(r) { // -s: a status that is not true, before the next command
+		errout(r, "status=")
+		errwords(r, get_var(r, "status"))
+		errout(r, "\n")
+	}
+	if rd.tty && rd.pos == rd.len { // what was run, let go
+		rd.pos, rd.len = 0, 0
+	}
+	start := rd.pos
+	line0 := rd.line + 1
+	code: ^Code
+	incomplete := false
+	for {
+		if rd.pos == rd.len && (!rd.tty || !reader_more(r, rd, rd.pos == start)) {
+			break
+		}
+		from := rd.pos
+		if rd.whole {
+			rd.pos = rd.len
+		} else {
+			for rd.pos < rd.len && rd.buf[rd.pos] != '\n' {
+				rd.pos += 1
+			}
+			if rd.pos < rd.len {
+				rd.pos += 1
+			}
+		}
+		for c in rd.buf[from:rd.pos] {
+			rd.line += c == '\n' ? 1 : 0
+		}
+		if r.flag['v'] || r.flag['V'] { // -v: input as read
+			errout(r, string(rd.buf[from:rd.pos]))
+		}
+		was := r.src // what it compiles names its file
+		source(r, reader_name(rd))
+		e := r.flag['e']
+		if rd.quiet {
+			r.flag['e'] = false // . -q: no -e in it, as rc's
+		}
+		code = compile_text(r, string(rd.buf[start:rd.pos]), line0, &incomplete)
+		r.flag['e'] = e
+		r.src = was
+		if code != nil || !incomplete {
+			break
+		}
+	}
+	if code == nil && start == rd.pos {
+		return // the end: the frame returns
+	}
+	if code == nil { // a syntax error, or the end inside a construct: said, and in $status
+		if incomplete && rd.pos == rd.len {
+			buf: [96]u8
+			errout(r, place(buf[:], reader_name(rd), rd.line))
+			errout(r, ": unexpected end of file\n")
+			set_status(r, "unexpected end of file")
+			r.incomplete = true
+		} else {
+			errout(r, string(r.err[:]))
+			errout(r, "\n")
+			r.syntax = true
+		}
+		if rd.interactive && !rd.eof {
+			f.pc -= 1 // the next command, as rc's
+		}
+		return
+	}
+	f.pc -= 1 // back for the next command once this one has run
+	_ = push_frame(r, code, 0, nil)
+	code_release(r, code)
 }
 
 // rc's builtins: the ones the language needs. True if argv's first word is one.
@@ -550,6 +783,25 @@ builtin :: proc "contextless" (r: ^Rc, argv: ^Word, argc: u32) -> bool {
 		}
 		set_status(r, "")
 		return true
+	case "flag": // flag f [+-], as rc's execflag
+		f: u8
+		if argc > 1 && argv.next.len == 1 {
+			f = text(argv.next)[0]
+		}
+		if argc == 2 && argv.next.len != 0 {
+			f = text(argv.next)[0]
+			set := f < 128 && r.flag[f]
+			set_status(r, set ? "" : "flag not set")
+			return true
+		}
+		v := argc == 3 ? argv.next.next : nil
+		if f != 0 && f < 128 && v != nil && (text(v) == "+" || text(v) == "-") {
+			r.flag[f] = text(v) == "+"
+			set_status(r, "")
+			return true
+		}
+		fail(r, "", "Usage: flag [letter] [+-]")
+		return true
 	case "whatis":
 		for a := argv.next; a != nil; a = a.next {
 			v := var_find(r, text(a), false)
@@ -572,21 +824,170 @@ builtin :: proc "contextless" (r: ^Rc, argv: ^Word, argc: u32) -> bool {
 	return false
 }
 
-// `.` and `eval`: text run in a frame of its own, on top.
-@(private = "file")
-run_nested :: proc "contextless" (r: ^Rc, text: string) -> bool {
-	code, _ := compile_text(r, text, 1)
-	if code == nil {
-		set_status(r, "syntax error")
-		return false
-	}
-	ok := push_frame(r, code, 0, nil)
-	code_release(r, code) // the frame holds it
-	return ok
-}
-
 @(private = "file")
 DOT_MAX :: 256 * 1024 // a file `.` reads
+
+// Whether a name says where it is, so no directory of $path is tried: it
+// starts / ./ or ../ (as rc's searchpath).
+@(private = "file")
+here_name :: proc "contextless" (s: string) -> bool {
+	return str.has_prefix(s, "/") || str.has_prefix(s, "./") || str.has_prefix(s, "../")
+}
+
+// A directory of $path joined to a name, into buf, as upstream's `.` and
+// whatis join them: "" and . mean the name as written, and so does a
+// directory too long for buf. ok is false if the name does not fit.
+@(private = "file")
+path_join :: proc "contextless" (buf: []u8, dir, name: string) -> (path: string, ok: bool) {
+	n := 0
+	if len(dir) != 0 && dir != "." && len(dir) + 1 < len(buf) {
+		n = copy(buf, dir)
+		if buf[n - 1] != '/' {
+			buf[n] = '/'
+			n += 1
+		}
+	}
+	if n + len(name) >= len(buf) {
+		return "", false
+	}
+	n += copy(buf[n:], name)
+	return string(buf[:n]), true
+}
+
+// `.` [-biq] file [arg ...], as rc's execdot: the file, found through $path
+// unless its name says where it is, read and run a command at a time in a
+// frame of its own, $* its arguments and $0 its name. '#d/0' is rc's own
+// standard input. -b: compiled whole; -i: interactive; -q: no error if it is
+// not there, and no -e in it.
+@(private = "file")
+dot :: proc "contextless" (r: ^Rc, argv: ^Word) {
+	bflag, iflag, qflag := false, false, false
+	a := argv.next
+	for ; a != nil && a.len != 0 && text(a)[0] == '-'; a = a.next {
+		if text(a) == "--" {
+			a = a.next
+			break
+		}
+		for c in transmute([]u8)text(a)[1:] {
+			switch c {
+			case 'b':
+				bflag = true
+			case 'i':
+				iflag = true
+			case 'q':
+				qflag = true
+			case:
+				fail(r, "", "Usage: . [-biq] file [arg ...]")
+				return
+			}
+		}
+	}
+	if a == nil {
+		fail(r, "", "Usage: . [-biq] file [arg ...]")
+		return
+	}
+	name := text(a)
+	rd: ^Reader
+	if name == "#d/0" {
+		rd = reader_new(r, name)
+		if rd != nil {
+			rd.tty = true
+		}
+	} else { // through $path, as rc's searchpath, unless it starts / ./ or ../
+		dirs := here_name(name) ? nil : get_var(r, "path")
+		as_is: Word // "": the name as written
+		if dirs == nil {
+			dirs = &as_is
+		}
+		buf := heap_alloc(r, DOT_MAX)
+		for d := dirs; buf != nil && d != nil && rd == nil; d = d.next {
+			path_buf: [512]u8
+			path := path_join(path_buf[:], d == &as_is ? "" : text(d), name) or_continue
+			got, ok := 0, false
+			if r.host.read_file != nil {
+				got, ok = r.host.read_file(r.host.ctx, path, ([^]u8)(buf)[:DOT_MAX])
+			}
+			if !ok {
+				continue
+			}
+			rd = reader_new(r, path)
+			if rd != nil {
+				rd.buf = ([^]u8)(buf)[:DOT_MAX]
+				rd.len = min(got, DOT_MAX)
+				buf = nil
+			}
+		}
+		heap_free(r, buf)
+		if rd == nil {
+			if !qflag { // rc's Xerror3: . can't open: file: why, why its status
+				msg: [dynamic; ERR_MAX]u8
+				append(&msg, ". can't open: ", name)
+				fail(r, "file does not exist", string(msg[:]), "file does not exist")
+			}
+			return
+		}
+	}
+	if rd == nil {
+		fail(r, "", "out of memory")
+		return
+	}
+	rd.interactive = iflag
+	rd.whole = bflag && !iflag
+	rd.quiet = qflag
+	star := new_local(r, "*", copy_words(r, a.next))
+	zero := new_local(r, "0", new_word(r, name))
+	if star != nil && zero != nil {
+		zero.next = star
+	}
+	_ = push_reader(r, rd, zero != nil ? zero : star)
+}
+
+// eval cmd ...: the words, joined by spaces, run as a command line (rc's execeval).
+@(private = "file")
+eval :: proc "contextless" (r: ^Rc, argv: ^Word) {
+	if argv.next == nil {
+		fail(r, "", "Usage: eval cmd ...")
+		return
+	}
+	total := 1
+	for w := argv.next; w != nil; w = w.next {
+		total += w.len + 1
+	}
+	p := heap_alloc(r, total)
+	if p == nil {
+		return
+	}
+	buf := ([^]u8)(p)[:total]
+	at := 0
+	for w := argv.next; w != nil; w = w.next {
+		at += copy(buf[at:], text(w))
+		buf[at] = w.next != nil ? ' ' : '\n'
+		at += 1
+	}
+	line: u32
+	src := string(r.src[:])
+	if len(r.frames) > 0 {
+		f := &r.frames[len(r.frames) - 1]
+		if f.pc != 0 && f.pc <= f.code.n {
+			line = code_inst(f.code)[f.pc - 1].line
+		}
+		if f.code.src[0] != 0 {
+			src = code_src(f.code)
+		}
+	}
+	// Its name, file:line *eval*, in upstream's 64 bytes, where leaves 8.
+	at_buf: [64 - 8]u8
+	name: [dynamic; 63]u8
+	append(&name, place(at_buf[:], src, line), " *eval*")
+	rd := reader_new(r, string(name[:]))
+	if rd == nil {
+		heap_free(r, p)
+		return
+	}
+	rd.buf = buf
+	rd.len = at
+	_ = push_reader(r, rd, nil)
+}
 
 // Runs a command whose words are argv: a function, a builtin (rc's, then the
 // host's), or a program.
@@ -597,6 +998,10 @@ simple :: proc "contextless" (r: ^Rc, words: ^Word, async: bool) {
 	if argc == 0 {
 		fail(r, "", "empty argument list")
 		return
+	}
+	if r.flag['x'] { // -x: each command, as rc's (before its redirections)
+		errwords(r, argv)
+		errout(r, "\n")
 	}
 	v := gvar_find(r, text(argv), false)
 	if v != nil && v.fn != nil && async { // rc runs it in a child, which needs upstream's M6 step 6d: refused, not run in the foreground
@@ -616,39 +1021,12 @@ simple :: proc "contextless" (r: ^Rc, words: ^Word, async: bool) {
 	if builtin(r, argv, argc) {
 		return
 	}
-	if name := text(argv); name == "." || name == "eval" {
-		dot := name[0] == '.'
-		if dot && argc > 1 && r.host.read_file != nil {
-			buf := heap_alloc(r, DOT_MAX)
-			n, ok := 0, false
-			if buf != nil {
-				n, ok = r.host.read_file(r.host.ctx, text(argv.next), ([^]u8)(buf)[:DOT_MAX])
-			}
-			if !ok || n < 0 || n > DOT_MAX {
-				shell_write(r, 2, "rc: cannot read the file\n")
-				set_status(r, "cannot read")
-			} else {
-				_ = run_nested(r, string(([^]u8)(buf)[:n]))
-			}
-			heap_free(r, buf)
-		} else if !dot { // eval: the words joined
-			total := 0
-			for w := argv.next; w != nil; w = w.next {
-				total += w.len + 1
-			}
-			buf := heap_alloc(r, total + 1)
-			if buf != nil {
-				b := ([^]u8)(buf)[:total + 1]
-				at := 0
-				for w := argv.next; w != nil; w = w.next {
-					at += copy(b[at:], text(w))
-					b[at] = ' '
-					at += 1
-				}
-				_ = run_nested(r, string(b[:at]))
-			}
-			heap_free(r, buf)
-		}
+	switch text(argv) {
+	case ".":
+		dot(r, argv)
+		return
+	case "eval":
+		eval(r, argv)
 		return
 	}
 	fds := command_fds(r)
@@ -768,14 +1146,18 @@ qw :: proc "contextless" (r: ^Rc, list: ^Word) -> ^Word {
 @(private = "file")
 fail :: proc "contextless" (r: ^Rc, status, a: string, b := "") {
 	line: u32
+	src := string(r.src[:])
 	if len(r.frames) > 0 {
 		f := &r.frames[len(r.frames) - 1]
 		if f.pc != 0 && f.pc <= f.code.n {
 			line = code_inst(f.code)[f.pc - 1].line
 		}
+		if f.code.src[0] != 0 {
+			src = code_src(f.code)
+		}
 	}
 	buf: [96]u8
-	set_error(r, place(&buf, string(r.src[:]), line), ": ", a)
+	set_error(r, place(buf[:], src, line), ": ", a)
 	if b != "" {
 		if len(r.err) + 3 < ERR_MAX + 1 {
 			append(&r.err, ':', ' ')
@@ -785,14 +1167,160 @@ fail :: proc "contextless" (r: ^Rc, status, a: string, b := "") {
 	set_status(r, c_name(status != "" ? status : "error"))
 	r.failed = true
 	r.failset = true
+	errout(r, string(r.err[:]))
+	errout(r, "\n")
+}
+
+// A here document's text with $name, $n and $$ replaced, as rc's psubst: a
+// list's words joined by spaces, and a ^ right after a name dropped. It takes
+// body, and gives one word.
+@(private = "file")
+hsubst :: proc "contextless" (r: ^Rc, body: ^Word) -> ^Word {
+	s := text(body)
+	size := len(s) + 64
+	n := 0
+	out := ([^]u8)(heap_alloc(r, size))
+	for i := 0; out != nil && i < len(s); {
+		add := s[i:][:1]
+		vals: ^Word
+		if s[i] != '$' {
+			i += 1
+		} else if i + 1 < len(s) && s[i + 1] == '$' {
+			add = "$"
+			i += 2
+		} else {
+			i += 1
+			s0 := i
+			for i < len(s) && name_char(s[i]) {
+				i += 1
+			}
+			if nm := new_word(r, s[s0:i]); nm != nil {
+				if nm.len != 0 {
+					vals, _, _ = value(r, nm, "")
+				}
+				free_words(r, nm)
+			}
+			if i < len(s) && s[i] == '^' {
+				i += 1
+			}
+			add = ""
+		}
+		need := len(add)
+		for w := vals; w != nil; w = w.next {
+			need += w.len + 1
+		}
+		if n + need + 1 > size {
+			more_size := (n + need + 1) * 2
+			more := ([^]u8)(heap_alloc(r, more_size))
+			if more != nil {
+				copy(more[:more_size], out[:n])
+			}
+			heap_free(r, out)
+			out, size = more, more_size
+			if out == nil {
+				break
+			}
+		}
+		n += copy(out[n:size], add)
+		for w := vals; w != nil; w = w.next {
+			n += copy(out[n:size], text(w))
+			if w.next != nil {
+				out[n] = ' '
+				n += 1
+			}
+		}
+		free_words(r, vals)
+	}
+	free_words(r, body)
+	w := out != nil ? new_word(r, string(out[:n])) : nil
+	heap_free(r, out)
+	return w
+}
+
+// Back to the nearest interactive reader above base, as rc's
+// while(!runq->iflag) Xreturn(): false if there is none.
+@(private = "file")
+unwind :: proc "contextless" (r: ^Rc, base: u32) -> bool {
+	i := u32(len(r.frames))
+	for i > base && !(r.frames[i - 1].rd != nil && r.frames[i - 1].rd.interactive) {
+		i -= 1
+	}
+	if i == base {
+		return false
+	}
+	for u32(len(r.frames)) > i {
+		pop_frame(r)
+	}
+	rf := &r.frames[i - 1]
+	for u32(len(r.stack)) > rf.sp {
+		free_words(r, pop_list(r))
+	}
+	for u32(len(r.captures)) > rf.ncaptures {
+		heap_free(r, raw_data(r.captures[len(r.captures) - 1].buf))
+		resize(&r.captures, len(r.captures) - 1)
+	}
+	pop_redirs(r, int(rf.redirs))
+	return true
+}
+
+// The instructions' names, as rc's -r prints them.
+@(private = "file")
+OP_NAMES := [Op]string {
+	.Mark      = "Xmark",
+	.Word      = "Xword",
+	.Dol       = "Xdol",
+	.Count     = "Xcount",
+	.Join      = "Xjoin",
+	.Sub       = "Xsub",
+	.Conc      = "Xconc",
+	.Simple    = "Xsimple",
+	.Stage     = "Xstage",
+	.Pipeline  = "Xpipe",
+	.Assign    = "Xassign",
+	.Local     = "Xlocal",
+	.Unlocal   = "Xunlocal",
+	.If        = "Xif",
+	.If_Not    = "Xifnot",
+	.Was_True  = "Xwastrue",
+	.True      = "Xtrue",
+	.False     = "Xfalse",
+	.Jump      = "Xjump",
+	.Bang      = "Xbang",
+	.For       = "Xfor",
+	.Popm      = "Xpopm",
+	.Fn        = "Xfn",
+	.Delfn     = "Xdelfn",
+	.Return    = "Xreturn",
+	.Qw        = "Xqw",
+	.Settrue   = "Xsettrue",
+	.Match     = "Xmatch",
+	.Case      = "Xcase",
+	.Backq     = "Xbackq",
+	.Backq_End = "Xbackqend",
+	.Redir     = "Xredir",
+	.Dup       = "Xdup",
+	.Popredir  = "Xpopredir",
+	.Rdcmds    = "Xrdcmds",
+	.Eflag     = "Xeflag",
 }
 
 // Runs code from the frame on top until the frames it started with have all
-// returned, or an error or exit stops it.
+// returned, or an error or exit stops it; an error inside an interactive
+// reader goes back to it.
 @(private)
 execute :: proc "contextless" (r: ^Rc, base: u32) {
 	steps: u64
-	for u32(len(r.frames)) > base && !r.failed && !r.exiting {
+	for {
+		if r.failed && !r.exiting { // as rc's Xerror: back to the nearest interactive reader, if one
+			if !unwind(r, base) {
+				break
+			}
+			r.failed = false
+			r.failset = false
+		}
+		if u32(len(r.frames)) <= base || r.failed || r.exiting {
+			break
+		}
 		if r.budget != 0 {
 			steps += 1
 			if steps > r.budget {
@@ -807,6 +1335,13 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 		}
 		ins := code_inst(f.code)[f.pc]
 		f.pc += 1
+		if r.flag['r'] { // -r: each instruction as it runs, as rc's pfnc
+			buf: [96]u8
+			errout(r, place(buf[:], code_src(f.code), ins.line))
+			errout(r, ": ")
+			errout(r, OP_NAMES[ins.op])
+			errout(r, "\n")
+		}
 		switch ins.op {
 		case .Mark:
 			_ = mark(r)
@@ -1135,6 +1670,19 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 			free_words(r, ifs)
 			heap_free(r, raw_data(c.buf))
 		case .Redir:
+			if Redir_Kind(ins.f1) == .Here { // a here document: its text, substituted unless its tag was quoted
+				body := pop_list(r)
+				if body != nil && ins.b == 0 {
+					body = hsubst(r, body)
+				}
+				if body == nil || len(r.redirs) == REDIRS {
+					free_words(r, body)
+					fail(r, "", "<< nested too deeply")
+					break
+				}
+				append(&r.redirs, Redir{fd = ins.f0, to = Fd_Here{text(body)}, path = body})
+				break
+			}
 			path := glob_list(r, pop_list(r))
 			kind := Open_Kind(ins.f1)
 			OPS := [Open_Kind]string {
@@ -1188,6 +1736,12 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 			append(&r.redirs, Redir{fd = ins.f0, to = to})
 		case .Popredir:
 			pop_redirs(r, len(r.redirs) >= int(ins.a) ? len(r.redirs) - int(ins.a) : 0)
+		case .Rdcmds:
+			rdcmds(r, f)
+		case .Eflag:
+			if !true_status(r) {
+				r.exiting = true // -e, as rc's Xeflag: exit with the status
+			}
 		}
 	}
 }
