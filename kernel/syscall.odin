@@ -73,18 +73,27 @@ user_range_ok :: proc "contextless" (addr: Uva, length: u64, write: bool) -> boo
 	return true
 }
 
+// A copy the caller's protection-key rights stop (ADR-0035: the hardware
+// checks them for the kernel's accesses too) is .Err_Access, any other fault
+// .Err_Invalid.
 @(require_results)
 copy_from_user :: proc "contextless" (dst: rawptr, src: Uva, length: u64) -> vx.Status {
-	if !user_range_ok(src, length, false) || vx_user_copy(dst, rawptr(uintptr(src)), length) != 0 {
+	if !user_range_ok(src, length, false) {
 		return .Err_Invalid
+	}
+	if vx_user_copy(dst, rawptr(uintptr(src)), length) != 0 {
+		return arch_user_copy_denied() ? .Err_Access : .Err_Invalid
 	}
 	return .Ok
 }
 
 @(require_results)
 copy_to_user :: proc "contextless" (dst: Uva, src: rawptr, length: u64) -> vx.Status {
-	if !user_range_ok(dst, length, true) || vx_user_copy(rawptr(uintptr(dst)), src, length) != 0 {
+	if !user_range_ok(dst, length, true) {
 		return .Err_Invalid
+	}
+	if vx_user_copy(rawptr(uintptr(dst)), src, length) != 0 {
+		return arch_user_copy_denied() ? .Err_Access : .Err_Invalid
 	}
 	return .Ok
 }
@@ -552,7 +561,7 @@ sys_as_map :: proc "contextless" (th, vh: vx.Handle, offset, size, flags: u64, a
 		defer object_release(&target.obj)
 		return task_enable_io(target, io)
 	}
-	opts, valid := options_of(vx.Map_Options, flags)
+	mf, opts, valid := map_flags_of(flags)
 	if !valid {
 		return .Err_Invalid
 	}
@@ -568,12 +577,73 @@ sys_as_map :: proc "contextless" (th, vh: vx.Handle, offset, size, flags: u64, a
 		need += {.Exec}
 	}
 	v := handle_get_as(current_task(), vh, Vmo, need) or_return
-	at, st := task_map(target, v, offset, size, opts, va)
+	// What the handle allows, for as_protect later: asked of it once more each.
+	allowed: vx.Map_Options
+	if w, _ := handle_get_as(current_task(), vh, Vmo, {.Map, .Write}); w != nil {
+		allowed += {.Write}
+		object_release(&w.obj)
+	}
+	if x, _ := handle_get_as(current_task(), vh, Vmo, {.Map, .Exec}); x != nil {
+		allowed += {.Exec}
+		object_release(&x.obj)
+	}
+	at, st := task_map(target, v, offset, size, opts, va, mf.key, allowed)
 	object_release(&v.obj)
 	if st != .Ok {
 		return st
 	}
 	return copy_out(addr_ptr, &at)
+}
+
+// as_map's and as_protect's flags word (vx.Map_Flags): the options and the
+// key; false for a bit nothing uses.
+@(private="file")
+map_flags_of :: proc "contextless" (flags: u64) -> (f: vx.Map_Flags, opts: vx.Map_Options, ok: bool) {
+	if flags > u64(max(u32)) {
+		return
+	}
+	f = transmute(vx.Map_Flags)u32(flags)
+	opts, ok = options_of(vx.Map_Options, u64(f.options))
+	return f, opts, ok && f.reserved == 0
+}
+
+// as_protect(task, address, size, flags): the rights and key of a range,
+// every page of it mapped (ADR-0035).
+@(private="file", require_results)
+sys_as_protect :: proc "contextless" (th: vx.Handle, va: Uva, size, flags: u64) -> vx.Status {
+	mf, opts, valid := map_flags_of(flags)
+	if !valid {
+		return .Err_Invalid
+	}
+	t := handle_get_as(current_task(), th, Task, {.Manage}) or_return
+	defer object_release(&t.obj)
+	return task_protect(t, va, size, opts, mf.key)
+}
+
+// as_key_alloc(task, &key) and as_key_free(task, key): the task's protection
+// keys (ADR-0035), with MANAGE, as as_map takes it.
+@(private="file", require_results)
+sys_as_key_alloc :: proc "contextless" (th: vx.Handle, key_ptr: Uva) -> vx.Status {
+	if !user_range_ok(key_ptr, size_of(u32), true) {
+		return .Err_Invalid
+	}
+	t := handle_get_as(current_task(), th, Task, {.Manage}) or_return
+	key, st := task_key_alloc(t)
+	object_release(&t.obj)
+	if st != .Ok {
+		return st
+	}
+	return copy_out(key_ptr, &key)
+}
+
+@(private="file", require_results)
+sys_as_key_free :: proc "contextless" (th: vx.Handle, key: u64) -> vx.Status {
+	t := handle_get_as(current_task(), th, Task, {.Manage}) or_return
+	defer object_release(&t.obj)
+	if key > vx.KEY_MAX {
+		return .Err_Invalid
+	}
+	return task_key_free(t, u32(key))
 }
 
 // as_unmap(task, address, size): the pages of a range, mapped or not.
@@ -932,6 +1002,11 @@ sys_thread_create :: proc "contextless" (th: vx.Handle, out, id_out: Uva) -> vx.
 	st := vx.Status.Err_Bad_State
 	if !ending {
 		thr, st = thread_create(t)
+	}
+	// A thread made by one of its own task takes its creator's protection-key
+	// rights; another task's first, key 0 alone (thread_create) (ADR-0035).
+	if st == .Ok && t == current_task() {
+		thr.rights = arch_rights_read()
 	}
 	object_release(&t.obj)
 	if st != .Ok {
@@ -1309,6 +1384,12 @@ syscall_dispatch :: proc "contextless" (nr: u64, a: [6]u64) -> i64 {
 		return i64(sys_vmo_clone(vx.Handle(a[0]), a[1], a[2], a[3], Uva(a[4])))
 	case .As_Unmap:
 		return i64(sys_as_unmap(vx.Handle(a[0]), Uva(a[1]), a[2]))
+	case .As_Protect:
+		return i64(sys_as_protect(vx.Handle(a[0]), Uva(a[1]), a[2], a[3]))
+	case .As_Key_Alloc:
+		return i64(sys_as_key_alloc(vx.Handle(a[0]), Uva(a[1])))
+	case .As_Key_Free:
+		return i64(sys_as_key_free(vx.Handle(a[0]), a[1]))
 	case .Handle_Dup:
 		return i64(sys_handle_dup(vx.Handle(a[0]), a[1], Uva(a[2])))
 	case .Handle_Close:

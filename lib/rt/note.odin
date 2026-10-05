@@ -99,8 +99,11 @@ note_dispatch :: proc "c" (e: ^vx.Exception) {
 }
 
 // Resumes the thread where it was diverted from, with the registers it has.
+// The protection-key rights the kernel opened key 0 from go back first
+// (ADR-0035).
 @(export, link_name="vx_note_resume")
 note_resume :: proc "c" (e: ^vx.Exception) -> ! {
+	rights_set(e.rights)
 	_ = exception_resume(self, 0, .Continue, &e.regs)
 	intrinsics.trap() // exception_resume does not return
 }

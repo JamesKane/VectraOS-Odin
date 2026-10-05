@@ -95,6 +95,7 @@ PLAN9_NOTES := [?]Plan9_Note {
 	{"sys: trap: arithmetic", SIGFPE, true},
 	{"sys: trap: misaligned", SIGBUS, true},
 	{"sys: trap: page not supplied", SIGBUS, true}, // a pager that did not answer in time
+	{"sys: trap: protection key", SIGSEGV, true}, // a page its key's rights deny (ADR-0035)
 	{"sys: breakpoint", SIGTRAP, true},
 	{"sys: trap: step", SIGTRAP, true},
 }

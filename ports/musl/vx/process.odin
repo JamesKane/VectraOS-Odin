@@ -691,6 +691,8 @@ proc_execve :: proc "contextless" (path: cstring, argv, envp: [^]cstring) -> int
 fork_jump: Fork_Context
 @(private="file")
 fork_tls: u64
+@(private="file")
+fork_rights: u64 // the forking thread's protection-key rights (ADR-0035: kept)
 // The parent's pending signals as its memory was copied: the child has none
 // of them (POSIX).
 @(private="file")
@@ -703,6 +705,7 @@ fork_stack: struct #align (16) {
 @(private="file")
 fork_entry :: proc "c" (unused: vx.Handle, unused2: u64) -> ! {
 	_ = rt.tls_set(fork_tls)
+	rt.rights_set(fork_rights) // the child's first thread starts with key 0 alone
 	__vx_fork_resume(&fork_jump)
 }
 
@@ -773,6 +776,7 @@ proc_fork :: proc "contextless" () -> int {
 		rt.console_flush() // not twice, once from each
 	}
 	fork_tls, _ = rt.tls_get()
+	fork_rights = rt.rights_get()
 	if __vx_fork_save(&fork_jump) != 0 {
 		return fork_child()
 	}

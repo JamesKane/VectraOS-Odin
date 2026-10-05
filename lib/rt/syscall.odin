@@ -234,10 +234,31 @@ vmo_create :: proc "contextless" (size: u64) -> (vx.Handle, vx.Status) {
 // Maps [offset, offset + size) of a VMO into a task. With at == 0 the
 // kernel chooses; the address used comes back.
 @(require_results)
-as_map :: proc "contextless" (task, vmo: vx.Handle, offset, size: u64, flags: vx.Map_Options, at: u64 = 0) -> (u64, vx.Status) {
+as_map :: proc "contextless" (task, vmo: vx.Handle, offset, size: u64, flags: vx.Map_Options, at: u64 = 0, key: u32 = 0) -> (u64, vx.Status) {
 	va := at
-	st := status(vx_syscall(.As_Map, u64(task), u64(vmo), offset, size, u64(transmute(u32)flags), addr(&va)))
+	st := status(vx_syscall(.As_Map, u64(task), u64(vmo), offset, size, u64(transmute(u32)vx.map_flags(flags, key)), addr(&va)))
 	return va, st
+}
+
+// Changes the rights and protection key of the pages of [at, at + size),
+// every one mapped, within what each mapping's VMO handle gave (ADR-0035).
+@(require_results)
+as_protect :: proc "contextless" (task: vx.Handle, at, size: u64, flags: vx.Map_Options, key: u32 = 0) -> vx.Status {
+	return status(vx_syscall(.As_Protect, u64(task), at, size, u64(transmute(u32)vx.map_flags(flags, key))))
+}
+
+// A protection key of the task's, 1 to rt.cpu().keys (ADR-0035).
+@(require_results)
+as_key_alloc :: proc "contextless" (task: vx.Handle) -> (u32, vx.Status) {
+	key: u32
+	st := status(vx_syscall(.As_Key_Alloc, u64(task), addr(&key)))
+	return key, st
+}
+
+// Frees a key, but not while a mapping still has it (.Err_Bad_State).
+@(require_results)
+as_key_free :: proc "contextless" (task: vx.Handle, key: u32) -> vx.Status {
+	return status(vx_syscall(.As_Key_Free, u64(task), u64(key)))
 }
 
 // Unmaps the pages of [at, at + size), whole mappings or parts of them; pages

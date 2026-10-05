@@ -70,7 +70,7 @@ elf_load :: proc "contextless" (t: ^Task, image: []u8) -> (entry: Uva, st: vx.St
 		if p.flags & PF_X != 0 {
 			flags += {.Exec}
 		}
-		_, st = task_map(t, v, 0, v.size, flags, Uva(base))
+		_, st = task_map(t, v, 0, v.size, flags, Uva(base), 0, flags) // the kernel's own mapping: what the image asks, no more
 		object_release(&v.obj) // the mapping keeps it
 		if st != .Ok {
 			return 0, st

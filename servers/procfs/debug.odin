@@ -1039,6 +1039,17 @@ regs_ndb_text :: proc "contextless" (p: ^Proc, tid: u32, buf: []u8) -> int {
 	for name, i in REG_NAMES {
 		put_hex(&w, name, reg_at(&r, i)^)
 	}
+	when ODIN_ARCH == .amd64 {
+		// Its protection-key rights (ADR-0035), where there are keys: PKRU,
+		// from its extended state at the place CPUID gives it. xregs sets them.
+		@(static) xs: [vx.XSTATE_MAX]u8
+		if rt.cpu().keys != 0 && rt.thread_state(p.task, tid, .Get_Xstate, &xs) == .Ok {
+			_, at, _, _ := intrinsics.x86_cpuid(0xd, 9)
+			if int(at) + 4 <= len(xs) {
+				put_hex(&w, "rights", u64(intrinsics.unaligned_load((^u32)(&xs[at]))))
+			}
+		}
+	}
 	_ = ndb.end(&w)
 	return w.failed ? 0 : w.len
 }

@@ -1454,6 +1454,11 @@ handler :: proc "c" (e: ^vx.Exception) -> ! {
 		intrinsics.atomic_add(&in_task.handled[e.kind], 1)
 	}
 	#partial switch e.kind {
+	case .Protection_Key: // seen, then the key given: the access made again
+		intrinsics.atomic_add(&key_faults, 1)
+		intrinsics.atomic_store(&key_fault_key, e.key)
+		intrinsics.atomic_store(&key_fault_code, e.code)
+		e.rights &~= 3 << (2 * u64(e.key))
 	case .Pager_Timeout: // the page, late: supplied now, and the access made again
 		_ = rt.pager_supply(late.pager, late.vmo, 0, 4096, late.src, 0)
 	case .Page_Fault:
@@ -1467,6 +1472,7 @@ handler :: proc "c" (e: ^vx.Exception) -> ! {
 		_ = append(&in_task.note, ..e.note[:min(e.code, vx.ERRMAX)])
 		intrinsics.atomic_store(&in_task.interrupted_thread, e.thread)
 	}
+	rt.rights_set(e.rights) // the kernel opened key 0 for the handler (ADR-0035): the thread's own, back
 	_ = rt.exception_resume(rt.self, 0, .Continue, &e.regs)
 	for {}
 }
@@ -1806,6 +1812,121 @@ test_vmo_clone :: proc "contextless" () {
 	_, st = rt.vmo_clone(v, 1, 4096)
 	check(st == .Err_Range)
 	rt.close_all(c, v)
+}
+
+// --- Protection keys and as_protect (ADR-0035) ---
+
+key_faults, key_fault_key, key_fault_code: u32 // the in-task handler's .Protection_Key
+keys_worker_ok: u32
+
+// A thread of the same task starts with its creator's rights, and its own
+// change of them is its own.
+keys_worker :: proc "c" (unused: vx.Handle, key: u64) -> ! {
+	ok := rt.keys_get(u32(key)) == {.Read, .Write} // inherited
+	ok = ok && rt.keys_set(u32(key), {}) == .Ok && rt.keys_get(u32(key)) == {}
+	intrinsics.atomic_store(&keys_worker_ok, ok ? 1 : 2)
+	rt.thread_exit()
+}
+
+test_keys :: proc "contextless" () {
+	// as_protect, on every CPU: a range's rights changed within what the
+	// mapping's handle gave, a mapping cut in three.
+	v, vst := rt.vmo_create(3 * 4096)
+	at, mst := rt.as_map(rt.self, v, 0, 3 * 4096, {.Write})
+	check(vst == .Ok && mst == .Ok)
+	if mst != .Ok {
+		return
+	}
+	check(rt.as_protect(rt.self, at + 4096, 4096, {}) == .Ok) // the middle page read-only
+	mi, qst := rt.as_query(rt.self, at)
+	check(qst == .Ok && mi.base == at && mi.size == 4096 && .Write in vx.map_options(mi.flags))
+	mi, qst = rt.as_query(rt.self, at + 4096)
+	check(qst == .Ok && mi.base == at + 4096 && mi.size == 4096 && .Write not_in vx.map_options(mi.flags))
+	mi, qst = rt.as_query(rt.self, at + 8192)
+	check(qst == .Ok && mi.base == at + 8192 && .Write in vx.map_options(mi.flags))
+	set_word(at, 1) // the ends still write
+	set_word(at + 8192, 3)
+	check(rt.as_protect(rt.self, at, 3 * 4096, {.Write}) == .Ok) // and the middle again
+	set_word(at + 4096, 2)
+	check(rt.as_protect(rt.self, at, 4096, {.Write, .Exec}) == .Err_Access) // W^X
+	check(rt.as_protect(rt.self, at, 4096, {.Exec}) == .Ok && rt.as_protect(rt.self, at, 4096, {.Write}) == .Ok) // written, then run, as a JIT does: W^X, in turn
+	check(rt.as_protect(rt.self, at, 4 * 4096, {}) == .Err_Not_Found) // past it: a hole
+	check(rt.as_protect(rt.self, at + 1, 4096, {}) == .Err_Range)
+	ro, dst := rt.handle_dup(v, {.Map, .Read}) // a handle that cannot write
+	check(dst == .Ok)
+	at2, m2 := rt.as_map(rt.self, ro, 0, 4096, {})
+	check(m2 == .Ok)
+	check(rt.as_protect(rt.self, at2, 4096, {.Write}) == .Err_Access) // more than its handle gave
+	check(rt.as_unmap(rt.self, at2, 4096) == .Ok)
+	_ = rt.handle_close(ro)
+
+	ci: vx.Cpu_Info
+	check(rt.thread_state(rt.self, 0, .Get_Cpu, &ci) == .Ok)
+	rt.print("ktest: protection keys: ", u64(ci.keys), "\n")
+	if ci.keys == 0 { // aarch64 (no FEAT_S1POE: upstream's 6c5), or an x86 without PKU
+		_, kst := rt.as_key_alloc(rt.self)
+		check(kst == .Err_Unsupported && rt.keys_set(1, {.Read}) == .Err_Unsupported)
+		check(rt.as_unmap(rt.self, at, 3 * 4096) == .Ok)
+		_ = rt.handle_close(v)
+		return
+	}
+	// Keys, each once, 1 to 15; then none.
+	keys: [15]u32
+	n := 0
+	for n < len(keys) {
+		k, st := rt.as_key_alloc(rt.self)
+		if st != .Ok {
+			break
+		}
+		keys[n] = k
+		n += 1
+	}
+	check(u32(n) == ci.keys && ci.keys == 15 && keys[0] == 1 && keys[14] == 15)
+	_, kst := rt.as_key_alloc(rt.self)
+	check(kst == .Err_No_Space)
+	for k in keys[1:n] {
+		check(rt.as_key_free(rt.self, k) == .Ok)
+	}
+	check(rt.as_key_free(rt.self, keys[1]) == .Err_Invalid && rt.as_key_free(rt.self, 0) == .Err_Invalid)
+	key := keys[0]
+	_, m9 := rt.as_map(rt.self, v, 0, 4096, {.Write}, 0, 9)
+	check(m9 == .Err_Invalid) // not allocated
+	// The middle page under the key: this thread, a new task's first, has
+	// every key but 0 closed.
+	check(rt.as_protect(rt.self, at + 4096, 4096, {.Write}, key) == .Ok)
+	mi, qst = rt.as_query(rt.self, at + 4096)
+	check(qst == .Ok && mi.flags.key == key)
+	check(rt.keys_get(key) == {})
+	check(rt.keys_set(key, {.Read}) == .Ok && rt.keys_get(key) == {.Read})
+	check(word_at(at + 4096) == 2) // read
+	// A write faults, as .Protection_Key with the key; the handler gives the
+	// key, and the write is made again.
+	check(rt.exception_bind(rt.self, vx.HANDLE_NONE, u64(uintptr(rawptr(handler))), {.In_Task}) == .Ok)
+	set_word(at + 4096, 4)
+	check(rt.exception_bind(rt.self, vx.HANDLE_NONE, 0, {.In_Task}) == .Ok)
+	check(intrinsics.atomic_load(&key_faults) == 1 && intrinsics.atomic_load(&key_fault_key) == key && intrinsics.atomic_load(&key_fault_code) == 1)
+	check(word_at(at + 4096) == 4 && rt.keys_get(key) == {.Read, .Write})
+	// The kernel's copies obey the caller's rights: .Err_Access, not a fault.
+	word := u64(5)
+	check(rt.keys_set(key, {.Read}) == .Ok)
+	check(rt.vmo_read(v, 0, bytes_at(at + 4096, 8)) == .Err_Access) // into a page it may not write
+	check(rt.keys_set(key, {}) == .Ok)
+	check(rt.vmo_write(v, 0, bytes_at(at + 4096, 8)) == .Err_Access) // from one it may not read
+	check(rt.vmo_write(v, 0, memory.ptr_to_bytes(&word)) == .Ok) // its own pages: as ever
+	// Another thread's rights are its own, from its creator's at its start.
+	check(rt.keys_set(key, {.Read, .Write}) == .Ok)
+	sp := new_stack()
+	th, tst := rt.thread_create(rt.self)
+	check(sp != 0 && tst == .Ok && rt.thread_start(th, u64(uintptr(rawptr(keys_worker))), sp, 0, u64(key)) == .Ok)
+	for i := 0; i < 1000 && intrinsics.atomic_load(&keys_worker_ok) == 0; i += 1 {
+		_ = rt.futex_wait(&never, 0, after_ms(1)) // switches, on this CPU or another
+	}
+	check(intrinsics.atomic_load(&keys_worker_ok) == 1 && rt.keys_get(key) == {.Read, .Write})
+	_ = rt.handle_close(th)
+	// A key a mapping uses is not freed; once unmapped, it is.
+	check(rt.as_key_free(rt.self, key) == .Err_Bad_State)
+	check(rt.as_unmap(rt.self, at, 3 * 4096) == .Ok && rt.as_key_free(rt.self, key) == .Ok)
+	_ = rt.handle_close(v)
 }
 
 // --- vx:memory's copies (upstream's mem_test.c and mem_words_test.c, M6 step 6c2) ---
@@ -2503,6 +2624,7 @@ vx_main :: proc() -> int {
 	test_rings()
 	test_vmo_rw()
 	test_pager()
+	test_keys()
 	test_mem()
 	test_devices()
 	rt.print("ktest: ", u64(checks), " checks, ", u64(failures), failures != 0 ? " FAILED\n" : " failed\n")

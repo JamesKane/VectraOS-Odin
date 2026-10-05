@@ -44,10 +44,20 @@ exception_divert :: proc "contextless" (f: ^Trap_Frame, e: ^vx.Exception) -> boo
 		return false
 	}
 	at := (sp - RED_ZONE - size_of(vx.Exception)) &~ 15
-	if copy_out(at, e) != .Ok {
+	// The handler runs with key 0 opened, so it can use its stack and data;
+	// the rights it interrupted go with the exception, and it writes them
+	// back as it leaves (ADR-0035). Opened live, for the copy below, and in
+	// the area user mode gets back.
+	d := e^
+	d.rights = arch_rights_read()
+	arch_rights_write(arch_rights_open_key0(d.rights))
+	arch_frame_set_rights(f, arch_rights_open_key0(d.rights))
+	if copy_out(at, &d) != .Ok || !arch_frame_divert(f, handler, at) {
+		arch_rights_write(d.rights)
+		arch_frame_set_rights(f, d.rights)
 		return false
 	}
-	return arch_frame_divert(f, handler, at)
+	return true
 }
 
 // Stops the current thread at a port: posts the packet that names it, and
@@ -143,6 +153,9 @@ exception_raise :: proc "contextless" (f: ^Trap_Frame, kind: ^vx.Exception_Kind,
 		address = e_address,
 		thread  = th.id,
 		regs    = arch_frame_regs(f),
+	}
+	if e_kind == .Protection_Key {
+		e.key = task_key_at(t, e_address)
 	}
 	if p, key := exception_port(t, true); p != nil { // a debugger first: it may handle it, step, kill, or pass it on
 		action := exception_stop(p, key, true, &e)
@@ -486,7 +499,9 @@ thread_xstate :: proc "contextless" (h: vx.Handle, id: u64, op: vx.Thread_State_
 			return .Err_Bad_State // running: neither read nor changed
 		}
 		if op == .Set_Xstate {
-			return arch_frame_set_xstate(arch_user_frame(target), area) // loaded on its way out
+			arch_frame_set_xstate(arch_user_frame(target), area) or_return // loaded on its way out
+			target.rights = arch_frame_rights(arch_user_frame(target)) // and its key rights as it next runs
+			return .Ok
 		}
 		arch_frame_get_xstate(arch_user_frame(target), area) // saved at its entry (ADR-0004)
 	}
@@ -768,7 +783,7 @@ mapping_privatize :: proc "contextless" (t: ^Task, m: ^Mapping) -> (old: ^Vmo, s
 	for off := u64(0); off < m.size; off += PAGE_SIZE {
 		page_copy(vmo_page(dup, off / PAGE_SIZE), vmo_page(m.vmo, (m.offset + off) / PAGE_SIZE))
 		unmap_page(t.root, u64(m.va) + off)
-		if !map_range(t.root, u64(m.va) + off, vmo_page(dup, off / PAGE_SIZE), PAGE_SIZE, mf) {
+		if !map_range(t.root, u64(m.va) + off, vmo_page(dup, off / PAGE_SIZE), PAGE_SIZE, mf, m.key) {
 			st = .Err_No_Memory
 		}
 	}

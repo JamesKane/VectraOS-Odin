@@ -49,10 +49,11 @@ table_page :: proc "contextless" () -> Paddr {
 }
 
 // Maps [va, va + size) to [pa, pa + size), with the largest leaves that
-// alignment allows. Fails without undoing anything if a table cannot be
-// allocated or the range is already mapped; callers treat that as fatal.
+// alignment allows; a user mapping's leaves carry its protection key
+// (ADR-0035). Fails without undoing anything if a table cannot be allocated
+// or the range is already mapped; callers treat that as fatal.
 @(require_results)
-map_range :: proc "contextless" (root: Paddr, va_start: u64, pa_start: Paddr, length: u64, flags: Map_Flags) -> bool {
+map_range :: proc "contextless" (root: Paddr, va_start: u64, pa_start: Paddr, length: u64, flags: Map_Flags, key: u32 = 0) -> bool {
 	va, pa, size := va_start, pa_start, length
 	for size > 0 {
 		level := 3
@@ -81,7 +82,7 @@ map_range :: proc "contextless" (root: Paddr, va_start: u64, pa_start: Paddr, le
 		if arch_pte_valid(t[idx]) {
 			return false
 		}
-		t[idx] = arch_pte_leaf(pa, flags, level)
+		t[idx] = arch_pte_leaf(pa, flags, level, key)
 		va += step
 		pa += Paddr(step)
 		size -= step

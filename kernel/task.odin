@@ -46,6 +46,8 @@ Mapping :: struct {
 	size, offset: u64,
 	vmo:          ^Vmo,
 	flags:        vx.Map_Options,
+	allowed:      vx.Map_Options, // what its VMO's handle gave when it was mapped: as_protect's limit
+	key:          u32, // its protection key (ADR-0035): 0, or one its task allocated
 	privatized:   bool, // its VMO is a copy of its own, made for a debugger's write (exception.odin)
 }
 
@@ -59,6 +61,7 @@ Task :: struct {
 	id:              u64,
 	root:            Paddr, // the address space's top table; 0 once torn down
 	map_next:        Uva, // the next address as_map places at
+	keys:            bit_set[0 ..< 16; u16], // its protection keys, 1 to 15 (ADR-0035): as_key_alloc's
 	handles:         ^[HANDLE_SLOTS]Handle_Entry, // nil once torn down
 	maps:            ^[TASK_MAX_MAPPINGS]Mapping, // size 0 is a free slot
 	mapped:          u64, // bytes
@@ -135,6 +138,9 @@ Thread :: struct {
 	parked:            bool, // stopped on its way to user mode while suspended
 	stepping:          bool, // a debugger asked for one instruction (arch_frame_step): aarch64 keeps MDSCR_EL1.SS on
 	tls:               u64, // its user thread pointer while it is not running (sched.odin's user_switch)
+	// Its protection-key rights (PKRU) while it is not running, loaded as it
+	// next runs (user_switch); a new thread's first (ADR-0035).
+	rights:            u64,
 	user_held:         bool, // stopped at an exception: tls is its own, saved, for a debugger (exception_stop)
 	// thread_interrupt's notes not yet delivered, oldest first: each is its
 	// own exception (Plan 9 queued notes the same way).
@@ -497,7 +503,7 @@ task_query :: proc "contextless" (t: ^Task, addr: Uva) -> (info: vx.Map_Info, st
 	if best == nil {
 		return {}, .Err_Not_Found
 	}
-	return {base = u64(best.va), size = best.size, offset = best.offset, flags = vx.map_flags(best.flags)}, .Ok
+	return {base = u64(best.va), size = best.size, offset = best.offset, flags = vx.map_flags(best.flags, best.key)}, .Ok
 }
 
 // The page-table flags for a user mapping.
@@ -528,9 +534,11 @@ page_map_flags :: proc "contextless" (v: ^Vmo, flags: vx.Map_Options, page: Page
 // Maps [offset, offset + size) of a VMO into a task's address space. With
 // va == 0 the kernel picks the address; otherwise va is used and must be
 // page-aligned and free. The mapping holds a reference on the VMO. W^X:
-// never writable and executable.
+// never writable and executable. key is the mapping's protection key, 0 or
+// one the task allocated; allowed what the VMO's handle gave, which
+// as_protect may later give the mapping and no more (ADR-0035).
 @(require_results)
-task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.Map_Options, want_va: Uva) -> (Uva, vx.Status) {
+task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.Map_Options, want_va: Uva, key: u32, allowed: vx.Map_Options) -> (Uva, vx.Status) {
 	if flags >= {.Write, .Exec} {
 		return 0, .Err_Access
 	}
@@ -555,6 +563,8 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 	switch {
 	case t.root == 0 || t.maps == nil || t.ending:
 		st = .Err_Bad_State
+	case !key_ok(t, key):
+		st = .Err_Invalid // a key it has not allocated
 	case at & (PAGE_SIZE - 1) != 0 || end_overflow || end > USER_TOP:
 		st = .Err_Range
 	case slot == nil:
@@ -575,7 +585,7 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 		page := v.pages[(offset + done) / PAGE_SIZE]
 		pa := Paddr(page.frame << 12)
 		pf := v.pager != nil ? page_map_flags(v, flags, page) : mf
-		if pa != 0 && !map_range(t.root, u64(at) + done, pa, PAGE_SIZE, pf) {
+		if pa != 0 && !map_range(t.root, u64(at) + done, pa, PAGE_SIZE, pf, key) {
 			st = .Err_No_Memory
 		} else {
 			done += PAGE_SIZE
@@ -596,7 +606,7 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 		return 0, st
 	}
 	object_ref(&v.obj)
-	slot^ = {va = at, size = size, offset = offset, vmo = v, flags = flags}
+	slot^ = {va = at, size = size, offset = offset, vmo = v, flags = flags, allowed = allowed, key = key}
 	t.mapped += size
 	if want_va == 0 {
 		t.map_next = end + PAGE_SIZE // leave a guard page between placed mappings
@@ -625,19 +635,20 @@ task_fork_copy :: proc "contextless" (parent, child: ^Task) -> vx.Status {
 	if parent.root == 0 || parent.ending {
 		return .Err_Bad_State
 	}
+	child.keys = parent.keys // first: the mappings below carry their keys
 	for m in parent.maps {
 		if m.size == 0 || m.vmo.physical || m.vmo.ring {
 			continue
 		}
 		if m.vmo.pager != nil {
-			_ = task_map(child, m.vmo, m.offset, m.size, m.flags, m.va) or_return
+			_ = task_map(child, m.vmo, m.offset, m.size, m.flags, m.va, m.key, m.allowed) or_return
 			continue
 		}
 		dup := vmo_create(m.size) or_return
 		for i in 0 ..< m.size / PAGE_SIZE {
 			page_copy(vmo_page(dup, i), vmo_page(m.vmo, m.offset / PAGE_SIZE + i))
 		}
-		_, st := task_map(child, dup, 0, m.size, m.flags, m.va)
+		_, st := task_map(child, dup, 0, m.size, m.flags, m.va, m.key, m.allowed)
 		object_release(&dup.obj) // the child's mapping holds it, if it was made
 		if st != .Ok {
 			return st
@@ -732,6 +743,175 @@ task_unmap :: proc "contextless" (t: ^Task, va: Uva, size: u64) -> vx.Status {
 	return .Ok
 }
 
+// A key the task may put on a mapping: 0, or one it allocated.
+@(private="file")
+key_ok :: proc "contextless" (t: ^Task, key: u32) -> bool {
+	return key == 0 || (key < 16 && int(key) in t.keys)
+}
+
+// Changes the rights and key of [va, va + size), every page of which must be
+// mapped (.Err_Not_Found otherwise), within the rights each mapping's handle
+// gave (.Err_Access past them) and W^X; a mapping the range cuts becomes two
+// or three, so that needs free slots (.Err_No_Memory, nothing changed). The
+// pages' entries are made again with the new rights (a pager's as far as it
+// has supplied them), then shot down (upstream's M6 step 6c4, ahead of 6e's
+// other address-space calls).
+@(require_results)
+task_protect :: proc "contextless" (t: ^Task, va: Uva, size: u64, flags: vx.Map_Options, key: u32) -> vx.Status {
+	end, overflow := intrinsics.overflow_add(va, Uva(size))
+	if size == 0 || (u64(va) | size) & (PAGE_SIZE - 1) != 0 || overflow || end > USER_TOP {
+		return .Err_Range
+	}
+	if flags >= {.Write, .Exec} {
+		return .Err_Access
+	}
+	root: Paddr
+	st := vx.Status.Ok
+	{
+		spin_guard(&t.lock)
+		if t.root == 0 || t.maps == nil || t.ending {
+			return .Err_Bad_State
+		}
+		if !key_ok(t, key) {
+			return .Err_Invalid
+		}
+		covered: u64
+		cuts, free_slots := 0, 0
+		for m in t.maps {
+			if m.size == 0 {
+				free_slots += 1
+				continue
+			}
+			m_end := m.va + Uva(m.size)
+			if m_end <= va || m.va >= end {
+				continue
+			}
+			if flags - m.allowed != {} {
+				return .Err_Access // more than its handle gave
+			}
+			covered += u64(min(m_end, end) - max(m.va, va))
+			cuts += int(m.va < va) + int(m_end > end)
+		}
+		if covered != size {
+			return .Err_Not_Found // a hole
+		}
+		if cuts > free_slots {
+			return .Err_No_Memory
+		}
+		for &m in t.maps {
+			if m.size == 0 || m.va + Uva(m.size) <= va || m.va >= end {
+				continue
+			}
+			// What lies before the range, then after it, to slots of their own.
+			if m.va < va {
+				rest := free_mapping(t)
+				object_ref(&m.vmo.obj)
+				rest^ = m
+				rest.size = u64(va - m.va)
+				m.offset += u64(va - m.va)
+				m.size -= u64(va - m.va)
+				m.va = va
+			}
+			if m_end := m.va + Uva(m.size); m_end > end {
+				rest := free_mapping(t)
+				object_ref(&m.vmo.obj)
+				rest^ = m
+				rest.offset += u64(end - m.va)
+				rest.size = u64(m_end - end)
+				rest.va = end
+				m.size = u64(end - m.va)
+			}
+			m.flags = flags
+			m.key = key
+			v := m.vmo
+			if v.pager != nil {
+				spin_lock(&v.lock)
+			}
+			for off := u64(0); off < m.size && st == .Ok; off += PAGE_SIZE {
+				index := (m.offset + off) / PAGE_SIZE
+				pa := vmo_page(v, index)
+				unmap_page(t.root, u64(m.va) + off)
+				if pa != 0 && !map_range(t.root, u64(m.va) + off, pa, PAGE_SIZE, page_map_flags(v, m.flags, v.pages[index]), m.key) {
+					st = .Err_No_Memory
+				}
+			}
+			if v.pager != nil {
+				spin_unlock(&v.lock)
+			}
+		}
+		root = t.root
+	}
+	arch_tlb_shootdown(root, va, size)
+	return st
+}
+
+// A free slot in the task's table of mappings, which the caller has counted.
+@(private="file")
+free_mapping :: proc "contextless" (t: ^Task) -> ^Mapping {
+	for &r in t.maps {
+		if r.size == 0 {
+			return &r
+		}
+	}
+	kpanic("free_mapping: no slot, after they were counted")
+}
+
+// The protection key of the mapping holding addr (0 if none): a
+// .Protection_Key exception's.
+task_key_at :: proc "contextless" (t: ^Task, addr: u64) -> u32 {
+	spin_guard(&t.lock)
+	if t.maps == nil {
+		return 0
+	}
+	for m in t.maps {
+		if m.size != 0 && Uva(addr) >= m.va && Uva(addr) - m.va < Uva(m.size) {
+			return m.key
+		}
+	}
+	return 0
+}
+
+// as_key_alloc and as_key_free (ADR-0035): the task's keys, 1 to arch_keys().
+@(require_results)
+task_key_alloc :: proc "contextless" (t: ^Task) -> (key: u32, st: vx.Status) {
+	n := arch_keys()
+	if n == 0 {
+		return 0, .Err_Unsupported
+	}
+	spin_guard(&t.lock)
+	for k in 1 ..= n {
+		if int(k) not_in t.keys {
+			t.keys += {int(k)}
+			return k, .Ok
+		}
+	}
+	return 0, .Err_No_Space
+}
+
+@(require_results)
+task_key_free :: proc "contextless" (t: ^Task, key: u32) -> vx.Status {
+	n := arch_keys()
+	if n == 0 {
+		return .Err_Unsupported
+	}
+	if key == 0 || key > n {
+		return .Err_Invalid
+	}
+	spin_guard(&t.lock)
+	if int(key) not_in t.keys {
+		return .Err_Invalid // not its
+	}
+	if t.maps != nil {
+		for m in t.maps {
+			if m.size != 0 && m.key == key {
+				return .Err_Bad_State // in use: a freed key never names a live mapping under its next owner
+			}
+		}
+	}
+	t.keys -= {int(key)}
+	return .Ok
+}
+
 // A thread of task t that has not started (thread_start, process.odin).
 @(require_results)
 thread_create :: proc "contextless" (t: ^Task) -> (thread: ^Thread, st: vx.Status) {
@@ -755,6 +935,7 @@ thread_create :: proc "contextless" (t: ^Task) -> (thread: ^Thread, st: vx.Statu
 	}
 	th.kstack = stack
 	th.intent = .Interactive
+	th.rights = arch_rights_default() // a new task's first thread's; sys_thread_create gives one of its own task's its creator's
 	object_ref(&t.obj)
 	th.kernel_sp = arch_thread_initial_sp(th)
 	return th, .Ok

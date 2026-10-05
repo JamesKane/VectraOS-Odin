@@ -482,6 +482,7 @@ Sa_Flags :: bit_set[Sa_Flag;u64]
 SI_USER :: 0
 SI_KERNEL :: 128
 SEGV_MAPERR :: 1
+SEGV_PKUERR :: 4 // a protection key's rights denied it (si_pkey)
 BUS_ADRALN :: 1
 BUS_ADRERR :: 2
 ILL_ILLOPC :: 1
@@ -686,14 +687,24 @@ Stack :: struct {
 Siginfo :: struct {
 	signo, errno, code: i32,
 	fields:             struct #raw_union {
-		addr: uintptr,
-		pid:  i32,
-		_:    [112]u8,
+		addr:  uintptr,
+		pid:   i32,
+		fault: Sigfault,
+		_:     [112]u8,
 	},
 }
 #assert(size_of(Siginfo) == 128)
 #assert(offset_of(Siginfo, code) == 8)
 #assert(offset_of(Siginfo, fields) == 16)
+
+// A fault's fields: si_addr, si_addr_lsb, then si_pkey where si_lower would be.
+Sigfault :: struct {
+	addr:     uintptr,
+	addr_lsb: i16,
+	_:        [6]u8,
+	pkey:     u32,
+}
+#assert(offset_of(Siginfo, fields) + offset_of(Sigfault, pkey) == 32) // musl's si_pkey
 
 // ucontext_t: only its signal mask is filled in (with the mask a handler
 // interrupted); the registers wait (upstream's signal.c says so).

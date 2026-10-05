@@ -145,7 +145,9 @@ arch_pte_table :: proc "contextless" (pa: Paddr) -> Pte {
 	return Pte(pa) | PTE_TABLE | PTE_VALID
 }
 
-arch_pte_leaf :: proc "contextless" (pa: Paddr, flags: Map_Flags, level: int) -> Pte {
+// No protection keys: aarch64's would be permission overlays, which no CPU
+// this runs on has (ADR-0035, upstream's M6 step 6c5).
+arch_pte_leaf :: proc "contextless" (pa: Paddr, flags: Map_Flags, level: int, key: u32) -> Pte {
 	e := Pte(pa) | PTE_AF | PTE_VALID | (level == 3 ? PTE_TABLE : 0)
 	e |= .Device in flags ? PTE_DEVICE : PTE_SH_INNER
 	if .Write not_in flags {
@@ -757,6 +759,38 @@ arch_page_zero :: proc "contextless" (va: rawptr, bytes: u64) {
 
 arch_page_copy :: proc "contextless" (dst, src: rawptr, bytes: u64) {
 	vx_page_copy(dst, src, bytes)
+}
+
+// Protection keys: none, as no CPU this runs on has Arm's permission
+// overlays (FEAT_S1POE: QEMU 10.2's max does not, nor the tiered boards;
+// upstream's M6 step 6c5, ADR-0035). The user copies use LDTR and STTR, as
+// overlays would need (entry.S).
+arch_keys :: proc "contextless" () -> u32 {
+	return 0
+}
+
+arch_rights_default :: proc "contextless" () -> u64 {
+	return 0
+}
+
+arch_rights_read :: proc "contextless" () -> u64 {
+	return 0
+}
+
+arch_rights_write :: proc "contextless" (rights: u64) {}
+
+arch_rights_open_key0 :: proc "contextless" (rights: u64) -> u64 {
+	return rights
+}
+
+arch_frame_rights :: proc "contextless" (f: ^Trap_Frame) -> u64 {
+	return 0
+}
+
+arch_frame_set_rights :: proc "contextless" (f: ^Trap_Frame, rights: u64) {}
+
+arch_user_copy_denied :: proc "contextless" () -> bool {
+	return false
 }
 
 // The extended state is the Fpregs image (ADR-0035): SVE's and SME's join it

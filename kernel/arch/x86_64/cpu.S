@@ -105,6 +105,22 @@ vx_write_xcr0:
     xsetbv
     ret
 
+// () -> u32 and (v: u32): PKRU, this thread's protection-key rights
+// (ADR-0035), where CR4.PKE is set.
+    .globl vx_rdpkru, vx_wrpkru
+    .type vx_rdpkru, @function
+vx_rdpkru:
+    xorl %ecx, %ecx
+    rdpkru
+    ret
+    .type vx_wrpkru, @function
+vx_wrpkru:
+    movl %edi, %eax
+    xorl %ecx, %ecx
+    xorl %edx, %edx
+    wrpkru
+    ret
+
 // (out: ^[512]u8, 16-aligned): FXSAVE's image of this CPU's x87 and SSE
 // state, for MXCSR_MASK.
     .globl vx_fxsave

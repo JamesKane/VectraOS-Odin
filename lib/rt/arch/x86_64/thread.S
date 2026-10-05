@@ -66,6 +66,24 @@ vx_fp_probe_get:
 1:  movabsq $0xbad0bad0bad0bad0, %rax
 2:  ret
 
+// vx_rdpkru() -> u32 and vx_wrpkru(v: u32): the thread's protection-key
+// rights (PKRU, ADR-0035), unprivileged where the kernel set CR4.PKE.
+    .globl vx_rdpkru
+    .type vx_rdpkru, @function
+vx_rdpkru:
+    xorl %ecx, %ecx
+    rdpkru
+    ret
+
+    .globl vx_wrpkru
+    .type vx_wrpkru, @function
+vx_wrpkru:
+    movl %edi, %eax
+    xorl %ecx, %ecx
+    xorl %edx, %edx
+    wrpkru
+    ret
+
 // vx_cycles() -> u64: the cycle counter the clock is made from, which user
 // code may always read.
     .globl vx_cycles

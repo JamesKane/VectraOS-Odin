@@ -155,7 +155,9 @@ schedule_locked :: proc "contextless" () {
 
 // A user thread's state that traps do not save: the thread pointer (x86_64's
 // FS base, aarch64's TPIDR_EL0), saved and loaded with each switch between
-// threads. (Its vector state is in its trap frame: ADR-0004.) Idle threads
+// threads; and its protection-key rights (ADR-0035), live in the register
+// while the kernel runs for it, so its copies to and from user memory obey
+// them. (Its vector state is in its trap frame: ADR-0004.) Idle threads
 // have none: whoever ran last leaves its thread pointer in place, unused,
 // until the next user thread loads its own. A thread stopped at an
 // exception has saved its own (user_held): what a debugger set there since
@@ -165,8 +167,12 @@ user_switch :: proc "contextless" (prev, next: ^Thread) {
 	if prev.task != nil && !prev.user_held {
 		prev.tls = arch_tls_read()
 	}
+	if prev.task != nil {
+		prev.rights = arch_rights_read()
+	}
 	if next.task != nil {
 		arch_tls_write(next.tls)
+		arch_rights_write(next.rights)
 		arch_watch_load(next.task)
 	}
 }

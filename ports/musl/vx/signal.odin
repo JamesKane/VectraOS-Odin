@@ -177,6 +177,9 @@ sig_act :: proc "contextless" (sig: int, code: i32, sender: i64, address: u64, e
 		}
 		if e != nil {
 			info.fields.addr = uintptr(address) // a fault's; a signal's sender shares the union with it
+			if code == linux.SEGV_PKUERR {
+				info.fields.fault.pkey = e.key // the page's protection key (ADR-0035)
+			}
 		} else {
 			info.fields.pid = i32(sender)
 		}
@@ -271,6 +274,8 @@ sig_note :: proc "contextless" (e: ^vx.Exception, text: string) -> rt.Noted {
 		sig, code = linux.SIGTRAP, linux.TRAP_BRKPT
 	case .General:
 		code = linux.SI_KERNEL
+	case .Protection_Key: // SIGSEGV, si_pkey the key (ADR-0035)
+		code = linux.SEGV_PKUERR
 	}
 	// A fault that is blocked or ignored would only happen again: its default.
 	if sig in sig_mask || actions[sig].handler == linux.SIG_IGN {

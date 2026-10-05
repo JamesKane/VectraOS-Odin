@@ -25,6 +25,7 @@ Trap :: enum u32 {
 	Step, // one instruction done
 	Watchpoint, // a watched address touched
 	Pager_Timeout, // a pager-backed page not supplied in time; code as Page_Fault's
+	Protection_Key, // a page whose key the thread's rights deny; code: read 0, write 1 (ADR-0035)
 }
 
 // A string under construction in a caller's buffer, cut off at its capacity
@@ -108,6 +109,9 @@ trap_note :: proc "contextless" (kind: Trap, code: u32, address, pc: u64, out: ^
 		put(&b, "sys: trap: fp disabled")
 	case .Step:
 		put(&b, "sys: trap: step")
+	case .Protection_Key: // the thread's rights to the page's key deny it (ADR-0035)
+		put(&b, code == 1 ? "sys: trap: protection key write" : "sys: trap: protection key read")
+		has_address = true
 	case .Pager_Timeout: // its pager did not supply the page in time
 		put(&b, "sys: trap: page not supplied")
 		has_address = true

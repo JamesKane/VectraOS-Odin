@@ -1,8 +1,9 @@
 // lib/signal against upstream's vx-signal. Upstream has no host test of its
 // own for it; upstream.txt is what upstream's posix_note, posix_note_signal,
 // posix_wait_status and posix_default_ignored print for the same inputs,
-// from a harness built with clang against M4's headers (the P4 cross-check),
-// and each line here must match it.
+// from a harness built with clang against M4's headers (the P4 cross-check;
+// made again at upstream's f9c14e9 with the page-not-supplied and
+// protection-key notes), and each line here must match it.
 package signal_test
 
 import "core:fmt"
@@ -32,6 +33,10 @@ NOTES := []string {
 	"sys: trap: misaligned addr=0x8 pc=0x4",
 	"sys: breakpoint pc=0x5",
 	"sys: trap: step pc=0x6",
+	"sys: trap: page not supplied addr=0x1000 pc=0x7",
+	"sys: trap: protection key write addr=0x2000 pc=0x8",
+	"sys: trap: protection key read addr=0x2000 pc=0x9",
+	"sys: trap: protection key",
 	"posix: SIGTERM",
 	"posix: SIGTERM pid=12",
 	"posix: SIGTERM pid=",

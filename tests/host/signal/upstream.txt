@@ -219,6 +219,10 @@ signal [sys: trap: arithmetic pc=0x3] 8 0 8
 signal [sys: trap: misaligned addr=0x8 pc=0x4] 7 0 7
 signal [sys: breakpoint pc=0x5] 5 0 5
 signal [sys: trap: step pc=0x6] 5 0 5
+signal [sys: trap: page not supplied addr=0x1000 pc=0x7] 7 0 7
+signal [sys: trap: protection key write addr=0x2000 pc=0x8] 11 0 11
+signal [sys: trap: protection key read addr=0x2000 pc=0x9] 11 0 11
+signal [sys: trap: protection key] 11 0 11
 signal [posix: SIGTERM] 15 0 15
 signal [posix: SIGTERM pid=12] 15 12 15
 signal [posix: SIGTERM pid=] 15 0 15

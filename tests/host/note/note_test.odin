@@ -1,7 +1,12 @@
 // lib/note against upstream's vx-note. Upstream has no host test of its own
 // for it; upstream.txt is what upstream's vx_trap_note and vx_note_buf print
 // for the same inputs, from a harness built with clang against M5's headers
-// (the P4 cross-check; the trap lines made again at M5, for .Pager_Timeout), and each line here must match it.
+// (the P4 cross-check; the trap lines made again at M5, for .Pager_Timeout,
+// and at upstream's f9c14e9, for .Protection_Key), and each line here must
+// match it. At f9c14e9 upstream's protection-key words are cut to "sys: tr"
+// (VX_STR of a conditional: the size of a pointer; UPSTREAM-FINDINGS): the
+// oracle was built with that one line mended, so these lines are its words
+// as meant.
 package note_test
 
 import "core:fmt"
@@ -31,7 +36,7 @@ expect_lines :: proc(t: ^testing.T, got: string, want: string, loc := #caller_lo
 test_against_upstream :: proc(t: ^testing.T) {
 	b := strings.builder_make(context.temp_allocator)
 	// Trap notes: every kind, each fault code.
-	for kind in u32(0) ..= 11 {
+	for kind in u32(0) ..= 12 {
 		for code in u32(0) ..= 3 {
 			out: [note.ERRMAX]u8
 			pc := kind != 0 ? 0x401000 * u64(kind) : 0

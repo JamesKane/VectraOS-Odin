@@ -83,3 +83,67 @@ cpu_has :: proc "contextless" (f: Cpu_Feature) -> bool {
 	}
 	return false
 }
+
+// The calling thread's protection-key rights (ADR-0035), its own register,
+// read and set with the unprivileged instructions (x86's RDPKRU and WRPKRU,
+// arch/x86_64/thread.S): no syscall. On aarch64, and on an x86 without PKU,
+// there are none: 0.
+when ODIN_ARCH == .amd64 {
+	foreign _ {
+		vx_rdpkru :: proc "c" () -> u32 ---
+		vx_wrpkru :: proc "c" (v: u32) ---
+	}
+}
+
+rights_get :: proc "contextless" () -> u64 {
+	when ODIN_ARCH == .amd64 {
+		if cpu().keys != 0 {
+			return u64(vx_rdpkru())
+		}
+	}
+	return 0
+}
+
+rights_set :: proc "contextless" (rights: u64) {
+	when ODIN_ARCH == .amd64 {
+		if cpu().keys != 0 {
+			vx_wrpkru(u32(rights))
+		}
+	}
+}
+
+// Sets the calling thread's rights to a key: .Read, or .Read and .Write, or
+// none (PKU has no write-only key: .Write alone is read and write).
+@(require_results)
+keys_set :: proc "contextless" (key: u32, rights: vx.Key_Rights) -> vx.Status {
+	keys := cpu().keys
+	if keys == 0 {
+		return .Err_Unsupported
+	}
+	if key > keys || rights - {.Read, .Write} != {} {
+		return .Err_Invalid
+	}
+	r := rights_get() &~ (3 << (2 * key))
+	if .Write not_in rights {
+		r |= 2 << (2 * key) // WD: no writes
+	}
+	if rights == {} {
+		r |= 1 << (2 * key) // AD: no access at all
+	}
+	rights_set(r)
+	return .Ok
+}
+
+// The calling thread's rights to a key, as it has them; every right where
+// there are no keys.
+keys_get :: proc "contextless" (key: u32) -> vx.Key_Rights {
+	keys := cpu().keys
+	if keys == 0 || key > keys {
+		return {.Read, .Write}
+	}
+	r := (rights_get() >> (2 * key)) & 3
+	if r & 1 != 0 {
+		return {}
+	}
+	return r & 2 != 0 ? {.Read} : {.Read, .Write}
+}

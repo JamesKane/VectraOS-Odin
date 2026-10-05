@@ -123,10 +123,10 @@ A VMO cannot be sealed, leased or revoked: `vmo_seal`, `vmo_lease` and `vmo_revo
 So a reader cannot be sure an untrusted writer's bytes stay still, and memory once given cannot be taken back while the reader runs.
 M6 step 6e brings the three calls, and leases lent for one `channel_call`, revoked by the kernel at the reply, the deadline, or either side's death.
 
-There are no reservations, and so no `AS_FIXED` inside one with the receiver choosing the base: `as_reserve` and `as_protect` are reserved, and a fixed address in `as_map` is checked only against the page tables.
+There are no reservations, and so no `AS_FIXED` inside one with the receiver choosing the base: `as_reserve` is reserved, and a fixed address in `as_map` is checked only against the page tables (`as_protect` came with M6 step 6c4).
 M6 step 6e brings them, with `<vx/shared.h>` in libvx, its offsets and links followed only within a VMO's bounds, and a host and plugin scenario that tests the discipline above.
 
-Protection keys, which would let a thread deny itself writes to chosen mappings, come in M6 step 6c.
+Protection keys (as(2), M6 step 6c4) let a thread deny itself access to chosen mappings, on x86 only: aarch64 has none until 6c5 finds Arm's permission overlays, which neither tiered board's cores have.
 
 A thread that dies holding a lock in shared memory leaves its waiters asleep: robust futexes come in M6 step 6d, which also checks whether keying a futex by physical address strands its waiters when a pager evicts the page and supplies it again elsewhere.
 

@@ -30,6 +30,8 @@ foreign _ {
 	vx_read_xcr0 :: proc "c" () -> u64 ---
 	vx_write_xcr0 :: proc "c" (v: u64) ---
 	vx_fxsave :: proc "c" (out: ^[512]u8) ---
+	vx_rdpkru :: proc "c" () -> u32 ---
+	vx_wrpkru :: proc "c" (v: u32) ---
 	vx_write_cr3 :: proc "c" (root: u64) ---
 	vx_read_cr3 :: proc "c" () -> u64 ---
 	vx_invlpg :: proc "c" (va: u64) ---
@@ -228,6 +230,10 @@ CR4_TSD :: 1 << 2 // RDTSC only in ring 0
 @(private="file")
 CR4_FSGSBASE :: 1 << 16 // RDFSBASE and friends in user mode
 @(private="file")
+CR4_PKE :: 1 << 22 // protection keys for user pages (PKU)
+@(private="file")
+CPUID7_ECX_PKU :: 1 << 3
+@(private="file")
 CPUID1_ECX_X2APIC :: 1 << 21
 @(private="file")
 CPUID1_ECX_TSC_DEADLINE :: 1 << 24
@@ -304,6 +310,10 @@ XFEATURES_USER :: u64(0x7 | 0xe0)
 @(private="file")
 XFEATURES_AVX512 :: u64(0xe0)
 @(private="file")
+XFEATURE_PKRU :: u64(1) << 9 // protection keys' rights, saved with the rest
+@(private="file")
+PKRU_DEFAULT :: u64(0x5555_5554) // key 0 open; every other key's access disabled
+@(private="file")
 XSAVE_HEADER :: 512 // XSTATE_BV, XCOMP_BV, then 48 reserved bytes
 
 @(private="file")
@@ -318,6 +328,10 @@ Xcomp :: struct {
 }
 @(private="file")
 xcomp: [10]Xcomp // each component's place, 2 to 9
+@(private="file")
+cpu_pku: bool // CPUID.7.0:ECX.PKU, so CR4.PKE is set
+@(private="file")
+have_pku: bool // and PKRU is in XCR0: protection keys, 15 a task
 
 // XCR0 for this CPU; on the boot CPU, first what to save and its layout. The
 // area entry.S reserves must fit, with the trap frame above it, in the page
@@ -329,10 +343,15 @@ simd_init :: proc "contextless" (index: u32) {
 			kpanic("the CPU has no XSAVE, which the kernel needs for vector state (ADR-0004)")
 		}
 		r := cpuid(0xd, 0)
-		xcr0 = (u64(r[3]) << 32 | u64(r[0])) & XFEATURES_USER
+		can := u64(r[3]) << 32 | u64(r[0])
+		xcr0 = can & XFEATURES_USER
 		if xcr0 & XFEATURES_AVX512 != XFEATURES_AVX512 {
 			xcr0 &~= XFEATURES_AVX512 // all three, or none
 		}
+		if cpu_pku && can & XFEATURE_PKRU != 0 {
+			xcr0 |= XFEATURE_PKRU
+		}
+		have_pku = xcr0 & XFEATURE_PKRU != 0
 		for i in u32(2) ..< 10 {
 			if xcr0 & (1 << i) != 0 {
 				c := cpuid(0xd, i)
@@ -374,7 +393,12 @@ arch_cpu_init :: proc "contextless" (index: u32) {
 	vx_wrmsr(MSR_KERNEL_GS_BASE, 0)
 	// TSD off: user code may always read the cycle counter. FSGSBASE off:
 	// user code changes its FS base only through thread_state.
-	vx_write_cr4(vx_read_cr4() &~ (CR4_TSD | CR4_FSGSBASE))
+	// PKE: protection keys (ADR-0035), where the CPU has PKU, their rights a
+	// thread's PKRU in its XSAVE state.
+	if index == 0 {
+		cpu_pku = cpuid(7, 0)[2] & CPUID7_ECX_PKU != 0
+	}
+	vx_write_cr4((vx_read_cr4() | (cpu_pku ? CR4_PKE : 0)) &~ (CR4_TSD | CR4_FSGSBASE))
 	simd_init(index)
 
 	ist: [^]u8
@@ -447,7 +471,7 @@ arch_pte_table :: proc "contextless" (pa: Paddr) -> Pte {
 	return Pte(pa) | X86_USER | X86_WRITE | X86_PRESENT
 }
 
-arch_pte_leaf :: proc "contextless" (pa: Paddr, flags: Map_Flags, level: int) -> Pte {
+arch_pte_leaf :: proc "contextless" (pa: Paddr, flags: Map_Flags, level: int, key: u32) -> Pte {
 	e := Pte(pa) | X86_PRESENT
 	if .Write in flags {
 		e |= X86_WRITE
@@ -461,6 +485,7 @@ arch_pte_leaf :: proc "contextless" (pa: Paddr, flags: Map_Flags, level: int) ->
 	if .Device in flags {
 		e |= X86_PCD | X86_PWT // uncached under the default PAT
 	}
+	e |= Pte(key & 0xf) << 59 // the protection key, bits 59-62 (PKU)
 	if level < 3 {
 		e |= X86_LARGE
 	}
@@ -730,6 +755,7 @@ Pf_Cause :: enum u64 {
 	User,
 	Reserved, // a reserved bit was set in an entry
 	Fetch,
+	Pk, // the page's protection key, which PKRU denies
 }
 
 @(private="file")
@@ -820,7 +846,7 @@ arch_context_switch :: proc "contextless" (save_sp: ^u64, load_sp: u64) {
 arch_enter_user :: proc "contextless" (entry, sp: Uva, arg, arg2, kstack_top: u64) -> ! {
 	zero: u64
 	_ = copy_out(sp - 8, &zero)
-	user_area_init(kstack_top)
+	user_area_init(kstack_top, this_cpu().current.rights)
 	vx_enter_user(u64(entry), u64(sp - 8), arg, arg2, kstack_top)
 }
 
@@ -1015,7 +1041,77 @@ arch_page_copy :: proc "contextless" (dst, src: rawptr, bytes: u64) {
 
 // .Get_Cpu's (ADR-0035): what the kernel saves, and lets user code use.
 arch_cpu_info :: proc "contextless" () -> vx.Cpu_Info {
-	return {xstate_size = xsave_bytes, xfeatures = xcr0, mxcsr_mask = mxcsr_mask}
+	return {xstate_size = xsave_bytes, keys = arch_keys(), xfeatures = xcr0, mxcsr_mask = mxcsr_mask}
+}
+
+// --- Protection keys (ADR-0035) ---
+//
+// A thread's rights are its PKRU: live in the register while it runs, the
+// kernel's own copies to and from user memory included (PKU checks
+// supervisor accesses to user pages too); kept in Thread.rights while it does
+// not (sched.odin's user_switch); and in its XSAVE area, from which XRSTOR
+// gives them back to user mode. What the kernel changes of them it changes in
+// both.
+
+// The keys a task may allocate: 1 to 15 where there is PKU.
+arch_keys :: proc "contextless" () -> u32 {
+	return have_pku ? 15 : 0
+}
+
+// A new task's first thread's: key 0 alone open.
+arch_rights_default :: proc "contextless" () -> u64 {
+	return have_pku ? PKRU_DEFAULT : 0
+}
+
+arch_rights_read :: proc "contextless" () -> u64 {
+	return have_pku ? u64(vx_rdpkru()) : 0
+}
+
+arch_rights_write :: proc "contextless" (rights: u64) {
+	if have_pku {
+		vx_wrpkru(u32(rights))
+	}
+}
+
+// Rights with key 0 opened: a handler's, which must reach its stack.
+arch_rights_open_key0 :: proc "contextless" (rights: u64) -> u64 {
+	return rights &~ 3 // key 0's AD and WD bits
+}
+
+// The rights in a saved area: PKRU's component, or its initial state (0:
+// every key open) if XSAVE left it so.
+arch_frame_rights :: proc "contextless" (f: ^Trap_Frame) -> u64 {
+	if !have_pku {
+		return 0
+	}
+	x := frame_xsave(f)
+	if x.xstate_bv & XFEATURE_PKRU == 0 {
+		return 0
+	}
+	return u64(intrinsics.unaligned_load((^u32)(&(cast([^]u8)x)[xcomp[9].offset])))
+}
+
+// The rights a saved area gives back to user mode: PKRU written there, and
+// marked present, so XRSTOR loads it.
+arch_frame_set_rights :: proc "contextless" (f: ^Trap_Frame, rights: u64) {
+	if !have_pku {
+		return
+	}
+	x := frame_xsave(f)
+	intrinsics.unaligned_store((^u32)(&(cast([^]u8)x)[xcomp[9].offset]), u32(rights))
+	x.xstate_bv |= XFEATURE_PKRU
+}
+
+// Set by x86_trap when a user copy's fault was a protection key's (#PF's PK
+// bit): the caller's rights stopped it, not a missing page.
+@(private="file")
+copy_denied: [MAX_CPUS]bool
+
+arch_user_copy_denied :: proc "contextless" () -> bool {
+	cpu := arch_cpu_index()
+	denied := copy_denied[cpu]
+	copy_denied[cpu] = false
+	return denied
 }
 
 // A new thread's area, at the top of its kernel stack under the frame
@@ -1023,12 +1119,15 @@ arch_cpu_info :: proc "contextless" () -> vx.Cpu_Info {
 // 0x37f and MXCSR 0x1f80 (every exception masked, round to nearest), every
 // register zero. XSTATE_BV is 0, so XRSTOR gives each component its initial
 // state; MXCSR it loads from the area whatever the header says.
+// Its protection-key rights are the thread's own (Thread.rights).
 @(private="file")
-user_area_init :: proc "contextless" (kstack_top: u64) {
-	x := frame_xsave(cast(^Trap_Frame)uintptr(kstack_top - size_of(Trap_Frame)))
+user_area_init :: proc "contextless" (kstack_top: u64, rights: u64) {
+	f := cast(^Trap_Frame)uintptr(kstack_top - size_of(Trap_Frame))
+	x := frame_xsave(f)
 	intrinsics.mem_zero(x, int(intrinsics.volatile_load(&vx_xsave_size)))
 	x.fxsave[0], x.fxsave[1] = 0x7f, 0x03 // FCW
 	intrinsics.unaligned_store((^u32)(&x.fxsave[24]), 0x1f80) // MXCSR
+	arch_frame_set_rights(f, rights)
 }
 
 // To pc(arg) as if called: a zero return address below arg, which is
@@ -1111,7 +1210,7 @@ x86_exception_kind :: proc "contextless" (f: ^Trap_Frame) -> (kind: vx.Exception
 		if .Fetch in pf {
 			code = 2
 		}
-		return .Page_Fault, code, vx_read_cr2()
+		return .Pk in pf ? vx.Exception_Kind.Protection_Key : .Page_Fault, code, vx_read_cr2() // PK: the thread's rights deny the page's key
 	case 16, 19:
 		return .Arithmetic, code, 0 // x87 and SIMD FP exceptions
 	case 17:
@@ -1152,6 +1251,7 @@ x86_trap :: proc "c" (f: ^Trap_Frame) {
 			return
 		}
 		if f.vector == 14 && !from_user && vx_read_cr2() < u64(USER_TOP) && uaccess_fixup(f.rip) != 0 {
+			copy_denied[arch_cpu_index()] = .Pk in transmute(Pf_Error)f.error // the caller's key rights, not a missing page
 			f.rip = uaccess_fixup(f.rip) // a user page gone under a copy: it reports the failure
 			return
 		}

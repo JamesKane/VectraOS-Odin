@@ -139,7 +139,7 @@ pager_fault :: proc "contextless" (address: u64, access: u32) -> Pager_Result {
 			if upgrade {
 				unmap_page(t.root, u64(page_va))
 			}
-			ok := (e != nil && !upgrade) || map_range(t.root, u64(page_va), pa, PAGE_SIZE, page_map_flags(v, m.flags, v.pages[index]))
+			ok := (e != nil && !upgrade) || map_range(t.root, u64(page_va), pa, PAGE_SIZE, page_map_flags(v, m.flags, v.pages[index]), m.key)
 			root := t.root
 			spin_unlock(&v.lock)
 			spin_unlock(&t.lock)
