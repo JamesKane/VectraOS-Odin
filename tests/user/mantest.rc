@@ -1,0 +1,46 @@
+# tests/user/mantest.rc: the manual on the target (tests/qemu/man.ndb, M6
+# step 6a5): man prints a page, a node, its contents and its path, and finds
+# a page by a name it documents; lookman finds pages by key; sig prints a
+# section 2 declaration; and each refuses what is not there. The last line
+# counts the checks.
+
+checks=0
+failed=0
+
+fn check {
+  checks=`{expr $checks + 1}
+  name=$1
+  want=$2
+  shift 2
+  if(! ~ $"* $want) {
+    failed=`{expr $failed + 1}
+    echo 'mantest: FAILED' $name: wanted $want, got $"*
+  }
+}
+
+fn status {
+  if($* >/dev/null >[2]/dev/null) echo ok
+  if not echo failed
+}
+
+check title 'GUIDE(6) GUIDE(6)' `{man guide | sed -n 1p}
+check name 'guide — the manual''s page format' `{man guide | sed -n 4p}
+check node NODES `{man 6 guide nodes | sed -n 1p}
+check width 0 `{man guide | awk 'length > 80' | wc -l}
+check path /lib/man/6/guide `{man -w guide}
+check contents '@header The header' `{man -t guide | grep '^@header'}
+check byname /lib/man/1/man `{man -w lookman}
+check section /lib/man/8/intro `{man -w 8 intro}
+check nopage failed `{status man nosuch}
+check nonode failed `{status man guide nosuch}
+check badflag failed `{status man -x guide}
+check lookman 'man 6 guide # the manual''s page format' `{lookman format | grep guide}
+check lookman2 'man 2 futex # wait for a word in memory to change, or wake its waiters' `{lookman WAKE word}
+check lookmiss failed `{status lookman nosuchkeyatall}
+check sig 'int64_t vx_futex_wake(const _Atomic uint32_t *word, uint32_t count);' `{sig futex_wake}
+check sigvx 'int64_t vx_futex_wake(const _Atomic uint32_t *word, uint32_t count);' `{sig vx_futex_wake}
+check sigmiss failed `{status sig nosuch}
+
+echo 'mantest:' $checks checks, $failed failed
+if(~ $failed 0) exit
+exit $failed^' failed'

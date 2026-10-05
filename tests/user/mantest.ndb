@@ -1,0 +1,9 @@
+# tests/user/mantest.ndb: rc runs tests/user/mantest.rc in the POSIX userland
+# (tests/qemu/man.ndb), where /lib/man is the image's.
+
+service=mantest program=/boot/bin/rc console
+arg=/boot/tests/mantest.rc
+ns=posix
+connect=nsd
+env=PATH=/bin
+env=HOME=/tmp

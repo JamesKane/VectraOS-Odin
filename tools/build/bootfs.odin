@@ -10,9 +10,10 @@ import "vx:tar"
 // points, boot/bin with each program that lives in bootfs (and
 // boot/bin/posix with sbase's, ADR-0010), boot/svc with the service
 // manifests from boot/svc/*.ndb, boot/drv with the driver manifests from
-// boot/drv/*.ndb, and lib/ns with the namespace templates, namespace(6)
-// files, from boot/lib/ns/. The archive is deterministic: fixed order, no
-// times or owners (lib/tar's writer).
+// boot/drv/*.ndb, lib/man with the manual (man/ and its index), and lib/ns
+// with the namespace templates, namespace(6) files, from boot/lib/ns/. The
+// archive is deterministic: fixed order, no times or owners (lib/tar's
+// writer).
 
 @(private="file")
 BOOTFS_DIRS := []string {
@@ -117,6 +118,17 @@ make_bootfs :: proc(a: ^Arch, mode: Mode, out: string, with := "") -> bool {
 			append(&entries, Bootfs_Entry{path = fmt.tprintf("boot/%s", item[colon + 1:]), data = data, mode = 0o644})
 		}
 	}
+	// The manual (upstream 12 §5): every page at /lib/man/<sect>/<page>, and
+	// the index the manual's pass writes, out/man/index/base, at
+	// /lib/man/index/base. The pass's verdict is ./build check's to give.
+	_ = check_man()
+	for sect in 1 ..= 8 {
+		for name in man_dir(sect) {
+			data := read_file(fmt.tprintf("man/%d/%s", sect, name)) or_return
+			append(&entries, Bootfs_Entry{path = fmt.tprintf("lib/man/%d/%s", sect, name), data = data, mode = 0o644})
+		}
+	}
+	append(&entries, Bootfs_Entry{path = "lib/man/index/base", data = read_file(MAN_INDEX) or_return, mode = 0o644})
 	// The service manifests, the driver manifests devmgr matches (M3), and
 	// the namespace templates: boot/lib/ns/NAME is /lib/ns/NAME in the image.
 	for dir in ([]string{"boot/svc", "boot/drv", "boot/lib/ns"}) {
