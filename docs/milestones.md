@@ -96,7 +96,7 @@ New vendored imports: Monocypher (ADR-0011) and ACPICA (ADR-0012), each behind a
 
 ## P6: M6, chasing upstream
 
-Upstream's M6 steps are ported as they land; scenarios are upstream's as of the step last ported (`tests/qemu/m6/`, from `3cb6968`; unchanged at `366394f`, but `tests/user/slottest.ndb`).
+Upstream's M6 steps are ported as they land; scenarios are upstream's as of the step last ported (`tests/qemu/m6/`, from `3cb6968`; unchanged at `366394f`, but `tests/user/slottest.ndb`; unchanged again from `08cc12f` to `f9c14e9`, 6c).
 
 | Step | Here | Commit |
 |---|---|---|
@@ -111,6 +111,13 @@ Upstream's M6 steps are ported as they land; scenarios are upstream's as of the 
 | 6b, the kernel fix (upstream `89b3ce8`) | `as_query` on an ended task answers `Err_Bad_State`; `exception_resume` needs DEBUG for a debugger's stop, MANAGE for an exception port's; ktest checks both | `c0f1e0a` |
 | 6b, waves A-E (upstream `b6ab2ae`, `cd2548c`, `b1af1bc`, `300676f`) | The manual's pages at `366394f`, copied as contracts; `man/missing` upstream's, 97 records. Usage from pages for cs, dbg, ping, tail, rc (and its builtins, `usage.TEXT_bind` and the like), dosfs, isofs; a program that prints no usage message needs none. `vx:rc`'s pattern matcher decodes runes with `vx:utf` | `6daab42` |
 | 6b, the key tables (upstream `1ac9468`) | svc, driver, store, release and slots `.def` tables beside their parsers, expanded by `tools/abigen`; `ndb.unknown_key`; svcd and devmgr use a manifest with an unknown key (or an error) not at all, install fails on such a release record and distd does not serve it, a slot table or store directory with one is invalid; `./build man --check` holds each format's page to its table. slottest's ESP is 96 MiB | `7b7cd4d` |
+| 6c, ADR-0035's ABI (upstream `b348676`, `338c0fa`) | Recorded here as ADR-0013, followed: thread_state's `.Get_Xstate`, `.Set_Xstate`, `.Get_Cpu` and `vx.Cpu_Info`; `as_key_alloc`, `as_key_free`; `vx.Map_Flags` (options and key) for as_map, as_protect and as_query; `.Protection_Key`, with `Exception.key` and `.rights` | `51f2d1d` |
+| 6c1. Every x86 FP/SIMD component, by XSAVE (upstream `820b378`) | XCR0 with AVX-512's three where the CPU has all three; the thread's XSAVE area stays at the top of its kernel stack (ADR-0004, ADR-0013), saved at every entry, with XSAVEOPT from user mode; the debugger's view and XRSTOR's checks; `rt.cpu()`; procfs's `xregs`; the note entry's page of stack | `c4cb4f3` |
+| 6c2. The copies by words (upstream `9c48c9f`) | `lib/memory/arch/*/mem.S` (upstream's vx-mem) in the kernel and every native program, in place of Odin's runtime byte loops; DC ZVA and NEON page copies on aarch64, no SIMD sections (eager save); aarch64's user copy by words; ktest's `test_mem` on the target | `6f539c2` |
+| 6c3. Userland's baseline (upstream `18d6e27`) | x86-64-v3 and armv8.2-a for every user program, the back end, musl, compiler-rt and the ports (odin, llc and clang told the same); the kernel at the base ISA; `rt.cpu_has` | `a6f18a1` |
+| 6c4. Protection keys on x86, and `as_protect` (upstream `e2942df`) | CR4.PKE and PKRU in XCR0; keys 1-15; rights live in the kernel for the thread's copies, kept per thread at switches and in the area; `as_protect`'s cuts and limits; `.Err_Access` from a denied copy; handlers with key 0 opened; musl's `SEGV_PKUERR` and `si_pkey`; `rights=` in regs.ndb. Under TCG ktest has 15 keys | `2bef63a` |
+| 6c5. aarch64's user copies unprivileged (upstream `b7f3d81`) | LDTR and STTR, the futex word's LDTR and a barrier; no keys on aarch64 | `4e0f42a` |
+| vx:guide's header values (upstream `705fd16`) | A header value not UTF-8 once decoded (ndb's hex form) refused; the cross-check against upstream's guide.c at `f9c14e9`, its corpus's new input, 1,000,000 mutated inputs matching | `310e32b` |
 
 After 6a5, `m6/man`, `shell`, `rc`, `rcscript`, `boot`, `ns`, `ktest`, `posix`, `fsd` and `net` pass on x86_64 and aarch64 (2026-10-05).
 

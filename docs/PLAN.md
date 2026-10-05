@@ -57,7 +57,7 @@ Odin replaces C23 for all first-party code, kernel included. Assembly stays for 
 Upstream's kernel is `-mgeneral-regs-only`. Odin's freestanding runtime and codegen use SSE and NEON (a trivial kernel object holds 571 vector instructions on x86_64 and 939 on aarch64), so the Odin kernel supports vector state instead of banning it:
 
 - FP and SIMD are enabled in the assembly entry, before the first Odin instruction, on every CPU.
-- The kernel's ISA is pinned to a bounded baseline (x86-64-v3 without AVX-512; ARMv8 NEON without SVE or SME), so the kernel's own save area has a fixed size.
+- The kernel's ISA is pinned to a bounded baseline (each architecture's base: x86-64 with SSE2, ARMv8 NEON without SVE or SME), so the kernel's own save area has a fixed size; user programs are built for userland's baseline, x86-64-v3 and armv8.2-a (upstream's M6 step 6c3; ADR-0004's amendment).
 - Every entry from user space (syscall, IRQ, exception) saves user vector state eagerly. Nested IRQs save the kernel's.
 - Per-thread save areas come from a typed pool charged to the thread's budget, sized from CPUID leaf 0xD on x86_64, 64-byte aligned.
 - Lazy save is a later optimisation, behind a benchmark.
