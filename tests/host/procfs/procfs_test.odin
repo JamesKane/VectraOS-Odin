@@ -269,7 +269,7 @@ test_procfs :: proc(t: ^testing.T) {
 	testing.expect_value(t, p9test.list(&c, root, ""), "1 2 7 9 13 12 14")
 	testing.expect_value(t, p9test.list(&c, root, "9"), "status ctl note notepg noteid ppid wait ns events mem maps images info prof threads")
 	testing.expect_value(t, p9test.list(&c, root, "9/threads"), "1 2")
-	testing.expect_value(t, p9test.list(&c, root, "9/threads/2"), "status regs regs.ndb fpregs ctl")
+	testing.expect_value(t, p9test.list(&c, root, "9/threads/2"), "status regs regs.ndb fpregs xregs ctl")
 	testing.expect_value(t, p9test.list(&c, root, "9/prof"), "ctl zones")
 
 	// Names that are not processes, threads or files.
@@ -325,7 +325,7 @@ test_procfs :: proc(t: ^testing.T) {
 		{"9/prof/zones", "zones", 0o444, {type = p9.QTFILE, path = 9 << 32 | 18}},
 		{"9/threads/2", "2", p9.DMDIR | 0o555, {type = p9.QTDIR, path = 9 << 32 | 2 << 8}},
 		{"9/threads/2/regs.ndb", "regs.ndb", 0o664, {type = p9.QTFILE, path = 9 << 32 | 2 << 8 | 3}},
-		{"9/threads/2/ctl", "ctl", 0o222, {type = p9.QTFILE, path = 9 << 32 | 2 << 8 | 5}},
+		{"9/threads/2/ctl", "ctl", 0o222, {type = p9.QTFILE, path = 9 << 32 | 2 << 8 | 6}}, // after xregs (ADR-0035), as upstream's
 	}
 	for sc in stat_cases {
 		s: p9.Stat
@@ -621,6 +621,21 @@ test_procfs :: proc(t: ^testing.T) {
 	}
 	text, _ = read_file(&c, root, "9/threads/1/fpregs", buf[:])
 	testing.expect_value(t, len(text), size_of(vx.Fpregs))
+	// xregs: the whole state, .Get_Cpu's xstate_size; written whole, at 0.
+	{
+		xs: [FAKE_XSTATE_SIZE]u8
+		for &b, i in xs {
+			b = u8(i * 7)
+		}
+		_, e = write_file(&c, root, "9/threads/1/xregs", string(xs[:]))
+		testing.expect_value(t, e, vx.Status.Ok)
+		testing.expect_value(t, th1.xstate[FAKE_XSTATE_SIZE - 1], xs[FAKE_XSTATE_SIZE - 1])
+		_, e = write_file(&c, root, "9/threads/1/xregs", string(xs[:16]))
+		testing.expect_value(t, e, vx.Status.Err_Invalid) // whole, at 0
+		text, _ = read_file(&c, root, "9/threads/1/xregs", buf[:])
+		testing.expect_value(t, len(text), FAKE_XSTATE_SIZE)
+		testing.expect_value(t, text[100], xs[100])
+	}
 	_, e = write_file(&c, root, "9/threads/1/regs.ndb", ARG1 + "=0x7 " + ARG0 + "=12\n")
 	testing.expect_value(t, e, vx.Status.Ok)
 	testing.expect_value(t, get_arg1(&th1.regs), 7)

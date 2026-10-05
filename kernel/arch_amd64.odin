@@ -28,6 +28,8 @@ foreign _ {
 	vx_frame_address :: proc "c" () -> u64 ---
 	vx_run_on_stack :: proc "c" (top: u64, fn: proc "c" () -> !) -> ! ---
 	vx_read_xcr0 :: proc "c" () -> u64 ---
+	vx_write_xcr0 :: proc "c" (v: u64) ---
+	vx_fxsave :: proc "c" (out: ^[512]u8) ---
 	vx_write_cr3 :: proc "c" (root: u64) ---
 	vx_read_cr3 :: proc "c" () -> u64 ---
 	vx_invlpg :: proc "c" (va: u64) ---
@@ -45,11 +47,14 @@ foreign _ {
 	x86_vector_table :: proc "c" () --- // entry.S's 256 stub addresses: an address only
 }
 
-// The XSAVE area entry.S reserves below each trap frame (simd_init sets it),
-// and the kernel's top table for ap_start and ap_park: Odin's, which the
-// assembly reads.
+// The XSAVE area entry.S reserves below each trap frame, rounded up to 64
+// bytes (simd_init sets it); whether entries from user mode save with
+// XSAVEOPT; and the kernel's top table for ap_start and ap_park: Odin's,
+// which the assembly reads.
 @(export)
 vx_xsave_size: u64 = 4096
+@(export)
+vx_xsaveopt: u64
 @(export)
 ap_park_tables: [1]u64
 
@@ -284,15 +289,75 @@ build_idt :: proc "contextless" () {
 	idt[18].ist = IST_MACHINE_CHECK
 }
 
-// The XSAVE area every trap reserves (ADR-0004): the size CPUID leaf 0Dh
-// gives for the state XCR0 enables, which entry.S's ENABLE_SIMD chose.
+// --- FP/SIMD state (ADR-0004, ADR-0013) ---
+//
+// Every user component the CPU has, saved with XSAVE in the standard format
+// at every trap (XSAVEOPT for an entry from user mode, where there is one):
+// x87, SSE and AVX, and AVX-512's opmask, upper ZMM halves and ZMM16-31 when
+// it has all three. Not MPX, which is gone, nor AMX, whose 8 KiB of tiles
+// want a permission first (as Linux asks). entry.S's ENABLE_SIMD turns on x87,
+// SSE and AVX before any Odin runs; simd_init adds the rest. The layout is
+// CPUID's, the same on every CPU.
+
 @(private="file")
-simd_init :: proc "contextless" () {
-	if cpuid(1)[2] & CPUID1_ECX_XSAVE == 0 {
-		kpanic("the CPU has no XSAVE, which the kernel needs for vector state (ADR-0004)")
+XFEATURES_USER :: u64(0x7 | 0xe0)
+@(private="file")
+XFEATURES_AVX512 :: u64(0xe0)
+@(private="file")
+XSAVE_HEADER :: 512 // XSTATE_BV, XCOMP_BV, then 48 reserved bytes
+
+@(private="file")
+xcr0: u64 // the components saved: set on every CPU from the boot CPU's
+@(private="file")
+xsave_bytes: u32 // the standard format's size for xcr0, as CPUID gives it
+@(private="file")
+mxcsr_mask: u32 = 0xffbf // MXCSR_MASK's default: DAZ aside, every defined bit
+@(private="file")
+Xcomp :: struct {
+	offset, size: u32,
+}
+@(private="file")
+xcomp: [10]Xcomp // each component's place, 2 to 9
+
+// XCR0 for this CPU; on the boot CPU, first what to save and its layout. The
+// area entry.S reserves must fit, with the trap frame above it, in the page
+// at the top of a kernel stack (arch_thread_initial_sp).
+@(private="file")
+simd_init :: proc "contextless" (index: u32) {
+	if index == 0 {
+		if cpuid(1)[2] & CPUID1_ECX_XSAVE == 0 {
+			kpanic("the CPU has no XSAVE, which the kernel needs for vector state (ADR-0004)")
+		}
+		r := cpuid(0xd, 0)
+		xcr0 = (u64(r[3]) << 32 | u64(r[0])) & XFEATURES_USER
+		if xcr0 & XFEATURES_AVX512 != XFEATURES_AVX512 {
+			xcr0 &~= XFEATURES_AVX512 // all three, or none
+		}
+		for i in u32(2) ..< 10 {
+			if xcr0 & (1 << i) != 0 {
+				c := cpuid(0xd, i)
+				xcomp[i] = {offset = c[1], size = c[0]}
+			}
+		}
 	}
-	size := u64(cpuid(0xd, 0)[1])
-	intrinsics.volatile_store(&vx_xsave_size, (size + 63) &~ 63)
+	vx_write_xcr0(xcr0)
+	if index != 0 {
+		return
+	}
+	xsave_bytes = cpuid(0xd, 0)[1] // EBX: the standard format's size for XCR0 as it is now
+	size := (u64(xsave_bytes) + 63) &~ 63
+	if size + size_of(Trap_Frame) + 63 > PAGE_SIZE {
+		kpanic("the XSAVE area is larger than a page")
+	}
+	intrinsics.volatile_store(&vx_xsave_size, size)
+	intrinsics.volatile_store(&vx_xsaveopt, u64(cpuid(0xd, 1)[0] & 1))
+	fx: struct #align (16) {
+		image: [512]u8,
+	}
+	vx_fxsave(&fx.image)
+	if mask := intrinsics.unaligned_load((^u32)(&fx.image[28])); mask != 0 { // MXCSR_MASK: 0 means the default
+		mxcsr_mask = mask
+	}
 }
 
 // Per CPU: control registers and MSRs, this CPU's GDT, TSS and GS data, and
@@ -310,9 +375,7 @@ arch_cpu_init :: proc "contextless" (index: u32) {
 	// TSD off: user code may always read the cycle counter. FSGSBASE off:
 	// user code changes its FS base only through thread_state.
 	vx_write_cr4(vx_read_cr4() &~ (CR4_TSD | CR4_FSGSBASE))
-	if index == 0 {
-		simd_init()
-	}
+	simd_init(index)
 
 	ist: [^]u8
 	if index == 0 {
@@ -631,6 +694,8 @@ Trap_Frame :: struct { // the layout entry.S builds
 	rip, cs, rflags, rsp, ss:                                               u64, // pushed by the CPU
 }
 
+#assert(offset_of(Trap_Frame, cs) == 144) // entry.S's trap_save reads it there
+
 @(private="file")
 EXCEPTION_NAMES := [22]string {
 	"divide error",
@@ -755,6 +820,7 @@ arch_context_switch :: proc "contextless" (save_sp: ^u64, load_sp: u64) {
 arch_enter_user :: proc "contextless" (entry, sp: Uva, arg, arg2, kstack_top: u64) -> ! {
 	zero: u64
 	_ = copy_out(sp - 8, &zero)
+	user_area_init(kstack_top)
 	vx_enter_user(u64(entry), u64(sp - 8), arg, arg2, kstack_top)
 }
 
@@ -829,15 +895,20 @@ arch_tls_write :: proc "contextless" (value: u64) {
 }
 
 // The XSAVE area entry.S keeps below a trap frame, 64-byte aligned: the
-// interrupted context's vector state (ADR-0004). Its first 512 bytes are
-// FXSAVE's image; XSTATE_BV, at 512, says which components it holds, and a
-// component it does not hold is in its initial state.
+// interrupted context's vector state (ADR-0004). Below a thread's user frame,
+// at the top of its kernel stack, it is the thread's own XSAVE area
+// (ADR-0013). Its first 512 bytes are FXSAVE's image; XSTATE_BV, at 512,
+// says which components it holds, and a component it does not hold is in its
+// initial state.
 @(private="file")
 Xsave_Legacy :: struct {
 	fxsave:    [512]u8,
 	xstate_bv: u64,
 	xcomp_bv:  u64,
+	reserved:  [48]u8,
 }
+
+#assert(offset_of(Xsave_Legacy, xstate_bv) == XSAVE_HEADER)
 
 @(private="file")
 XSTATE_X87 :: u64(1)
@@ -849,17 +920,69 @@ frame_xsave :: proc "contextless" (f: ^Trap_Frame) -> ^Xsave_Legacy {
 	return cast(^Xsave_Legacy)uintptr((u64(uintptr(f)) - intrinsics.volatile_load(&vx_xsave_size)) &~ 63)
 }
 
-// The FXSAVE image of a thread's saved FP/SIMD state, with any component in
-// its initial state written out as such: FCW 0x37f, every register zero.
+// The area's bytes in use: the standard format's size for XCR0.
+@(private="file")
+frame_xsave_bytes :: proc "contextless" (f: ^Trap_Frame) -> []u8 {
+	return (cast([^]u8)frame_xsave(f))[:xsave_bytes]
+}
+
+// .Get_Xstate's size: the standard format's for XCR0.
+arch_xstate_size :: proc "contextless" () -> u32 {
+	return xsave_bytes
+}
+
+// A debugger's view of a thread's saved area, into out (arch_xstate_size()
+// bytes): every component XCR0 enables written out, those XSAVE left in their
+// initial state given their initial values: FCW 0x37f and the rest of x87
+// zero, XMM0-15 zero, every later component zero. MXCSR is always the area's.
+arch_frame_get_xstate :: proc "contextless" (f: ^Trap_Frame, out: []u8) {
+	area := frame_xsave_bytes(f)
+	copy(out, area)
+	x := (^Xsave_Legacy)(raw_data(out))
+	bv := x.xstate_bv
+	if bv & XSTATE_X87 == 0 {
+		intrinsics.mem_zero(&x.fxsave[0], 24) // FCW to FDP
+		intrinsics.mem_zero(&x.fxsave[32], 128) // ST0-7
+		x.fxsave[0], x.fxsave[1] = 0x7f, 0x03 // FCW 0x37f
+	}
+	if bv & XSTATE_SSE == 0 {
+		intrinsics.mem_zero(&x.fxsave[160], 16 * 16) // XMM0-15
+	}
+	for c, i in xcomp {
+		if i >= 2 && xcr0 & (1 << uint(i)) != 0 && bv & (1 << uint(i)) == 0 {
+			intrinsics.mem_zero(&out[c.offset], int(c.size))
+		}
+	}
+	x.xstate_bv = xcr0
+}
+
+// Writes a debugger's whole area in, which XRSTOR loads on the way out, if
+// XRSTOR would take it: no header bit XCR0 lacks, the standard format (no
+// XCOMP_BV), reserved header bytes zero, no MXCSR bit MXCSR_MASK lacks.
+@(require_results)
+arch_frame_set_xstate :: proc "contextless" (f: ^Trap_Frame, from: []u8) -> vx.Status {
+	x := (^Xsave_Legacy)(raw_data(from))
+	mxcsr := intrinsics.unaligned_load((^u32)(&x.fxsave[24]))
+	if x.xstate_bv &~ xcr0 != 0 || x.xcomp_bv != 0 || mxcsr &~ mxcsr_mask != 0 {
+		return .Err_Invalid
+	}
+	for b in x.reserved {
+		if b != 0 {
+			return .Err_Invalid
+		}
+	}
+	copy(frame_xsave_bytes(f), from)
+	return .Ok
+}
+
+// The FXSAVE image of a thread's saved FP/SIMD state: the legacy part of
+// arch_frame_get_xstate's view.
 arch_frame_fpregs :: proc "contextless" (f: ^Trap_Frame) -> (r: vx.Fpregs) {
 	x := frame_xsave(f)
 	r.fxsave = x.fxsave
 	if x.xstate_bv & XSTATE_X87 == 0 {
-		mxcsr := r.fxsave[24:32]
-		saved: [8]u8
-		copy(saved[:], mxcsr) // MXCSR and its mask, which XSAVE writes whatever XSTATE_BV says
-		intrinsics.mem_zero(&r.fxsave[0], 160)
-		copy(r.fxsave[24:32], saved[:])
+		intrinsics.mem_zero(&r.fxsave[0], 24)
+		intrinsics.mem_zero(&r.fxsave[32], 128)
 		r.fxsave[0], r.fxsave[1] = 0x7f, 0x03 // FCW 0x37f
 	}
 	if x.xstate_bv & XSTATE_SSE == 0 {
@@ -870,13 +993,31 @@ arch_frame_fpregs :: proc "contextless" (f: ^Trap_Frame) -> (r: vx.Fpregs) {
 
 // Writes the FXSAVE image in, which XRSTOR loads on the way out. MXCSR is
 // made safe first: no reserved bit set (XRSTOR would fault in the kernel).
-// The upper halves of the YMM registers stay as they were.
+// The rest of the state (the YMM upper halves and on) stays as it was.
 arch_frame_set_fpregs :: proc "contextless" (f: ^Trap_Frame, r: ^vx.Fpregs) {
 	x := frame_xsave(f)
 	x.fxsave = r.fxsave
 	mxcsr := intrinsics.unaligned_load((^u32)(&x.fxsave[24]))
 	intrinsics.unaligned_store((^u32)(&x.fxsave[24]), mxcsr & 0xffbf) // MXCSR_MASK's default: DAZ aside, every defined bit
-	x.xstate_bv |= XSTATE_X87 | XSTATE_SSE
+	x.xstate_bv |= XSTATE_X87 | XSTATE_SSE // what was written, not their initial state
+}
+
+// .Get_Cpu's (ADR-0035): what the kernel saves, and lets user code use.
+arch_cpu_info :: proc "contextless" () -> vx.Cpu_Info {
+	return {xstate_size = xsave_bytes, xfeatures = xcr0, mxcsr_mask = mxcsr_mask}
+}
+
+// A new thread's area, at the top of its kernel stack under the frame
+// vx_enter_user builds: FINIT's and the reset's values, the x87 control word
+// 0x37f and MXCSR 0x1f80 (every exception masked, round to nearest), every
+// register zero. XSTATE_BV is 0, so XRSTOR gives each component its initial
+// state; MXCSR it loads from the area whatever the header says.
+@(private="file")
+user_area_init :: proc "contextless" (kstack_top: u64) {
+	x := frame_xsave(cast(^Trap_Frame)uintptr(kstack_top - size_of(Trap_Frame)))
+	intrinsics.mem_zero(x, int(intrinsics.volatile_load(&vx_xsave_size)))
+	x.fxsave[0], x.fxsave[1] = 0x7f, 0x03 // FCW
+	intrinsics.unaligned_store((^u32)(&x.fxsave[24]), 0x1f80) // MXCSR
 }
 
 // To pc(arg) as if called: a zero return address below arg, which is

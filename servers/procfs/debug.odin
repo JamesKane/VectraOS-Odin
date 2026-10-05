@@ -15,7 +15,8 @@
 //   /proc/N/info         arch= watchpoints= (the hardware's) breakpoints= (procfs's)
 //   /proc/N/threads/T/   status (state= reason= pc=), regs (vx.Regs, binary),
 //                        regs.ndb (the same as one record; write NAME=VALUE to
-//                        set), fpregs (vx.Fpregs, binary), ctl (step · resume ·
+//                        set), fpregs (vx.Fpregs, binary), xregs (the whole
+//                        FP/SIMD state, binary: ADR-0035), ctl (step · resume ·
 //                        freeze · thaw)
 //
 // Breakpoints live here, not in the debugger, so a shell script and dbg share

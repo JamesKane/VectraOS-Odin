@@ -184,6 +184,8 @@ A fault's `access` is `read`, `write` or `exec`; a watchpoint's is the kind it w
   Writing `<name>=<value> ...` sets those registers and leaves the rest.
 : `threads/<tid>/fpregs`
   The floating-point and SIMD registers, binary: the architecture's `vx_fpregs`, read or written whole at offset 0.
+: `threads/<tid>/xregs`
+  All of the thread's FP/SIMD state, binary, as thread(2)'s `VX_STATE_GET_XSTATE` gives it: on x86_64 XSAVE's standard image, AVX and AVX-512 included; read at any offset, written whole at offset 0.
 : `threads/<tid>/ctl`
   `step`, `resume` (lets the thread go from its event), `freeze` or `thaw`, for this thread.
 
@@ -212,7 +214,7 @@ It stops the process's other threads and saves the process as a directory shaped
 /tmp/crash/NAME.PID/
     info status maps images    as /proc/N's, at the fault
     note                       the fault in Plan 9's words
-    threads/T/status regs regs.ndb fpregs
+    threads/T/status regs regs.ndb fpregs xregs
     mem/0xBASE                 each writable mapping's bytes
 ```
 

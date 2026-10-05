@@ -37,6 +37,15 @@ vx_write_\name:
     READ tpidr_el0, tpidr_el0
     WRITE tpidr_el0, tpidr_el0
     READ id_aa64dfr0, id_aa64dfr0_el1
+    // The ID registers thread_state's .Get_Cpu hands to user code (ADR-0035),
+    // by their generic encodings, as the newer names need a newer assembler;
+    // one a CPU lacks reads as zero.
+    READ id_aa64isar0, s3_0_c0_c6_0
+    READ id_aa64isar1, s3_0_c0_c6_1
+    READ id_aa64isar2, s3_0_c0_c6_2
+    READ id_aa64pfr0, s3_0_c0_c4_0
+    READ id_aa64pfr1, s3_0_c0_c4_1
+    READ id_aa64mmfr3, s3_0_c0_c7_3
     READ cntkctl, cntkctl_el1
     WRITE cntkctl, cntkctl_el1
 

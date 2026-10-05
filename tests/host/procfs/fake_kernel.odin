@@ -25,7 +25,10 @@ Fake_Thread :: struct {
 	exception:   vx.Exception, // while stopped at a port
 	resumed:     vx.Resume_Action, // how it was last resumed (0: not since it stopped)
 	resumes:     int,
+	xstate:      [FAKE_XSTATE_SIZE]u8, // .Get_Xstate's and .Set_Xstate's
 }
+
+FAKE_XSTATE_SIZE :: 832 // a made-up size: more than an Fpregs, less than XSTATE_MAX
 
 Fake_Map :: struct {
 	base:   u64,
@@ -308,6 +311,9 @@ thread_state :: proc "contextless" (t: ^Fake_Task, tid: u32, op: vx.Thread_State
 		w^ = t.watches
 		w.count = 4
 		return 0
+	case .Get_Cpu:
+		ptr(vx.Cpu_Info, buf)^ = {xstate_size = FAKE_XSTATE_SIZE}
+		return 0
 	case .Set_Watch:
 		w := ptr(vx.Watches, buf)
 		for s in w.slot {
@@ -344,6 +350,13 @@ thread_state :: proc "contextless" (t: ^Fake_Task, tid: u32, op: vx.Thread_State
 			b = u8(i)
 		}
 	case .Set_Fpregs:
+	case .Get_Xstate:
+		if th.state != .Stopped && th.state != .Suspended {
+			return ERR(.Err_Bad_State)
+		}
+		copy(bytes_at(buf, size), th.xstate[:])
+	case .Set_Xstate:
+		copy(th.xstate[:], bytes_at(buf, FAKE_XSTATE_SIZE))
 	case:
 		return ERR(.Err_Unsupported)
 	}

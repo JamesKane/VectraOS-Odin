@@ -38,9 +38,11 @@ thread_word :: proc "contextless" () -> u64 {
 	return vx_thread_word()
 }
 
-// A vector register (xmm7, v7) and the FP control register (MXCSR, FPCR),
-// put and read back: how ktest checks that the kernel keeps each thread's
-// FP/SIMD state across its sleeps and switches.
+// A vector register (all of ymm7, with lanes of its own beside v; v7) and the
+// FP control register (MXCSR, FPCR), put and read back: how ktest checks that
+// the kernel keeps each thread's FP/SIMD state across its sleeps and
+// switches. On x86_64 a get of a register whose lanes do not agree returns
+// 0xbad0bad0bad0bad0 (thread.S).
 fp_probe_put :: proc "contextless" (v: u64, ctl: u32) {
 	vx_fp_probe_put(v, ctl)
 }

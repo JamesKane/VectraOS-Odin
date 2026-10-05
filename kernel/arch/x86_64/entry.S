@@ -16,7 +16,8 @@
 
 // CR0: MP (1) and NE (5) and WP (16) on; EM (2) and TS (3) off. CR4: OSFXSR
 // (9), OSXMMEXCPT (10) and OSXSAVE (18). XCR0: x87, SSE and, when the CPU
-// has it, AVX. The kernel requires XSAVE (arch_amd64.odin checks).
+// has it, AVX; arch_amd64.odin's simd_init adds AVX-512's state. The kernel
+// requires XSAVE (simd_init checks).
 .macro ENABLE_SIMD
     mov %cr0, %rax
     and $~((1 << 2) | (1 << 3)), %rax
@@ -135,7 +136,7 @@ trap_save:
     movq %rsp, %rbx        // the frame; rbx is callee-saved, so it survives x86_trap
     subq vx_xsave_size(%rip), %rsp
     andq $~63, %rsp
-    xorl %eax, %eax        // XSAVE needs a zeroed header (bytes 512-575)
+    xorl %eax, %eax        // XRSTOR needs a zeroed header (bytes 512-575)
     movq %rax, 512(%rsp)
     movq %rax, 520(%rsp)
     movq %rax, 528(%rsp)
@@ -146,8 +147,18 @@ trap_save:
     movq %rax, 568(%rsp)
     movl $-1, %eax
     movl $-1, %edx
-    xsave64 (%rsp)
-    movq %rbx, %rdi
+    // From user mode the area is the thread's own, at the top of its kernel
+    // stack (ADR-0013): XSAVEOPT, where there is one, skips what is unchanged
+    // since the XRSTOR that left it there, which nothing has written over.
+    // A frame of the kernel's is stack memory, used again: XSAVE.
+    testb $3, 144(%rbx)    // the saved CS
+    jz 1f
+    cmpq $0, vx_xsaveopt(%rip)
+    je 1f
+    xsaveopt64 (%rsp)
+    jmp 2f
+1:  xsave64 (%rsp)
+2:  movq %rbx, %rdi
     call x86_trap
 // rbx: the general-register frame; rsp: the XSAVE area below it.
 trap_restore:
@@ -230,9 +241,9 @@ thread_trampoline:
 
 // vx_enter_user(entry, sp, arg, arg2, kstack_top): user mode at entry with
 // interrupts on, through a trap frame built at the top of the thread's
-// kernel stack, with vector state in its initial state: an XSAVE area whose
-// header is zero (every component at its reset value) but for MXCSR, which
-// XRSTOR always loads.
+// kernel stack, with vector state in its initial state: the XSAVE area below
+// the frame, which arch_enter_user filled (a zero header, so every component
+// at its reset value, but for MXCSR, which XRSTOR always loads).
     .globl vx_enter_user
     .type vx_enter_user, @function
 vx_enter_user:
@@ -262,12 +273,6 @@ vx_enter_user:
     movq %rsp, %rbx
     subq vx_xsave_size(%rip), %rsp
     andq $~63, %rsp
-    movq %rsp, %rdi
-    movq vx_xsave_size(%rip), %rcx
-    xorl %eax, %eax
-    rep stosb
-    movw $0x37f, 0(%rsp)   // FCW
-    movl $0x1f80, 24(%rsp) // MXCSR
     jmp trap_restore
 
 // vx_user_copy(dst, src, n) -> u64: copies to or from user memory, and

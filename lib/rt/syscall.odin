@@ -149,6 +149,13 @@ thread_state :: proc "contextless" (task: vx.Handle, thread: u32, op: vx.Thread_
 	return status(vx_syscall(.Thread_State, u64(task), u64(thread), u64(op), addr(buf), size_of(T)))
 }
 
+// thread_state with a buffer of bytes, its size the slice's: for
+// .Get_Xstate and .Set_Xstate, whose size .Get_Cpu gives.
+@(require_results)
+thread_state_bytes :: proc "contextless" (task: vx.Handle, thread: u32, op: vx.Thread_State_Op, buf: []u8) -> vx.Status {
+	return status(vx_syscall(.Thread_State, u64(task), u64(thread), u64(op), addr(raw_data(buf)), u64(len(buf))))
+}
+
 // Counted; with thread 0, every thread of the task. Returns once the thread
 // holds still.
 @(require_results)

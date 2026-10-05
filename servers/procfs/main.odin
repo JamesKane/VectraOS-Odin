@@ -431,6 +431,7 @@ Thread_File :: enum u32 {
 	Regs,
 	Regs_Ndb,
 	Fpregs,
+	Xregs,
 	Ctl,
 }
 
@@ -469,6 +470,7 @@ THREAD_FILES := [Thread_File]File_Entry {
 	.Regs     = {"regs", 0o664},
 	.Regs_Ndb = {"regs.ndb", 0o664},
 	.Fpregs   = {"fpregs", 0o664},
+	.Xregs    = {"xregs", 0o664},
 	.Ctl      = {"ctl", 0o222},
 }
 
@@ -785,8 +787,22 @@ thread_read :: proc "contextless" (p: ^Proc, tid: u32, f: Thread_File, offset: u
 		fp: vx.Fpregs
 		rt.thread_state(p.task, tid, .Get_Fpregs, &fp) or_return
 		n = copy(text[:], ptr_bytes(&fp))
+	case .Xregs: // the whole FP/SIMD state (ADR-0035): at most a page
+		@(static) xs: [vx.XSTATE_MAX]u8
+		size := xstate_get(p, tid, &xs) or_return
+		return read_at(xs[:size], offset, buf), .Ok
 	}
 	return read_at(text[:n], offset, buf), .Ok
+}
+
+// A thread's whole FP/SIMD state, into xs: thread_state's .Get_Xstate, its
+// size as .Get_Cpu gives it.
+@(private, require_results)
+xstate_get :: proc "contextless" (p: ^Proc, tid: u32, xs: ^[vx.XSTATE_MAX]u8) -> (size: u32, st: vx.Status) {
+	ci: vx.Cpu_Info
+	rt.thread_state(p.task, 0, .Get_Cpu, &ci) or_return
+	rt.thread_state(p.task, tid, .Get_Xstate, xs) or_return
+	return min(ci.xstate_size, vx.XSTATE_MAX), .Ok
 }
 
 // mem: the task's memory at offset, as much of it as is mapped. A page at a
@@ -931,6 +947,16 @@ fs_write :: proc "contextless" (ctx: rawptr, node: p9.Node, offset: u64, data: [
 		}
 		copy(ptr_bytes(&r), data)
 		return u32(len(data)), rt.thread_state(p.task, b.tid, .Set_Regs, &r)
+	}
+	if b.tid != 0 && Thread_File(b.file) == .Xregs { // whole, at offset 0: the size .Get_Cpu says
+		ci: vx.Cpu_Info
+		rt.thread_state(p.task, 0, .Get_Cpu, &ci) or_return
+		if len(data) != int(ci.xstate_size) || len(data) > vx.XSTATE_MAX || offset != 0 {
+			return 0, .Err_Invalid
+		}
+		@(static) xs: [vx.XSTATE_MAX]u8
+		copy(xs[:], data)
+		return u32(len(data)), rt.thread_state(p.task, b.tid, .Set_Xstate, &xs)
 	}
 	if b.tid != 0 && Thread_File(b.file) == .Fpregs {
 		fp: vx.Fpregs

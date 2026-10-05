@@ -450,6 +450,49 @@ thread_next :: proc "contextless" (h: vx.Handle, after: u64, buf: Uva) -> vx.Sta
 	return copy_out(buf, &info)
 }
 
+// .Get_Xstate and .Set_Xstate (ADR-0035): the whole of a stopped thread's
+// FP/SIMD state, through a page of the kernel's (the state can be most of
+// one), on .Get_Fpregs's terms. A read is the debugger's view
+// (arch_frame_get_xstate); a write is checked as XRSTOR would check it.
+@(private="file", require_results)
+thread_xstate :: proc "contextless" (h: vx.Handle, id: u64, op: vx.Thread_State_Op, buf: Uva) -> vx.Status {
+	n := u64(arch_xstate_size())
+	pa := phys_alloc(0)
+	if pa == 0 {
+		return .Err_No_Memory
+	}
+	defer phys_free(pa, 0)
+	area := page_bytes(pa)[:n]
+	if op == .Set_Xstate {
+		copy_from_user(raw_data(area), buf, n) or_return
+	}
+	t := handle_get_as(current_task(), h, Task, {.Manage}) or_return
+	as_debugger, _ := handle_get_as(current_task(), h, Task, {.Debug})
+	debugger := as_debugger != nil
+	if as_debugger != nil {
+		object_release(&as_debugger.obj)
+	}
+	target := task_thread(t, id)
+	object_release(&t.obj)
+	if target == nil {
+		return .Err_Not_Found
+	}
+	defer object_release(&target.obj)
+	tt := target.task
+	{
+		spin_guard(&tt.lock)
+		still := target.suspend_count > 0 && (target.parked || intrinsics.volatile_load(&target.state) == .Blocked)
+		if !target.exc_stopped && !(still && debugger) {
+			return .Err_Bad_State // running: neither read nor changed
+		}
+		if op == .Set_Xstate {
+			return arch_frame_set_xstate(arch_user_frame(target), area) // loaded on its way out
+		}
+		arch_frame_get_xstate(arch_user_frame(target), area) // saved at its entry (ADR-0004)
+	}
+	return copy_to_user(buf, raw_data(area), n)
+}
+
 // How many bytes each operation reads or writes.
 @(private="file")
 state_size :: proc "contextless" (op: vx.Thread_State_Op) -> u64 {
@@ -466,8 +509,10 @@ state_size :: proc "contextless" (op: vx.Thread_State_Op) -> u64 {
 		return size_of(vx.Thread_Info)
 	case .Get_Watch, .Set_Watch:
 		return size_of(vx.Watches)
-	case .Get_Xstate, .Set_Xstate, .Get_Cpu:
-		return 0
+	case .Get_Xstate, .Set_Xstate:
+		return u64(arch_xstate_size())
+	case .Get_Cpu:
+		return size_of(vx.Cpu_Info)
 	}
 	return 0
 }
@@ -482,8 +527,14 @@ sys_thread_state :: proc "contextless" (h: vx.Handle, id, op_arg: u64, buf: Uva,
 		return .Err_Too_Small
 	}
 	#partial switch op {
-	case .Get_Xstate, .Set_Xstate, .Get_Cpu:
-		return .Err_Unsupported
+	case .Get_Cpu: // what the kernel saves and lets user code use (ADR-0035)
+		if id != 0 {
+			return .Err_Invalid
+		}
+		info := arch_cpu_info()
+		return copy_out(buf, &info)
+	case .Get_Xstate, .Set_Xstate:
+		return thread_xstate(h, id, op, buf)
 	case .Next_Thread:
 		return thread_next(h, id, buf)
 	case .Get_Watch, .Set_Watch:

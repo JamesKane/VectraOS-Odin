@@ -9,7 +9,7 @@
 //   /tmp/crash/NAME.PID/
 //       info status maps images     as /proc/N's, at the moment of the fault
 //       note                        the fault in Plan 9's words: its exit string
-//       threads/T/status regs regs.ndb fpregs
+//       threads/T/status regs regs.ndb fpregs xregs
 //       mem/0xBASE                  each writable mapping's bytes, from its base
 //
 // Read-only mappings are not copied: the images are named by their build IDs;
@@ -167,6 +167,10 @@ crash_thread :: proc "contextless" (c: ^p9.Client, threads: p9.Fid, p: ^Proc, ti
 	fp: vx.Fpregs
 	if rt.thread_state(p.task, tid, .Get_Fpregs, &fp) == .Ok {
 		crash_file(c, dir, "fpregs", ptr_bytes(&fp))
+	}
+	@(static) xs: [vx.XSTATE_MAX]u8 // ADR-0035's whole state
+	if size, st := xstate_get(p, tid, &xs); st == .Ok {
+		crash_file(c, dir, "xregs", xs[:size])
 	}
 	_ = p9.client_clunk(c, dir)
 }

@@ -318,6 +318,7 @@ write_child :: proc "contextless" (what: Child_Code) -> (code: Child_Image) {
 		what := what
 		if what == .Use_Simd {
 			emit(&code, 0x66, 0x0f, 0xef, 0xc0) // pxor %xmm0, %xmm0: user tasks have SIMD (ADR-0004)
+			emit(&code, 0xc5, 0xfd, 0xef, 0xc0) // vpxor %ymm0, %ymm0, %ymm0: AVX too (XSAVE), then exit 7
 			what = .Exit_7
 		}
 		if what == .Break_Step {
@@ -1886,6 +1887,34 @@ test_debugger :: proc "contextless" () {
 		check(fp.v[0][0] == 0x5a && fp.fpcr == 0x07ff9f00)
 	}
 	check(rt.thread_state(weak, 1, .Get_Fpregs, &fp) == .Err_Bad_State) // DEBUG needed
+	// Its whole FP/SIMD state, and what the kernel saves (ADR-0035).
+	ci: vx.Cpu_Info
+	check(rt.thread_state(child, 0, .Get_Cpu, &ci) == .Ok)
+	check(rt.thread_state(child, 1, .Get_Cpu, &ci) == .Err_Invalid) // thread 0's
+	@(static) xs: [vx.XSTATE_MAX]u8
+	check(ci.xstate_size >= size_of(vx.Fpregs) && ci.xstate_size <= vx.XSTATE_MAX)
+	check(rt.thread_state_bytes(child, 1, .Get_Xstate, xs[:ci.xstate_size - 1]) == .Err_Too_Small)
+	check(rt.thread_state(child, 1, .Get_Xstate, &xs) == .Ok)
+	when ODIN_ARCH == .amd64 {
+		check(ci.xfeatures & 7 == 7 && ci.mxcsr_mask != 0) // x87, SSE and AVX at least: x86-64-v3
+		bv := intrinsics.unaligned_load((^u64)(&xs[512]))
+		check(bv == ci.xfeatures && xs[160] == 0x5a) // every component written out; XMM0 as .Set_Fpregs left it
+		_, avx, _, _ := intrinsics.x86_cpuid(0xd, 2) // AVX's place
+		check(avx + 16 <= ci.xstate_size)
+		xs[avx] = 0xa7 // YMM0's upper half, its first byte
+		check(rt.thread_state(child, 1, .Set_Xstate, &xs) == .Ok)
+		xs = {}
+		check(rt.thread_state(child, 1, .Get_Xstate, &xs) == .Ok && xs[avx] == 0xa7 && xs[160] == 0x5a)
+		xs[512 + 20] = 1 // a reserved header byte
+		check(rt.thread_state(child, 1, .Set_Xstate, &xs) == .Err_Invalid)
+		xs[512 + 20], xs[512 + 7] = 0, 0x80 // XSTATE_BV bit 63: no such component
+		check(rt.thread_state(child, 1, .Set_Xstate, &xs) == .Err_Invalid)
+	} else {
+		check(ci.xstate_size == size_of(vx.Fpregs) && string(xs[:size_of(fp)]) == string(memory.ptr_to_bytes(&fp))) // the same image
+		bad := fp
+		bad.fpcr = ~u64(0)
+		check(rt.thread_state(child, 1, .Set_Xstate, &bad) == .Err_Invalid)
+	}
 	// Its watchpoints: as many as the hardware has, each checked when set.
 	w: vx.Watches
 	check(rt.thread_state(child, 0, .Get_Watch, &w) == .Ok && w.count >= 2 && w.count <= vx.WATCH_MAX && w.slot[0].kind == .Off)

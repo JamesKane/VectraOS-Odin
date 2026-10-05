@@ -94,6 +94,25 @@ vx_read_xcr0:
     orq %rdx, %rax
     ret
 
+// (v: u64): XCR0, the components XSAVE saves and user code may use.
+    .globl vx_write_xcr0
+    .type vx_write_xcr0, @function
+vx_write_xcr0:
+    movq %rdi, %rax
+    movq %rdi, %rdx
+    shrq $32, %rdx
+    xorl %ecx, %ecx
+    xsetbv
+    ret
+
+// (out: ^[512]u8, 16-aligned): FXSAVE's image of this CPU's x87 and SSE
+// state, for MXCSR_MASK.
+    .globl vx_fxsave
+    .type vx_fxsave, @function
+vx_fxsave:
+    fxsave64 (%rdi)
+    ret
+
 // (root: u64): the kernel's tables. Clearing and restoring CR4.PGE drops any
 // global entries Limine left.
     .globl vx_switch_tables

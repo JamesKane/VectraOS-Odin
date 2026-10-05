@@ -48,6 +48,12 @@ foreign _ {
 	vx_sync_icache :: proc "c" (p: rawptr, length: u64) ---
 	vx_read_tpidr_el0 :: proc "c" () -> u64 ---
 	vx_read_id_aa64dfr0 :: proc "c" () -> u64 ---
+	vx_read_id_aa64isar0 :: proc "c" () -> u64 ---
+	vx_read_id_aa64isar1 :: proc "c" () -> u64 ---
+	vx_read_id_aa64isar2 :: proc "c" () -> u64 ---
+	vx_read_id_aa64pfr0 :: proc "c" () -> u64 ---
+	vx_read_id_aa64pfr1 :: proc "c" () -> u64 ---
+	vx_read_id_aa64mmfr3 :: proc "c" () -> u64 ---
 	vx_watch_slot :: proc "c" (slot: u32, value, control: u64) ---
 	vx_read_cntkctl :: proc "c" () -> u64 ---
 	vx_write_cntkctl :: proc "c" (v: u64) ---
@@ -723,12 +729,55 @@ arch_frame_fpregs :: proc "contextless" (f: ^Trap_Frame) -> vx.Fpregs {
 	return frame_fp(f)^
 }
 
+@(private="file")
+FPCR_DEFINED :: u64(0x07ff_9f00)
+@(private="file")
+FPSR_DEFINED :: u64(0xf800_009f)
+
 // FPCR and FPSR are kept to their defined bits.
 arch_frame_set_fpregs :: proc "contextless" (f: ^Trap_Frame, r: ^vx.Fpregs) {
 	fp := frame_fp(f)
 	fp^ = r^
-	fp.fpcr &= 0x07ff_9f00
-	fp.fpsr &= 0xf800_009f
+	fp.fpcr &= FPCR_DEFINED
+	fp.fpsr &= FPSR_DEFINED
+}
+
+// The extended state is the Fpregs image (ADR-0035): SVE's and SME's join it
+// when the kernel saves them, POR_EL0 with a CPU that has overlays.
+arch_xstate_size :: proc "contextless" () -> u32 {
+	return size_of(vx.Fpregs)
+}
+
+arch_frame_get_xstate :: proc "contextless" (f: ^Trap_Frame, out: []u8) {
+	copy(out, (cast([^]u8)frame_fp(f))[:size_of(vx.Fpregs)])
+}
+
+// A whole image written in, if it can be loaded as it is: FPCR and FPSR with
+// no undefined bit.
+@(require_results)
+arch_frame_set_xstate :: proc "contextless" (f: ^Trap_Frame, from: []u8) -> vx.Status {
+	r := intrinsics.unaligned_load((^vx.Fpregs)(raw_data(from)))
+	if r.fpcr &~ FPCR_DEFINED != 0 || r.fpsr &~ FPSR_DEFINED != 0 {
+		return .Err_Invalid
+	}
+	frame_fp(f)^ = r
+	return .Ok
+}
+
+// .Get_Cpu's (ADR-0035): the ID registers user code needs, as this CPU has
+// them, with the fields of what the kernel does not save or support zeroed:
+// SVE (PFR0[35:32], and ZFR0 left zero), SME (PFR1[27:24], SMFR0 left zero),
+// MTE (PFR1[11:8]), permission overlays (MMFR3[19:16]).
+arch_cpu_info :: proc "contextless" () -> vx.Cpu_Info {
+	return {
+		xstate_size = size_of(vx.Fpregs),
+		isar0 = vx_read_id_aa64isar0(),
+		isar1 = vx_read_id_aa64isar1(),
+		isar2 = vx_read_id_aa64isar2(),
+		pfr0 = vx_read_id_aa64pfr0() &~ (0xf << 32),
+		pfr1 = vx_read_id_aa64pfr1() &~ (0xf << 24 | 0xf << 8),
+		mmfr3 = vx_read_id_aa64mmfr3() &~ (0xf << 16),
+	}
 }
 
 // Code written through the direct map: cleaned to the point of unification,
