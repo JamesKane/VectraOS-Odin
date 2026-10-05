@@ -77,6 +77,7 @@ PROGRAMS := []Program {
 	{name = "ctestfsd", source = "tests/posix/ctest.c", place = .Tests, kind = .C}, // ctest again, with /tmp on fsd
 	{name = "sbasetest", source = "tests/posix/sbasetest.c", place = .Tests, kind = .C},
 	{name = "maptest", source = "tests/posix/maptest.c", place = .Tests, kind = .C},
+	{name = "powercut", source = "tests/posix/powercut.c", place = .Tests, kind = .C},
 	// dbg's fixture, as upstream builds it but against musl: its own
 	// functions are optnone, and the house flags give -g and frame pointers.
 	// Its lib/vx-rt/rt.c is this tree's stand-in for upstream's runtime.

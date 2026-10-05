@@ -35,7 +35,9 @@ import "vx:ndb"
 // an install medium (implying iso), and with media release 2 is on a FAT
 // disk too, for the boots after the first. A reboot= record ends a boot: the
 // expects after it are another boot's, from the second disk, with no CD, its
-// writes kept, and the media disk second. alone asks upstream's parallel
+// writes kept, and the media disk second. again ends a boot too, cut once its
+// expects are met, as a power cut would cut it: the next boot is the same
+// image's, with the second disk as that one left it. alone asks upstream's parallel
 // runner to run the scenario by itself; this runner runs one at a time.
 
 Expect_Kind :: enum {
@@ -78,6 +80,7 @@ Scenario :: struct {
 	installer: bool, // the ISO an install medium (implies iso)
 	media:   bool, // and release 2 on a FAT disk, the second disk of every boot after the first
 	phases:  [dynamic]int, // each boot's expects end here: [phases[k-1], phases[k])
+	again:   [4]bool, // boot k is the same image's again (again), not the second disk's
 	expects: [dynamic]Expect,
 	fails:   [dynamic]string,
 	hosts:   [dynamic]Host_Check,
@@ -163,11 +166,12 @@ load_scenario :: proc(name: string, a: ^Arch) -> (sc: Scenario, ok: bool) {
 			sc.installer = ndb.has(rec, "installer")
 			sc.media = ndb.has(rec, "media")
 			sc.iso = sc.iso || sc.installer
-		case ndb.has(rec, "reboot"): // what follows is another boot, from the second disk
+		case ndb.has(rec, "reboot") || ndb.has(rec, "again"): // another boot
 			if len(sc.phases) == 3 || len(sc.expects) == 0 {
-				fmt.eprintfln("%s:%d: reboot= after an expect=, at most 3 times", path, rec.line)
+				fmt.eprintfln("%s:%d: reboot or again after an expect=, at most 3 times", path, rec.line)
 				return sc, false
 			}
+			sc.again[len(sc.phases) + 1] = ndb.has(rec, "again")
 			append(&sc.phases, len(sc.expects))
 		case ndb.has(rec, "host"):
 			file := val(rec, "host")
@@ -361,21 +365,22 @@ run_scenario :: proc(a: ^Arch, mode: Mode, name: string) -> bool {
 			break
 		}
 		first := ph > 0 ? sc.phases[ph - 1] : 0
+		second := ph > 0 && !sc.again[ph] // booting from the second disk
 		if ph > 0 {
-			fmt.fprintf(log, "\n--- build: boot %d, from the second disk ---\n", ph + 1)
+			fmt.fprintf(log, "\n--- build: boot %d, %s ---\n", ph + 1, second ? "from the second disk" : "again")
 		}
 		o := Qemu_Opts {
 			test    = true,
 			share   = share,
 			u9fs    = u9fs,
-			cdrom   = ph > 0 ? "" : cdrom,
+			cdrom   = second ? "" : cdrom,
 			iommu   = sc.iommu,
 			rtc     = sc.rtc,
-			disk    = ph > 0 ? media_disk : disk,
+			disk    = second ? media_disk : disk,
 			nvme    = sc.nvme,
-			persist = ph > 0,
+			persist = second,
 		}
-		why, passed = run_phase(a, ph > 0 ? disk : image, o, &sc, sc.expects[first:last], sc.exits && ph + 1 == len(sc.phases), log)
+		why, passed = run_phase(a, second ? disk : image, o, &sc, sc.expects[first:last], sc.exits && ph + 1 == len(sc.phases), log)
 	}
 	if passed {
 		why, passed = check_hosts(&sc, run_dir)

@@ -1,0 +1,12 @@
+# tests/user/powercut.ndb: powercut (tests/qemu/powercut.ndb) as vectra on the
+# fsd scenarios' volume (fsdvol.ndb): home on /tmp, adm on /adm (vectra is in
+# adm's group: sync, check).
+
+service=powercut program=/boot/bin/powercut console
+user=vectra
+ns=posix
+mount=/tmp srv=fsd aname=home flags=c
+mount=/adm srv=fsd aname=adm
+connect=nsd
+env=PATH=/bin
+env=HOME=/tmp
