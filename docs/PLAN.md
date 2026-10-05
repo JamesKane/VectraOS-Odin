@@ -96,7 +96,7 @@ Each phase is gated by upstream's scenarios for the milestone it reaches.
 
 **P4. M4, POSIX and debugging.** Namespace groups and `nsd`, notes and exit strings, `ptyd`, the in-task fault path, `vx-rc`, `vx-debug` (DWARF, evaluator, aarch64 disassembler; it must also read Odin's own DWARF), `dbg`, the `procfs` debug files. The musl back end (`ports/musl/vx`) is written in Odin as an object with C-ABI exports linked into `libc.a`, or kept as a small C exception by ADR; decided at the start of P4. **Decided 2026-10-04: Odin**, with C-ABI exports and one C shim header (ADR-0007). Gate: `posix`, `rc`, `rcscript`, `sbase`, `lua`, `dbg`. **Done 2026-10-04** on macOS: every M4 scenario passes on x86_64 and aarch64 except `u9fs`, which needs Linux user namespaces (see [milestones](milestones.md)).
 
-**P5. M5, storage**, chasing upstream: the `block` class, virtio-blk, GPT, `vx-fs` and `fsd`, the pager and `dref`. Gate: `block`, `fsd*`, plus a cross-format test: the Odin `fsd` reads volumes the C `fsd` wrote, and the reverse.
+**P5. M5, storage**, chasing upstream: the `block` class, virtio-blk, GPT, `vx-fs` and `fsd`, the pager and `dref`. Gate: `block`, `fsd*`, plus a cross-format test: the Odin `fsd` reads volumes the C `fsd` wrote, and the reverse. **Done 2026-10-04** on macOS: every M5 scenario passes on x86_64 and aarch64 (`u9fs` needs Linux), including the cross-format test both ways and the power-cut exit test (see [milestones](milestones.md)).
 
 **Then** port upstream step by step as it lands.
 

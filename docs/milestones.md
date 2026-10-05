@@ -85,3 +85,11 @@ The POSIX personality is musl 1.2.6, vendored unchanged, with its back end in Od
 Along the way: builds made byte-identical across runs and checkout paths (Odin's IR canonicalized; `/src` for the root), `--release` fixed, shrink-wrapping turned off so every function's frame record is set up at entry (ADR-0003), a ring server's closed connections unmapped. Upstream findings are in [UPSTREAM-FINDINGS.md](UPSTREAM-FINDINGS.md).
 
 Imports reviewed and accepted: musl, compiler-rt, Lua, sbase (ADR-0007 to ADR-0010).
+
+## P5: M5, storage — done 2026-10-04
+
+On macOS, every M5 scenario passes on x86_64 and aarch64 (94 runs in the closing matrix, plus `powercut` from M5's step 11): the block class on virtio-blk and NVMe (with reset, restart and fault injection), GPT through `partd`, `fsd` on `vx:fs` (users and permissions, the adm files, snapshots and the dump view, fsd as pager for mapped files, dref), `dosfs` and `isofs`, `distd`'s verified reads, install from the ISO, boot slots and rollback, ACPI through ACPICA in `bus-acpi` (power off, the CMOS RTC and the wall clock), and the VT-d and SMMUv3 IOMMUs. `u9fs` needs Linux user namespaces. Scenarios are upstream's as M5 left them (`tests/qemu/m5/`).
+
+PLAN's cross-format test holds both ways: volumes upstream's C library and `host/vxfs` wrote mount, check clean and read the same here, and volumes this tree's `vxfs` and `fsd` write are byte-identical or read and check clean with upstream's tool. The power-cut exit test kills QEMU mid-commit and finds every synced file whole after the remount.
+
+New vendored imports: Monocypher (ADR-0011) and ACPICA (ADR-0012), each behind a thin Odin layer, accepted on the upstream review of the same trees. Upstream findings from the storage libraries (FAT, ISO, the block client, vx-fs) are in [UPSTREAM-FINDINGS.md](UPSTREAM-FINDINGS.md). Testing became risk-based: the full matrix at a milestone's close only (docs/CODING.md).
