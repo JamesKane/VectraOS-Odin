@@ -45,6 +45,7 @@ import "vx:p9"
 import "vx:p9ring"
 import "vx:rt"
 import "vx:str"
+import "vx:users"
 
 COMMIT_EVERY :: vx.Duration(5_000_000_000)
 CACHE_BLOCKS :: 1024 // 16 MiB of tree nodes and data
@@ -55,7 +56,7 @@ MAX_OPEN :: 512 // distinct nodes open at once
 // the users table, whether the attach was %BRANCH, and the tree's slot.
 Id :: bit_field u64 {
 	qid:        u64  | 48,
-	user:       u32  | 7, // a user index is 7 bits: MAX_USERS
+	user:       u32  | 7, // a user index is 7 bits: users.MAX + 1
 	permissive: bool | 1, // the node's attach was %BRANCH
 	slot:       u32  | 8,
 }
@@ -283,7 +284,7 @@ may :: proc "contextless" (node: Id, d: ^fs.Dir, want: Mays) -> bool {
 		if me == d.uid && (d.mode >> 6) & bits == bits {
 			return true
 		}
-		if in_group(me, d.gid) && (d.mode >> 3) & bits == bits {
+		if users.in_group(&ut, me, d.gid) && (d.mode >> 3) & bits == bits {
 			return true
 		}
 	}
@@ -291,7 +292,7 @@ may :: proc "contextless" (node: Id, d: ^fs.Dir, want: Mays) -> bool {
 }
 
 is_adm :: proc "contextless" (node: Id) -> bool {
-	return node.permissive || (!is_none(node) && in_group(uid_of(node), 0))
+	return node.permissive || (!is_none(node) && users.in_group(&ut, uid_of(node), 0))
 }
 
 // A change, which a halted volume refuses.
@@ -315,8 +316,8 @@ fs_attach :: proc "contextless" (ctx: rawptr, aname, uname: string) -> (root: p9
 	if all {
 		name = name[1:]
 	}
-	who := user_named(uname)
-	if all && (who == none_user || !in_group(users[who].id, 0)) {
+	who := users.named(&ut, uname)
+	if all && !users.adm(&ut, uname) {
 		return 0, .Err_Access
 	}
 	if len(name) == 0 || len(name) > fs.LABELMAX {
@@ -411,7 +412,7 @@ uid_bufs: [3][12]u8
 
 @(private="file")
 user_name :: proc "contextless" (buf: []u8, id: u32) -> string {
-	if u := user_by_id(id); u != nil {
+	if u := users.by_id(&ut, id); u != nil {
 		return string(u.name[:])
 	}
 	return str.format_u64(buf, u64(id))
@@ -780,13 +781,13 @@ may_setattr :: proc "contextless" (node: Id, d: ^fs.Dir, a: ^p9.Setattr) -> bool
 	if .Size in a.valid && !may(node, d, {.W}) {
 		return false
 	}
-	if .Mode in a.valid && !owner && !leads(me, d.gid) {
+	if .Mode in a.valid && !owner && !users.leads(&ut, me, d.gid) {
 		return false
 	}
 	if .Uid in a.valid && a.uid != d.uid && !is_adm(node) {
 		return false // owners are adm's to give
 	}
-	if .Gid in a.valid && a.gid != d.gid && !((owner && in_group(me, a.gid)) || (leads(me, d.gid) && leads(me, a.gid))) {
+	if .Gid in a.valid && a.gid != d.gid && !((owner && users.in_group(&ut, me, a.gid)) || (users.leads(&ut, me, d.gid) && users.leads(&ut, me, a.gid))) {
 		return false
 	}
 	if a.valid & {.Atime_Set, .Mtime_Set} != {} && !owner {
@@ -1019,7 +1020,7 @@ vx_main :: proc() -> int {
 		}
 		_ = rt.handle_close(authority)
 	}
-	rt.print("fsd: /srv/", disk_name, ": commit ", vol.sb.commit, ", ", u64(len(vol.fs.arenas)), " arenas, ", u64(nusers), " users\n")
+	rt.print("fsd: /srv/", disk_name, ": commit ", vol.sb.commit, ", ", u64(len(vol.fs.arenas)), " arenas, ", u64(len(ut.users)), " users\n")
 	rt.print("fsd: serving /srv/fsd\n")
 	if p9ring.serve(&server) != .Ok {
 		rt.exits("cannot serve")

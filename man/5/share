@@ -38,7 +38,8 @@ A server's open files are one table, 256 entries, shared by all its connections;
 
 The `Tshare` request asks for a token for the open file of <fid>, which must be open on a file that is not a directory.
 The token is good for <holds> joins, 1 to 64, and the open file holds at most 64 at once; `Rshare` returns it.
-The token is 16 bytes from the server's random generator, made at the open file's first `Tshare` and the same for every later one.
+The token is 16 bytes from the server's random generator, made by a `Tshare` that finds no holds outstanding, at the first or once earlier holds are used or run out; a `Tshare` while holds are outstanding adds to them and returns the same token.
+So a token whose holds are gone never joins again, and whoever kept one cannot come back with it.
 A server whose spawn message gave it no `entropy` (see svc(6)) has no generator, and refuses `Tshare`: a token that could be guessed would let any connection reach an open file it could not open.
 
 The `Tjoin` request, on any connection to the same server, makes <newfid> a fid open on the open file the token names, and uses up one of its holds.
@@ -81,8 +82,6 @@ VectraOS's client sends none of the four unless the session has `posix`, and fai
 intro(5), version(5), open(5), read(5), lock(5), map(5), dref(5), tmpfs(4), fsd(4), svc(6); the extension's spec is `docs/proto/posix.md` in the repository
 
 # BUGS
-
-A file's token is made once and kept for the open file's life, so a token whose holds have run out becomes good again at the next `Tshare` of the file: anyone who kept it may join then.
 
 `Tseek` and `Tdesc` cannot reach a directory, which has no open file, so a directory's offset stays the client's; a `Tseek` on one, like one on a fid with no open file, is answered `fid already in use`, a misleading string.
 

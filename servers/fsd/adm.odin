@@ -46,7 +46,7 @@ make_status :: proc "contextless" () -> vx.Status {
 	put(b, " size=")
 	put_n(b, size)
 	put(b, " users=")
-	put_n(b, u64(nusers))
+	put_n(b, u64(len(ut.users)))
 	put(b, " check=", len(check_said) > 0 ? string(check_said[:]) : "unchecked", halted ? " halted\n" : "\n")
 	pfx := [1]u8{u8(fs.Key_Kind.Label)}
 	s: fs.Scan

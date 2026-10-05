@@ -8,7 +8,8 @@
 // upstream.txt what upstream's C makes of each (a clang-built oracle over
 // lib/vx-slots/slots.c): the status, the table as print writes it, Limine's
 // configuration, whether it fits in exactly as many bytes or one more, and
-// the free slot. Added here: a table written, read back and written again.
+// the slot apply writes (vx_slots_target) for each slot that booted, or none
+// (the oracle rerun for it at upstream's 08cc12f). Added here: a table written, read back and written again.
 package slots_test
 
 import "core:fmt"
@@ -45,8 +46,12 @@ transcript :: proc(b: ^strings.Builder, text: string) {
 		small, _ := slots.limine(t, conf[:n + 1])
 		fits, _ := slots.limine(t, conf[:n + 2])
 		fmt.sbprintf(b, "limine cap n+1=%d n+2=%d\n", len(small), len(fits))
-		free_slot, has := slots.free_slot(t)
-		fmt.sbprintf(b, "free=%d\n", has ? int(free_slot) : -1)
+		strings.write_string(b, "target=")
+		for booted, i in ([4]Maybe(slots.Name){nil, .A, .B, .C}) {
+			n, has := slots.target(t, booted)
+			fmt.sbprintf(b, "%s%d", i > 0 ? " " : "", has ? int(n) : -1)
+		}
+		strings.write_string(b, "\n")
 	}
 	strings.write_string(b, "%%\n")
 }
@@ -120,6 +125,36 @@ test_keys :: proc(t: ^testing.T) {
 	testing.expect_value(t, slots.parse(back, "boot=b previous=-\n", scratch[:]), vx.Status.Err_Invalid)
 }
 
+// Upstream's slots_test.c (M6 step 6b): the slot apply writes, which is never
+// the one that booted, however many applies come before a boot.
+@(test)
+test_target :: proc(t: ^testing.T) {
+	expect_target :: proc(t: ^testing.T, tab: ^slots.Table, booted: Maybe(slots.Name), want: Maybe(slots.Name), loc := #caller_location) {
+		n, ok := slots.target(tab, booted)
+		got: Maybe(slots.Name)
+		if ok {
+			got = n
+		}
+		testing.expect_value(t, got, want, loc = loc)
+	}
+	tab := new(slots.Table, context.temp_allocator)
+	// Applies with no boot between them: a, running, is never written.
+	tab.boot = .A
+	tab.slots[.A].used = true
+	expect_target(t, tab, nil, nil) // not booted from a slot: none
+	expect_target(t, tab, .A, .B)
+	tab.slots[.B].used, tab.previous, tab.boot = true, .A, .B
+	expect_target(t, tab, .A, .C) // not in use yet
+	tab.slots[.C].used, tab.previous, tab.boot = true, .A, .C
+	expect_target(t, tab, .A, .C) // the staged slot again, never a
+	// Booted from b, a the previous, c staged and not booted: c; then, c
+	// booted, the one neither booting nor previous.
+	tab.boot, tab.previous = .C, .B
+	expect_target(t, tab, .B, .C)
+	tab.boot, tab.previous = .B, .A
+	expect_target(t, tab, .B, .C)
+}
+
 // Added here: a table made in code, written, read back, written again the same.
 @(test)
 test_round_trip :: proc(t: ^testing.T) {
@@ -154,7 +189,7 @@ test_round_trip :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, slots.print(back, &w2))
 	testing.expect_value(t, ndb.written(&w2), ndb.written(&w))
-	n, ok := slots.free_slot(back)
+	n, ok := slots.target(back, .B)
 	testing.expect(t, ok)
 	testing.expect_value(t, n, slots.Name.A)
 	// With nothing booting, print refuses (upstream would write boot=`).

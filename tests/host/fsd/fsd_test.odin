@@ -198,7 +198,7 @@ test_fsd :: proc(t: ^testing.T) {
 	}
 	defer fs.unmount(&fsd.vol)
 	fsd.load_users()
-	testing.expect_value(t, fsd.nusers, 3)
+	testing.expect_value(t, len(fsd.ut.users), 3)
 	testing.expect_value(t, string(kernel_log[:kernel_log_len]), "") // nothing to say of a good users file
 
 	sessions := new([8]Session)
@@ -310,13 +310,13 @@ test_fsd :: proc(t: ^testing.T) {
 		strings.write_string(&b, fmt.tprintf("%d:u%d::\n", i, i))
 	}
 	testing.expect_value(t, write_file(adm, "users", strings.to_string(b)), vx.Status.Ok)
-	testing.expect_value(t, fsd.nusers, 128)
+	testing.expect_value(t, len(fsd.ut.users), 128)
 	testing.expect_value(t, p9test.list(&adm.c, adm.root, ""), "ctl status users")
 	testing.expect_value(t, write_file(adm, "users", "0:adm:nobody:\n"), vx.Status.Ok) // malformed: kept as they were
-	testing.expect_value(t, fsd.nusers, 128)
+	testing.expect_value(t, len(fsd.ut.users), 128)
 	testing.expect(t, strings.contains(string(kernel_log[:kernel_log_len]), "fsd: /adm/users is malformed: the users stay as they were\n"))
 	testing.expect_value(t, write_file(adm, "users", users), vx.Status.Ok)
-	testing.expect_value(t, fsd.nusers, 3)
+	testing.expect_value(t, len(fsd.ut.users), 3)
 
 	// Read-only snapshots and the dump view (tests/user/fsddump.rc).
 	testing.expect_value(t, ctl(adm, "snap home home@2026-01-01"), vx.Status.Ok)

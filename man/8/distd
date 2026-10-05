@@ -55,10 +55,16 @@ install(8) writes slot a and both files; `distd` changes them.
 
 - its whole tree is checked: every directory, index and block present and matching its hash;
 - `/cfg` is snapshotted as `cfg@apply-`<n>, through `/adm/ctl`, replacing a snapshot of that name from an earlier apply;
-- the release's `boot/vx/kernel.elf`, `svcd`, `ktest` and `bootfs.tar` are written to the slot that neither boots nor booted before, each checked block by block as it is read from the store, then read back from the ESP and compared with its hash;
-- the table is rewritten with the slot holding release <n> and booting, the slot that booted before as the previous, and Limine's configuration made again from it.
+- the release's `boot/vx/kernel.elf`, `svcd`, `ktest` and `bootfs.tar` are written to a slot that is never the one running (`vx.slot=`): one not in use; else the one staged by an apply since the last boot; else the one that neither is staged nor booted before, each checked block by block as it is read from the store, then read back from the ESP and compared with its hash;
+- the table is rewritten with the slot holding release <n> and booting, the slot running as the previous, and Limine's configuration made again from it.
 
-`rollback` makes the previous slot the one that boots and the one that boots the previous, rewrites the table and Limine's configuration, then rolls `/cfg` back to `cfg@apply-`<n>, <n> the release of the slot being left: `/cfg` as it was before that release was applied.
+`rollback` makes the previous slot the one that boots and the one that boots the previous, and rewrites the table and Limine's configuration.
+If the slot being left is the one running, it then rolls `/cfg` back to `cfg@apply-`<n>, <n> that slot's release: `/cfg` as it was before that release was applied; a release staged and never booted changed nothing in `/cfg`.
+
+Each file is written whole under a new name, `slots.ndb.new` or `limine.conf.new`, then renamed over the old, the table first.
+
+`ctl` obeys only a user who administers: one in group 0 of `/adm/users` (see users(6)), or `adm` where there is no such file, as fsd(4) has it; a write by anyone else fails with `permission denied`.
+The user is the one the connection attached as (Tattach's `uname`), which is advisory until keyd (M10), as it is to fsd.
 
 Both take effect at the next boot.
 Neither reboots, and the running system's base stays the bootfs it booted with: `distd` serves the store, it does not switch to it.
@@ -144,20 +150,19 @@ It exits, printing `distd: FAILED:` and the reason, with `no listen channel (pos
 
 A read refused is said with the file's path in its tree: `distd: a block does not match its hash:` or `a file's index does not match its hash:`, then the path and `(refused)`.
 
+A system that did not boot from a slot refuses `apply` with `apply: the system did not boot from a slot`, and one with no slot to write with `apply: no slot to write`.
 `apply` and `rollback` say what they did, `release `<n>` staged: the next boot is its slot's` and `rolled back: the next boot is release `<n>`'s slot`, or the step that failed and the error: `release `<n>` is not whole and sound in the store (`<error>`): not applied`, `apply: no such release`, `apply: cannot read the slot table`, `apply: cannot snapshot /cfg`, `apply: cannot write the slot`, `apply: cannot write the slot table`, `rollback: cannot read the slot table`, `rollback: no previous slot`, `rollback: cannot write the slot table`.
 A rollback with no snapshot of `/cfg` to restore still changes the slots, and says `no snapshot of /cfg to roll back to`.
 
 # BUGS
 
-`distd` checks no user: anyone whose namespace holds `/dist` may `apply` and `rollback`.
-
 `ctl` has `rescan`, `apply` and `rollback` alone: there is no `fetch`, so a release's objects are put in the store by hand, and no `gc`, so nothing collects a dropped release's objects.
 Records are found, not checked: releases are unsigned.
 There are no `.help` and `.schema` files.
 
-`apply` writes into the slot that neither boots nor booted before even when it holds a release, which it drops; while it is written, Limine's entry for that slot names the old files' hashes.
+`apply` writes into a slot that holds a release, when no slot is free, and drops that release; while it is written, Limine's entry for that slot names the old files' hashes.
 A release goes straight into the default slot with no trial boot; one that does not come up is left by choosing the previous slot in Limine's menu, which `timeout: 0` hides (press a key early).
-The table and Limine's configuration are rewritten in place, not by a rename, so a power cut mid-write can leave a configuration Limine cannot read.
+FAT's rename is two steps, the old entry removed and then the new made, so a power cut between them can leave no table or no configuration; the window is a few directory writes, where the whole rewrite used to be.
 `rollback` restores `/cfg` only from a snapshot `apply` took.
 
 A release's `status` checks only that its tree's root directory is there.

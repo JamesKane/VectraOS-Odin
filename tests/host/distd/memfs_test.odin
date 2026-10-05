@@ -235,6 +235,24 @@ m_create :: proc "contextless" (ctx: rawptr, dir: p9.Node, name: string, perm: u
 	return p9.Node(i), i != 0 ? .Ok : .Err_No_Space
 }
 
+// Trenameat: the entry moved, over any entry of the new name.
+@(private="file")
+m_rename :: proc "contextless" (ctx: rawptr, olddir: p9.Node, oldname: string, newdir: p9.Node, newname: string) -> vx.Status {
+	from, to := node_index(olddir), node_index(newdir)
+	if from == 0 || to == 0 || !mem_nodes[to].dir {
+		return .Err_Not_Found
+	}
+	c := mem_child(from, oldname)
+	if c == 0 {
+		return .Err_Not_Found
+	}
+	if old := mem_child(to, newname); old != 0 && old != c {
+		mem_nodes[old].used = false
+	}
+	mem_nodes[c].parent, mem_nodes[c].name = to, arena_string(newname)
+	return .Ok
+}
+
 mem_fs :: p9.Fs {
 	attach  = m_attach,
 	walk    = m_walk,
@@ -245,4 +263,5 @@ mem_fs :: p9.Fs {
 	readdir = m_readdir,
 	write   = m_write,
 	create  = m_create,
+	rename  = m_rename,
 }

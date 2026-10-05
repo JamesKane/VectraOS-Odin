@@ -226,15 +226,23 @@ limine :: proc "contextless" (t: ^Table, out: []u8) -> (text: string, ok: bool) 
 	return str.to_string(&b), true
 }
 
-// The slot a new release goes to: neither the one that boots nor the
-// previous; ok is false if there is none.
+// The slot a new release goes to, given the slot that booted (nil if not
+// known): never that one, which is running. A slot not in use first; then
+// the one staged to boot, if it has not booted (a release applied since);
+// then one that is neither staged nor the previous. ok is false if none.
 @(require_results)
-free_slot :: proc "contextless" (t: ^Table) -> (n: Name, ok: bool) {
-	for _, i in t.slots {
-		if boot, booting := t.boot.?; booting && i == boot {
-			continue
+target :: proc "contextless" (t: ^Table, booted: Maybe(Name)) -> (n: Name, ok: bool) {
+	running := booted.? or_return
+	for &sl, i in t.slots {
+		if i != running && !sl.used {
+			return i, true
 		}
-		if prev, has := t.previous.?; has && i == prev {
+	}
+	if boot, booting := t.boot.?; booting && boot != running {
+		return boot, true
+	}
+	for _, i in t.slots {
+		if prev, has := t.previous.?; i == running || (has && i == prev) {
 			continue
 		}
 		return i, true

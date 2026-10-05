@@ -11,7 +11,8 @@
 // It serves:
 //
 //   /dist/status              state=idle releases=N arch=ARCH
-//   /dist/ctl                 (write) rescan: the records read again
+//   /dist/ctl                 (write) rescan: the records read again;
+//                             obeyed only for a user who administers
 //   /dist/releases/N/record   the release's record, as it is in the store
 //   /dist/releases/N/status   state=fetched missing=0 (or state=seen missing=M)
 //   /dist/releases/N/tree/    the release's base tree for this architecture,
@@ -29,16 +30,23 @@
 // which slot booted (vx.slot=X):
 //
 //   apply N     release N's tree checked whole; /cfg snapshotted (cfg@apply-N);
-//               its kernel, modules and bootfs written to a free slot and read
-//               back against their hashes; then the table and Limine's
-//               configuration rewritten, the new slot the default
+//               its kernel, modules and bootfs written to a slot that is not
+//               running (slots.target) and read back against their hashes;
+//               then the table and Limine's configuration rewritten, each
+//               whole, the new slot the default and the running one the
+//               previous
 //   rollback    the previous slot the default again, and /cfg rolled back to
-//               the snapshot taken when the release being left was applied
+//               the snapshot taken when the release being left was applied,
+//               if that release is the one running
 //
 // Both take effect at the next boot; status says current= (the release that
 // booted) and boot= (the one that will). The running system's base stays
 // bootfs's: serving from the store, not switching to it (upstream's 06
 // §3.1).
+//
+// ctl obeys only a user who administers: in group 0 of /adm/users, or adm
+// where there is none, as fsd decides (users(6); advisory until keyd,
+// upstream's M10).
 //
 // One request at a time: the buffers below are shared by every callback.
 package distd
@@ -54,6 +62,7 @@ import "vx:rt"
 import "vx:slots"
 import "vx:store"
 import "vx:str"
+import "vx:users"
 
 when ODIN_ARCH == .amd64 {
 	ARCH :: "x86_64"
@@ -331,9 +340,38 @@ add_node :: proc "contextless" (kind: Kind, parent: u32, seq: u64, name: string,
 	return u32(len(nodes) - 1), true
 }
 
+// A node id as distd hands it to the framework: the node's slot in nodes,
+// and whether the fid's attach was by an administrator (users(6): group 0),
+// whom alone ctl obeys; walks, parents and listings keep it. The qid's path
+// is the slot alone.
+@(private="file")
+Id :: bit_field u64 {
+	node: u64  | 63,
+	adm:  bool | 1,
+}
+#assert(size_of(Id) == 8)
+
+@(private="file")
+id_of :: proc "contextless" (n: p9.Node) -> Id {
+	return transmute(Id)u64(n)
+}
+
+// A node's slot as a p9.Node, carrying like's adm.
+@(private="file")
+as_node :: proc "contextless" (index: u32, like: p9.Node) -> p9.Node {
+	return p9.Node(transmute(u64)Id{node = u64(index), adm = id_of(like).adm})
+}
+
+// A node id's slot in nodes.
+@(private="file")
+slot_of :: proc "contextless" (n: p9.Node) -> u32 {
+	return u32(id_of(n).node)
+}
+
 @(private="file")
 node_of :: proc "contextless" (id: p9.Node) -> ^Node {
-	return id > 0 && u64(id) < u64(len(nodes)) ? &nodes[id] : nil
+	i := id_of(id).node
+	return i > 0 && i < u64(len(nodes)) ? &nodes[i] : nil
 }
 
 @(private="file")
@@ -394,11 +432,11 @@ tree_path :: proc "contextless" (id: u32, out: []u8) -> string {
 root_id, status_id, ctl_id, releases_id, store_id: u32
 
 @(private="file")
-fs_attach :: proc "contextless" (ctx: rawptr, aname: string) -> (root: p9.Node, st: vx.Status) {
+fs_attach :: proc "contextless" (ctx: rawptr, aname, uname: string) -> (root: p9.Node, st: vx.Status) {
 	if aname != "" {
 		return 0, .Err_Not_Found
 	}
-	return p9.Node(root_id), .Ok
+	return p9.Node(transmute(u64)Id{node = u64(root_id), adm = administers(uname)}), .Ok
 }
 
 // A release's number as a directory names it: decimal, no leading zero.
@@ -440,18 +478,18 @@ fs_walk :: proc "contextless" (ctx: rawptr, dir: p9.Node, name: string) -> (chil
 		}
 	case .Releases:
 		if seq, ok := seq_of(name); ok && release_of(seq) != nil {
-			id = fixed(.Release, u32(dir), seq, name)
+			id = fixed(.Release, slot_of(dir), seq, name)
 		}
 	case .Release:
 		switch name {
 		case "record":
-			id = fixed(.Record, u32(dir), d.seq, name)
+			id = fixed(.Record, slot_of(dir), d.seq, name)
 		case "status":
-			id = fixed(.Release_Status, u32(dir), d.seq, name)
+			id = fixed(.Release_Status, slot_of(dir), d.seq, name)
 		case "tree":
 			if r := release_of(d.seq); r != nil {
 				made: bool
-				if id, made = add_node(.Tree, u32(dir), d.seq, ""); made {
+				if id, made = add_node(.Tree, slot_of(dir), d.seq, ""); made {
 					nodes[id].e = {mode = 0o040555, hash = r.tree}
 				}
 			}
@@ -462,7 +500,7 @@ fs_walk :: proc "contextless" (ctx: rawptr, dir: p9.Node, name: string) -> (chil
 		if fst != .Ok {
 			return 0, fst == .Err_Invalid ? .Err_Io : fst
 		}
-		id = tree_node(u32(dir), d.seq, e)
+		id = tree_node(slot_of(dir), d.seq, e)
 	case .Store:
 		// b2, then two hex digits, then the object's 64: as the store has them.
 		plen := len(d.path)
@@ -478,12 +516,12 @@ fs_walk :: proc "contextless" (ctx: rawptr, dir: p9.Node, name: string) -> (chil
 		}
 		c, fid := ns.walk(&space, full) or_return
 		_ = p9.client_clunk(c, fid)
-		id, _ = add_node(kind, u32(dir), 0, name, path)
+		id, _ = add_node(kind, slot_of(dir), 0, name, path)
 	}
 	if id == 0 {
 		return 0, .Err_Not_Found
 	}
-	return p9.Node(id), .Ok
+	return as_node(id, dir), .Ok
 }
 
 @(private="file")
@@ -492,7 +530,7 @@ fs_parent :: proc "contextless" (ctx: rawptr, id: p9.Node) -> (parent: p9.Node, 
 	if n == nil {
 		return 0, .Err_Not_Found
 	}
-	return p9.Node(n.parent != 0 ? n.parent : root_id), .Ok
+	return as_node(n.parent != 0 ? n.parent : root_id, id), .Ok
 }
 
 // A tree file's index, checked against its name, and against the size its
@@ -596,7 +634,23 @@ write_whole :: proc "contextless" (path: string, data: []u8) -> vx.Status {
 }
 
 SLOT_TABLE :: "/tmp/EFI/vectra/slots.ndb"
-LIMINE_CONF :: "/tmp/boot/limine/limine.conf"
+
+// dir/name replaced by data: written whole as dir/name.new, then renamed
+// over it (Trenameat), so a crash leaves the old file or the new, not one
+// half written; FAT's rename is itself two steps, a small window (upstream's
+// BUGS).
+@(private="file")
+replace_whole :: proc "contextless" (dir, name: string, data: []u8) -> vx.Status {
+	tmp_buf: [96]u8
+	fresh_buf: [48]u8
+	fresh, _ := str.join(fresh_buf[:], name, ".new")
+	tmp, _ := str.join(tmp_buf[:], dir, "/", fresh)
+	write_whole(tmp, data) or_return
+	c, fid := ns.walk(&space, dir) or_return
+	st := p9.client_renameat(c, fid, fresh, fid, name)
+	_ = p9.client_clunk(c, fid)
+	return st
+}
 
 @(private="file")
 table_text: [4096]u8
@@ -623,8 +677,17 @@ save_table :: proc "contextless" (t: ^slots.Table) -> vx.Status {
 	if !ok {
 		return .Err_Range
 	}
-	write_whole(SLOT_TABLE, transmute([]u8)ndb.written(&w)) or_return
-	return write_whole(LIMINE_CONF, transmute([]u8)c)
+	replace_whole("/tmp/EFI/vectra", "slots.ndb", transmute([]u8)ndb.written(&w)) or_return
+	return replace_whole("/tmp/boot/limine", "limine.conf", transmute([]u8)c)
+}
+
+// The slot that booted, from vx.slot; nil if the system did not boot from one.
+@(private="file")
+booted_slot :: proc "contextless" () -> Maybe(slots.Name) {
+	if booted >= 'a' && booted < 'a' + len(slots.Name) {
+		return slots.Name(booted - 'a')
+	}
+	return nil
 }
 
 // A whole tree checked: every directory, index and block, present and
@@ -751,6 +814,22 @@ adm_ctl :: proc "contextless" (cmd: string) -> vx.Status {
 	return write_whole("/adm/ctl", transmute([]u8)cmd)
 }
 
+@(private="file")
+adm_users, adm_next: users.Table
+@(private="file")
+users_text: [64 * 1024]u8
+
+// Whether uname administers, by /adm/users as it is now, or users(6)'s
+// default (adm alone) where there is none, as fsd has it.
+@(private="file")
+administers :: proc "contextless" (uname: string) -> bool {
+	text, st := read_whole("/adm/users", users_text[:])
+	if st != .Ok || !users.parse(&adm_users, string(text), &adm_next) {
+		_ = users.parse(&adm_users, users.DEFAULT, &adm_next)
+	}
+	return users.adm(&adm_users, uname)
+}
+
 // A step of apply or rollback that failed, said: the step and the error.
 @(private="file")
 refused :: proc "contextless" (what: string, st: vx.Status) -> vx.Status {
@@ -772,9 +851,13 @@ apply :: proc "contextless" (seq: u64) -> vx.Status {
 	if st := load_table(&t); st != .Ok {
 		return refused("apply: cannot read the slot table", st)
 	}
-	slot, free := slots.free_slot(&t)
-	if !free {
-		return refused("apply: no free slot", .Err_No_Space)
+	now, from_slot := booted_slot().?
+	if !from_slot {
+		return refused("apply: the system did not boot from a slot", .Err_Bad_State)
+	}
+	slot, has := slots.target(&t, now)
+	if !has {
+		return refused("apply: no slot to write", .Err_No_Space)
 	}
 	num_buf: [str.U64_DIGITS]u8
 	num := str.format_u64(num_buf[:], seq)
@@ -805,7 +888,7 @@ apply :: proc "contextless" (seq: u64) -> vx.Status {
 	x := store.hex(r.tree)
 	clear(&sl.tree)
 	_ = append(&sl.tree, string(x[:]))
-	t.previous, t.boot = t.boot, slot
+	t.previous, t.boot = now, slot // the running release is what a rollback returns to
 	if st := save_table(&t); st != .Ok {
 		return refused("apply: cannot write the slot table", st)
 	}
@@ -825,6 +908,8 @@ rollback :: proc "contextless" () -> vx.Status {
 	}
 	b := t.boot.? or_else prev // load_table makes sure a slot boots
 	leaving := t.slots[b].release
+	running, from_slot := booted_slot().?
+	ran := from_slot && b == running // a staged release that never booted changed no /cfg
 	t.boot, t.previous = prev, b
 	if st := save_table(&t); st != .Ok {
 		return refused("rollback: cannot write the slot table", st)
@@ -832,7 +917,7 @@ rollback :: proc "contextless" () -> vx.Status {
 	num_buf: [str.U64_DIGITS]u8
 	cmd_buf: [96]u8
 	cmd, _ := str.join(cmd_buf[:], "rollback cfg cfg@apply-", str.format_u64(num_buf[:], leaving))
-	if adm_ctl(cmd) != .Ok {
+	if ran && adm_ctl(cmd) != .Ok {
 		rt.print("distd: no snapshot of /cfg to roll back to\n")
 	}
 	rt.print("distd: rolled back: the next boot is release ", t.slots[prev].release, "'s slot\n")
@@ -909,7 +994,7 @@ fs_stat :: proc "contextless" (ctx: rawptr, id: p9.Node, out: ^p9.Stat) -> vx.St
 		}
 	}
 	out^ = {
-		qid    = {type = dir ? p9.QTDIR : p9.QTFILE, path = u64(id)},
+		qid    = {type = dir ? p9.QTDIR : p9.QTFILE, path = id_of(id).node},
 		mode   = mode,
 		length = length,
 		name   = name,
@@ -979,7 +1064,7 @@ fs_read :: proc "contextless" (ctx: rawptr, id: p9.Node, offset: u64, buf: []u8)
 	where_buf: [512]u8
 	x, ist := index_of(n.e)
 	if ist != .Ok {
-		said_bad("a file's index", tree_path(u32(id), where_buf[:]))
+		said_bad("a file's index", tree_path(slot_of(id), where_buf[:]))
 		return 0, ist
 	}
 	if offset >= x.size {
@@ -1001,7 +1086,7 @@ fs_read :: proc "contextless" (ctx: rawptr, id: p9.Node, offset: u64, buf: []u8)
 		if !kept {
 			want := b + 1 < nblocks ? store.BLOCK : x.size - b * store.BLOCK
 			if u64(len(data)) != want || store.leaf(data) != bh {
-				said_bad("a block", tree_path(u32(id), where_buf[:]))
+				said_bad("a block", tree_path(slot_of(id), where_buf[:]))
 				return 0, .Err_Io
 			}
 			keep(bh)
@@ -1016,8 +1101,8 @@ fs_read :: proc "contextless" (ctx: rawptr, id: p9.Node, offset: u64, buf: []u8)
 @(private="file")
 fs_write :: proc "contextless" (ctx: rawptr, id: p9.Node, offset: u64, data: []u8) -> (count: u32, st: vx.Status) {
 	n := node_of(id)
-	if n == nil || n.kind != .Ctl {
-		return 0, .Err_Access
+	if n == nil || n.kind != .Ctl || !id_of(id).adm {
+		return 0, .Err_Access // adm's alone
 	}
 	cmd := string(data)
 	for len(cmd) > 0 && (cmd[len(cmd) - 1] == '\n' || cmd[len(cmd) - 1] == ' ') {
@@ -1073,7 +1158,7 @@ fs_readdir :: proc "contextless" (ctx: rawptr, dir: p9.Node, index: u32) -> (chi
 		}
 		seq := releases[index].seq
 		num_buf: [str.U64_DIGITS]u8
-		id = fixed(.Release, u32(dir), seq, str.format_u64(num_buf[:], seq))
+		id = fixed(.Release, slot_of(dir), seq, str.format_u64(num_buf[:], seq))
 	case .Release:
 		names := [3]string{"record", "status", "tree"}
 		if index >= len(names) {
@@ -1096,7 +1181,7 @@ fs_readdir :: proc "contextless" (ctx: rawptr, dir: p9.Node, index: u32) -> (chi
 			if est != .Ok {
 				return 0, .Err_Io
 			}
-			id = tree_node(u32(dir), d.seq, e)
+			id = tree_node(slot_of(dir), d.seq, e)
 			break
 		}
 	case .Store: // as the store branch lists it
@@ -1133,12 +1218,12 @@ fs_readdir :: proc "contextless" (ctx: rawptr, dir: p9.Node, index: u32) -> (chi
 	if id == 0 {
 		return 0, .Err_No_Memory
 	}
-	return p9.Node(id), .Ok
+	return as_node(id, dir), .Ok
 }
 
 // Not file-private: tests/host drives its Fs on the host.
 server := p9ring.Server {
-	fs = {attach = fs_attach, walk = fs_walk, parent = fs_parent, stat = fs_stat, open = fs_open, read = fs_read, write = fs_write, readdir = fs_readdir, readlink = fs_readlink},
+	fs = {attach_as = fs_attach, walk = fs_walk, parent = fs_parent, stat = fs_stat, open = fs_open, read = fs_read, write = fs_write, readdir = fs_readdir, readlink = fs_readlink},
 	name = "distd",
 	supported = {.Posix, .Xattr}, // Treadlink; Tgetattr, for stat
 }

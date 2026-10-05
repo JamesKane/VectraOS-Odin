@@ -149,9 +149,11 @@ Client :: struct {
 	root:       p9.Fid,
 }
 
-connect :: proc(t: ^testing.T, x: ^Client, fs: p9.Fs, supported: p9.Extensions) {
+// A client of fs, attached as uname: adm, who alone may write distd's ctl
+// (users(6)), unless a test says otherwise.
+connect :: proc(t: ^testing.T, x: ^Client, fs: p9.Fs, supported: p9.Extensions, uname := "adm") {
 	x.srv = {fs = fs, max_msize = 8192, supported = supported}
-	x.c = {rpc = p9test.loopback, ctx = &x.srv, tbuf = x.tbuf[:], rbuf = x.rbuf[:]}
+	x.c = {rpc = p9test.loopback, ctx = &x.srv, tbuf = x.tbuf[:], rbuf = x.rbuf[:], uname = uname}
 	testing.expect_value(t, p9.client_version(&x.c, 8192, {.Posix, .Xattr}), vx.Status.Ok)
 	e: vx.Status
 	x.root, e = p9.client_attach(&x.c, "")
@@ -238,9 +240,9 @@ test_distd :: proc(t: ^testing.T) {
 	// distd's namespace: the memory server at /.
 	store_side := new(Client)
 	defer free(store_side)
-	store_side.srv = {fs = mem_fs, max_msize = 8192}
+	store_side.srv = {fs = mem_fs, max_msize = 8192, supported = {.Posix}} // Trenameat
 	store_side.c = {rpc = p9test.loopback, ctx = &store_side.srv, tbuf = store_side.tbuf[:], rbuf = store_side.rbuf[:]}
-	testing.expect_value(t, p9.client_version(&store_side.c, 8192, {}), vx.Status.Ok)
+	testing.expect_value(t, p9.client_version(&store_side.c, 8192, {.Posix}), vx.Status.Ok)
 	testing.expect_value(t, ns.mount(&distd.space, &store_side.c, vx.HANDLE_NONE, "/srv/fsd", "", "/", {}), vx.Status.Ok)
 	rt.spawn.cmdline = "vx.skip=rc vx.system vx.slot=a"
 	kernel_log_len = 0
@@ -340,6 +342,16 @@ test_distd :: proc(t: ^testing.T) {
 	testing.expect(t, got == string(raw), "an object reads as the store has it")
 	testing.expect_value(t, said(), "")
 
+	// ctl obeys administrators alone (users(6): group 0): none's write is
+	// refused, though none may open it.
+	{
+		nx := new(Client)
+		defer free(nx)
+		connect(t, nx, distd.server.fs, distd.server.supported, "none")
+		testing.expect_value(t, ctl(nx, "rescan"), vx.Status.Err_Access)
+		testing.expect_value(t, p9test.list(&nx.c, nx.root, ""), "status ctl releases store")
+	}
+
 	// ctl: rescan finds a record added; what it does not know is refused.
 	testing.expect_value(t, ctl(x, "frobnicate"), vx.Status.Err_Invalid)
 	testing.expect_value(t, ctl(x, "apply 1x"), vx.Status.Err_Invalid)
@@ -379,30 +391,45 @@ test_distd :: proc(t: ^testing.T) {
 	written, _ := mem_get("tmp/boot/limine/limine.conf")
 	testing.expect_value(t, string(written), conf)
 	testing.expect(t, strings.contains(conf, "default_entry: 2\n"), "slot b is Limine's default")
+	_, made := mem_get("tmp/EFI/vectra/slots.ndb.new")
+	testing.expect(t, !made, "the table is written whole, then renamed over the old")
+	_, made = mem_get("tmp/boot/limine/limine.conf.new")
+	testing.expect(t, !made, "Limine's configuration is written whole, then renamed over the old")
 	got, _ = read_all(x, "status")
 	testing.expect_value(t, got, fmt.tprintf("state=idle releases=3 arch=%s current=1 slot=a boot=2\n", distd.ARCH))
-	// No free slot: a and b are boot and previous, c is free; after c,
-	// none is.
+	// More applies with no boot between them: a, running, is never written.
+	// c is not in use; then the staged slot, c, again.
 	testing.expect_value(t, ctl(x, "apply 1"), vx.Status.Ok)
 	testing.expect_value(t, said(), "distd: release 1 staged: the next boot is its slot's\n")
-	testing.expect_value(t, ctl(x, "apply 2"), vx.Status.Ok) // into a, which is neither boot (c) nor previous (b)
+	testing.expect_value(t, ctl(x, "apply 2"), vx.Status.Ok)
 	testing.expect_value(t, said(), "distd: release 2 staged: the next boot is its slot's\n")
 	read_table(t, &table)
-	testing.expect_value(t, table.boot, slots.Name.A)
-	testing.expect_value(t, table.previous, slots.Name.C)
+	testing.expect_value(t, table.boot, slots.Name.C)
+	testing.expect_value(t, table.previous, slots.Name.A)
+	testing.expect_value(t, table.slots[.A].release, 1)
+	testing.expect_value(t, table.slots[.C].release, 2)
 
-	// rollback: the previous slot boots again, /cfg rolled back to the
-	// snapshot taken when the release being left was applied.
+	// rollback: the previous slot boots again. Leaving c, staged and never
+	// booted, changes no /cfg; leaving a, running, rolls /cfg back to the
+	// snapshot taken when its release was applied.
 	clear(&ctl_log)
 	testing.expect_value(t, ctl(x, "rollback"), vx.Status.Ok)
 	testing.expect_value(t, said(), "distd: rolled back: the next boot is release 1's slot\n")
+	testing.expect_value(t, len(ctl_log), 0)
+	read_table(t, &table)
+	testing.expect_value(t, table.boot, slots.Name.A)
+	testing.expect_value(t, table.previous, slots.Name.C)
+	testing.expect_value(t, ctl(x, "rollback"), vx.Status.Ok)
+	testing.expect_value(t, said(), "distd: rolled back: the next boot is release 2's slot\n")
 	testing.expect_value(t, len(ctl_log), 1)
 	if len(ctl_log) == 1 {
-		testing.expect_value(t, ctl_log[0], "rollback cfg cfg@apply-2")
+		testing.expect_value(t, ctl_log[0], "rollback cfg cfg@apply-1")
 	}
 	read_table(t, &table)
 	testing.expect_value(t, table.boot, slots.Name.C)
 	testing.expect_value(t, table.previous, slots.Name.A)
+	testing.expect_value(t, ctl(x, "rollback"), vx.Status.Ok) // back to a, leaving c
+	_ = said()
 	ctl_status = .Err_Not_Found // no such snapshot
 	testing.expect_value(t, ctl(x, "rollback"), vx.Status.Ok)
 	testing.expect_value(t, said(), "distd: no snapshot of /cfg to roll back to\ndistd: rolled back: the next boot is release 2's slot\n")
@@ -443,4 +470,17 @@ test_distd :: proc(t: ^testing.T) {
 	_, e = p9.client_walk(&x.c, x.root, "releases/4/tree/README.txt")
 	testing.expect_value(t, e, vx.Status.Err_Not_Found)
 	testing.expect_value(t, said(), "")
+
+	// Who administers is /adm/users's group 0, as it is at the attach.
+	mem_put("adm/users", transmute([]u8)string("0:adm:adm:glenda\n1:none::\n100:glenda::\n101:ken::\n"))
+	Admin_Case :: struct {
+		uname: string,
+		want:  vx.Status,
+	}
+	admins := []Admin_Case{{"glenda", .Ok}, {"ken", .Err_Access}, {"nobody", .Err_Access}}
+	for c in admins {
+		ux := new(Client, context.temp_allocator)
+		connect(t, ux, distd.server.fs, distd.server.supported, c.uname)
+		testing.expectf(t, ctl(ux, "rescan") == c.want, "%s's rescan: want %v", c.uname, c.want)
+	}
 }

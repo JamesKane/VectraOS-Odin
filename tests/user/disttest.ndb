@@ -16,3 +16,12 @@ mount=/n srv=fsd aname=store
 connect=nsd
 env=PATH=/bin
 env=HOME=/tmp
+
+# ctl obeys administrators alone (users(6): group 0): none's apply is refused
+# before distd looks for the release (echo cannot report the failed write).
+service=distnone program=/boot/bin/rc console
+user=none
+arg=-c
+arg="/boot/bin/echo apply 7 >/dist/ctl; /boot/bin/echo distnone: done"
+mount=/ srv=bootfs
+mount=/dist srv=dist

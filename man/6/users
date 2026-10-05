@@ -14,6 +14,7 @@ fsd(4) keeps its users and groups in the file `users` at the root of the volume'
 The format is Plan 9's users file, not ndb(6): one line a user, its fields separated by `:`.
 
 `fsd` reads the file when it starts, and again whenever the last open of a file called `users` in the `adm` branch is closed, so an edit takes effect when the editor closes it.
+distd(8) reads it through `/adm` to decide who may write its `ctl`, by the same rules, and both read it with `lib/vx-users`.
 install(8) writes it when it makes the system volume, and vxfs(8)'s `mkfs` when it makes an image with an `adm` branch; after that it is changed only by writing it through `fsd`.
 It is created owned by user 0 and group 0, mode 0664, so the members of group 0 may change it.
 

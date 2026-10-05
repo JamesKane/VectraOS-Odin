@@ -26,7 +26,7 @@ default_entry: 2
     module_path: boot():/EFI/vectra/b/bootfs.tar#fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
     cmdline: vx.system vx.slot=b vx.skip=gsh
 limine cap n+1=0 n+2=1811
-free=2
+target=-1 2 2 1
 %%
 status=0
 print=1
@@ -65,7 +65,7 @@ default_entry: 3
     module_path: boot():/EFI/vectra/c/bootfs.tar#fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
     cmdline: vx.system vx.slot=c
 limine cap n+1=0 n+2=2579
-free=0
+target=-1 2 2 0
 %%
 status=-4
 %%
@@ -88,7 +88,7 @@ default_entry: 1
     module_path: boot():/EFI/vectra/a/bootfs.tar#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     cmdline: vx.system vx.slot=a x
 limine cap n+1=0 n+2=1010
-free=1
+target=-1 1 2 1
 %%
 status=0
 print=1
@@ -109,7 +109,7 @@ default_entry: 1
     module_path: boot():/EFI/vectra/a/bootfs.tar#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     cmdline: vx.system vx.slot=a
 limine cap n+1=0 n+2=1008
-free=1
+target=-1 1 2 1
 %%
 status=0
 print=1
@@ -130,7 +130,7 @@ default_entry: 1
     module_path: boot():/EFI/vectra/a/bootfs.tar#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     cmdline: vx.system vx.slot=a
 limine cap n+1=0 n+2=1008
-free=1
+target=-1 1 2 1
 %%
 status=-4
 %%
@@ -162,7 +162,7 @@ default_entry: 1
     module_path: boot():/EFI/vectra/b/bootfs.tar#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     cmdline: vx.system vx.slot=b vx
 limine cap n+1=0 n+2=1793
-free=2
+target=-1 2 2 0
 %%
 status=-4
 %%

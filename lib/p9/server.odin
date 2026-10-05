@@ -110,7 +110,8 @@ MAX_FIDS :: 256 // per connection, for now
 // it, on any of the server's connections. Tshare gives a token for it, good
 // for `holds` joins within HOLD_TIME of the last Tshare (or of its last fid's
 // going, which a hold outlives so long): holds a client never used run out
-// then, open file or not. Locks are POSIX's: byte ranges, owned by a
+// then, open file or not. A Tshare with no holds outstanding makes a new
+// token, so an old one never joins again. Locks are POSIX's: byte ranges, owned by a
 // connection and a process id, and let go when the owner lets go of any fid
 // on the file.
 
@@ -625,7 +626,10 @@ serve_share :: proc "contextless" (s: ^Server, f: ^Fid_Entry, t: ^Msg, r: ^Msg) 
 		if t.holds == 0 || t.holds > MAX_HOLDS || o.holds + t.holds > MAX_HOLDS {
 			return .Err_Range
 		}
-		if !o.shared {
+		// A new token whenever none is outstanding (its holds used or run
+		// out), so a token once given is never good again after its holds
+		// are gone.
+		if !o.shared || o.holds == 0 {
 			drbg.read(&sh.random, o.token[:])
 		}
 		o.shared = true

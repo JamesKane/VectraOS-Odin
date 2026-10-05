@@ -1,7 +1,8 @@
 // lib/p9's server framework and client against a small in-memory tree, then
 // the hostile-client conformance test (upstream 02 §2, 04 §7): raw messages
 // that try to leave the attach root, misuse fids, and lie about sizes and
-// counts. Ported from upstream's tests/host/p9_server_test.c; each test has a
+// counts; and share tokens, never good again once their holds are gone.
+// Ported from upstream's tests/host/p9_server_test.c; each test has a
 // tree and a server of its own, since Odin's runner runs them in parallel.
 //
 //   /           (node 1)
@@ -13,6 +14,7 @@ package p9_server_test
 
 import "abi:vx"
 import "core:testing"
+import "vx:drbg"
 import "vx:p9"
 import "../p9test"
 
@@ -504,4 +506,68 @@ test_open_moves :: proc(t: ^testing.T) {
 	testing.expect_value(t, p9.client_clunk(&c, f), vx.Status.Ok)
 	testing.expect_value(t, len(ram.opened_clunks), 1)
 	testing.expect_value(t, ram.opened_clunks[0], 4)
+}
+
+// Tshare and Tjoin (posix): a token joins as many times as its holds; once
+// they are used or run out, it joins no more, and the next Tshare gives a new
+// token, so whoever kept the old one cannot come back with it.
+@(private="file")
+share_clock: i64 // only test_share_tokens reads it
+
+@(private="file")
+share_now :: proc "contextless" () -> i64 {
+	return share_clock
+}
+
+@(test)
+test_share_tokens :: proc(t: ^testing.T) {
+	ram: Ram
+	server: p9.Server
+	ram_init(&ram)
+	ram_server(&server, &ram)
+	sh := new(p9.Shared, context.temp_allocator)
+	sh.now = share_now
+	drbg.mix(&sh.random, transmute([]u8)string("seed"), true)
+	server.supported, server.shared = {.Posix}, sh
+	tbuf, rbuf: [16384]u8
+	c := p9.Client{rpc = p9test.loopback, ctx = &server, tbuf = tbuf[:], rbuf = rbuf[:]}
+	testing.expect_value(t, p9.client_version(&c, 8192, {.Posix}), vx.Status.Ok)
+	root, e := p9.client_attach(&c, "")
+	testing.expect_value(t, e, vx.Status.Ok)
+	f, g: p9.Fid
+	f, e = p9.client_walk(&c, root, "b.txt")
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect_value(t, p9.client_open(&c, f, p9.OREAD), vx.Status.Ok)
+
+	first, second, third, again: [p9.TOKEN_SIZE]u8
+	first, e = p9.client_share(&c, f, 1)
+	testing.expect_value(t, e, vx.Status.Ok)
+	g, e = p9.client_join(&c, first)
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect_value(t, p9.client_clunk(&c, g), vx.Status.Ok)
+	_, e = p9.client_join(&c, first)
+	testing.expect_value(t, e, vx.Status.Err_Not_Found) // its one hold used
+
+	second, e = p9.client_share(&c, f, 1)
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect(t, first != second, "a new token")
+	_, e = p9.client_join(&c, first)
+	testing.expect_value(t, e, vx.Status.Err_Not_Found) // the old one is no good
+
+	share_clock += p9.HOLD_TIME // second's hold runs out unused
+	_, e = p9.client_join(&c, second)
+	testing.expect_value(t, e, vx.Status.Err_Not_Found)
+	third, e = p9.client_share(&c, f, 2)
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect(t, second != third, "a new token once the holds ran out")
+	_, e = p9.client_join(&c, second)
+	testing.expect_value(t, e, vx.Status.Err_Not_Found)
+	g, e = p9.client_join(&c, third)
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect_value(t, p9.client_clunk(&c, g), vx.Status.Ok)
+	// Holds outstanding: a Tshare adds to them, and keeps the token.
+	again, e = p9.client_share(&c, f, 1)
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect(t, third == again, "the same token while holds are outstanding")
+	testing.expect_value(t, p9.client_clunk(&c, f), vx.Status.Ok)
 }

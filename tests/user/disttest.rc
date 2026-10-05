@@ -40,4 +40,7 @@ echo not the block >/n/$p
 check damaged refused `{if(cat $t/other.bin >/dev/null >[2]/dev/null) echo read; if not echo refused}
 check still readme `{cat $t/README.txt}
 
+# adm's apply is obeyed, and refused: the tree was damaged above.
+echo apply 1 >/dist/ctl
+
 echo disttest: $checks checks, $failed failed
