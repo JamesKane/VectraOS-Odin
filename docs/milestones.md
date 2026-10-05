@@ -93,3 +93,17 @@ On macOS, every M5 scenario passes on x86_64 and aarch64 (94 runs in the closing
 PLAN's cross-format test holds both ways: volumes upstream's C library and `host/vxfs` wrote mount, check clean and read the same here, and volumes this tree's `vxfs` and `fsd` write are byte-identical or read and check clean with upstream's tool. The power-cut exit test kills QEMU mid-commit and finds every synced file whole after the remount.
 
 New vendored imports: Monocypher (ADR-0011) and ACPICA (ADR-0012), each behind a thin Odin layer, accepted on the upstream review of the same trees. Upstream findings from the storage libraries (FAT, ISO, the block client, vx-fs) are in [UPSTREAM-FINDINGS.md](UPSTREAM-FINDINGS.md). Testing became risk-based: the full matrix at a milestone's close only (docs/CODING.md).
+
+## P6: M6, chasing upstream
+
+Upstream's M6 steps are ported as they land; scenarios are upstream's as of the step last ported (`tests/qemu/m6/`, from `025911e`).
+
+| Step | Here | Commit |
+|---|---|---|
+| 6a1. `lib/vx-guide`, guide(6), `./build man` | `vx:guide`: contextless, allocation-free, no recursion and no statics, freestanding for both targets. `tests/host/guide` ports guide_test.c and guide_fuzz.c and cross-checks every call against upstream's C over its fuzz corpus, the manual's pages and 5,000 mutated inputs (1,000,000 run once), byte for byte but one hostile case (UPSTREAM-FINDINGS) | `cb25411` |
+| 6a2. The index and the coverage check | `./build check`'s manual pass, alone as `./build man --check` (`tools/build/man.odin`); `man/missing` is upstream's unchanged, this tree's inventory matching it name for name | `04d25e8` |
+| 6a3. Usage messages from pages | A generated Odin package per program, `gen:usage/NAME` (docs/CODING.md); `install` the first to use it | `04d25e8` |
+| 6a4. gsh renamed rc | `cmd/rc`, `/boot/bin/rc`, service `rc`, `rc:` messages; the manifests, scripts and host tests that say what is | `1c9b576` |
+| 6a5. `man`, `lookman`, `sig`; `/lib/man` in the image | `vx:man`, `cmd/man`, `cmd/lookman`, `cmd/sig`; `m6/man` passes on x86_64 and aarch64 | `a3f838f` |
+
+After 6a5, `m6/man`, `shell`, `rc`, `rcscript`, `boot`, `ns`, `ktest`, `posix`, `fsd` and `net` pass on x86_64 and aarch64 (2026-10-05).
