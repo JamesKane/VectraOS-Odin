@@ -51,7 +51,7 @@ Token :: struct {
 	quoted: bool, // a word written in quotes
 	adj:    bool, // nothing between it and the token before
 	fd0:    u8,
-	fd1:    u8, // a word's: 1 if it is a variable's name, after $
+	fd1:    u8,
 	rkind:  Open_Kind,
 	s:      string, // a word's text, unquoted, its glob characters marked (GLOB before them)
 	line:   u32,
@@ -69,8 +69,9 @@ Lexer :: struct {
 	used:         int,
 	why:          string,
 	line:         u32,
-	prev_kind:    Token_Kind, // of the token before: all a free caret or a subscript needs of it
-	prev_name:    bool, // it was a variable's name
+	// The token before was a word, not a keyword (or one quoted): all a free
+	// caret or a subscript needs of it.
+	prev_plain:   bool,
 	has_pending:  bool,
 	after_dollar: bool,
 	failed:       bool,
@@ -96,6 +97,12 @@ name_char :: proc "contextless" (c: u8) -> bool { // a variable name's character
 		return false
 	}
 	return true
+}
+
+// A byte a bare word marks: one that globs, or the mark itself.
+@(private = "file")
+globbing :: proc "contextless" (c: u8) -> bool {
+	return c == '*' || c == '?' || c == '[' || c == GLOB
 }
 
 @(private = "file")
@@ -250,8 +257,8 @@ lex_raw :: proc "contextless" (lx: ^Lexer) -> (t: Token) {
 		t.kind = .Caret
 	case '`':
 		t.kind = .Backq
-	case '(': // right after a variable's name: a subscript
-		t.kind = t.adj && lx.prev_kind == .Word && lx.prev_name ? .Sub_Lp : .Lp
+	case '(': // right after a word (not a keyword): a subscript, which rc's grammar allows only after $name
+		t.kind = t.adj && lx.prev_plain ? .Sub_Lp : .Lp
 	case ')':
 		t.kind = .Rp
 	case '{':
@@ -345,7 +352,7 @@ lex_raw :: proc "contextless" (lx: ^Lexer) -> (t: Token) {
 		s := lx.p
 		n := 0
 		for q := s; q < end && word_char(text[q]) && !continues(text, q); q += 1 {
-			n += text[q] == '*' || text[q] == '?' || text[q] == '[' ? 2 : 1
+			n += globbing(text[q]) ? 2 : 1
 		}
 		keep := lex_keep(lx, n)
 		if keep == nil {
@@ -353,7 +360,7 @@ lex_raw :: proc "contextless" (lx: ^Lexer) -> (t: Token) {
 		}
 		k := 0
 		for ; lx.p < end && word_char(text[lx.p]) && !continues(text, lx.p); lx.p += 1 {
-			if text[lx.p] == '*' || text[lx.p] == '?' || text[lx.p] == '[' {
+			if globbing(text[lx.p]) { // a mark doubled: itself
 				keep[k] = GLOB
 				k += 1
 			}
@@ -382,18 +389,16 @@ wordish :: proc "contextless" (k: Token_Kind) -> bool {
 lex :: proc "contextless" (lx: ^Lexer) -> Token {
 	if lx.has_pending {
 		lx.has_pending = false
-		lx.prev_kind, lx.prev_name = lx.pending.kind, lx.pending.fd1 == 1
+		lx.prev_plain = plain(lx.pending)
 		return lx.pending
 	}
 	name := lx.after_dollar
 	t := lex_raw(lx)
 	if name {
-		t.fd1 = 1 // a variable's name: a subscript may follow, and it is never a keyword
-		t.kw = .None
-	} else if t.kind == .Word {
-		t.fd1 = 0
+		t.kw = .None // a variable's name: never a keyword
 	}
-	if t.adj && lx.prev_kind == .Word && wordish(t.kind) && !name {
+	// No caret after a keyword, as rc's lexer (echo for$x is two words).
+	if t.adj && lx.prev_plain && wordish(t.kind) && !name {
 		lx.pending = t
 		lx.has_pending = true
 		caret := Token {
@@ -401,9 +406,15 @@ lex :: proc "contextless" (lx: ^Lexer) -> Token {
 			line = t.line,
 			adj  = true,
 		}
-		lx.prev_kind, lx.prev_name = .Caret, false
+		lx.prev_plain = false
 		return caret
 	}
-	lx.prev_kind, lx.prev_name = t.kind, t.fd1 == 1
+	lx.prev_plain = plain(t)
 	return t
+}
+
+// A word, not a keyword (or one quoted).
+@(private = "file")
+plain :: proc "contextless" (t: Token) -> bool {
+	return t.kind == .Word && (t.kw == .None || t.quoted)
 }

@@ -6,64 +6,109 @@ import "vx:str"
 
 // --- Patterns and globbing ---
 
-// Whether s matches pattern p, whose * ? and [ match only where GLOB marks
-// them; marks are skipped. No recursion: a * is retried from where it last
-// matched. A class's ranges compare bytes as signed, as upstream's C does on
-// the host and x86_64.
+// The length of the UTF-8 sequence at s[i], 1 when it is not one, as rc's
+// nextutf; and its rune (-1 if malformed), as rc's unicode.
+@(private = "file")
+utf :: proc "contextless" (s: string, i: int) -> (n: int, c: i32) {
+	b := s[i]
+	size := 4
+	v := i32(b & 0x07)
+	switch {
+	case b < 0x80:
+		size, v = 1, i32(b)
+	case b < 0xe0:
+		size, v = 2, i32(b & 0x1f)
+	case b < 0xf0:
+		size, v = 3, i32(b & 0x0f)
+	}
+	n = 1
+	for ; n < size && i + n < len(s) && s[i + n] & 0xc0 == 0x80; n += 1 {
+		v = v << 6 | i32(s[i + n] & 0x3f)
+	}
+	return n, n == size ? v : -1
+}
+
+// Whether s matches pattern p, as rc's match: * ? and [ are special only
+// where GLOB marks them (a doubled mark is the byte itself), ? and a class
+// match one rune, and a class's range may be written either way round. No
+// recursion: a * is retried from where it last matched, which is exact for
+// patterns of *, ? and classes.
 @(private)
 match :: proc "contextless" (s, p: string) -> bool {
 	n, m := len(s), len(p)
 	si, pi := 0, 0
 	star_p, star_s := -1, 0
-	for si < n {
-		if pi < m && p[pi] == GLOB && pi + 1 < m {
-			switch p[pi + 1] {
-			case '*':
+	for si < n || pi < m {
+		if pi + 1 < m && p[pi] == GLOB && p[pi + 1] == '*' {
+			pi += 2
+			star_p, star_s = pi, si
+			continue
+		}
+		if si < n && pi < m {
+			sl, c := utf(s, si)
+			marked := p[pi] == GLOB && pi + 1 < m
+			if marked && p[pi + 1] == '?' {
 				pi += 2
-				star_p, star_s = pi, si
+				si += sl
 				continue
-			case '?':
-				pi += 2
-				si += 1
-				continue
-			case '[': // a class: [abc], [a-z], [~abc]
+			}
+			if marked && p[pi + 1] == '[' { // [abc], [a-z], [~abc]
 				q := pi + 2
 				neg := q < m && p[q] == '~'
-				hit := false
+				hit, closed := false, false
 				if neg {
 					q += 1
 				}
-				c := i8(s[si])
-				for ; q < m && p[q] != ']'; q += 1 {
-					if q + 2 < m && p[q + 1] == '-' && p[q + 2] != ']' {
-						hit = hit || (c >= i8(p[q]) && c <= i8(p[q + 2]))
-						q += 2
-					} else {
-						hit = hit || s[si] == p[q]
+				for q < m {
+					if p[q] == ']' {
+						closed = true
+						break
+					}
+					k, lo := utf(p, q)
+					q += k
+					hi := lo
+					if q < m && p[q] == '-' {
+						q += 1
+						if q >= m {
+							break
+						}
+						k, hi = utf(p, q)
+						q += k
+						if hi < lo {
+							lo, hi = hi, lo
+						}
+					}
+					if lo <= c && c <= hi {
+						hit = true
 					}
 				}
-				if q < m && hit != neg {
+				if closed && hit != neg {
 					pi = q + 1
+					si += sl
+					continue
+				}
+			} else if marked && p[pi + 1] == GLOB { // the byte itself
+				if s[si] == GLOB {
+					pi += 2
 					si += 1
 					continue
 				}
+			} else if p[pi] != GLOB {
+				if pl, _ := utf(p, pi); pl == sl && p[pi:][:pl] == s[si:][:sl] {
+					pi += pl
+					si += sl
+					continue
+				}
 			}
-		} else if pi < m && p[pi] == s[si] {
-			pi += 1
-			si += 1
-			continue
 		}
-		if star_p < 0 { // no * to stretch
+		if star_p < 0 || star_s >= n { // no * to stretch, or nothing left to give it
 			return false
 		}
-		pi = star_p
-		star_s += 1
-		si = star_s
+		k, _ := utf(s, star_s)
+		star_s += k
+		pi, si = star_p, star_s
 	}
-	for pi + 1 < m && p[pi] == GLOB && p[pi + 1] == '*' {
-		pi += 2
-	}
-	return pi == m
+	return true
 }
 
 @(private = "file")
@@ -76,16 +121,18 @@ globby :: proc "contextless" (s: string) -> bool {
 	return false
 }
 
-// A word with its glob marks taken out, in place.
+// A word with its glob marks taken out, in place: as rc's, each mark goes,
+// and the byte after it stays (a mark too).
 @(private = "file")
 deglob :: proc "contextless" (w: ^Word) {
 	b := word_room(w)
 	k := 0
-	for i in 0 ..< w.len {
-		if b[i] != GLOB {
-			b[k] = b[i]
-			k += 1
+	for i := 0; i < w.len; i += 1 {
+		if b[i] == GLOB && i + 1 < w.len {
+			i += 1
 		}
+		b[k] = b[i]
+		k += 1
 	}
 	w.len = k
 }
@@ -109,7 +156,7 @@ Glob :: struct {
 
 // A directory entry, for the glob being made.
 glob_add :: proc "contextless" (g: ^Glob, name: string) {
-	if len(name) > 0 && name[0] == '.' && !(len(g.pat) > 0 && g.pat[0] == '.') { // dot files only when asked for
+	if (name == "." || name == "..") && !(len(g.pat) > 0 && g.pat[0] == '.') { // . and .. only when asked for, as rc's
 		return
 	}
 	if !match(name, g.pat) || g.n >= 4096 {
@@ -159,12 +206,15 @@ glob :: proc "contextless" (r: ^Rc, w: ^Word) -> ^Word {
 	rooted := s[0] == '/'
 	paths := new_word(r, rooted ? "/" : "")
 	at := rooted ? 1 : 0
+	globbed, plain_after := false, false // a pattern matched, and a plain component came after it
 	for at < len(s) && paths != nil {
 		end := at
 		for end < len(s) && s[end] != '/' {
 			end += 1
 		}
 		component := s[at:end]
+		plain_after = globbed && !globby(component)
+		globbed = globbed || globby(component)
 		next: ^Word
 		tail := &next
 		for pth := paths; pth != nil; pth = pth.next {
@@ -197,6 +247,20 @@ glob :: proc "contextless" (r: ^Rc, w: ^Word) -> ^Word {
 			x.len += 1
 		}
 		at = end + 1
+	}
+	if plain_after && r.host.exists != nil { // as rc's globdir: what follows the last pattern must exist
+		kept: List
+		for paths != nil {
+			x := paths
+			paths = x.next
+			x.next = nil
+			if r.host.exists(r.host.ctx, text(x)) {
+				list_add(&kept, x)
+			} else {
+				heap_free(r, x)
+			}
+		}
+		paths = kept.head
 	}
 	if paths == nil {
 		deglob(w)
@@ -248,8 +312,7 @@ list_add :: proc "contextless" (l: ^List, w: ^Word) {
 @(require_results)
 mark :: proc "contextless" (r: ^Rc) -> bool {
 	if len(r.stack) == STACK {
-		set_error(r, "stack overflow")
-		r.failed = true
+		fail(r, "", "stack overflow")
 		return false
 	}
 	append(&r.stack, List{})
@@ -431,9 +494,8 @@ forget_path :: proc "contextless" (r: ^Rc, path: string) {
 @(require_results)
 push_frame :: proc "contextless" (r: ^Rc, code: ^Code, pc: u32, locals: ^Var) -> bool {
 	if len(r.frames) == FRAMES {
-		set_error(r, "functions nested too deeply")
+		fail(r, "", "functions nested too deeply")
 		free_locals(r, locals)
-		r.failed = true
 		return false
 	}
 	code.refs += 1
@@ -533,15 +595,24 @@ simple :: proc "contextless" (r: ^Rc, words: ^Word, async: bool) {
 	argv := glob_list(r, words)
 	argc := count_words(argv)
 	if argc == 0 {
+		fail(r, "", "empty argument list")
 		return
 	}
-	defer free_words(r, argv)
-	if v := var_find(r, text(argv), false); v != nil && v.fn != nil { // a function: $* the rest, in a frame of its own
+	v := gvar_find(r, text(argv), false)
+	if v != nil && v.fn != nil && async { // rc runs it in a child, which needs upstream's M6 step 6d: refused, not run in the foreground
+		shell_write(r, 2, "rc: a function run with & needs a child (for now)\n")
+		set_status(r, "async")
+		free_words(r, argv)
+		return
+	}
+	if v != nil && v.fn != nil { // a function: $* the rest, in a frame of its own
 		star := new_local(r, "*", argv.next)
 		argv.next = nil
+		free_words(r, argv)
 		_ = push_frame(r, v.fn, v.fn_pc, star)
 		return
 	}
+	defer free_words(r, argv)
 	if builtin(r, argv, argc) {
 		return
 	}
@@ -597,14 +668,20 @@ simple :: proc "contextless" (r: ^Rc, words: ^Word, async: bool) {
 	}
 }
 
-// Concatenation (rc's ^): one word with each of a list, or pairwise; bad if
-// a side is empty, or they are lists of different lengths.
+// Concatenation (rc's ^): one word with each of a list, or pairwise; two
+// empty lists make an empty one, as rc's Xconc. bad says why it cannot be.
 @(private = "file")
-conc :: proc "contextless" (r: ^Rc, a, b: ^Word) -> (out: ^Word, bad: bool) {
+conc :: proc "contextless" (r: ^Rc, a, b: ^Word) -> (out: ^Word, bad: string) {
 	a, b := a, b
 	na, nb := count_words(a), count_words(b)
-	if na == 0 || nb == 0 || (na != nb && na != 1 && nb != 1) {
-		return nil, true
+	if na == 0 && nb == 0 {
+		return nil, ""
+	}
+	if na == 0 || nb == 0 {
+		return nil, "null list in concatenation"
+	}
+	if na != nb && na != 1 && nb != 1 {
+		return nil, "mismatched list lengths in concatenation"
 	}
 	l: List
 	for _ in 0 ..< max(na, nb) {
@@ -624,7 +701,7 @@ conc :: proc "contextless" (r: ^Rc, a, b: ^Word) -> (out: ^Word, bad: bool) {
 			b = b.next
 		}
 	}
-	return l.head, false
+	return l.head, ""
 }
 
 @(private = "file")
@@ -638,32 +715,76 @@ parse_index :: proc "contextless" (s: string) -> (v: u32, ok: bool) {
 	return v, len(s) > 0
 }
 
-// The values of the variables named in names: $1 and the like are $*'s.
+// The value of the variable named in names, which must be one word (rc's
+// Xdol and Xcount), and how many words it has: $1 and the like are $*'s. ok
+// is false, with the run failed (what), if names is not one word.
 @(private = "file")
-values :: proc "contextless" (r: ^Rc, names: ^Word) -> ^Word {
-	l: List
-	for nm := names; nm != nil; nm = nm.next {
-		if k, num := parse_index(text(nm)); num && k != 0 { // $n: the n'th of $*; $0 is a variable of its own, the script's name
-			w := get_var(r, "*")
-			for i: u32 = 1; w != nil && i < k; i += 1 {
-				w = w.next
-			}
-			if w != nil {
-				list_add(&l, new_word(r, text(w)))
-			}
-			continue
-		}
-		if v := var_find(r, text(nm), false); v != nil {
-			list_add(&l, copy_words(r, v.val))
-		}
+value :: proc "contextless" (r: ^Rc, names: ^Word, what: string) -> (out: ^Word, count: u32, ok: bool) {
+	if names == nil || names.next != nil {
+		fail(r, "", what)
+		return nil, 0, false
 	}
-	return l.head
+	if k, num := parse_index(text(names)); num && k != 0 { // $n: the n'th of $*; $0 is a variable of its own, the script's name
+		w := get_var(r, "*")
+		for i: u32 = 1; w != nil && i < k; i += 1 {
+			w = w.next
+		}
+		if w != nil {
+			return new_word(r, text(w)), 1, true
+		}
+		return nil, 0, true
+	}
+	if v := var_find(r, text(names), false); v != nil {
+		return copy_words(r, v.val), count_words(v.val), true
+	}
+	return nil, 0, true
 }
 
+// A list joined by spaces into one word, "" for none (rc's Xqw); it takes the list.
 @(private = "file")
-fail :: proc "contextless" (r: ^Rc, why: string) {
-	set_error(r, why)
+qw :: proc "contextless" (r: ^Rc, list: ^Word) -> ^Word {
+	total := 0
+	for w := list; w != nil; w = w.next {
+		total += w.len + 1
+	}
+	j := heap_new(r, Word, total + 1)
+	if j != nil {
+		room := word_room(j)
+		for w := list; w != nil; w = w.next {
+			j.len += copy(room[j.len:], text(w))
+			if w.next != nil {
+				room[j.len] = ' '
+				j.len += 1
+			}
+		}
+	}
+	free_words(r, list)
+	return j
+}
+
+// A run-time error, as rc's Xerror1 and Xerror2: `where: a[: b]` for the host
+// to show, $status status ("": "error"), and the run ends. Each part is read
+// as upstream's C reads it, to its first NUL.
+@(private = "file")
+fail :: proc "contextless" (r: ^Rc, status, a: string, b := "") {
+	line: u32
+	if len(r.frames) > 0 {
+		f := &r.frames[len(r.frames) - 1]
+		if f.pc != 0 && f.pc <= f.code.n {
+			line = code_inst(f.code)[f.pc - 1].line
+		}
+	}
+	buf: [96]u8
+	set_error(r, place(&buf, string(r.src[:]), line), ": ", a)
+	if b != "" {
+		if len(r.err) + 3 < ERR_MAX + 1 {
+			append(&r.err, ':', ' ')
+		}
+		add_error(r, b)
+	}
+	set_status(r, c_name(status != "" ? status : "error"))
 	r.failed = true
+	r.failset = true
 }
 
 // Runs code from the frame on top until the frames it started with have all
@@ -675,7 +796,7 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 		if r.budget != 0 {
 			steps += 1
 			if steps > r.budget {
-				fail(r, "rc: too many steps")
+				fail(r, "", "too many steps")
 				break
 			}
 		}
@@ -696,10 +817,10 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 		case .Dol, .Count, .Join:
 			names := pop_list(r)
 			deglob_list(names)
-			vals := values(r, names)
+			vals, k, ok := value(r, names, ins.op == .Count ? "$# variable name not singleton!" : "$ variable name not singleton!")
 			free_words(r, names)
 			l := top_list(r)
-			if l == nil {
+			if !ok || l == nil {
 				free_words(r, vals)
 				break
 			}
@@ -708,71 +829,72 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 				list_add(l, vals)
 			case .Count:
 				digits: [str.U64_DIGITS]u8
-				list_add(l, new_word(r, str.format_u64(digits[:], u64(count_words(vals)))))
+				list_add(l, new_word(r, str.format_u64(digits[:], u64(k))))
 				free_words(r, vals)
 			case: // $": one word, joined by spaces
-				total := 0
-				for w := vals; w != nil; w = w.next {
-					total += w.len + 1
-				}
-				j := heap_new(r, Word, total + 1)
-				if j != nil {
-					room := word_room(j)
-					for w := vals; w != nil; w = w.next {
-						j.len += copy(room[j.len:], text(w))
-						if w.next != nil {
-							room[j.len] = ' '
-							j.len += 1
-						}
-					}
-				}
-				list_add(l, j)
-				free_words(r, vals)
+				list_add(l, qw(r, vals))
 			}
-		case .Sub: // $x(subscripts): 1-based, ranges n-m and n-
+		case .Sub: // $x(subscripts) as rc's subwords: 1-based, ranges n-m and n-
 			subs := pop_list(r)
 			names := pop_list(r)
 			deglob_list(subs)
 			deglob_list(names)
-			vals := values(r, names)
+			if names == nil || names.next != nil {
+				fail(r, "", "$() variable name not singleton!")
+				free_words(r, subs)
+				free_words(r, names)
+				break
+			}
+			v := var_find(r, text(names), false) // $1(2) is a variable named 1's, as rc's
+			vals := v != nil ? v.val : nil
 			nv := count_words(vals)
-			for s := subs; s != nil && len(r.stack) > 0; s = s.next {
-				t := text(s)
-				dash := str.index_byte(t, '-')
-				if dash < 0 {
-					dash = len(t)
+			for sw := subs; sw != nil && len(r.stack) > 0; sw = sw.next {
+				t := text(sw)
+				i := 0
+				n, m: u32
+				for i < len(t) && t[i] >= '0' && t[i] <= '9' && n < 100_000_000 {
+					n = n * 10 + u32(t[i] - '0')
+					i += 1
 				}
-				from, ok1 := parse_index(t[:dash])
-				to, ok2 := from, true
-				if dash < len(t) {
-					if dash + 1 < len(t) {
-						to, ok2 = parse_index(t[dash + 1:])
+				neg := false
+				if i < len(t) && t[i] == '-' {
+					i += 1
+					if i == len(t) {
+						neg = n > nv
+						m = neg ? 0 : nv - n
 					} else {
-						to = nv
+						to: u32
+						for i < len(t) && t[i] >= '0' && t[i] <= '9' && to < 100_000_000 {
+							to = to * 10 + u32(t[i] - '0')
+							i += 1
+						}
+						neg = to < n
+						m = neg ? 0 : to - n
 					}
 				}
-				if !ok1 || !ok2 {
+				if n < 1 || n > nv || neg {
 					continue
 				}
-				i: u32 = 1
-				for w := vals; w != nil; w = w.next {
-					if i >= from && i <= to {
-						list_add(top_list(r), new_word(r, text(w)))
-					}
-					i += 1
+				m = min(m, nv - n)
+				w := vals
+				for _ in 1 ..< n {
+					w = w.next
+				}
+				for k: u32 = 0; k <= m && w != nil; k += 1 {
+					list_add(top_list(r), new_word(r, text(w)))
+					w = w.next
 				}
 			}
 			free_words(r, subs)
 			free_words(r, names)
-			free_words(r, vals)
 		case .Conc:
 			b := pop_list(r)
 			a := pop_list(r)
 			c, bad := conc(r, a, b)
 			free_words(r, a)
 			free_words(r, b)
-			if bad {
-				fail(r, "rc: ^ of lists of different lengths, or an empty one")
+			if bad != "" {
+				fail(r, "", bad)
 				break
 			}
 			if l := top_list(r); l != nil {
@@ -786,7 +908,7 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 			argv := glob_list(r, pop_list(r))
 			if len(r.stages) == STAGES {
 				free_words(r, argv)
-				fail(r, "pipelines nested too deeply")
+				fail(r, "", "pipelines nested too deeply")
 				break
 			}
 			st := Command {
@@ -813,7 +935,7 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 			for &c in stages {
 				if c.argc == 0 {
 					ok = false
-				} else if v := var_find(r, text(c.argv), false); v != nil && v.fn != nil {
+				} else if v := gvar_find(r, text(c.argv), false); v != nil && v.fn != nil {
 					ok = false
 				}
 			}
@@ -829,7 +951,7 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 			val := glob_list(r, pop_list(r))
 			deglob_list(name)
 			if name == nil || name.next != nil {
-				fail(r, "rc: a variable's name must be one word")
+				fail(r, "", ins.op == .Assign ? "= variable name not singleton!" : "local variable name must be singleton")
 				free_words(r, name)
 				free_words(r, val)
 				break
@@ -912,7 +1034,7 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 			names := pop_list(r)
 			deglob_list(names)
 			for n := names; n != nil; n = n.next {
-				v := var_find(r, text(n), true)
+				v := gvar_find(r, text(n), true)
 				if v == nil {
 					continue
 				}
@@ -927,7 +1049,7 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 			names := pop_list(r)
 			deglob_list(names)
 			for n := names; n != nil; n = n.next {
-				if v := var_find(r, text(n), false); v != nil {
+				if v := gvar_find(r, text(n), false); v != nil {
 					code_release(r, v.fn)
 					v.fn = nil
 				}
@@ -935,30 +1057,30 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 			free_words(r, names)
 		case .Return:
 			pop_frame(r)
-		case .Match: // ~ subject patterns
+		case .Qw: // the list on top as one word, its marks gone: a subject is never a pattern
+			l := pop_list(r)
+			deglob_list(l)
+			if mark(r) {
+				list_add(top_list(r), qw(r, l))
+			}
+		case .Settrue:
+			set_status(r, "")
+		case .Match: // ~ subject patterns: the subject (one word, Qw's) against each
 			subj := pop_list(r)
 			pats := pop_list(r)
-			deglob_list(subj)
 			hit := false
-			for s := subj; s != nil && !hit; s = s.next {
-				for p := pats; p != nil && !hit; p = p.next {
-					hit = match(text(s), text(p))
-				}
-			}
-			if subj == nil { // ~ () pattern: an empty subject matches only an empty pattern list
-				hit = pats == nil
+			for p := pats; subj != nil && p != nil && !hit; p = p.next {
+				hit = match(text(subj), text(p))
 			}
 			set_status(r, hit ? "" : "no match")
 			free_words(r, subj)
 			free_words(r, pats)
-		case .Case: // the patterns on top against the subject below them
+		case .Case: // the patterns on top against the subject below them (one word, Qw's)
 			pats := pop_list(r)
 			hit := false
-			if subj := top_list(r); subj != nil {
-				for s := subj.head; s != nil && !hit; s = s.next {
-					for p := pats; p != nil && !hit; p = p.next {
-						hit = match(text(s), text(p))
-					}
+			if subj := top_list(r); subj != nil && subj.head != nil {
+				for p := pats; p != nil && !hit; p = p.next {
+					hit = match(text(subj.head), text(p))
 				}
 			}
 			free_words(r, pats)
@@ -967,7 +1089,7 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 			}
 		case .Backq: // fd 1 into a new capture
 			if len(r.captures) == CAPTURES || len(r.redirs) == REDIRS {
-				fail(r, "rc: ` nested too deeply")
+				fail(r, "", "` nested too deeply")
 				break
 			}
 			append(&r.redirs, Redir{fd = 1, to = Fd_Capture{u8(len(r.captures))}})
@@ -981,8 +1103,9 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 			if len(r.redirs) > 0 {
 				pop_redirs(r, len(r.redirs) - 1)
 			}
-			// Every byte of every word of $ifs separates; none (ifs=()) makes the
-			// whole output one word.
+			// Every byte of $ifs separates, its words joined by spaces as rc's (so
+			// a space too when it has several); none (ifs=()) makes the output
+			// one word.
 			ifs := pop_list(r)
 			seps: [dynamic; 64]u8
 			for w := ifs; w != nil; w = w.next {
@@ -991,6 +1114,9 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 						break
 					}
 					append(&seps, b)
+				}
+				if w.next != nil && len(seps) < cap(seps) {
+					append(&seps, ' ')
 				}
 			}
 			out := c.buf[:c.len]
@@ -1010,21 +1136,42 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 			heap_free(r, raw_data(c.buf))
 		case .Redir:
 			path := glob_list(r, pop_list(r))
-			if path == nil || path.next != nil || len(r.redirs) == REDIRS {
-				fail(r, "rc: a redirection needs one file")
+			kind := Open_Kind(ins.f1)
+			OPS := [Open_Kind]string {
+				.Read   = "<",
+				.Write  = ">",
+				.Append = ">>",
+				.Rdwr   = "<>",
+			}
+			if path == nil || path.next != nil || len(r.redirs) == REDIRS { // as rc's: > requires file, > requires singleton
+				tail := " requires singleton"
+				if path == nil {
+					tail = " requires file"
+				} else if len(r.redirs) == REDIRS {
+					tail = " nested too deeply"
+				}
+				msg: [32]u8
+				fail(r, "", str.join(msg[:], OPS[kind], tail) or_else "")
 				free_words(r, path)
 				break
 			}
-			kind := Open_Kind(ins.f1)
 			handle: u32
 			if r.host.open != nil {
 				h, ok := r.host.open(r.host.ctx, r, text(path), kind)
 				if !ok {
-					shell_write(r, 2, "rc: cannot open ")
-					shell_write(r, 2, text(path))
-					shell_write(r, 2, "\n")
+					// rc's Xerror3: `< can't open: file: why`, why (the host's, in $status) the status.
+					msg: [dynamic; ERR_MAX]u8
+					append(&msg, OPS[kind], " can't open: ")
+					append(&msg, text(path))
+					why: [dynamic; ERR_MAX]u8
+					if st := get_var(r, "status"); st != nil {
+						append(&why, text(st))
+					}
+					if len(why) == 0 {
+						append(&why, "cannot open")
+					}
 					free_words(r, path)
-					r.failed = true
+					fail(r, string(why[:]), string(msg[:]), string(why[:]))
 					break
 				}
 				handle = h

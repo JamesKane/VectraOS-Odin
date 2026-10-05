@@ -128,6 +128,9 @@ Host :: struct {
 	// it go when the redirection ends.
 	open:      proc "contextless" (ctx: rawptr, r: ^Rc, path: string, kind: Open_Kind) -> (handle: u32, ok: bool),
 	close:     proc "contextless" (ctx: rawptr, handle: u32),
+	// Whether a path exists, for globbing: a plain name after a pattern must
+	// (rc's access check). Optional: without it, such names are kept.
+	exists:    proc "contextless" (ctx: rawptr, path: string) -> bool,
 }
 
 // What run made of a text.
@@ -153,6 +156,8 @@ CAPTURES :: 8
 STAGES :: 64
 @(private)
 ERR_MAX :: 127 // upstream's 128-byte buffer, with its NUL
+@(private)
+SRC_MAX :: 63 // upstream's src[64], with its NUL
 
 // An interpreter. Large (the machine's stacks are fixed arrays): a host keeps
 // it in a global. It holds pointers into the heap, so it must not be copied.
@@ -175,8 +180,11 @@ Rc :: struct {
 	closes:   [dynamic; 2 * STAGES]Pending_Close,
 	compiler: Compiler_Scratch,
 	ifnot:    bool, // the last if's condition was false: what `if not` runs on
+	iflast:   bool, // the last command compiled was an if, so `if not` may follow (rc's lex->iflast)
 	failed:   bool, // a run-time error ended the script
+	failset:  bool, // and fail set $status for it
 	exiting:  bool,
+	src:      [dynamic; SRC_MAX]u8, // where the code being run came from, for errors: a file's name, or rc
 	err:      [dynamic; ERR_MAX]u8, // the last error, for the host to show
 }
 
@@ -227,6 +235,7 @@ init :: proc "contextless" (r: ^Rc, heap: []u8, host: Host) -> bool {
 	}
 	set_var_words(r, "ifs", new_word(r, " \t\n"))
 	set_status(r, "")
+	append(&r.src, "rc")
 	return true
 }
 
@@ -235,6 +244,7 @@ init :: proc "contextless" (r: ^Rc, heap: []u8, host: Host) -> bool {
 run :: proc "contextless" (r: ^Rc, text: string) -> Result {
 	clear(&r.err)
 	r.failed = false
+	r.failset = false
 	r.exiting = false
 	code, incomplete := compile_text(r, text, 1)
 	if code == nil {
@@ -259,10 +269,31 @@ run :: proc "contextless" (r: ^Rc, text: string) -> Result {
 		return .Exit
 	}
 	if r.failed {
-		set_status(r, "error")
+		if !r.failset {
+			set_status(r, "error") // out of memory, which fail cannot report
+		}
 		return .Failed
 	}
 	return .Ok
+}
+
+// Where the code run next comes from, for errors (file:line): a script's
+// name; "rc" until set. Cut, as upstream's, to 63 bytes.
+source :: proc "contextless" (r: ^Rc, name: string) {
+	clear(&r.src)
+	append(&r.src, name[:min(len(name), SRC_MAX)])
+}
+
+// Adds one stage's status to a pipeline's, held in buf (n bytes so far), as
+// rc's concstatus: joined by |, which is left out while what came before is
+// empty. What does not fit is cut. The new length.
+concstatus :: proc "contextless" (buf: []u8, n: int, s: string) -> int {
+	n := n
+	if n > 0 && n < len(buf) {
+		buf[n] = '|'
+		n += 1
+	}
+	return n + copy(buf[n:], s)
 }
 
 // The last error: a syntax error's, with its line, or a run-time error's.

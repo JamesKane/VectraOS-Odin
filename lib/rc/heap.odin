@@ -3,6 +3,7 @@
 package rc
 
 import "base:intrinsics"
+import "vx:str"
 
 @(private)
 ALIGN :: 16
@@ -205,6 +206,13 @@ var_find :: proc "contextless" (r: ^Rc, name: string, make: bool) -> ^Var {
 			}
 		}
 	}
+	return gvar_find(r, name, make)
+}
+
+// A global variable, which is where functions live (rc's gvlook): a local of
+// the same name does not hide one.
+@(private)
+gvar_find :: proc "contextless" (r: ^Rc, name: string, make: bool) -> ^Var {
 	bucket := &r.vars[hash(name)]
 	for v := bucket^; v != nil; v = v.next {
 		if var_name(v) == name {
@@ -235,14 +243,16 @@ set_var_words :: proc "contextless" (r: ^Rc, name: string, w: ^Word) {
 	v.val = w
 }
 
-// As rc's: nothing in $status but 0s and a pipeline's |s.
+// As rc's: nothing in $status's first word but 0s and a pipeline's |s.
 @(private)
 true_status :: proc "contextless" (r: ^Rc) -> bool {
-	for w := get_var(r, "status"); w != nil; w = w.next {
-		for c in transmute([]u8)text(w) {
-			if c != '0' && c != '|' {
-				return false
-			}
+	w := get_var(r, "status")
+	if w == nil {
+		return true
+	}
+	for c in transmute([]u8)text(w) {
+		if c != '0' && c != '|' {
+			return false
 		}
 	}
 	return true
@@ -252,6 +262,12 @@ true_status :: proc "contextless" (r: ^Rc) -> bool {
 @(private)
 set_error :: proc "contextless" (r: ^Rc, parts: ..string) {
 	clear(&r.err)
+	add_error(r, ..parts)
+}
+
+// More of it, each part read as upstream's C reads it, to its first NUL.
+@(private)
+add_error :: proc "contextless" (r: ^Rc, parts: ..string) {
 	for p in parts {
 		for c in transmute([]u8)p {
 			if c == 0 || len(r.err) == ERR_MAX {
@@ -260,4 +276,18 @@ set_error :: proc "contextless" (r: ^Rc, parts: ..string) {
 			append(&r.err, c)
 		}
 	}
+}
+
+// Where an error is, as rc's pfln: file:line, or the file alone.
+@(private)
+place :: proc "contextless" (buf: ^[96]u8, src: string, line: u32) -> string {
+	b := str.Buf {
+		buf = buf[:],
+	}
+	str.write_string(&b, c_name(src))
+	if line != 0 {
+		str.write_byte(&b, ':')
+		str.write_u64(&b, u64(line))
+	}
+	return str.to_string(&b)
 }

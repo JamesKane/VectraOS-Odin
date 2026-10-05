@@ -81,8 +81,8 @@ fn count { echo $#* }
 check fn-args 3 `{count a 'b c' d}
 check and-or 'yes no' `{test -d $dir && echo yes} `{test -f $dir/none || echo no}
 check not ok `{if(! test -f $dir/none) echo ok}
-check status 'not found' `{nosuchcommand >[2] /dev/null; echo $status}
-check pipe-status '1|' `{false | true; echo $status}
+check status 'file does not exist' `{nosuchcommand >[2] /dev/null; echo $status}
+check pipe-status ok `{false | true; if(~ $status 'false '*': 1|') echo ok}
 check pipe-true yes `{if(true | true) echo yes; if not echo no}
 printf 'c\nb\na\n' > $dir/unsorted
 sort < $dir/unsorted | uniq > $dir/sorted

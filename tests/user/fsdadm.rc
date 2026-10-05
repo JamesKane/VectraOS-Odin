@@ -45,7 +45,7 @@ check bogus refused `{refused ctl bogus}
 check del-adm refused `{refused ctl del adm}
 ctl sync
 ctl check
-check clean check=clean `{sed -n 1p /adm/status | tr ' ' '\n' | grep '^check='}
+check clean 'check=clean' `{sed -n 1p /adm/status | tr ' ' '\n' | grep '^check='}
 
 # Permissive: a file its owner gave no bits, read only through %home.
 echo secret >/tmp/secret

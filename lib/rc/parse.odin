@@ -44,13 +44,28 @@ Node_Kind :: enum u8 {
 
 @(private)
 Node :: struct {
-	kind:     Node_Kind,
+	kind:    Node_Kind,
+	using _: struct #raw_union {
+		using io:   Node_Io,
+		using word: Node_Word,
+	},
+	line:    u32, // where it was written
+	a, b, c: i32, // children (NONE: none)
+	next:    i32, // the next in a list of words or redirections
+	s:       string, // a Word's text
+}
+
+// A redirection's, a Dup's or a Pipe's: its descriptors, and how it opens its file.
+@(private)
+Node_Io :: struct {
 	fd0, fd1: u8,
 	rkind:    Open_Kind,
-	eq:       bool, // a Word: an = written as a word, joined to what is against it
-	a, b, c:  i32, // children (NONE: none)
-	next:     i32, // the next in a list of words or redirections
-	s:        string, // a Word's text
+}
+
+// A Word's.
+@(private)
+Node_Word :: struct {
+	quoted: bool, // written in quotes: never a switch's case
 }
 // Upstream's rc_node is 40 bytes, and the parse takes room for len+32 of
 // them from the heap: so does this one.
@@ -174,6 +189,7 @@ node_new :: proc "contextless" (p: ^Parser, kind: Node_Kind, a, b, c: i32) -> i3
 	}
 	p.nodes[p.nnodes] = Node {
 		kind = kind,
+		line = p.line,
 		a    = a,
 		b    = b,
 		c    = c,
@@ -462,7 +478,10 @@ cmd :: proc "contextless" (p: ^Parser) -> State {
 		_ = push(p, {kind = .Prefix, op = .Dup, prec = 2, fd0 = r.fd0, fd1 = r.fd1})
 		return .Cmd
 	}
-	if t.kind == .Word && !t.quoted && t.kw != .None && t.kw != .In && t.kw != .Not {
+	if t.kind == .Word && !t.quoted && (t.kw == .In || t.kw == .Not) {
+		return fail(p, "syntax error") // in and not begin no command: rc's grammar has them only after for( and if
+	}
+	if t.kind == .Word && !t.quoted && t.kw != .None {
 		k := take(p)
 		kw := k.kw
 		if kw == .If && peek(p).kind == .Word && peek(p).kw == .Not {
@@ -606,13 +625,17 @@ collect :: proc "contextless" (p: ^Parser) -> State {
 		_ = take(p)
 		return .Collect
 	}
+	if t.kind == .Eq && f.kind == .Simple && f.a != NONE && p.nodes[f.a].next == NONE && f.b == NONE {
+		// first=value: an assignment, its name any word ($x=1 too), as rc's grammar
+		_ = take(p)
+		name := f.a
+		_ = pop(p)
+		_ = push(p, {kind = .Want, purpose = .Want_Assign, a = name})
+		return .Word
+	}
 	#partial switch t.kind {
 	case .Word, .Dollar, .Count, .Join, .Backq, .Lp:
 		return .Word
-	case .Eq:
-		if f.kind == .Simple || list {
-			return .Word
-		}
 	case .Redir:
 		if f.kind == .Simple {
 			r := take(p)
@@ -684,13 +707,13 @@ collect :: proc "contextless" (p: ^Parser) -> State {
 atom :: proc "contextless" (p: ^Parser) -> State {
 	t := take(p)
 	#partial switch t.kind {
-	case .Word, .Eq:
+	case .Word: // = is not one: rc's grammar has it only in an assignment
 		n := node_new(p, .Word, NONE, NONE, NONE)
 		if n == NONE {
 			return .Done
 		}
-		p.nodes[n].s = t.kind == .Eq ? "=" : t.s
-		p.nodes[n].eq = t.kind == .Eq
+		p.nodes[n].s = t.s
+		p.nodes[n].quoted = t.quoted
 		_ = push_val(p, n)
 		return .After_Atom
 	case .Dollar, .Count, .Join:
@@ -728,20 +751,12 @@ after_atom :: proc "contextless" (p: ^Parser) -> State {
 		}
 		atom = node_new(p, op, atom, NONE, NONE)
 	}
-	f := top(p)
-	eq := atom != NONE && p.nodes[atom].kind == .Word && p.nodes[atom].eq // an = as a word
-	if f != nil && f.kind == .Conc {
+	if f := top(p); f != nil && f.kind == .Conc {
 		atom = node_new(p, .Conc, f.a, atom, NONE)
 		_ = pop(p)
 	}
-	next := peek(p)
-	// A word joined to an = written against it (a=b as an argument), as rc's
-	// lexer would make one word of them; rc's carets otherwise.
-	joined := next.adj && (next.kind == .Eq || (eq && wordish(next.kind)))
-	if next.kind == .Caret || joined {
-		if next.kind == .Caret {
-			_ = take(p)
-		}
+	if peek(p).kind == .Caret {
+		_ = take(p)
 		_ = push(p, {kind = .Conc, a = atom})
 		return .Word
 	}

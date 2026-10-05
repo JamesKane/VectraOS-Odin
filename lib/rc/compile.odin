@@ -8,7 +8,6 @@
 // are compiled first.
 package rc
 
-import "vx:str"
 
 @(private)
 Op :: enum u8 {
@@ -37,6 +36,8 @@ Op :: enum u8 {
 	Fn, // a: where its body ends; the top list names it (them); the body follows
 	Delfn, // the top list's functions removed
 	Return, // the frame ends
+	Qw, // the top list joined by spaces into one word ("" for none): a subject of ~ or switch
+	Settrue, // $status true: while()'s empty condition
 	Match, // the top list (a subject) against the patterns below: $status
 	Case, // a: where to go unless the subject (two lists down) matches the patterns on top
 	Backq, // fd 1 into a capture, until Backq_End
@@ -51,8 +52,9 @@ Inst :: struct {
 	op:     Op,
 	f0, f1: u8,
 	a, b:   u32,
+	line:   u32, // the source line it came from, for errors
 }
-#assert(size_of(Inst) == 12) // upstream's rc_inst
+#assert(size_of(Inst) == 16) // upstream's rc_inst
 
 @(private)
 Code :: struct {
@@ -82,6 +84,7 @@ Compiler :: struct {
 	str:   []u8,
 	nstr:  int,
 	why:   string,
+	line:  u32, // the line of the node being compiled
 }
 
 @(private)
@@ -116,11 +119,12 @@ emit :: proc "contextless" (c: ^Compiler, op: Op, f0: u8 = 0, f1: u8 = 0, a: u32
 		return 0
 	}
 	c.inst[c.n] = Inst {
-		op = op,
-		f0 = f0,
-		f1 = f1,
-		a  = a,
-		b  = b,
+		op   = op,
+		f0   = f0,
+		f1   = f1,
+		a    = a,
+		b    = b,
+		line = c.line,
 	}
 	c.n += 1
 	return c.n - 1
@@ -152,7 +156,7 @@ is_case :: proc "contextless" (c: ^Compiler, n: i32) -> bool {
 		return false
 	}
 	w := &c.nodes[c.nodes[n].a]
-	return w.kind == .Word && w.s == "case"
+	return w.kind == .Word && !w.quoted && w.s == "case" // unquoted, as rc's iscase
 }
 
 // A switch's body as a list of its commands, in order (its Seq chain
@@ -193,6 +197,18 @@ dol_inst :: proc "contextless" (k: Node_Kind) -> Op {
 }
 
 @(private = "file")
+END_CMD :: 200 // a compile item's phase: the command it names has been compiled
+
+@(private = "file")
+is_cmd :: proc "contextless" (k: Node_Kind) -> bool { // a command, not a word
+	#partial switch k {
+	case .Word, .Dol, .Count, .Join, .Sub, .Conc, .Paren, .Backq:
+		return false
+	}
+	return true
+}
+
+@(private = "file")
 compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 	items := &c.r.compiler.items
 	ni := 0
@@ -227,6 +243,29 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 			continue
 		}
 		t := &c.nodes[it.node]
+		if t.line != 0 {
+			c.line = t.line
+		}
+		// As rc's outcode: a command other than if not and a sequence clears
+		// iflast as it starts, and sets it, once compiled, to whether it was an if.
+		if it.phase == END_CMD {
+			c.r.iflast = t.kind == .If
+			continue
+		}
+		if it.phase == 0 && is_cmd(t.kind) && t.kind != .Seq && t.kind != .If_Not {
+			c.r.iflast = false
+			// Room for the command's next phase too, which upstream pushes
+			// unchecked, past its array when this took the last place.
+			if ni + 1 >= CITEMS {
+				c.why = "nested too deeply"
+				return false
+			}
+			push(c, items, &ni, it.node, END_CMD) or_return
+		}
+		if it.phase == 0 && t.kind == .If_Not && !c.r.iflast {
+			c.why = "`if not' does not follow `if(...)'"
+			return false
+		}
 		switch t.kind {
 		case .Word:
 			emit_word(c, t.s)
@@ -445,6 +484,9 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 				again(items, &ni, &it, 1)
 				push(c, items, &ni, t.a, 0) or_return
 			} else if it.phase == 1 {
+				if c.n == it.count {
+					emit(c, .Settrue) // while(): an empty condition is true
+				}
 				it.at = emit(c, .True)
 				again(items, &ni, &it, 2)
 				push(c, items, &ni, t.b, 0) or_return
@@ -550,6 +592,7 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 					push(c, items, &ni, w, 0) or_return
 				}
 			case:
+				emit(c, .Qw) // the subject one word, as rc's
 				emit(c, .Match)
 			}
 		case .Fn: // fn names { body }: the names, Fn, the body inline, Return
@@ -580,14 +623,22 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 			// same room.
 			body := c.r.compiler.body[:]
 			n := flatten(c, t.b, body)
+			if it.phase == 0 && (n == 0 || !is_case(c, body[0])) {
+				c.why = "case missing in switch"
+				break
+			}
 			if it.phase == 0 {
 				emit(c, .Mark)
 				it.cur = 0 // the next command of the body
 				it.at = 0 // the pending Case to patch, + 1 (0: none)
 				it.count = 0 // the Jumps to the end, as a chain through their a's, + 1
-				again(items, &ni, &it, 1)
+				again(items, &ni, &it, 6)
 				push(c, items, &ni, t.a, 0) or_return
 				break
+			}
+			if it.phase == 6 { // the subject is on the stack: one word, as rc's
+				emit(c, .Qw)
+				it.phase = 1
 			}
 			if it.phase == 3 { // a case's patterns are on the stack: its test
 				it.at = emit(c, .Case) + 1
@@ -664,9 +715,12 @@ compile_text :: proc "contextless" (r: ^Rc, text: string, line: u32) -> (code: ^
 	if p.lx.scratch != nil && p.nodes != nil {
 		root := parse(p)
 		incomplete = p.incomplete || p.lx.incomplete
-		if p.why != "" {
-			digits: [str.U64_DIGITS]u8
-			set_error(r, "rc: line ", str.format_u64(digits[:], u64(p.line)), ": ", p.why)
+		if p.why != "" { // as rc's yyerror: file:line: message, which is $status too
+			buf: [96]u8
+			set_error(r, place(&buf, string(r.src[:]), p.line), ": ", p.why)
+			if !incomplete {
+				set_status(r, p.why)
+			}
 		} else {
 			c := Compiler {
 				r     = r,
@@ -694,7 +748,10 @@ compile_text :: proc "contextless" (r: ^Rc, text: string, line: u32) -> (code: ^
 					heap_free(r, raw_data(c.str))
 				}
 			} else {
-				set_error(r, "rc: ", c.why != "" ? c.why : "out of memory")
+				buf: [96]u8
+				why := c.why != "" ? c.why : "out of memory"
+				set_error(r, place(&buf, string(r.src[:]), c.line), ": ", why)
+				set_status(r, why)
 				heap_free(r, raw_data(c.inst))
 				heap_free(r, raw_data(c.str))
 			}

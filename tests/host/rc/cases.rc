@@ -63,3 +63,43 @@ exportx
 for(i in 1 2 3 4 5 6 7 8 9 10) { x=`{echo $i $i $i}; y=$x^-; z=$y(1) }; echo $z
 x=`{echo a b c d e f g}; y=($x $x $x); fn f { echo $y }; f > /dev/null
 echo still
+echo a(b c)
+not echo x
+in
+y=(a b); echo $$y
+y=(a b); $y=1
+x=1; echo for$x
+echo for in not
+x=(a b); if(~ $x 'a b') echo joined
+if(~ () '') echo empty
+if(! ~ ()) echo none
+x=(a b); switch($x){case a; echo A; case 'a b'; echo AB}
+switch(){case ''; echo empty}
+switch(a){echo x; case a; echo A}
+switch(a){case a; echo A; 'case' b; echo B}
+if not echo x
+if(false) echo a; echo mid; if not echo b
+if(false) echo a; if not echo b; if not echo c
+x=y; $x=hello; echo $y
+false; while(){ echo once; exit }
+x=(); y=(); echo a $x^$y b
+x=(); echo a^$x
+x=(1 2 3); y=(a b); echo $x^$y
+x=(a b c); echo $x(0-2) . $x(2x) . $x(3-1) . $x(2-9)
+fn f { echo $1(1) $#1 $#3 }; f a b
+ifs=(: ';'); x=`{echo 'a:b;c d'}; echo $#x
+x=(); $x
+exitwith '' | exitwith 3; echo $status
+exitwith 3 | exitwith ''; echo $status
+fn t { status=('' no) }; if(t) echo first
+fn f { echo F }; f=1 f
+fn g { echo G }; g &
+echo *
+echo */one.c
+echo */nosuch
+if(~ é ?) echo rune
+if(~ b [c-a]) echo reversed
+if(~ é [à-ï]) echo class
+echo data > f; { cat; cat } < f
+cat < nosuchfile
+echo )

@@ -208,12 +208,12 @@ open_file :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, path: string, kind: rc.
 		st = ns.open(&space, path, p9.OREAD, f)
 	} else {
 		// > truncates (devices ignore that) and makes the file if need be, as
-		// rc does; >> writes at its end; <> reads and writes.
+		// rc does; >> writes at its end; <> reads and writes, and makes nothing.
 		mode := kind == .Rdwr ? p9.ORDWR : p9.OWRITE
 		opened := mode
 		opened.trunc = kind == .Write
 		st = ns.open(&space, path, opened, f)
-		if st == .Err_Not_Found {
+		if st == .Err_Not_Found && kind != .Rdwr {
 			st = ns.create(&space, path, 0o644, mode, f)
 		}
 		if st == .Ok && kind == .Append {
@@ -268,6 +268,16 @@ write_out :: proc "contextless" (ctx: rawptr, fd: rc.Fd, which: u32, s: string) 
 			rt.print(s)
 		}
 	}
+}
+
+// Host.exists: whether the path names something, for globbing.
+exists :: proc "contextless" (ctx: rawptr, path: string) -> bool {
+	c, fid, st := ns.walk(&space, path)
+	if st != .Ok {
+		return false
+	}
+	_ = p9.client_clunk(c, fid)
+	return true
 }
 
 dir_buf: [4096]u8
@@ -709,14 +719,18 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 		if s + 1 < n {
 			pipe[0], pipe[1], st = rt.channel_create()
 		}
+		fds := c.fds
+		if own, is := fds[0].(rc.Fd_Inherit); async && is && own.which == 0 {
+			fds[0] = rc.Fd_Closed{} // & reads nothing, as rc's /dev/null
+		}
 		for i in 0 ..< 3 {
 			if st != .Ok {
 				break
 			}
-			if i == 2 && io[1] != vx.HANDLE_NONE && same_as_1(c.fds[2], c.fds[1]) {
+			if i == 2 && io[1] != vx.HANDLE_NONE && same_as_1(fds[2], fds[1]) {
 				io[2], st = rt.handle_dup(io[1], vx.RIGHTS_SAME)
 			} else {
-				io[i], st = stage_io(c.fds[i], i, pipe_in, pipe[0])
+				io[i], st = stage_io(fds[i], i, pipe_in, pipe[0])
 			}
 		}
 		rt.close_all(pipe_in, pipe[0])
@@ -727,15 +741,10 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 			rt.close_all(..io[:])
 		}
 		if st != .Ok {
-			why := "cannot run it"
-			#partial switch st {
-			case .Err_Not_Found:
-				why = "not found"
-			case .Err_Range:
-				why = "argument list too long"
-			}
+			// As rc's: the command's name and why, which is its status.
+			why := st == .Err_Range ? "argument list too long" : p9.error_text(st)
 			// Where the command's own errors would go, as rc writes them.
-			to := c.fds[2]
+			to := fds[2]
 			#partial switch v in to {
 			case rc.Fd_Pipe_Out, rc.Fd_Pipe_In:
 				to = rc.Fd_Inherit{2}
@@ -744,7 +753,7 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 					to = rc.Fd_Inherit{2}
 				}
 			}
-			for part in ([?]string{"rc: ", rc.text(c.argv), ": ", why, "\n"}) {
+			for part in ([?]string{rc.text(c.argv), ": ", why, "\n"}) {
 				write_out(nil, to, 2, part)
 			}
 			_ = append(&ends[s], why)
@@ -777,8 +786,7 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 				_ = rt.handle_close(t)
 			}
 		}
-		set_status("")
-		return pid, true
+		return pid, true // $status as it was, as rc's
 	}
 	defer rt.close_all(..tasks[:n])
 
@@ -821,7 +829,7 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 				running -= 1
 				if p.value != 0 {
 					if info, ist := rt.task_info(tasks[p.key]); ist == .Ok {
-						_ = append(&ends[p.key], vx.exit_string(&info))
+						wait_message(&ends[p.key], &info)
 					}
 				}
 				continue
@@ -846,17 +854,32 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 	if broken {
 		say("rc: write error", "", "\n")
 	}
-	// The commands' exit strings, joined by |, as rc's $status.
-	status_buf: [MAX_STAGES * (vx.ERRMAX + 1)]u8
-	status := str.Buf{buf = status_buf[:]}
-	for &e, s in ends[:n] {
-		if s > 0 {
-			str.write_byte(&status, '|')
-		}
-		str.write_bytes(&status, e[:])
+	// The commands' statuses, as rc's concstatus joins them.
+	status: [MAX_STAGES * (vx.ERRMAX + 1)]u8
+	len_status := 0
+	for &e in ends[:n] {
+		len_status = rc.concstatus(status[:], len_status, string(e[:]))
 	}
-	rc.set_status(&sh, str.to_string(&status))
+	rc.set_status(&sh, string(status[:len_status]))
 	return 0, true
+}
+
+// A task's end as rc's $status has it, into m: the wait message, name pid:
+// exit string, cut at a rune boundary to what an exit string holds; nothing
+// for success.
+wait_message :: proc "contextless" (m: ^[dynamic; vx.ERRMAX]u8, info: ^vx.Task_Summary) {
+	clear(m)
+	exit := vx.exit_string(info)
+	if exit == "" {
+		return
+	}
+	name := str.from_nul_padded(info.name[:])
+	digits: [str.U64_DIGITS]u8
+	_ = append(m, name)
+	_ = append(m, ' ')
+	_ = append(m, str.format_u64(digits[:], info.id))
+	_ = append(m, ": ")
+	_ = append(m, exit[:utf.cut(exit, cap(m) - len(m))])
 }
 
 // --- The shell ---
@@ -864,18 +887,21 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 heap: [4 << 20]u8
 text: [256 * 1024]u8 // a script's, or the lines of a construct still open
 
-// The last $status, as rc exits with it: its words joined, cut to whole runes.
+// The last $status, as rc exits with it: its first word, or nothing when it
+// is true (0s and |s), as rc's Exit; cut to whole runes (ADR-0013).
 exit_status :: proc "contextless" () -> string {
-	@(static) status: [dynamic; vx.ERRMAX]u8
-	clear(&status)
-	for w := rc.get_var(&sh, "status"); w != nil; w = w.next {
-		s := rc.text(w)
-		_ = append(&status, s[:utf.cut(s, cap(status) - len(status))])
-		if w.next != nil && len(status) < cap(status) {
-			_ = append(&status, ' ')
+	w := rc.get_var(&sh, "status")
+	if w == nil {
+		return ""
+	}
+	s := rc.text(w)
+	for c in transmute([]u8)s {
+		if c != '0' && c != '|' {
+			s = s[:utf.cut(s, vx.ERRMAX)]
+			return str.from_nul_padded(transmute([]u8)s) // upstream's exit string is a C string
 		}
 	}
-	return string(status[:])
+	return ""
 }
 
 show_error :: proc "contextless" () {
@@ -899,6 +925,7 @@ shell :: proc() -> string {
 		read_file = read_whole,
 		open      = open_file,
 		close     = close_file,
+		exists    = exists,
 	}
 	if !rc.init(&sh, heap[:], host) {
 		return "no memory"
@@ -908,6 +935,7 @@ shell :: proc() -> string {
 	if args := rt.args(); len(args) > 0 { // rc FILE ARG ...: a script, its arguments in $*, its name in $0
 		rc.set_var(&sh, "*", ..args[1:])
 		rc.set_var(&sh, "0", args[0])
+		rc.source(&sh, args[0]) // its errors at file:line
 		n, ok := read_whole(nil, args[0], text[:])
 		if !ok {
 			say("rc: ", args[0], ": cannot read it\n")

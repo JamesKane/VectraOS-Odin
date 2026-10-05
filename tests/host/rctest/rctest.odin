@@ -18,7 +18,7 @@ import "vx:str"
 // Upstream's struct rc, which its heap holds too (rc_new takes it from the
 // front): a heap this much smaller is the same heap to the allocator, so the
 // port runs out of memory where upstream does.
-C_RC_SIZE :: 17856
+C_RC_SIZE :: 17936
 
 FILES :: 8
 
@@ -54,6 +54,7 @@ callbacks :: proc(h: ^Host) -> rc.Host {
 		builtin = host_builtin,
 		open = open_fake,
 		close = close_fake,
+		exists = exists_fake,
 	}
 }
 
@@ -199,17 +200,20 @@ emit :: proc(h: ^Host, fds: ^[rc.FDS]rc.Fd, which: int, s: string, pipe: ^[dynam
 	}
 }
 
+// The most of a pipeline's $status the hosts keep.
+STATUS_MAX :: 8191
+
 // A pipeline, its stages run in turn; $status as the shell makes it, each stage's
-// joined by |.
+// joined by rc.concstatus.
 run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: bool) -> (pid: u64, ok: bool) {
 	context = runtime.default_context()
 	h := (^Host)(ctx)
 	pipes: [2][dynamic]u8
-	status: [dynamic]u8
+	status_buf: [STATUS_MAX]u8
+	status_len := 0
 	defer {
 		delete(pipes[0])
 		delete(pipes[1])
-		delete(status)
 	}
 	putf(&h.log, "run %d", len(stages))
 	put(&h.log, async ? " &\n" : "\n")
@@ -284,18 +288,16 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 		case:
 			st = "not found"
 		}
-		if i > 0 {
-			append(&status, '|')
-		}
-		append(&status, st)
+		status_len = rc.concstatus(status_buf[:], status_len, st)
 	}
 	if async {
 		pid = 42
 	}
+	status := string(status_buf[:status_len])
 	put(&h.log, "  status ")
-	esc(&h.log, string(status[:]))
+	esc(&h.log, status)
 	put(&h.log, "\n")
-	rc.set_status(r, string(status[:]))
+	rc.set_status(r, status)
 	return pid, true
 }
 
@@ -361,6 +363,21 @@ readdir_fake :: proc "contextless" (ctx: rawptr, path: string, g: ^rc.Glob) -> b
 		return true
 	}
 	return false
+}
+
+// Whether a path exists: the directory's names, and the files written.
+exists_fake :: proc "contextless" (ctx: rawptr, path: string) -> bool {
+	context = runtime.default_context()
+	h := (^Host)(ctx)
+	NAMES :: [?]string{"a.c", "b.c", "x.h", ".hidden", "dir", "dir/one.c", "dir/two.txt"}
+	found := file_of(h, path, false) >= 0
+	for name in NAMES {
+		found = found || name == path
+	}
+	put(&h.log, "exists ")
+	esc(&h.log, path)
+	putf(&h.log, " %d\n", int(found))
+	return found
 }
 
 read_file_fake :: proc "contextless" (ctx: rawptr, path: string, buf: []u8) -> (n: int, ok: bool) {

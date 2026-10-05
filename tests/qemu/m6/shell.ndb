@@ -1,7 +1,8 @@
 # tests/qemu/shell.ndb: M2's exit test (docs/04 §5): a shell in a namespace,
 # commands in their own namespaces, /proc, pipes, and a console driver killed
 # from the shell and restarted by svcd, after which the shell carries on; and
-# $status, the commands' exit strings joined by |, as rc keeps it (ADR-0010).
+# $status, each command's wait message (name pid: exit string) joined by |,
+# as 9front's rc keeps it (ADR-0010, M6 step 6a6a).
 
 scenario=shell timeout=30
 expect="svcd: started rc (task "
@@ -25,11 +26,11 @@ prompt="vx% "
 send="echo still here"
 line="still here"
 prompt="vx% "
-send="ls /nothing | tail -1; echo status=$status"
+send="ls /nothing | tail -1; if(~ $status 'ls '*': error|') echo status ok"
 expect="ls: /nothing: file does not exist"
-line="status=error|"
+line="status ok"
 prompt="vx% "
-send="bind /nothing /n; echo bind=$status; echo ok; echo after=$status"
+send="bind /nothing /n; echo 'bind='$status; echo ok; echo 'after='$status"
 line="bind=file does not exist"
 line="ok"
 line="after="
