@@ -32,7 +32,8 @@ import "core:strings"
 // it, so `odin check` of a library needs nothing built.
 
 // What a native port compiles with on an architecture, before its cflags:
-// freestanding, static and not PIC, as Odin's objects are. No stack
+// userland's baseline (tools.odin); freestanding, static and not PIC, as
+// Odin's objects are. No stack
 // protector: Odin programs define no __stack_chk_guard. No -g: upstream
 // builds its native ports without debug information (build.c's user flags
 // and the ports' cflags carry none). ACPICA's would be 1.8 MB of bus-acpi,
@@ -64,7 +65,7 @@ cobj_load :: proc(name: string) -> (p: Port, ok: bool) {
 // The port's archive for an architecture, built unless the cache has it.
 cobj_archive :: proc(name: string, a: ^Arch) -> (lib: string, ok: bool) {
 	p := cobj_load(name) or_return
-	return cobj_build(&p, a.name, concat({CLANG, fmt.tprintf("--target=%s", a.clang_target)}, COBJ_TARGET_FLAGS))
+	return cobj_build(&p, a.name, concat({CLANG, fmt.tprintf("--target=%s", a.clang_target), a.user_march}, COBJ_TARGET_FLAGS))
 }
 
 // The port's archive for this machine, built unless the cache has it.

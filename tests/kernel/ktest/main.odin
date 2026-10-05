@@ -2396,6 +2396,12 @@ test_tls :: proc "contextless" () {
 // --- FP/SIMD state, kept per thread (ADR-0004) ---
 
 when ODIN_ARCH == .amd64 {
+	foreign _ {
+		vx_avx512_double :: proc "c" (z: ^[8]u64) --- // arch/x86_64/avx512.S
+	}
+}
+
+when ODIN_ARCH == .amd64 {
 	FP_CTL_DEFAULT :: u32(0x1f80)
 	FP_CTL_ZERO :: u32(0x7f80) // round toward zero
 } else {
@@ -2452,6 +2458,20 @@ test_fp :: proc "contextless" () {
 	check(vst == .Ok && cst == .Ok && got == 0xc3c3_c3c3_c3c3_c3c3 && ctl == FP_CTL_ZERO)
 	rt.fp_probe_put(0, FP_CTL_DEFAULT)
 	rt.close_all(c, v)
+	// What is above the baseline (M6 step 6c3): AVX-512 runs where
+	// rt.cpu_has says so (the kernel's XCR0 has its state: KVM on a Zen 5;
+	// QEMU's TCG has no AVX-512), and SVE is never offered, as its state is
+	// not saved.
+	when ODIN_ARCH == .amd64 {
+		if rt.cpu_has(.Avx512) {
+			z := [8]u64{1, 2, 3, 4, 5, 6, 7, 8}
+			vx_avx512_double(&z)
+			check(z[0] == 2 && z[7] == 16)
+		}
+		check(!rt.cpu_has(.Avx512) || rt.cpu().xfeatures & 0xe0 == 0xe0)
+	} else {
+		check(!rt.cpu_has(.Sve))
+	}
 	// And floating point itself, compiled: 1/3 rounds differently by mode.
 	third, three := 1.0, 3.0
 	q := intrinsics.volatile_load(&third) / intrinsics.volatile_load(&three)

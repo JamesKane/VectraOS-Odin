@@ -100,6 +100,12 @@ Arch :: struct {
 	odin_target:       string,
 	kernel_odin_flags: []string, // the kernel's only, beyond IR_ODIN_FLAGS
 	kernel_llc_flags:  []string,
+	// User code's, the kernel's never: userland's baseline (below), for odin,
+	// for llc (the IR does not carry odin's choice, so llc is told the same),
+	// and for clang.
+	user_odin_flags:   []string,
+	user_llc_flags:    []string,
+	user_march:        string,
 	clang_target:      string,
 	limine:            string, // the target= in ports/limine/port.ndb
 	loader:            string, // the loader's name on the ESP
@@ -109,6 +115,14 @@ Arch :: struct {
 	vars:              string, // its variable store, the second pflash (snapshot=on: never written)
 }
 
+// Userland's baseline (upstream's M6 step 6c3, decided there 2026-10-05):
+// every user program, native and POSIX, musl, compiler-rt's builtins, the
+// back end and the ports are compiled for x86-64-v3 (AVX2, FMA, BMI2, MOVBE;
+// Haswell and Zen on) or armv8.2-a, which every tiered machine has and
+// QEMU's TCG emulates. What is above it, AVX-512 and the rest, a program
+// chooses at run time (rt.cpu_has). The kernel stays at each architecture's
+// base, x86-64 (SSE2) and armv8-a with NEON (ADR-0004): it saves the user's
+// vector state at every entry, and its own never grows with the user's.
 ARCHES := [Arch_Kind]Arch {
 	.X86_64 = {
 		kind = .X86_64,
@@ -116,6 +130,9 @@ ARCHES := [Arch_Kind]Arch {
 		odin_target = "freestanding_amd64_sysv",
 		kernel_odin_flags = {"-disable-red-zone"},
 		kernel_llc_flags = {"-code-model=kernel"},
+		user_odin_flags = {"-microarch:x86-64-v3"},
+		user_llc_flags = {"-mcpu=x86-64-v3"},
+		user_march = "-march=x86-64-v3",
 		clang_target = "x86_64-unknown-none-elf",
 		limine = "uefi-x86_64",
 		loader = "BOOTX64.EFI",
@@ -128,6 +145,9 @@ ARCHES := [Arch_Kind]Arch {
 		kind = .AArch64,
 		name = "aarch64",
 		odin_target = "freestanding_arm64",
+		user_odin_flags = {"-target-features:v8.2a"},
+		user_llc_flags = {"-mattr=+v8.2a"},
+		user_march = "-march=armv8.2-a",
 		clang_target = "aarch64-unknown-none-elf",
 		limine = "uefi-aarch64",
 		loader = "BOOTAA64.EFI",

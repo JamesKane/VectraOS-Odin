@@ -96,7 +96,7 @@ build_program :: proc(a: ^Arch, mode: Mode, p: Program) -> (elf: string, ok: boo
 	make_dirs(filepath.dir(elf)) or_return
 	fmt.eprintfln("  PROG  %s %s", p.name, a.name)
 	out := fmt.tprintf("%s/prog/%s", out_dir(a, mode), p.name)
-	objs := compile_ir(a, mode, p.dir, fmt.tprintf("lib/rt/arch/%s", a.name), out, nil, nil) or_return
+	objs := compile_ir(a, mode, p.dir, fmt.tprintf("lib/rt/arch/%s", a.name), out, a.user_odin_flags, a.user_llc_flags) or_return
 	extra := program_asm(a, p, out) or_return
 	append(&objs, ..extra[:])
 

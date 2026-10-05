@@ -80,19 +80,20 @@ posix_target :: proc(a: ^Arch) -> string {
 	return fmt.tprintf("--target=%s-vectra-unknown-musl", a.name)
 }
 
-// The target and include path of everything compiled against musl. The
-// triple defines neither __linux__ nor __unix__.
+// The target, userland's baseline (tools.odin) and include path of everything
+// compiled against musl. The triple defines neither __linux__ nor __unix__.
 posix_flags :: proc(a: ^Arch) -> []string {
-	c := cmd_make(posix_target(a), "-nostdinc", "-isystem", CLANG_RESOURCE_INCLUDE)
+	c := cmd_make(posix_target(a), a.user_march, "-nostdinc", "-isystem", CLANG_RESOURCE_INCLUDE)
 	append(&c, "-isystem", fmt.tprintf("third_party/musl/arch/%s", a.name), "-isystem", "third_party/musl/arch/generic")
 	append(&c, "-isystem", fmt.tprintf("ports/musl/generated/%s/include", a.name), "-isystem", "third_party/musl/include")
 	return c[:]
 }
 
-// musl's own compile: the target, port.ndb's flags, then the Makefile's
-// include path (CFLAGS_ALL) with the back end's syscall_arch.h first.
+// musl's own compile: the target and the baseline, port.ndb's flags, then
+// the Makefile's include path (CFLAGS_ALL) with the back end's
+// syscall_arch.h first.
 musl_flags :: proc(musl: ^Port, a: ^Arch) -> []string {
-	c := cmd_make(posix_target(a))
+	c := cmd_make(posix_target(a), a.user_march)
 	append(&c, ..words(val(musl.head, "cflags")))
 	append(&c, fmt.tprintf("-I%s/arch/generic", BACKEND_PKG))
 	append(&c, fmt.tprintf("-I%s/arch/%s", musl.src, a.name), fmt.tprintf("-I%s/arch/generic", musl.src))
@@ -401,7 +402,7 @@ build_backend :: proc(musl: ^Port, a: ^Arch, mode: Mode, override: string) -> (b
 	case has_backend():
 		out := fmt.tprintf("%s/musl-vx", out_dir(a, mode))
 		fmt.eprintfln("  VX    libc back end %s", a.name)
-		objs := compile_ir(a, mode, BACKEND_PKG, fmt.tprintf("%s/arch/%s", BACKEND_PKG, a.name), fmt.tprintf("%s/pkg", out), BACKEND_ODIN_FLAGS, nil) or_return
+		objs := compile_ir(a, mode, BACKEND_PKG, fmt.tprintf("%s/arch/%s", BACKEND_PKG, a.name), fmt.tprintf("%s/pkg", out), concat(BACKEND_ODIN_FLAGS, a.user_odin_flags), a.user_llc_flags) or_return
 		// vx:rt's assembly (its system call, its note entry), which the
 		// package's own programs get from build_program.
 		rt_asm := tree_files(fmt.tprintf("lib/rt/arch/%s", a.name)) or_return

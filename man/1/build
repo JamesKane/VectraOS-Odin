@@ -29,6 +29,7 @@ After that, whenever `build.c` or a source it includes (`lib/vx-ndb`, `lib/vx-sh
 Every first-party component is one translation unit, so there is no dependency tracking: each command builds again what it names.
 Vendored ports (`ports/`, built from `third_party/`) are built once and cached under a hash of their inputs.
 The toolchain is pinned (ADR-0001): before building, `build` checks that `/usr/bin/clang`, `ld.lld`, `llvm-objcopy` and `llvm-ar` print exactly the versions it names, and stops if one does not.
+User programs, native and POSIX, and the ports they use are compiled for userland's baseline, `-march=x86-64-v3` and `-march=armv8.2-a` (M6 step 6c3); what is above it, AVX-512 or Arm's crypto and dot-product instructions, a program chooses at run time with vx-rt's `vx_cpu_has`. The kernel is compiled for general registers alone.
 Builds are reproducible: every time written into an output is `SOURCE_DATE_EPOCH`, which, when the environment does not set it, is the time of the last commit (1980-01-01 without git).
 
 An architecture, <arch>, is `x86_64` or `aarch64`.
