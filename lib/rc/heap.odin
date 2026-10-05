@@ -167,8 +167,15 @@ Var :: struct {
 	// Its name follows; upstream's is a C string, so a name is only ever
 	// read up to its first NUL.
 	name_len: u32,
+	fnsrc:    ^u8, // and its body's text, { to }, for whatis and export: in the heap, NUL-terminated
 }
-#assert(size_of(Var) == 32) // upstream's rc_var
+#assert(size_of(Var) == 40) // upstream's rc_var
+
+// A function's body's text, { to }, or "" if it kept none.
+@(private)
+var_fnsrc :: proc "contextless" (v: ^Var) -> string {
+	return v.fnsrc != nil ? c_name(string(payload(v.fnsrc))) : ""
+}
 
 @(private)
 var_name :: proc "contextless" (v: ^Var) -> string {

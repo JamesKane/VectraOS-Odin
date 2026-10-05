@@ -19,7 +19,7 @@ import "vx:str"
 // Upstream's struct rc, which its heap holds too (rc_new takes it from the
 // front): a heap this much smaller is the same heap to the allocator, so the
 // port runs out of memory where upstream does.
-C_RC_SIZE :: 19104
+C_RC_SIZE :: 19152
 
 FILES :: 8
 
@@ -441,6 +441,22 @@ host_builtin :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, argv: ^rc.Word, argc
 		fd_desc(&h.log, fd)
 	}
 	put(&h.log, "\n")
+	if c_str(rc.text(argv)) == "note" { // note N: rc.trap, as the shell's note handler calls it
+		sig: u32
+		if argc > 1 {
+			for c in transmute([]u8)rc.text(argv.next) {
+				if c < '0' || c > '9' || sig >= 1000 {
+					break
+				}
+				sig = sig * 10 + u32(c - '0')
+			}
+		}
+		if sig < len(rc.Sig) {
+			rc.trap(r, rc.Sig(sig))
+		}
+		rc.set_status(r, "")
+		return true
+	}
 	if c_str(rc.text(argv)) != "exportx" {
 		return false
 	}
@@ -459,6 +475,13 @@ host_builtin :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, argv: ^rc.Word, argc
 		for w := val; w != nil && len(h.exported) + w.len + 4 < 256; w = w.next {
 			putf(&h.exported, "x=%s;", c_str(rc.text(w)))
 		}
+	}
+	fns := rc.fns(r)
+	for name, src in rc.next_fn(&fns) {
+		put(&h.log, "  fn ")
+		esc(&h.log, name)
+		esc(&h.log, src)
+		put(&h.log, "\n")
 	}
 	rc.set_status(r, "")
 	return true

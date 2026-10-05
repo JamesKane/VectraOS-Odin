@@ -1,6 +1,7 @@
 # tests/qemu/rc.ndb: the shell's language as Plan 9 rc's (M4 step 7a; rc's
 # start, -c and -x, rcmain's $path and $home, and a here document typed at the
-# prompt, M6 step 6a6b), in the running
+# prompt, M6 step 6a6b; whatis, a function exported to a child, exec, wait and
+# sigexit, step 6a6c), in the running
 # system: lists, ^, control flow, functions, `{...} from a program, redirections
 # into tmpfs and back, globbing through the namespace, a construct continued
 # over lines, and a script run with arguments, `rc FILE ARG ...`.
@@ -64,6 +65,20 @@ send="cat <<EOF"
 send="here $home"
 send="EOF"
 expect="here /"
+prompt="% "
+send="fn greet {echo hello $1}; whatis greet; rc -c 'greet bob'"
+line="fn greet {echo hello $1}"
+line="hello bob"
+prompt="% "
+send="rc -c 'exec echo replaced'; echo $status"
+line="replaced"
+prompt="% "
+send="echo background &; wait; echo waited"
+expect="waited"
+prompt="% "
+send="rc -c 'fn sigexit {echo bye}; echo hi'"
+line="hi"
+line="bye"
 fail="vx: panic"
 fail="FAILED"
 fail="syntax error"

@@ -67,6 +67,8 @@ Token :: struct {
 	here:   u8, // a here document's tag: its place in the lexer's heres, plus 1
 	s:      string, // a word's text, unquoted, its glob characters marked (GLOB before them)
 	line:   u32,
+	at:     int, // where it starts in the text
+	end:    int, // and where it ends
 }
 
 @(private)
@@ -297,6 +299,7 @@ lex_raw :: proc "contextless" (lx: ^Lexer) -> (t: Token) {
 	}
 	t.adj = lx.p == start
 	t.line = lx.line
+	t.at = lx.p
 	if lx.p >= end {
 		return
 	}
@@ -471,6 +474,7 @@ lex :: proc "contextless" (lx: ^Lexer) -> Token {
 	}
 	name, tag := lx.after_dollar, lx.want_tag
 	t := lex_raw(lx)
+	t.end = lx.p
 	if tag && t.kind == .Word { // a here document's tag: its body is read when the line ends, as rc's
 		lx.want_tag = false
 		if len(lx.heres) == HERES {

@@ -6,18 +6,20 @@
 // result, error and $status) is upstream's.
 //
 // The inputs: upstream's fuzz corpus; seeds (the corpus, upstream's test
-// scripts in cases.rc, more in xcheck.rc, and tests/user/rctest.rc); and
-// inputs the mutator makes from them. Each at upstream's heap sizes from 4 MiB
-// down to 64 KiB, where scripts run out of memory as they compile or run.
-// The digests are those of upstream's rc.c at its M6 step 6a6b (57e7c3a),
-// whose host has exists and read_line too (logged as the others are; its
-// standard input is rctest's STDIN), and joins a pipeline's statuses with
-// rc_concstatus. The seeds have rc_test.c's 9front cases: those of one line
-// in cases.rc, the others in blocks.rc. Two differences are kept out of the
-// comparison: the oracle's rc.c is patched to call no close as a here
-// document's redirection is undone (upstream closes handle 0), and a
-// pipeline stage's here document is not read (upstream's text has been
-// freed by then); api_test checks both.
+// scripts in cases.rc and blocks.rc, more in xcheck.rc, and
+// tests/user/rctest.rc); and inputs the mutator makes from them. Each at
+// upstream's heap sizes from 4 MiB down to 64 KiB, where scripts run out of
+// memory as they compile or run.
+//
+// The digests are those of upstream's rc.c at its M6 step 6a6c (f33715d;
+// 3cb6968 is the same rc.c). Its host has exists, read_line (its standard
+// input rctest's STDIN) and two builtins more: note N calls rc_trap, and
+// exportx lists the functions too; each callback is logged as the others
+// are, and a pipeline's statuses are joined by rc_concstatus. Two
+// differences are kept out of the comparison: the oracle's rc.c is patched
+// to call no close as a here document's redirection is undone (upstream
+// closes handle 0), and a pipeline stage's here document is not read
+// (upstream's text has been freed by then); api_test checks both.
 package rc_test
 
 import "core:testing"
@@ -84,12 +86,12 @@ Fold :: struct {
 test_seeds :: proc(t: ^testing.T) {
 	m := mutator()
 	defer rt.mutator_destroy(&m)
-	testing.expect_value(t, len(m.seeds), 188)
+	testing.expect_value(t, len(m.seeds), 209)
 	folds := []Fold {
-		{BIG_HEAP, false, 0x06481b601bfccc9e},
-		{MID_HEAP, false, 0x22030d5c3dcedc70},
-		{SMALL_HEAP, false, 0x5d2731f396d6fa8f},
-		{SMALL_HEAP, true, 0x4fddde80b9152394},
+		{BIG_HEAP, false, 0x9ee6b4e90d255fa3},
+		{MID_HEAP, false, 0x88a6d41756bba011},
+		{SMALL_HEAP, false, 0x9ecfe7440df5cc88},
+		{SMALL_HEAP, true, 0xb81f236671177567},
 	}
 	for f in folds {
 		b := rt.bench_make(f.heap, f.minimal)
@@ -110,11 +112,11 @@ test_mutated :: proc(t: ^testing.T) {
 	m := mutator()
 	defer rt.mutator_destroy(&m)
 	folds := []Fold {
-		{BIG_HEAP, false, 0x81a1c13cd792a527},
-		{MID_HEAP, false, 0xfa3333df2225b61f},
-		{SMALL_HEAP, false, 0xeb9920ac6714d842},
-		{FUZZ_HEAP, true, 0x1bb6d9185c032f25},
-		{SMALL_HEAP, true, 0xeacada1deeb78d78},
+		{BIG_HEAP, false, 0xcbbb6627171ebd02},
+		{MID_HEAP, false, 0x6fe271635936af10},
+		{SMALL_HEAP, false, 0x95cbd01cf8b0ed45},
+		{FUZZ_HEAP, true, 0xa1ffb2fd140e029d},
+		{SMALL_HEAP, true, 0x2e7dff460f2a6e58},
 	}
 	text: [dynamic]u8
 	defer delete(text)

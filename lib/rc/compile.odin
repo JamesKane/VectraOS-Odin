@@ -33,7 +33,7 @@ Op :: enum u8 {
 	Bang, // $status negated
 	For, // a: where to go when the list on top is used up; the next word into the frame's newest local
 	Popm, // drops the top list
-	Fn, // a: where its body ends; the top list names it (them); the body follows
+	Fn, // a: where its body ends, b: its text's place in the strings, plus 1; the top list names it (them); the body follows
 	Delfn, // the top list's functions removed
 	Return, // the frame ends
 	Qw, // the top list joined by spaces into one word ("" for none): a subject of ~ or switch
@@ -660,7 +660,14 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 				} else if t.b == NONE {
 					emit(c, .Delfn)
 				} else {
-					it.at = emit(c, .Fn)
+					src: u32 // its text, in the strings, plus 1 (0: none kept)
+					if len(t.s) != 0 && len(c.str) - c.nstr >= len(t.s) + 1 {
+						copy(c.str[c.nstr:], t.s)
+						c.str[c.nstr + len(t.s)] = 0
+						src = u32(c.nstr) + 1
+						c.nstr += len(t.s) + 1
+					}
+					it.at = emit(c, .Fn, b = src)
 					again(items, &ni, &it, 2)
 					push(c, items, &ni, t.b, 0) or_return
 				}

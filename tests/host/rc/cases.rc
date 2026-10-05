@@ -119,3 +119,22 @@ eval 'y=5'; echo $y
 eval 'echo )'
 . -i '#d/0'
 . '#d/0'
+false; exit
+exit a b
+fn f { shift 2; echo $* }; f a b c d
+fn f { shift x; echo $* }; f a b
+shift 1 2; echo $status
+fn echo { builtin echo wrapped $* }; echo hi; fn echo
+builtin
+exec
+x=(a 'b c'); y=1; whatis x y
+fn g {echo  G}; whatis g
+whatis shift
+whatis nosuchthing; echo $status
+path=(dir); whatis one.c; path=()
+whatis
+fn g {echo  G}; exportx; fn g
+fn sigexit { echo bye }; echo before; exit
+fn sigint { echo caught }; note 2; echo next
+fn sighup { echo hup }; note 1; echo after; note 1; note 1; echo end
+note 3; echo never

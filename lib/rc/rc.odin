@@ -42,6 +42,7 @@
 // variables to a program it walks rc.vars/rc.next_var.
 package rc
 
+import "base:intrinsics"
 import "vx:str"
 
 FDS :: 10 // descriptors 0 to 9, as rc's >[n]
@@ -140,6 +141,32 @@ Host :: struct {
 	// its newline with it, into buf: its length, or 0 at the end or on an
 	// error. Optional: without it, standard input is empty.
 	read_line: proc "contextless" (ctx: rawptr, buf: []u8) -> int,
+	// The host's builtins' names, for whatis.
+	builtin_names: []string,
+}
+
+// rc's notes, by its signal functions' names (rc's Signame): what trap takes.
+Sig :: enum u8 {
+	Exit, // sigexit: run once, as the shell exits (sigexit)
+	Hup, // sighup
+	Int, // sigint
+	Quit, // sigquit
+	Alrm, // sigalrm
+	Kill, // sigkill
+	Fpe, // sigfpe
+	Term, // sigterm
+}
+
+@(private)
+SIG_NAMES := [Sig]string {
+	.Exit = "sigexit",
+	.Hup  = "sighup",
+	.Int  = "sigint",
+	.Quit = "sigquit",
+	.Alrm = "sigalrm",
+	.Kill = "sigkill",
+	.Fpe  = "sigfpe",
+	.Term = "sigterm",
 }
 
 // What run made of a text.
@@ -200,6 +227,11 @@ Rc :: struct {
 	// the host sets them from its arguments before it runs anything.
 	flag:     [128]bool,
 	rdcode:   ^Code, // the code a reading frame runs: one Rdcmds
+	// Notes waiting for their functions, by Sig (rc's trap): a note handler
+	// adds to them, so they are read and written as volatile.
+	trap:     [Sig]u32,
+	ntrap:    u32,
+	trapped:  bool, // sigexit has run, as rc's
 	err:      [dynamic; ERR_MAX]u8, // the last error, for the host to show
 }
 
@@ -292,6 +324,9 @@ run :: proc "contextless" (r: ^Rc, text: string) -> Result {
 		return .Failed
 	}
 	execute(r, base)
+	if r.exiting {
+		sigexit(r) // as rc's Xexit: sigexit first, once
+	}
 	for u32(len(r.frames)) > base { // after an error or exit: what was running
 		pop_frame(r)
 	}
@@ -316,6 +351,70 @@ run :: proc "contextless" (r: ^Rc, text: string) -> Result {
 		return .Incomplete
 	}
 	return r.syntax ? .Syntax : .Ok
+}
+
+// Runs sigexit, once, as rc does when it exits: the host calls it at its end
+// too (the end of its input, or an error that ends it).
+sigexit :: proc "contextless" (r: ^Rc) {
+	v := gvar_find(r, "sigexit", false)
+	if r.trapped || v == nil || v.fn == nil {
+		return
+	}
+	r.trapped = true
+	exiting := r.exiting
+	r.exiting = false
+	r.failed = false
+	base := u32(len(r.frames))
+	star := new_local(r, "*", copy_words(r, get_var(r, "*")))
+	if push_frame(r, v.fn, v.fn_pc, star) {
+		execute(r, base)
+	}
+	for u32(len(r.frames)) > base {
+		pop_frame(r)
+	}
+	r.exiting = r.exiting || exiting
+}
+
+// A note for rc, from the host's note handler: its function runs before the
+// next instruction (rc's notifyf). An interrupt is counted once until it has
+// run; .Exit is not a note.
+trap :: proc "contextless" (r: ^Rc, sig: Sig) {
+	if sig == .Exit || (sig == .Int && intrinsics.volatile_load(&r.trap[.Int]) != 0) {
+		return
+	}
+	intrinsics.volatile_store(&r.trap[sig], intrinsics.volatile_load(&r.trap[sig]) + 1)
+	intrinsics.volatile_store(&r.ntrap, intrinsics.volatile_load(&r.ntrap) + 1)
+}
+
+// Each function, for the host to export: its name and its body's text.
+//
+//	it := rc.fns(&sh)
+//	for name, src in rc.next_fn(&it) { ... }
+Fn_Iterator :: struct {
+	r:      ^Rc,
+	bucket: int,
+	v:      ^Var,
+}
+
+fns :: proc "contextless" (r: ^Rc) -> Fn_Iterator {
+	return {r = r, v = r.vars[0]}
+}
+
+next_fn :: proc "contextless" (it: ^Fn_Iterator) -> (name, src: string, ok: bool) {
+	for {
+		for it.v == nil {
+			it.bucket += 1
+			if it.bucket >= VARS {
+				return "", "", false
+			}
+			it.v = it.r.vars[it.bucket]
+		}
+		v := it.v
+		it.v = v.next
+		if v.fn != nil {
+			return var_name(v), v.fnsrc != nil ? var_fnsrc(v) : "{}", true
+		}
+	}
 }
 
 // Where the code run next comes from, for errors (file:line): a script's

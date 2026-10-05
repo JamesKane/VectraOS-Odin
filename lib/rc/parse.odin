@@ -87,7 +87,7 @@ Frame_Kind :: enum u8 {
 	While_Cond, // while ( ... )
 	Switch_Wait, // switch word: its { next; a: the word
 	Switch_Body, // a: the subject
-	Fn_Body, // a: the names
+	Fn_Body, // a: the names; c: where its { is in the text
 	Backq_Body, // `{ ... }; b: the ifs words, or none
 	Backq_Wait, // `word: its { next; a: the word
 	Prefix, // op, prec; a, b, fd0, fd1, rkind: what it holds
@@ -138,6 +138,7 @@ PVALS :: 256
 @(private)
 Parser :: struct {
 	lx:         Lexer,
+	last_end:   int, // where the last token taken ends: a function body's text ends there
 	look:       [2]Token,
 	nlook:      u32,
 	nodes:      []Node,
@@ -150,7 +151,7 @@ Parser :: struct {
 }
 // Upstream's parser takes this much of the heap; this one lives in as much.
 @(private)
-PARSER_BYTES :: 8720
+PARSER_BYTES :: 8800
 #assert(size_of(Parser) <= PARSER_BYTES)
 
 @(private = "file")
@@ -179,6 +180,7 @@ take :: proc "contextless" (p: ^Parser) -> Token {
 	p.look[0] = p.look[1]
 	p.nlook -= 1
 	p.line = t.line
+	p.last_end = t.end
 	return t
 }
 
@@ -426,8 +428,12 @@ list_done :: proc "contextless" (p: ^Parser) -> State {
 	case .Switch_Body:
 		_ = push_val(p, node_new(p, .Switch, up.a, list.a, NONE))
 		return .After_Cmd
-	case .Fn_Body:
-		_ = push_val(p, node_new(p, .Fn, up.a, list.a, NONE))
+	case .Fn_Body: // its body's text kept, { to }, for whatis and export (rc's fnstr)
+		n := node_new(p, .Fn, up.a, list.a, NONE)
+		if n != NONE {
+			p.nodes[n].s = p.lx.text[up.c:max(p.last_end, int(up.c))] // the } just taken ends it
+		}
+		_ = push_val(p, n)
 		return .After_Cmd
 	case .Backq_Body:
 		_ = push_val(p, node_new(p, .Backq, list.a, up.b, NONE))
@@ -688,8 +694,8 @@ collect :: proc "contextless" (p: ^Parser) -> State {
 	case .Fn_Names:
 		_ = pop(p)
 		if t.kind == .Lbrace {
-			_ = take(p)
-			_ = push(p, {kind = .Fn_Body, a = done.a})
+			lb := take(p)
+			_ = push(p, {kind = .Fn_Body, a = done.a, c = i32(lb.at)})
 			_ = push(p, {kind = .List, term = .Rbrace, a = NONE})
 			return .Cmd
 		}

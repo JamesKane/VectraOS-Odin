@@ -118,6 +118,12 @@ usage :: proc "contextless" (text: string) {
 // Host.builtin: true if argv's first word was one, which then ran, its
 // messages to its own descriptor 2.
 builtin :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, argv: ^rc.Word, argc: u32, fds: ^[rc.FDS]rc.Fd) -> bool {
+	switch rc.text(argv) {
+	case "exec":
+		return exec_builtin(argv, fds)
+	case "wait":
+		return wait_builtin(argv, int(argc))
+	}
 	errors_to = &fds[2]
 	defer errors_to = nil
 	return builtin_run(argv, int(argc))
@@ -478,6 +484,47 @@ export_var :: proc "contextless" (rec: ^ndb.Writer, name: string, val: ^rc.Word)
 	return true
 }
 
+// A function, exported as rc does: fn#name, its text `fn name {body}`.
+export_fn :: proc "contextless" (rec: ^ndb.Writer, name, src: string) {
+	if 2 * len(name) + len(src) + 16 > len(env_buf) { // too long to pass: the spawn is refused, not given less
+		rec.failed = true
+		return
+	}
+	env := str.Buf{buf = env_buf[:]}
+	str.write_string(&env, "fn#")
+	str.write_string(&env, name)
+	str.write_string(&env, "=fn ")
+	str.write_string(&env, name)
+	str.write_byte(&env, ' ')
+	str.write_string(&env, src)
+	ndb.put(rec, "env", str.to_string(&env))
+	_ = ndb.end(rec)
+}
+
+// The functions the shell was given (fn#name), defined, as rcmain's loop over
+// /env/fn#* does; not with -p. $status is kept as it was.
+import_fns :: proc "contextless" () {
+	rd := ndb.Reader{src = rt.spawn.text, scratch = env_scratch[:]}
+	rec: ndb.Record
+	for ndb.next(&rd, &rec) == .Record {
+		e := ndb.get(&rec, "env") or_continue
+		eq := str.index_byte(e, '=')
+		if eq < 4 || !str.has_prefix(e, "fn#") {
+			continue
+		}
+		kept: [4096]u8
+		words: [dynamic; 64]string
+		at := 0
+		for w := rc.get_var(&sh, "status"); w != nil && len(words) < cap(words); w = w.next {
+			n := copy(kept[at:], rc.text(w))
+			_ = append(&words, string(kept[at:][:n]))
+			at += n
+		}
+		_ = rc.run(&sh, e[eq + 1:])
+		rc.set_var(&sh, "status", ..words[:])
+	}
+}
+
 // The environment the shell was given, as variables (rc's lists, split at \x01).
 env_words: [dynamic; CHILD_MAX_ARGS]string
 env_scratch: [vx.CHANNEL_MAX_BYTES]u8
@@ -489,6 +536,9 @@ import_env :: proc "contextless" () {
 		e := ndb.get(&rec, "env") or_continue
 		eq := str.index_byte(e, '=')
 		if eq <= 0 || eq >= 64 {
+			continue
+		}
+		if eq > 3 && str.has_prefix(e, "fn#") { // a function: import_fns's
 			continue
 		}
 		clear(&env_words)
@@ -508,8 +558,10 @@ import_env :: proc "contextless" () {
 records: [vx.CHANNEL_MAX_BYTES - 4096]u8 // room left for spawn's own records
 
 // Spawns one program with its standard input, output and error (channel
-// ends, or HANDLE_NONE for the console), which are given away.
-spawn :: proc "contextless" (argv: ^rc.Word, io: [3]vx.Handle) -> (task: vx.Handle, st: vx.Status) {
+// ends, or HANDLE_NONE for the console), which are given away. With exec,
+// the program takes this task's place (task_exec, ADR-0012): it returns
+// only if it failed.
+spawn :: proc "contextless" (argv: ^rc.Word, io: [3]vx.Handle, exec := false) -> (task: vx.Handle, st: vx.Status) {
 	IO := [3]string{"stdin", "stdout", "stderr"}
 	io := io
 	handles: [vx.CHANNEL_MAX_HANDLES - 1]vx.Handle
@@ -536,6 +588,11 @@ spawn :: proc "contextless" (argv: ^rc.Word, io: [3]vx.Handle) -> (task: vx.Hand
 		if export_var(&rec, name, val) {
 			exported += 1
 		}
+	}
+	fns := rc.fns(&sh)
+	for name, src in rc.next_fn(&fns) {
+		export_fn(&rec, name, src)
+		exported += 1
 	}
 	// More than a spawn message holds, or than the child takes: refused
 	// whole, never run with a list cut short.
@@ -564,6 +621,7 @@ spawn :: proc "contextless" (argv: ^rc.Word, io: [3]vx.Handle) -> (task: vx.Hand
 		handles      = handles[:count],
 		handle_names = names[:count],
 		records      = ndb.written(&rec),
+		exec         = exec,
 	}
 	return rt.spawn_elf(&a)
 }
@@ -896,7 +954,7 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 // A task's end as rc's $status has it, into m: the wait message, name pid:
 // exit string, cut at a rune boundary to what an exit string holds; nothing
 // for success.
-wait_message :: proc "contextless" (m: ^[dynamic; vx.ERRMAX]u8, info: ^vx.Task_Summary) {
+wait_message :: proc "contextless" (m: ^[dynamic; $N]u8, info: ^vx.Task_Summary) {
 	clear(m)
 	exit := vx.exit_string(info)
 	if exit == "" {
@@ -909,6 +967,106 @@ wait_message :: proc "contextless" (m: ^[dynamic; vx.ERRMAX]u8, info: ^vx.Task_S
 	_ = append(m, str.format_u64(digits[:], info.id))
 	_ = append(m, ": ")
 	_ = append(m, exit[:utf.cut(exit, cap(m) - len(m))])
+}
+
+// exec cmd ...: the program in this task's place, as rc's execexec. The
+// shell relays files, here documents and captures, so a command with one of
+// those redirected is refused until the program can be given the file itself.
+exec_builtin :: proc "contextless" (argv: ^rc.Word, fds: ^[rc.FDS]rc.Fd) -> bool {
+	io: [3]vx.Handle
+	st := vx.Status.Ok
+	for i in 0 ..< 3 {
+		#partial switch _ in fds[i] {
+		case rc.Fd_Inherit, rc.Fd_Closed:
+		case:
+			say("rc: exec with a file, here document or capture redirected needs the shell to stay (for now)", "", "\n")
+			set_status("exec redirection")
+			rt.close_all(..io[:])
+			return true
+		}
+		io[i], st = stage_io(fds[i], i, vx.HANDLE_NONE, vx.HANDLE_NONE)
+		if st != .Ok {
+			rt.close_all(..io[:])
+			break
+		}
+	}
+	if st == .Ok {
+		_, st = spawn(argv.next, io, exec = true) // returns only if it failed
+	}
+	why := p9.error_text(st)
+	say("", rc.text(argv.next), ": ")
+	say("", why, "\n")
+	set_status(why)
+	sh.exiting = true // as rc's: it exits all the same
+	return true
+}
+
+// wait [pid]: for a command run with &, or for all of them; $status its wait
+// message (rc's execwait).
+wait_builtin :: proc "contextless" (argv: ^rc.Word, argc: int) -> bool {
+	if argc > 2 {
+		say("rc: Usage: wait [pid]", "", "\n")
+		set_status("error")
+		return true
+	}
+	want: u64
+	if argc == 2 {
+		for c in transmute([]u8)rc.text(argv.next) {
+			if c < '0' || c > '9' {
+				break
+			}
+			want = want * 10 + u64(c - '0')
+		}
+	}
+	set_status("")
+	for &t in background {
+		if t == vx.HANDLE_NONE {
+			continue
+		}
+		info, ist := rt.task_info(t)
+		if ist != .Ok || (want != 0 && info.id != want) {
+			continue
+		}
+		if info.state != .Exited {
+			if port, pst := rt.port_create(); pst == .Ok {
+				if rt.port_bind(port, t, .Exit, 0) == .Ok {
+					pk: [1]vx.Packet
+					_, _ = rt.port_wait(port, vx.INFINITE, 0, pk[:])
+				}
+				_ = rt.handle_close(port)
+			}
+		}
+		if info, ist = rt.task_info(t); ist == .Ok {
+			msg: [dynamic; vx.ERRMAX + 64]u8
+			wait_message(&msg, &info)
+			set_status(string(msg[:]))
+		}
+		_ = rt.handle_close(t)
+		t = vx.HANDLE_NONE
+	}
+	return true
+}
+
+// Notes, to rc's functions for them (rc's notifyf): what rc has a name for,
+// sigint and the rest; any other, as the system does by default.
+on_note :: proc "contextless" (e: ^vx.Exception, note: string) -> rt.Noted {
+	NAMES := [rc.Sig]string {
+		.Exit = "exit",
+		.Hup  = "hangup",
+		.Int  = "interrupt",
+		.Quit = "quit",
+		.Alrm = "alarm",
+		.Kill = "kill",
+		.Fpe  = "sys: fp: ",
+		.Term = "term",
+	}
+	for name, sig in NAMES {
+		if sig != .Exit && str.has_prefix(note, name) {
+			rc.trap(&sh, sig)
+			return .Cont
+		}
+	}
+	return .Dflt
 }
 
 // --- The shell ---
@@ -984,6 +1142,9 @@ quoted :: proc "contextless" (b: ^[dynamic; 512]u8, room: int, s: string) {
 	}
 }
 
+// The host's builtins, for whatis.
+HOST_BUILTINS := [?]string{"bind", "mount", "unmount"}
+
 USAGE :: "usage: rc [-srdiIlxebpvV] [-c command] [-m initial] [file [arg ...]]\n"
 
 @(export, link_name="vx_main")
@@ -1006,11 +1167,13 @@ shell :: proc() -> string {
 		close     = close_file,
 		exists    = exists,
 		read_line = read_line,
+		builtin_names = HOST_BUILTINS[:],
 	}
 	if !rc.init(&sh, heap[:], host) {
 		return "no memory"
 	}
 	import_env()
+	_ = rt.notify(on_note)
 
 	// The flags, as rc's getflags("srdiIlxebpvVc:1m:1").
 	args := rt.args()
@@ -1070,6 +1233,9 @@ shell :: proc() -> string {
 		rc.set_var(&sh, "cflag", cflag)
 	}
 	rc.set_var(&sh, "*", ..args[i:][:min(len(args) - i, CHILD_MAX_ARGS)])
+	if !sh.flag['p'] {
+		import_fns()
+	}
 
 	// rc's bootstrap: . -bq rcmain $*, then exit.
 	boot: [dynamic; 512]u8
@@ -1077,5 +1243,6 @@ shell :: proc() -> string {
 	quoted(&boot, 8, rcmain)
 	append(&boot, " $*\n")
 	_ = rc.run(&sh, string(boot[:]))
+	rc.sigexit(&sh) // at the end of the input too, once
 	return exit_status()
 }

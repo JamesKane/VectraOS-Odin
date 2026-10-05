@@ -2,6 +2,7 @@
 // builtins.
 package rc
 
+import "base:intrinsics"
 import "vx:str"
 
 // --- Patterns and globbing ---
@@ -523,7 +524,7 @@ pop_frame :: proc "contextless" (r: ^Rc) {
 	reader_free(r, f.rd)
 }
 
-@(private = "file")
+@(private)
 new_local :: proc "contextless" (r: ^Rc, name: string, val: ^Word) -> ^Var {
 	v := new_var(r, name)
 	if v == nil {
@@ -760,23 +761,39 @@ rdcmds :: proc "contextless" (r: ^Rc, f: ^Frame) {
 @(private = "file")
 builtin :: proc "contextless" (r: ^Rc, argv: ^Word, argc: u32) -> bool {
 	switch text(argv) {
-	case "exit":
-		set_status(r, argc > 1 ? text(argv.next) : "")
+	case "exit": // exit [status]: with no status, $status as it is (rc's execexit)
+		if argc > 2 {
+			// Upstream gives 34 bytes of the message's 36: kept, byte for byte.
+			errout(r, "Usage: exit [status]\nExiting anyway\n"[:34])
+		}
+		if argc > 1 {
+			set_status(r, text(argv.next))
+		}
 		r.exiting = true
 		return true
-	case "shift": // shift [n]: from $*
-		k: u32 = 1
+	case "shift": // shift [n]: from $*, n as atoi reads it (rc's execshift)
+		if argc > 2 {
+			errout(r, "Usage: shift [n]\n")
+			set_status(r, "shift usage")
+			return true
+		}
+		k := 1
 		if argc > 1 {
-			k = 0
-			for c in transmute([]u8)text(argv.next) {
-				if c < '0' || c > '9' {
-					break
-				}
-				k = k * 10 + u32(c - '0')
+			a := text(argv.next)
+			i := 0
+			neg := i < len(a) && a[i] == '-'
+			if neg || (i < len(a) && a[i] == '+') {
+				i += 1
+			}
+			for k = 0; i < len(a) && a[i] >= '0' && a[i] <= '9' && k < 1_000_000; i += 1 {
+				k = k * 10 + int(a[i] - '0')
+			}
+			if neg {
+				k = -k
 			}
 		}
 		star := var_find(r, "*", true)
-		for ; k != 0 && star != nil && star.val != nil; k -= 1 {
+		for ; k > 0 && star != nil && star.val != nil; k -= 1 {
 			first := star.val
 			star.val = first.next
 			heap_free(r, first)
@@ -803,25 +820,99 @@ builtin :: proc "contextless" (r: ^Rc, argv: ^Word, argc: u32) -> bool {
 		fail(r, "", "Usage: flag [letter] [+-]")
 		return true
 	case "whatis":
-		for a := argv.next; a != nil; a = a.next {
-			v := var_find(r, text(a), false)
-			shell_write(r, 1, c_name(text(a)))
-			if v != nil && v.fn != nil {
-				shell_write(r, 1, " is a function")
-			}
-			if v != nil && v.val != nil {
-				shell_write(r, 1, "=")
-				for w := v.val; w != nil; w = w.next {
-					shell_write(r, 1, text(w))
-					shell_write(r, 1, w.next != nil ? " " : "")
-				}
-			}
-			shell_write(r, 1, "\n")
-		}
-		set_status(r, "")
+		whatis(r, argv)
 		return true
 	}
 	return false
+}
+
+// rc's own builtins, by name (rc's Builtin[]: cd and the namespace's are the host's).
+@(private = "file")
+BUILTINS := [?]string{".", "builtin", "eval", "exec", "exit", "flag", "shift", "wait", "whatis"}
+
+@(private = "file")
+is_builtin :: proc "contextless" (r: ^Rc, s: string) -> bool {
+	for b in BUILTINS {
+		if s == b {
+			return true
+		}
+	}
+	for b in r.host.builtin_names {
+		if s == b {
+			return true
+		}
+	}
+	return false
+}
+
+// Output on the shell's descriptor 1, for quote.
+@(private = "file")
+out1 :: proc "contextless" (r: ^Rc, s: string) {
+	shell_write(r, 1, s)
+}
+
+// whatis name ..., as rc's execwhatis: each name's value (x=val, or
+// x=(a 'b c')), then its function (fn name {body}), or builtin name, or
+// the program $path finds; $status "not found" for a name that is none.
+@(private = "file")
+whatis :: proc "contextless" (r: ^Rc, argv: ^Word) {
+	if argv.next == nil {
+		fail(r, "", "Usage: whatis name ...")
+		return
+	}
+	set_status(r, "")
+	for a := argv.next; a != nil; a = a.next {
+		name := text(a)
+		v := var_find(r, name, false)
+		found := v != nil && v.val != nil
+		if found {
+			out1(r, name)
+			out1(r, "=")
+			if v.val.next == nil {
+				quote(r, text(v.val), out1)
+			} else {
+				for w := v.val; w != nil; w = w.next {
+					out1(r, w == v.val ? "(" : " ")
+					quote(r, text(w), out1)
+				}
+				out1(r, ")")
+			}
+			out1(r, "\n")
+		}
+		if g := gvar_find(r, name, false); g != nil && g.fn != nil {
+			out1(r, "fn ")
+			quote(r, name, out1)
+			out1(r, " ")
+			out1(r, g.fnsrc != nil ? var_fnsrc(g) : "{}")
+			out1(r, "\n")
+			continue
+		}
+		if is_builtin(r, name) {
+			out1(r, "builtin ")
+			out1(r, name)
+			out1(r, "\n")
+			continue
+		}
+		here := str.has_prefix(name, "/") || str.has_prefix(name, "./")
+		dirs := here ? nil : get_var(r, "path")
+		as_is: Word // "": the name as written
+		if dirs == nil {
+			dirs = &as_is
+		}
+		hit := false
+		for d := dirs; d != nil && !hit && r.host.exists != nil; d = d.next {
+			path_buf: [512]u8
+			path := path_join(path_buf[:], d == &as_is ? "" : text(d), name) or_continue
+			hit = r.host.exists(r.host.ctx, path)
+			if hit {
+				out1(r, path)
+				out1(r, "\n")
+			}
+		}
+		if !hit && !found {
+			set_status(r, "not found")
+		}
+	}
 }
 
 @(private = "file")
@@ -1003,7 +1094,25 @@ simple :: proc "contextless" (r: ^Rc, words: ^Word, async: bool) {
 		errwords(r, argv)
 		errout(r, "\n")
 	}
-	v := gvar_find(r, text(argv), false)
+	forced := text(argv) == "builtin" // builtin cmd: no function, as rc's
+	if forced {
+		if argc == 1 {
+			free_words(r, argv)
+			fail(r, "", "builtin: empty argument list")
+			return
+		}
+		b := argv
+		argv = argv.next
+		argc -= 1
+		b.next = nil
+		free_words(r, b)
+	}
+	if argc == 1 && text(argv) == "exec" {
+		free_words(r, argv)
+		fail(r, "", "exec: empty argument list")
+		return
+	}
+	v := forced ? nil : gvar_find(r, text(argv), false)
 	if v != nil && v.fn != nil && async { // rc runs it in a child, which needs upstream's M6 step 6d: refused, not run in the foreground
 		shell_write(r, 2, "rc: a function run with & needs a child (for now)\n")
 		set_status(r, "async")
@@ -1263,6 +1372,32 @@ unwind :: proc "contextless" (r: ^Rc, base: u32) -> bool {
 	return true
 }
 
+// The notes waiting, each to its function, as rc's dotrap: with none, an
+// interrupt or quit goes back to the interactive reader (or exits, if none),
+// and anything else exits.
+@(private = "file")
+dotrap :: proc "contextless" (r: ^Rc, base: u32) {
+	for &waiting, sig in r.trap {
+		if intrinsics.volatile_load(&r.ntrap) == 0 {
+			break
+		}
+		for intrinsics.volatile_load(&waiting) != 0 {
+			intrinsics.volatile_store(&waiting, intrinsics.volatile_load(&waiting) - 1)
+			intrinsics.volatile_store(&r.ntrap, intrinsics.volatile_load(&r.ntrap) - 1)
+			if v := gvar_find(r, SIG_NAMES[sig], false); v != nil && v.fn != nil {
+				star := new_local(r, "*", copy_words(r, get_var(r, "*")))
+				_ = push_frame(r, v.fn, v.fn_pc, star)
+			} else if sig == .Int || sig == .Quit {
+				if !unwind(r, base) {
+					r.exiting = true
+				}
+			} else {
+				r.exiting = true
+			}
+		}
+	}
+}
+
 // The instructions' names, as rc's -r prints them.
 @(private = "file")
 OP_NAMES := [Op]string {
@@ -1317,6 +1452,9 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 			}
 			r.failed = false
 			r.failset = false
+		}
+		if intrinsics.volatile_load(&r.ntrap) != 0 && !r.exiting {
+			dotrap(r, base)
 		}
 		if u32(len(r.frames)) <= base || r.failed || r.exiting {
 			break
@@ -1577,6 +1715,15 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 				v.fn = f.code
 				v.fn_pc = f.pc
 				f.code.refs += 1
+				heap_free(r, v.fnsrc)
+				v.fnsrc = nil
+				if ins.b != 0 {
+					t := c_name(string(code_strings(f.code)[ins.b - 1:]))
+					v.fnsrc = (^u8)(heap_alloc(r, len(t) + 1))
+					if v.fnsrc != nil {
+						copy(payload(v.fnsrc), t)
+					}
+				}
 			}
 			free_words(r, names)
 			f.pc = ins.a
@@ -1587,6 +1734,8 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 				if v := gvar_find(r, text(n), false); v != nil {
 					code_release(r, v.fn)
 					v.fn = nil
+					heap_free(r, v.fnsrc)
+					v.fnsrc = nil
 				}
 			}
 			free_words(r, names)

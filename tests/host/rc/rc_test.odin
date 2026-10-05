@@ -397,3 +397,53 @@ test_9front_reading :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(b.host.out[:]), "s1\n")
 	b.host.stdin = ""
 }
+
+// The third part (upstream's M6 step 6a6c): the builtins as rc(1) has them,
+// functions for export, sigexit, and notes as functions.
+@(test)
+test_9front_builtins :: proc(t: ^testing.T) {
+	b := shell(t)
+	defer rt.bench_destroy(b)
+	expect_result(t, b, "false; exit", .Exit)
+	testing.expect_value(t, status_now(b), "false") // $status kept
+	expect_result(t, b, "exit a b", .Exit)
+	testing.expect_value(t, status_now(b), "a")
+	expect_cases(t, b, {
+		{"fn f { shift 2; echo $* }; f a b c d", "c d\n"},
+		{"fn f { shift x; echo $* }; f a b", "a b\n"}, // as atoi: 0
+		{"shift 1 2; echo $status", "shift usage\n"},
+		{"fn echo { builtin echo wrapped $* }; echo hi; fn echo", "wrapped hi\n"},
+	})
+	expect_err(t, b, "builtin", .Failed, "builtin: empty argument list")
+	expect_err(t, b, "exec", .Failed, "exec: empty argument list")
+	expect_cases(t, b, {
+		{"x=(a 'b c'); y=1; whatis x y", "x=(a 'b c')\ny=1\n"},
+		{"fn g {echo  G}; whatis g", "fn g {echo  G}\n"},
+		{"whatis shift", "builtin shift\n"},
+		{"whatis nosuchthing; echo $status", "not found\n"},
+		{"path=(dir); whatis one.c; path=()", "dir/one.c\n"},
+	})
+	expect_err(t, b, "whatis", .Failed, "Usage: whatis name ...")
+	fns := strings.builder_make(context.temp_allocator) // as name=body;
+	it := rc.fns(b.sh)
+	for name, src in rc.next_fn(&it) {
+		fmt.sbprintf(&fns, "%s=%s;", name, src)
+	}
+	testing.expectf(t, strings.contains(strings.to_string(fns), "g={echo  G};"), "functions %q", strings.to_string(fns))
+	expect_result(t, b, "fn g", .Ok)
+	// sigexit, once, at exit.
+	expect_result(t, b, "fn sigexit { echo bye }; echo before; exit", .Exit)
+	testing.expect_value(t, string(b.host.out[:]), "before\nbye\n")
+	expect_result(t, b, "exit", .Exit)
+	testing.expect_value(t, string(b.host.out[:]), "")
+	_ = script(b, "fn sigexit")
+	b.sh.trapped = false
+	// A note: its function before the next command; with none, a hangup ends it.
+	_ = script(b, "fn sigint { echo caught }")
+	rc.trap(b.sh, .Int)
+	expect_out(t, b, "echo next", "caught\nnext\n")
+	_ = script(b, "fn sigint")
+	rc.trap(b.sh, .Hup)
+	expect_result(t, b, "echo never", .Exit)
+	testing.expect_value(t, string(b.host.out[:]), "")
+}

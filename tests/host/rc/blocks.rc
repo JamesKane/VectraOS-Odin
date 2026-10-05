@@ -65,3 +65,15 @@ one
 A
 two
 B
+%%
+fn sigint { echo caught $* }
+note 2
+echo next
+fn sigint
+note 2
+echo gone
+%%
+fn sigexit { echo bye }
+fn f { echo in f; exit fail }
+f
+echo never
