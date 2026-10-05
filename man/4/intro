@@ -1,0 +1,14 @@
+page=intro sect=4 summary="introduction to file servers"
+    keys=servers,files,ctl
+
+# DESCRIPTION
+
+Section 4 describes the file servers.
+Every service in the system is a file server: a process that serves a tree of files over 9Px (see intro(5)), posted by name in `/srv`, which a process mounts into its namespace.
+A server's page lists its files and what writing to its `ctl` file does.
+
+svcd(8) starts the servers from their manifests and keeps their names in `/srv`, so a client that connects while a server restarts waits for it rather than failing.
+
+# SEE ALSO
+
+intro(5), svcd(8)

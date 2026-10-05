@@ -29,6 +29,9 @@ USAGE :: `usage: ./build <command> [--arch x86_64|aarch64] [--release] [-v]
   check          host tests under ASan, vendor-check
   vendor-check   check third_party/ against VENDOR.ndb
   loc            the line-count ledger
+  man [section ...] title [node]
+                 a page of man/, as man(1) shows it;
+  man --check    or check's manual pass alone
 (abi/vx/abi_gen.odin is made from abi/vx/*.def by tools/abigen, which the
 ./build wrapper runs first.)`
 
@@ -38,6 +41,10 @@ main :: proc() {
 		os.exit(2)
 	}
 	command := os.args[1]
+	if command == "man" { // its own arguments: sections, a title, a node, --check
+		set_source_date_epoch()
+		os.exit(cmd_man(os.args[2:]) ? 0 : 1)
+	}
 	chosen: bit_set[Arch_Kind] // by --arch; none means all
 	names := make([dynamic]string, context.temp_allocator)
 	mode := Mode.Debug
@@ -218,9 +225,10 @@ has_tests :: proc(dir: string) -> bool {
 	return false
 }
 
-// Host tests: every package under tests/host with a suite, under ASan.
+// The manual's pass (man.odin), then host tests: every package under
+// tests/host with a suite, under ASan.
 cmd_check :: proc() -> bool {
-	ok := true
+	ok := check_man()
 	dirs, err := os.read_directory_by_path("tests/host", -1, context.temp_allocator)
 	if err != nil {
 		fmt.eprintfln("build: cannot read tests/host: %v", err)

@@ -1,0 +1,14 @@
+page=intro sect=3 summary="introduction to devices and their drivers"
+    keys=devices,drivers
+
+# DESCRIPTION
+
+Section 3 describes the devices: one page for each class of device and the files it serves, and one for each driver.
+
+Drivers are processes, not part of the kernel.
+devmgr(8) finds the devices on the buses, matches each against the drivers' manifests (`/boot/drv`), starts the driver it names with the device's registers, interrupts and DMA mappings and nothing else, and starts it again if it dies.
+A driver serves its device as files, posted in `/srv`, which others mount: a disk as `/srv/disk0`, served to partd(8).
+
+# SEE ALSO
+
+devmgr(8), intro(4)

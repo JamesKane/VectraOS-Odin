@@ -26,6 +26,7 @@ IR_ODIN_FLAGS :: []string {
 	"-warnings-as-errors",
 	"-collection:vx=lib",
 	"-collection:abi=abi",
+	"-collection:gen=out/gen", // generated packages: usage messages from pages (man.odin)
 	// Reproducible IR: the threaded checker numbers entities and orders debug
 	// metadata differently from one run to the next.
 	"-no-threaded-checker",

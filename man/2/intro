@@ -1,0 +1,20 @@
+page=intro sect=2 summary="introduction to system calls and libraries"
+    keys=syscalls,library,status
+
+# DESCRIPTION
+
+Section 2 describes the system calls and the libraries C programs call.
+Until the native library, libvx, is installed, it holds the system calls: each page names the calls it covers, as futex(2) covers `futex_wait` and `futex_wake`, and its SYNOPSIS gives the C functions that make them, which take the call's name with `vx_` before it.
+
+A call returns a `vx_status`: `VX_OK`, zero, when it succeeded, or a negative error such as `VX_ERR_INVALID` or `VX_ERR_TIMED_OUT`.
+A call that also returns a count returns it as a non-negative number in the same place.
+Each page's DIAGNOSTICS lists what its calls return.
+
+Time is one monotonic clock, in nanoseconds (`vx_instant`); a call that waits takes an absolute deadline, and `VX_INFINITE` is the deadline that never comes.
+Objects are named by handles, each with the rights the holder was given; a call refuses what the handle's rights do not allow.
+
+sig(1) prints a page's declarations.
+
+# SEE ALSO
+
+futex(2), man(1)

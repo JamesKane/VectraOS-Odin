@@ -8,6 +8,8 @@ Most of the "Idiomatic Odin" section below came out of the October 2026 review o
 
 - `lib/<name>/`: one package per library (`package <name>`), imported as `vx:<name>` (`-collection:vx=lib`).
 - `abi/vx/`: the kernel/user ABI, imported as `abi:vx` (`-collection:abi=abi`). `abi_gen.odin` is generated from the `.def` tables by `tools/abigen`, which the `./build` wrapper runs first: run any `./build` command (`./build loc` is quick) before compiling by hand.
+- `out/gen/`: packages `./build` generates, imported as `gen:` (`-collection:gen=out/gen`): a program with a page in `man/` takes its usage message from the page's usage fence as `usage.TEXT` (`import usage "gen:usage/<program>"`), and `./build check` refuses a `"usage:` string of its own (`tools/build/man.odin`). Run a `./build` command that builds programs (`./build all`) before `odin check` on such a program.
+- `man/<sect>/<page>`: the manual, in guide (guide(6)); `man/missing` is the ledger of what has no page yet, which only shrinks. Copied from upstream as contracts: `man`'s output must match upstream's byte for byte.
 - `tests/host/<name>/`: host tests for `lib/<name>`, as `package <name>_test`, run by `./build check` under ASan. Helpers shared by several suites live in a test-free package beside them (`tests/host/p9test`), imported relatively.
 - `kernel/`: one package; architecture files end in `_amd64.odin` / `_arm64.odin`; assembly in `kernel/arch/<arch>/*.S`.
 
@@ -109,26 +111,28 @@ for, on both architectures:
 
 ```sh
 ./build all          # both architectures; warnings are errors
-./build check        # host tests under ASan, vendor-check
+./build check        # the manual's pass, host tests under ASan, vendor-check
 odin check lib/<name> -no-entry-point -target:freestanding_arm64 -collection:vx=lib -collection:abi=abi -vet -strict-style -warnings-as-errors
-./build test m5/<scenario> ...   # the scenarios the change can affect
+./build test m6/<scenario> ...   # the scenarios the change can affect
 ```
 
 Which scenarios a change can affect:
-- **A library or program:** the scenarios that run it (grep `tests/qemu/m5/` and
+- **A library or program:** the scenarios that run it (grep `tests/qemu/m6/` and
   `tests/user/` for the program's name), plus its host suite.
 - **The kernel, lib/rt, the ring or 9P transport, svcd, devmgr or the build
   tool's image or runner code:** these sit under everything, so add a broad
-  sample: `m5/ktest m5/boot m5/shell m5/posix m5/fsd m5/net`.
+  sample: `m6/ktest m6/boot m6/shell m6/posix m6/fsd m6/net`.
 - **An on-disk or wire format:** its host cross-check suites, and every scenario
   that reads or writes that format.
+- **A page in `man/`, or a program's usage message:** `./build man --check`
+  (the manual's pass alone, in milliseconds), and `m6/man`.
 
 At a milestone's close, the full matrix, every scenario of the newest
 `tests/qemu/mN/` on both architectures (some are for one architecture only,
 and `u9fs` needs Linux user namespaces):
 
 ```sh
-ls tests/qemu/m5/*.ndb | xargs -n1 basename | sed 's/\.ndb$//; s#^#m5/#' | xargs ./build test simd
+ls tests/qemu/m6/*.ndb | xargs -n1 basename | sed 's/\.ndb$//; s#^#m6/#' | xargs ./build test simd
 ```
 
 (In zsh, don't put the scenario names in one unquoted variable: it does not

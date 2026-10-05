@@ -1,0 +1,16 @@
+page=intro sect=8 summary="introduction to running the system"
+    keys=administration,boot,services
+
+# DESCRIPTION
+
+Section 8 describes what runs the system: booting, services, devices, storage, installing and updating.
+
+The machine's firmware starts Limine, which loads the kernel, its root task's modules and the boot image, checking each file against the hash in its configuration.
+The root task starts svcd(8), which starts every service from its manifest in `/boot/svc` (see svc(6)), in order, and starts again those that exit when their manifest says so.
+devmgr(8) starts the drivers; partd(8), fsd(4) and distd(8) bring up the disk, the system volume and the release it holds.
+
+install(8) puts the system on a disk from an install medium; distd(8) applies a new release into a free slot, and rolls back to the one before.
+
+# SEE ALSO
+
+svcd(8), devmgr(8), install(8), intro(1)

@@ -1,0 +1,77 @@
+page=man sect=1 summary="print or find pages of the manual"
+    names=man,lookman,sig
+    src=cmd/man.c,cmd/lookman.c,cmd/sig.c,lib/vx-man/man.c,lib/vx-guide/guide.c
+    keys=manual,help,documentation,index
+
+# SYNOPSIS
+
+```usage
+man [-tw] [section ...] title [node]
+lookman key ...
+sig name ...
+```
+
+# DESCRIPTION
+
+`man` prints the page <title> of the manual, from the first <section> given that has one, or from the first of all eight.
+A <title> is a page's name, or any name a page documents, which the index finds: `man lookman` prints this page.
+With a <node>, it prints that node of the page alone; `man -t` lists a page's nodes.
+The page is refilled to 80 columns, its headings at the margin and its text indented, as Plan 9's are; links are printed as written, `rc(1)`, so they can be plumbed.
+There is no pager.
+
+: `-t`
+  Print the page's contents instead: each heading, each subheading indented, and each node as `@` and its id, then its title.
+: `-w`
+  Print the page's path instead.
+
+`lookman` prints the pages about every <key>: each name in the index whose name, summary, node title or keys holds every <key>, ignoring case.
+Each page, or node, is printed once, as the `man` command that shows it, then `#` and what it is about.
+
+`sig` prints the C declarations of the functions <name> from the SYNOPSIS of their section 2 pages, each on one line, for pasting into code.
+A <name> is a name the page documents, such as `futex_wait`, or its C function's, such as `vx_futex_wait`.
+
+The manual is described by guide(6), its sections by `intro` in each section, such as intro(1).
+
+# EXAMPLES
+
+```rc
+% man -t guide
+SYNOPSIS
+DESCRIPTION
+@header The header
+@blocks Blocks
+@fences Fences
+@inline Text inside a line
+@nodes Nodes
+EXAMPLES
+FILES
+SEE ALSO
+DIAGNOSTICS
+BUGS
+% lookman format
+man 6 guide # the manual's page format
+man 6 intro # introduction to file formats
+% sig futex_wake
+int64_t vx_futex_wake(const _Atomic uint32_t *word, uint32_t count);
+```
+
+# FILES
+
+: `/lib/man/<sect>/<page>`
+  The pages.
+: `/lib/man/index/`
+  The index: one ndb file for each tree of pages, the base system's `base`.
+
+# SEE ALSO
+
+guide(6), intro(1)
+
+# DIAGNOSTICS
+
+`man` says `man: no page for` <title> when no section has it, and that is its exit string.
+`lookman` exits `not found` when no page matches, and `sig` `not found` when a <name> has no declaration.
+
+# BUGS
+
+`man` refills to 80 columns whatever the terminal's width, since nothing yet tells it the width.
+`lookman` matches each <key> anywhere in a word, not only whole words.

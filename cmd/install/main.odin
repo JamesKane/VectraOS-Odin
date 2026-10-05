@@ -5,7 +5,7 @@
 //
 // 1. checks the whole tree in the image: each directory, file index and block
 //    against its name, as the live system's check of its own medium;
-// 2. writes a GPT on the disk: an ESP (FAT32, 512 MiB, or -e MIB) and the
+// 2. writes a GPT on the disk: an ESP (FAT32, 512 MiB, or -e mib) and the
 //    system volume (the rest);
 // 3. writes slot a on the ESP (06 §7): Limine at the firmware's fallback path,
 //    the slot's kernel, bootfs and modules under \EFI\vectra\a, the slot
@@ -16,7 +16,7 @@
 //    the users adm, none and vectra (vectra owning home), and the release's
 //    objects and record copied into store, where distd finds them.
 //
-//   install [-y] [-p] [-e MIB]       the disk is the one connect= names (srv:NAME)
+//   install [-y] [-p] [-e mib]       the disk is the one connect= names; see install(8)
 //
 // Without -y it only checks the medium and says what it would do: the disk
 // is erased only when asked to be. -p: power off when done (through
@@ -39,6 +39,7 @@ import "vx:slots"
 import "vx:store"
 import "vx:str"
 import "vx:tar"
+import usage "gen:usage/install"
 
 when ODIN_ARCH == .amd64 {
 	ARCH :: "x86_64"
@@ -414,7 +415,7 @@ vx_main :: proc() -> int {
 				esp_mib = esp_mib * 10 + u64(i64(c) - '0') // as upstream reads it: unchecked
 			}
 		case:
-			fail("usage: install [-y] [-p] [-e MIB]")
+			fail(usage.TEXT) // from install(8)'s usage fence (tools/build/man.odin)
 		}
 	}
 	now = rt.clock_utc()

@@ -1,0 +1,21 @@
+page=intro sect=1 summary="introduction to commands"
+    keys=commands,conventions
+
+# DESCRIPTION
+
+Section 1 describes the commands a person runs: rc(1), the shell; the native commands in `/boot/bin`; the POSIX commands; and the tools that run on the development host, marked as such.
+Commands for running the system itself, such as install(8), are in section 8.
+
+A command takes flags first, each a `-` and a letter, then its arguments.
+Its page's SYNOPSIS shows them in Plan 9's notation: the command and its flags as written, every other word a parameter, `[ ]` around what may be left out, and `...` after what may repeat.
+That synopsis is also the command's usage message, which it prints when given what it does not take.
+
+A command finishes with an exit string: empty when it succeeded, otherwise a short phrase saying what went wrong, which rc(1) keeps in `$status`.
+Its errors go to standard error, as the command's name, a colon and the message.
+
+A command sees only its namespace: the files it was given, as its parent arranged them.
+In the POSIX namespace, which a manifest's `ns=posix` gives, the POSIX commands in `/boot/bin/posix` are bound before the native ones on `/bin`, so `cat` is the POSIX `cat` there and the native one elsewhere; one page describes both.
+
+# SEE ALSO
+
+man(1), rc(1), intro(8)

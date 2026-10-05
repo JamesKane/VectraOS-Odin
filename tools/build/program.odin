@@ -113,6 +113,7 @@ program_for :: proc(p: Program, a: ^Arch) -> bool {
 // (build_posix: the C programs here, and the ports' programs), linked against
 // the back end, or with backend_override the objects in it.
 build_programs :: proc(a: ^Arch, mode: Mode, backend_override := "") -> bool {
+	make_usage() or_return
 	for p in PROGRAMS {
 		if p.kind == .Odin && program_for(p, a) {
 			build_program(a, mode, p) or_return
