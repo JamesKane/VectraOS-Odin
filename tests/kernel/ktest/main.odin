@@ -1904,7 +1904,7 @@ test_debugger :: proc "contextless" () {
 	w.slot[0].kind = .Off
 	check(rt.thread_state(child, 0, .Set_Watch, &w) == .Ok)
 	mi, qst := rt.as_query(child, 0)
-	check(qst == .Ok && mi.base <= CHILD_CODE && mi.base + mi.size > CHILD_CODE && mi.flags == {.Exec})
+	check(qst == .Ok && mi.base <= CHILD_CODE && mi.base + mi.size > CHILD_CODE && vx.map_options(mi.flags) == {.Exec} && mi.flags.key == 0)
 	_, qst = rt.as_query(child, ~u64(0) - 4096)
 	check(qst == .Err_Not_Found)
 	when ODIN_ARCH == .amd64 {

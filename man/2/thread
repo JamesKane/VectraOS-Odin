@@ -62,7 +62,14 @@ Stopping a process is this, not a note (ADR-0011).
 : `VX_STATE_GET_REGS`, `VX_STATE_SET_REGS`
   Its user registers, a `vx_regs`.
 : `VX_STATE_GET_FPREGS`, `VX_STATE_SET_FPREGS`
-  Its FP/SIMD registers, a `vx_fpregs`: x86_64's FXSAVE image, aarch64's V0 to V31 with FPCR and FPSR.
+  The legacy part of its FP/SIMD registers, a `vx_fpregs`: x86_64's FXSAVE image (x87, MXCSR, XMM0 to XMM15), aarch64's V0 to V31 with FPCR and FPSR.
+  A SET leaves the rest of the state as it was.
+: `VX_STATE_GET_XSTATE`, `VX_STATE_SET_XSTATE`
+  All of its FP/SIMD state, `vx_cpu_info.xstate_size` bytes: on x86_64 XSAVE's standard image of every component the kernel saves (x87, SSE, AVX, and AVX-512's three where the CPU has them), every component written out, those in their initial state included; on aarch64 the `vx_fpregs` image.
+  A SET whose XSAVE header names a component the kernel does not save, has reserved bytes set or a compacted format, or whose MXCSR has a bit `mxcsr_mask` lacks, is refused with `VX_ERR_INVALID`, as is an aarch64 FPCR or FPSR with undefined bits (ADR-0035).
+: `VX_STATE_GET_CPU`
+  With <thread> 0, a `vx_cpu_info`: `xstate_size`, `keys` (protection keys a task may allocate; 0 until M6 step 6c4), and on x86_64 `xfeatures` (XCR0) and `mxcsr_mask`, on aarch64 the ID registers user code needs to choose code paths (`ID_AA64ISAR0_EL1` to `ISAR2`, `PFR0`, `PFR1`, `ZFR0`, `SMFR0`, `MMFR3`), the fields of what the kernel does not save, SVE and SME, zeroed.
+  User code on x86_64 asks CPUID for instruction sets; aarch64's ID registers trap at EL0.
 : `VX_STATE_GET_TLS`, `VX_STATE_SET_TLS`
   Its thread pointer, a `uint64_t`: x86_64's FS base, aarch64's `TPIDR_EL0`.
   With <thread> 0, the caller's own, at any time (musl's `__set_thread_area`).
@@ -76,7 +83,7 @@ Stopping a process is this, not a note (ADR-0011).
 
 The register operations work on a thread stopped at an exception port, or, for a holder of `VX_RIGHT_DEBUG`, a suspended one that holds still; a running thread is neither read nor changed.
 Registers set are checked: a thread may be given any user-mode state and never a privileged one, so a program counter or stack pointer outside user space is refused, and flags a user may not set are dropped.
-FP/SIMD registers set are made safe to load the same way.
+FP/SIMD registers set with `SET_FPREGS` are made safe to load the same way; `SET_XSTATE` refuses what it cannot load instead.
 
 ## Rights
 

@@ -462,7 +462,7 @@ Task_Info_Option :: enum u32 {
 }
 Task_Info_Options :: bit_set[Task_Info_Option; u32]
 
-Map_Option :: enum u32 { // as_map; a mapping is always readable
+Map_Option :: enum u32 { // as_map, as_protect; a mapping is always readable
 	Write,
 	Exec,
 }
@@ -471,12 +471,50 @@ Map_Options :: bit_set[Map_Option; u32]
 // On the wire, an option set is the u32 whose bit i is the option with value i.
 #assert(u32(Map_Option.Write) == 0 && u32(Map_Option.Exec) == 1)
 
+// as_map's and as_protect's flags word, and as_query's: the options in its
+// low byte, and the mapping's protection key in bits 8-11 (upstream's
+// VX_MAP_KEY(k); ADR-0035). A key of 0 is every mapping's default.
+Map_Flags :: bit_field u32 {
+	options:  u32 | 8, // a Map_Options: map_options() reads it
+	key:      u32 | 4,
+	reserved: u32 | 20,
+}
+
+KEY_MAX :: 15 // the most keys a task may allocate: 1 to 15 (x86's PKU)
+
+map_flags :: #force_inline proc "contextless" (options: Map_Options, key: u32 = 0) -> Map_Flags {
+	return Map_Flags{options = transmute(u32)options, key = key}
+}
+
+map_options :: #force_inline proc "contextless" (f: Map_Flags) -> Map_Options {
+	return transmute(Map_Options)f.options
+}
+
+// A thread's rights to a protection key (rt.keys_set): with .Read it may read
+// the key's pages, with .Write write them too; with neither, not touch them.
+// x86's PKU has no write-only key: .Write alone is read and write.
+Key_Right :: enum u32 {
+	Read,
+	Write,
+}
+Key_Rights :: bit_set[Key_Right; u32]
+
 // as_map(task, vmo, offset, size, flags, &address): maps part of a VMO, at
-// address, or where the kernel picks with address 0.
+// address, or where the kernel picks with address 0; flags a Map_Flags.
 // as_unmap(task, address, size): unmaps the pages of [address, address +
 // size), whole mappings or parts of them; a mapping cut in the middle becomes
 // two. Pages nothing maps there are left alone. Once it returns, no CPU can
 // reach the pages through those addresses any more.
+// as_protect(task, address, size, flags): changes the rights and key of the
+// pages of [address, address + size), every one mapped, within the rights
+// each mapping's VMO handle gave when it was mapped (.Err_Access past them);
+// a mapping cut by the range becomes two or three (ADR-0035).
+// as_key_alloc(task, &key) and as_key_free(task, key): a protection key of
+// the task's, 1 to Cpu_Info.keys (key 0 is every mapping's default), with
+// the task handle's MANAGE as as_map takes it; .Err_No_Space when none is
+// free, .Err_Unsupported where the CPU has none; a key a mapping still uses
+// is not freed (.Err_Bad_State). A thread's rights to each key are its own
+// (PKRU, POR_EL0), set with the unprivileged instruction (rt.keys_set).
 
 // The longest exit string or note, in bytes: Plan 9's ERRMAX (ADR-0010).
 ERRMAX :: 128
@@ -516,12 +554,18 @@ ERRMAX :: 128
 //     .Get_Tls and .Set_Tls its thread pointer (x86_64's FS base, aarch64's
 //     TPIDR_EL0), a u64, on the same terms; with thread 0, the caller's own,
 //     at any time. .Get_Fpregs and .Set_Fpregs its FP/SIMD registers, an
-//     Fpregs, on the same terms. .Get_Watch and .Set_Watch (DEBUG), with
-//     thread 0, the task's watchpoints, a Watches, which every thread of it
-//     has, from when each next runs; .Get_Watch says how many the hardware
-//     has in count. .Next_Thread, at any time, describes the live thread with
-//     the next id after `thread` (0: the first) in a Thread_Info;
-//     .Err_Not_Found after the last.
+//     Fpregs, on the same terms: the legacy part alone, x86_64's FXSAVE
+//     image. .Get_Xstate and .Set_Xstate the whole of it, on the same terms
+//     (ADR-0035): x86_64's XSAVE standard image of every component XCR0
+//     enables, aarch64's Fpregs; Cpu_Info.xstate_size bytes. A .Set_Xstate
+//     with a header bit XCR0 lacks, reserved header bytes set, or an MXCSR bit
+//     mxcsr_mask lacks is .Err_Invalid. .Get_Cpu, with thread 0, a Cpu_Info:
+//     what the kernel saves and lets user code use. .Get_Watch and
+//     .Set_Watch (DEBUG), with thread 0, the task's watchpoints, a Watches,
+//     which every thread of it has, from when each next runs; .Get_Watch
+//     says how many the hardware has in count. .Next_Thread, at any time,
+//     describes the live thread with the next id after `thread` (0: the
+//     first) in a Thread_Info; .Err_Not_Found after the last.
 // thread_suspend(task, thread), thread_resume(task, thread): counted, with
 //     the DEBUG right; with thread 0, every thread of the task. A suspended
 //     thread stops before it next returns to user mode; thread_suspend
@@ -589,16 +633,24 @@ Exception_Kind :: enum u32 {
 	// A pager-backed page not supplied by its pager's deadline; address: the
 	// page, code: read 0, write 1, execute 2 (POSIX's SIGBUS).
 	Pager_Timeout,
+	// A page whose key the thread's rights deny; address: what was touched,
+	// code: read 0, write 1, key: the mapping's (ADR-0035; SIGSEGV,
+	// SEGV_PKUERR).
+	Protection_Key,
 }
 
 Exception :: struct {
-	kind:     Exception_Kind,
-	code:     u32,
-	address:  u64,
-	thread:   u32, // the id of the thread it happened to
-	reserved: u32,
-	regs:     Regs,
-	note:     [ERRMAX]u8, // .Interrupt: the note, `code` bytes of it
+	kind:    Exception_Kind,
+	code:    u32,
+	address: u64,
+	thread:  u32, // the id of the thread it happened to
+	key:     u32, // .Protection_Key: the mapping's protection key
+	// Its protection-key rights (PKRU, POR_EL0) when it was diverted to its
+	// in-task handler, which runs with key 0 opened; the handler writes them
+	// back as it leaves (rt.note_resume).
+	rights:  u64,
+	regs:    Regs,
+	note:    [ERRMAX]u8, // .Interrupt: the note, `code` bytes of it
 }
 
 Exception_Option :: enum u32 {
@@ -625,6 +677,38 @@ Thread_State_Op :: enum u32 {
 	Next_Thread,
 	Get_Watch,
 	Set_Watch,
+	Get_Xstate, // ADR-0035
+	Set_Xstate,
+	Get_Cpu,
+}
+
+// .Get_Xstate's most: the kernel's limit, a page (Cpu_Info.xstate_size says
+// how much of it a thread's state takes).
+XSTATE_MAX :: 4096
+
+// thread_state's .Get_Cpu (ADR-0035): what the kernel saves of a thread's
+// FP/SIMD state, and what user code may use. x86_64 user code asks CPUID for
+// instruction sets; aarch64's ID registers trap at EL0, so they are here, as
+// the kernel read them, with the fields of what it does not save (SVE, SME)
+// zeroed.
+when ODIN_ARCH == .amd64 {
+	Cpu_Info :: struct {
+		xstate_size: u32, // .Get_Xstate's bytes
+		keys:        u32, // protection keys a task may allocate; 0: none
+		xfeatures:   u64, // XCR0: the components saved
+		mxcsr_mask:  u32,
+		reserved:    u32,
+	}
+
+	#assert(size_of(Cpu_Info) == 24)
+} else {
+	Cpu_Info :: struct {
+		xstate_size: u32, // .Get_Xstate's bytes
+		keys:        u32, // protection keys a task may allocate; 0: none
+		isar0, isar1, isar2, pfr0, pfr1, zfr0, smfr0, mmfr3: u64, // ID_AA64*_EL1
+	}
+
+	#assert(size_of(Cpu_Info) == 72)
 }
 
 // Watchpoints: the debug registers, x86_64's four, aarch64's two to sixteen.
@@ -666,7 +750,7 @@ Thread_Info :: struct { // thread_state(.Next_Thread)
 Map_Info :: struct { // as_query
 	base, size: u64,
 	offset:     u64, // into the VMO mapped
-	flags:      Map_Options, // always readable
+	flags:      Map_Flags, // its options (always readable) and key
 	reserved:   u32,
 }
 
@@ -678,7 +762,7 @@ Mem_Op :: struct { // task_mem_rw
 	status:  Status, // set by the kernel
 }
 
-#assert(size_of(Exception) == 24 + size_of(Regs) + ERRMAX)
+#assert(size_of(Exception) == 32 + size_of(Regs) + ERRMAX)
 #assert(size_of(Thread_Info) == 16 && size_of(Map_Info) == 32 && size_of(Mem_Op) == 32)
 #assert(size_of(Watches) == 8 + WATCH_MAX * 16)
 #assert(u32(Exception_Option.In_Task) == 0 && u32(Exception_Option.First_Chance) == 1)

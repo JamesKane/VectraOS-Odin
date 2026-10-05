@@ -1,7 +1,7 @@
 page=as sect=2 summary="map memory objects into a task's address space, unmap and list them"
-    names=as_reserve,as_map,as_unmap,as_protect,as_query
+    names=as_reserve,as_map,as_unmap,as_protect,as_query,as_key_alloc,as_key_free
     src=kernel/syscall/syscall.c,kernel/obj/task.c,kernel/obj/device.c,lib/vx-rt/base.c
-    keys=address,space,map,mmap,munmap,mapping,vmo,memory,ioport
+    keys=address,space,map,mmap,munmap,mprotect,mapping,vmo,memory,ioport,pkey,protection,keys,pku
 
 # SYNOPSIS
 
@@ -10,6 +10,12 @@ vx_status vx_as_map(vx_handle task, vx_handle vmo, uint64_t offset,
                     uint64_t size, uint32_t flags, uint64_t *addr);
 vx_status vx_as_unmap(vx_handle task, uint64_t addr, uint64_t size);
 vx_status vx_as_query(vx_handle task, uint64_t address, vx_map_info *info);
+vx_status vx_as_protect(vx_handle task, uint64_t addr, uint64_t size,
+                        uint32_t flags);
+vx_status vx_as_key_alloc(vx_handle task, uint32_t *key);
+vx_status vx_as_key_free(vx_handle task, uint32_t key);
+vx_status vx_keys_set(uint32_t key, uint32_t rights);
+uint32_t vx_keys_get(uint32_t key);
 ```
 
 # DESCRIPTION
@@ -20,7 +26,8 @@ Addresses, offsets and sizes are in bytes and are multiples of the page size, 40
 
 `vx_as_map` maps <size> bytes of <vmo>, starting <offset> bytes into it, into <task>.
 With `*`<addr> zero the kernel picks the address and writes it to `*`<addr>; otherwise the mapping goes at `*`<addr>, which must be page-aligned.
-<flags> is `VX_MAP_WRITE`, `VX_MAP_EXEC` or neither: a mapping is always readable, and is never both writable and executable, so a JIT maps one VMO twice, once each way.
+<flags> is `VX_MAP_WRITE`, `VX_MAP_EXEC` or neither: a mapping is always readable, and is never both writable and executable, so a JIT writes code and then makes it executable with `vx_as_protect`, or maps one VMO twice, once each way.
+<flags> may also carry a protection key, `VX_MAP_KEY(`<k>`)`, one the task has allocated (below); without one a mapping has key 0.
 <task> needs `VX_RIGHT_MANAGE`; <vmo> needs `VX_RIGHT_MAP` and `VX_RIGHT_READ`, and `VX_RIGHT_WRITE` or `VX_RIGHT_EXEC` to match <flags>.
 The mapping holds a reference to the VMO, so the VMO's handle may be closed once it is mapped.
 A VMO of physical memory, a device's registers, is mapped as device memory; a pager's VMO is mapped as far as its pager has supplied the pages, the rest as they are touched, and a page of it is writable only once it is dirty.
@@ -37,7 +44,7 @@ When it returns, no CPU reaches those pages through those addresses, the kernel'
 A VMO is freed when its last mapping and its last handle are gone.
 <task> needs `VX_RIGHT_MANAGE`.
 
-`vx_as_query` fills `*`<info> with the first of <task>'s mappings that ends after <address>: its `base` and `size`, the `offset` into its VMO, and its `flags`, `VX_MAP_WRITE` and `VX_MAP_EXEC`.
+`vx_as_query` fills `*`<info> with the first of <task>'s mappings that ends after <address>: its `base` and `size`, the `offset` into its VMO, and its `flags`, `VX_MAP_WRITE` and `VX_MAP_EXEC` and its key (`VX_MAP_KEY_MASK`).
 Asking again from each mapping's end lists the address space, as a debugger or `/proc/N/maps` does.
 <task> needs `VX_RIGHT_INSPECT`.
 
@@ -45,9 +52,29 @@ Asking again from each mapping's end lists the address space, as a debugger or `
 It is meant to reserve a range of address space with nothing committed, at a size and alignment the caller names and a random base, for `as_map` to fill (01 §5).
 It has no vx-rt wrapper, and `vx_syscall(VX_SYS_as_reserve, ...)` returns `VX_ERR_UNSUPPORTED` today.
 
-`as_protect` is reserved.
-It is meant to change the permissions of mapped pages, and to tag a mapping with a protection key (01 §5).
-It has no vx-rt wrapper, and `vx_syscall(VX_SYS_as_protect, ...)` returns `VX_ERR_UNSUPPORTED` today.
+`vx_as_protect` changes the rights and the key of the pages of [<addr>, <addr> + <size>) to <flags>, as `vx_as_map` takes them (ADR-0035).
+Every page of the range must be mapped, and <flags> may give each mapping no more than its VMO's handle gave when it was mapped: `VX_MAP_WRITE` only if that handle had `VX_RIGHT_WRITE`, `VX_MAP_EXEC` only with `VX_RIGHT_EXEC`; never both at once.
+A mapping the range cuts becomes two or three, as `vx_as_unmap` cuts them, so that needs free mapping slots.
+When it returns, no CPU reaches the pages with their old rights.
+<task> needs `VX_RIGHT_MANAGE`.
+
+@node=keys title="Protection keys"
+
+A protection key lets a thread deny itself access to some of its task's memory without a syscall: each mapping carries a key, and each thread holds its own rights to each key, read and write or read only or none, changed by an instruction user code may run (x86's PKU: the `PKRU` register, `WRPKRU`).
+It is a guard against a task's own mistakes, not a wall: any code in the task can change its rights back, so code that is not trusted still belongs in another task (sharing(7)).
+
+`vx_as_key_alloc` gives <task> a free key, 1 to `vx_cpu_info.keys` (thread(2)), 15 on x86 with PKU; key 0 is every mapping's default and is never allocated.
+`vx_as_key_free` frees one, but not while any mapping still has it, so a key's next owner inherits no protected memory.
+Both need `VX_RIGHT_MANAGE` on <task>, and answer `VX_ERR_UNSUPPORTED` where the CPU has no keys: aarch64 today (M6 step 6c5 looks for Arm's permission overlays).
+
+`vx_keys_set` sets the calling thread's rights to <key>: `VX_KEY_READ`, `VX_KEY_READ | VX_KEY_WRITE`, or 0 for none (x86 has no write-only key, so `VX_KEY_WRITE` alone is read and write); `vx_keys_get` says what they are.
+They run the instruction, with no syscall, and change no other thread's rights.
+A new task's first thread has key 0 open and every other key closed; a thread created by a thread of its own task starts with its creator's rights; `fork` keeps every mapping's key and the forking thread's rights.
+
+A thread's rights hold for the kernel too: a syscall given a buffer the caller may not write (or read) fails with `VX_ERR_ACCESS`, where it would have written (or read) it.
+A load or store its rights deny raises `VX_EXCEPTION_PROTECTION_KEY` (exception(2)), with the mapping's key in `vx_exception.key`; under POSIX it is `SIGSEGV` with `SEGV_PKUERR` and `si_pkey`.
+A thread diverted to its in-task handler runs it with key 0 opened, and finds the rights it had in `vx_exception.rights`, which the handler's way out writes back (vx-rt's does).
+A debugger sees them as `rights` in procfs(4)'s `regs.ndb`, and sets them in its `xregs`.
 
 # EXAMPLES
 
@@ -106,7 +133,25 @@ handle(2), intro(2)
 : `VX_ERR_INVALID`
   <info> is not writable memory of the caller's.
 
-`as_reserve` and `as_protect` return `VX_ERR_UNSUPPORTED`.
+`vx_as_protect` returns `VX_OK`, or:
+
+: `VX_ERR_BAD_HANDLE`
+  As above.
+: `VX_ERR_ACCESS`
+  <task> lacks `VX_RIGHT_MANAGE`, <flags> asks for both `VX_MAP_WRITE` and `VX_MAP_EXEC`, or for a right a mapping's handle did not give.
+: `VX_ERR_INVALID`
+  <flags> has an unknown bit, or a key <task> has not allocated.
+: `VX_ERR_RANGE`
+  <size> is zero, <addr> or <size> is not page-aligned, or the range runs past the user half.
+: `VX_ERR_NOT_FOUND`
+  A page of the range is not mapped; nothing is changed.
+: `VX_ERR_NO_MEMORY`
+  The range cuts more mappings than the task has free mapping slots; nothing is changed.
+
+`vx_as_key_alloc` returns `VX_OK`, `VX_ERR_NO_SPACE` when all its keys are taken, `VX_ERR_UNSUPPORTED` where there are none, or `VX_ERR_INVALID` for a <key> that is not writable memory of the caller's; `vx_as_key_free` returns `VX_OK`, `VX_ERR_INVALID` for a key that is not the task's, `VX_ERR_BAD_STATE` for one a mapping uses, or `VX_ERR_UNSUPPORTED`.
+`vx_keys_set` returns `VX_ERR_INVALID` for a key past `vx_cpu_info.keys` or unknown rights, and `VX_ERR_UNSUPPORTED` where there are no keys.
+
+`as_reserve` returns `VX_ERR_UNSUPPORTED`.
 
 # BUGS
 
@@ -117,4 +162,4 @@ Large pages, which the design lets `as_map` ask for, are not offered, and a mapp
 An IoRange without `VX_RIGHT_MAP` is reported as `VX_ERR_BAD_HANDLE`, not `VX_ERR_ACCESS`.
 Mapping the same IoRange twice takes two of the task's 32 ranges.
 A <addr> the caller can read but not write fails with `VX_ERR_INVALID` after the mapping is made, and the mapping stays.
-`vx_as_query` on a task that has exited walks a mapping table that is no longer there, through a null pointer: the kernel faults.
+Protection keys exist on x86 alone until 6c5.

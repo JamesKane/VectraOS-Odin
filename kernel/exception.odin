@@ -466,6 +466,8 @@ state_size :: proc "contextless" (op: vx.Thread_State_Op) -> u64 {
 		return size_of(vx.Thread_Info)
 	case .Get_Watch, .Set_Watch:
 		return size_of(vx.Watches)
+	case .Get_Xstate, .Set_Xstate, .Get_Cpu:
+		return 0
 	}
 	return 0
 }
@@ -480,6 +482,8 @@ sys_thread_state :: proc "contextless" (h: vx.Handle, id, op_arg: u64, buf: Uva,
 		return .Err_Too_Small
 	}
 	#partial switch op {
+	case .Get_Xstate, .Set_Xstate, .Get_Cpu:
+		return .Err_Unsupported
 	case .Next_Thread:
 		return thread_next(h, id, buf)
 	case .Get_Watch, .Set_Watch:

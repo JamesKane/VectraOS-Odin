@@ -125,7 +125,7 @@ crash_mem :: proc "contextless" (c: ^p9.Client, dir: p9.Fid, p: ^Proc) {
 			break
 		}
 		at = m.base + m.size
-		if .Write not_in m.flags {
+		if .Write not_in vx.map_options(m.flags) {
 			continue
 		}
 		fid, wst := p9.client_walk(c, mem, "")

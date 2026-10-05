@@ -882,7 +882,8 @@ maps_text :: proc "contextless" (p: ^Proc, buf: []u8) -> int {
 		}
 		put_hex(&w, "base", m.base)
 		put_hex(&w, "size", m.size)
-		prot := [3]u8{'r', .Write in m.flags ? 'w' : '-', .Exec in m.flags ? 'x' : '-'}
+		opts := vx.map_options(m.flags)
+		prot := [3]u8{'r', .Write in opts ? 'w' : '-', .Exec in opts ? 'x' : '-'}
 		ndb.put(&w, "prot", string(prot[:]))
 		put_hex(&w, "offset", m.offset)
 		_ = ndb.end(&w)

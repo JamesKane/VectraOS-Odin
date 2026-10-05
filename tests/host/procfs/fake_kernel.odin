@@ -240,7 +240,7 @@ fake_syscall :: proc "c" (nr: vx.Syscall, a0, a1, a2, a3, a4, a5: u64) -> i64 {
 		}
 		for &m in t.maps { // in address order
 			if m.base + u64(len(m.bytes)) > a1 {
-				ptr(vx.Map_Info, a2)^ = {base = m.base, size = u64(len(m.bytes)), offset = m.offset, flags = m.flags}
+				ptr(vx.Map_Info, a2)^ = {base = m.base, size = u64(len(m.bytes)), offset = m.offset, flags = vx.map_flags(m.flags)}
 				return 0
 			}
 		}

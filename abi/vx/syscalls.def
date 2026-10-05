@@ -68,3 +68,5 @@ VX_SYSCALL(pmu_configure)
 VX_SYSCALL(dma_domain_op)
 VX_SYSCALL(system_power)
 VX_SYSCALL(clock_set)
+VX_SYSCALL(as_key_alloc) // ADR-0035
+VX_SYSCALL(as_key_free)

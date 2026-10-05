@@ -497,7 +497,7 @@ task_query :: proc "contextless" (t: ^Task, addr: Uva) -> (info: vx.Map_Info, st
 	if best == nil {
 		return {}, .Err_Not_Found
 	}
-	return {base = u64(best.va), size = best.size, offset = best.offset, flags = best.flags}, .Ok
+	return {base = u64(best.va), size = best.size, offset = best.offset, flags = vx.map_flags(best.flags)}, .Ok
 }
 
 // The page-table flags for a user mapping.

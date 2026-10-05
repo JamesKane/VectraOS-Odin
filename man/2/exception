@@ -22,10 +22,11 @@ It goes to whoever is bound to take it, in this order (see the kernel's design, 
 - the task's exception port, bound with options 0;
 - the default: the kernel reports the fault on the console and kills the task, its exit string the trap in Plan 9's words, such as `sys: trap: fault read addr=0x0 pc=0x401000`.
 
-A page fault on memory a pager supplies is first given to the pager; if the page does not come by the pager's deadline, the exception is `VX_EXCEPTION_PAGER_TIMEOUT`.
+A page fault on memory a pager supplies is first given to the pager; if the page does not come by the pager's deadline, the exception is `VX_EXCEPTION_PAGER_TIMEOUT`, and a task no one handles it for ends with `sys: trap: page not supplied`.
+A load or store that the thread's protection-key rights deny is `VX_EXCEPTION_PROTECTION_KEY`, its <code> 0 for a read and 1 for a write, the mapping's key in <key> (as(2)'s protection keys); unhandled, `sys: trap: protection key write addr=`<a>.
 A note posted by `thread_interrupt` (thread(2)) is an exception too, of kind `VX_EXCEPTION_INTERRUPT`, but goes only to the in-task handler.
 
-An exception is described by a `vx_exception`: its <kind>, a <code> and an <address> whose meaning the kind gives (abi.h has them), the id of the <thread> it happened to, the thread's registers, and for an interrupt the note.
+An exception is described by a `vx_exception`: its <kind>, a <code> and an <address> whose meaning the kind gives (abi.h has them), the id of the <thread> it happened to, a protection key's <key>, the thread's <rights> to the keys when it was diverted to its in-task handler (which runs with key 0 opened, and writes <rights> back before it resumes: ADR-0035), the thread's registers, and for an interrupt the note.
 
 ## Binding
 
