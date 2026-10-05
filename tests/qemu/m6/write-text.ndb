@@ -1,0 +1,6 @@
+# tests/qemu/write-text.ndb: kernel code is mapped read-only (W^X), so writing
+# to it is a protection fault (M1). Each expect= matches its own line.
+
+scenario=write-text timeout=10 cmdline=vx.selftest=write-text
+expect="vx: kernel 0.1.0 $arch, "
+expect="(write, protection, kernel) at "

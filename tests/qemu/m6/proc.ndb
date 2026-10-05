@@ -1,0 +1,12 @@
+# tests/qemu/proc.ndb: the one process table (ADR-0011). proctest spawns
+# copies of itself, registered with procfs, and checks /proc's files: status,
+# ppid, wait records, note, notepg, noteid and ctl, and a note ending a wait
+# read (tests/user/proctest.c).
+
+scenario=proc timeout=30 cmdline=vx.skip=rc with=proctest
+expect=" checks, 0 failed"
+line="svcd: proctest exited"
+fail="vx: panic"
+fail="FAILED"
+fail=") killed: "
+fail="cannot register"

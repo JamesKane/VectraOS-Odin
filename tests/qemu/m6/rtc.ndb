@@ -1,0 +1,14 @@
+# tests/qemu/rtc.ndb: wall-clock time (M5 step 7d). bus-acpi reports the CMOS
+# RTC (PNP0B00) with its _CRS resources; devmgr starts drv-rtc-cmos with
+# exactly those, the driver reads the clock QEMU starts at a fixed time, and
+# devmgr sets the kernel's wall clock (ADR-0031); date and a new file's time
+# then show it.
+
+scenario=rtc timeout=120 arch=x86_64 rtc=2030-01-02T03:04:05 with=rtctest cmdline=vx.skip=rc
+expect="devmgr: \_SB.PCI0.SF8.RTC PNP0B00: /boot/bin/drv-rtc-cmos"
+expect="devmgr: the wall clock is 2030-01-02 03:04:"
+expect="rtctest: date 2030-01-02 03"
+expect="rtctest: file -rw-r--r-- 1 0 0 0 Jan 02 03:0"
+fail="vx: panic"
+fail="not starting"
+fail=") killed: "

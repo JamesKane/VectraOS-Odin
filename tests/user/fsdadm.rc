@@ -1,4 +1,4 @@
-# tests/user/fsdadm.rc: fsd's adm files (tests/qemu/fsdadm.ndb). gsh runs it as
+# tests/user/fsdadm.rc: fsd's adm files (tests/qemu/fsdadm.ndb). rc runs it as
 # vectra, a member of adm, with fsd's home branch on /tmp, its adm branch on
 # /adm and home again, permissively (%home), on /n. Each ctl command is
 # written and status read back; then a file no one may read is read through

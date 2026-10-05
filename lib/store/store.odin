@@ -19,7 +19,7 @@
 //   in one canonical form (dir_put's):
 //     name=bin mode=040555 hash=b2:...
 //     name=svcd mode=0555 size=394632 hash=b2:...
-//     name=sh mode=0120777 link=/bin/gsh
+//     name=sh mode=0120777 link=/bin/rc
 //   Its name is BLAKE2b(text), as doc 06 has it. A tree's hash is its root
 //   directory's.
 //

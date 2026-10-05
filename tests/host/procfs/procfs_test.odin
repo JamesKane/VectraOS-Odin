@@ -155,7 +155,7 @@ test_procfs :: proc(t: ^testing.T) {
 	make_image()
 	add_task({id = 1, name = "svcd", state = .Running, blocked = 1, mapped = 412 * 1024, threads = {{id = 1, state = .Blocked}}})
 	add_task({id = 2, name = "procfs", state = .Running, threads = {{id = 1, state = .Running}}})
-	add_task({id = 7, name = "gsh", state = .Running, blocked = 1, mapped = 412 * 1024, threads = {{id = 1, state = .Blocked}}})
+	add_task({id = 7, name = "rc", state = .Running, blocked = 1, mapped = 412 * 1024, threads = {{id = 1, state = .Blocked}}})
 	ls := add_task({id = 9, name = "ls", state = .Running, mapped = 1536, threads = {{id = 1, state = .Running}, {id = 2, state = .Blocked}}})
 	_ = append(&ls.maps, Fake_Map{base = 0x400000, flags = {.Exec}, bytes = code_mem[:]})
 	_ = append(&ls.maps, Fake_Map{base = 0x600000, flags = {.Write}, offset = 0x1000, bytes = data_mem[:]})
@@ -223,7 +223,7 @@ test_procfs :: proc(t: ^testing.T) {
 	status_cases := []Status_Case {
 		{"1/status", "pid=1 name=svcd state=waiting threads=1 mem=412K sid=1\n"},
 		{"2/status", "pid=2 name=procfs state=running threads=1 mem=0K sid=2\n"},
-		{"7/status", "pid=7 name=gsh state=waiting threads=1 mem=412K sid=7\n"},
+		{"7/status", "pid=7 name=rc state=waiting threads=1 mem=412K sid=7\n"},
 		{"9/status", "pid=9 name=ls state=running threads=2 mem=1K sid=7\n"},
 		{"13/status", "pid=13 name=victim state=new threads=0 mem=0K sid=7\n"},
 		// The name fills its field: no NUL.
@@ -256,9 +256,9 @@ test_procfs :: proc(t: ^testing.T) {
 	{
 		f, _ := p9.client_walk(&c, root, "7/status")
 		_ = p9.client_open(&c, f, p9.OREAD)
-		n, re := p9.client_read(&c, f, 11, buf[:3])
+		n, re := p9.client_read(&c, f, 11, buf[:2])
 		testing.expect_value(t, re, vx.Status.Ok)
-		testing.expect_value(t, string(buf[:n]), "gsh")
+		testing.expect_value(t, string(buf[:n]), "rc")
 		n, re = p9.client_read(&c, f, 1000, buf[:])
 		testing.expect_value(t, re, vx.Status.Ok)
 		testing.expect_value(t, n, 0)
@@ -387,12 +387,12 @@ test_procfs :: proc(t: ^testing.T) {
 	_, e = write_file(&c, root, "9/note", strings.repeat("x", vx.ERRMAX, context.temp_allocator))
 	testing.expect_value(t, e, vx.Status.Ok)
 	// notepg: every process in the writer's group, the writer too.
-	gsh := task_by_id(7)
-	clear(&gsh.notes)
+	shell := task_by_id(7)
+	clear(&shell.notes)
 	clear(&ls.notes)
 	_, e = write_file(&c, root, "9/notepg", "group")
 	testing.expect_value(t, e, vx.Status.Ok)
-	testing.expect_value(t, note_text(gsh, 0), "group")
+	testing.expect_value(t, note_text(shell, 0), "group")
 	testing.expect_value(t, note_text(ls, 0), "group")
 	testing.expect_value(t, len(task_by_id(12).notes), 0) // a group of its own
 	testing.expect_value(t, len(task_by_id(14).notes), 1)
@@ -489,14 +489,14 @@ test_procfs :: proc(t: ^testing.T) {
 	// childnotes: records of a child's stops and continues, and SIGCHLD.
 	_, e = write_file(&c, root, "7/ctl", "childnotes")
 	testing.expect_value(t, e, vx.Status.Ok)
-	clear(&gsh.notes)
+	clear(&shell.notes)
 	now += 3_000_000
 	_, e = write_file(&c, root, "9/ctl", "stop 20")
-	testing.expect_value(t, note_text(gsh, 0), "posix: SIGCHLD pid=9")
+	testing.expect_value(t, note_text(shell, 0), "posix: SIGCHLD pid=9")
 	_, e = fs_read(7, .Wait, buf[:])
 	testing.expect_value(t, e, vx.Status.Err_Interrupted) // the note ended the read held for 7
 	_, e = write_file(&c, root, "9/ctl", "start")
-	testing.expect_value(t, note_text(gsh, 1), "posix: SIGCHLD pid=9")
+	testing.expect_value(t, note_text(shell, 1), "posix: SIGCHLD pid=9")
 	_ = p9test.stat_of(&c, root, "7/wait", &st)
 	testing.expect_value(t, st.length, 2) // as 9front's: records queued
 	text, e = fs_read(7, .Wait, buf[:])
@@ -516,7 +516,7 @@ test_procfs :: proc(t: ^testing.T) {
 	testing.expect_value(t, e, vx.Status.Err_Not_Found) // gone
 	text, e = fs_read(7, .Wait, buf[:])
 	testing.expect_value(t, text, "pid=13 name=victim noteid=7 status=killed real=15\n")
-	testing.expect_value(t, note_text(gsh, 2), "posix: SIGCHLD pid=13")
+	testing.expect_value(t, note_text(shell, 2), "posix: SIGCHLD pid=13")
 	// A child registered with No_Wait leaves none.
 	long := task_by_id(14)
 	_, e = write_file(&c, root, "14/ctl", "kill")
@@ -850,7 +850,7 @@ test_procfs :: proc(t: ^testing.T) {
 		sf, _ := p9.client_walk(&c, root, "7/status")
 		_ = p9.client_open(&c, sf, p9.OREAD)
 		_, e = write_file(&c, root, "7/ctl", "kill")
-		fire_exit(gsh)
+		fire_exit(shell)
 		_, e = p9.client_read(&c, sf, 0, buf[:])
 		testing.expect_value(t, e, vx.Status.Err_Not_Found)
 		_ = p9.client_clunk(&c, sf)

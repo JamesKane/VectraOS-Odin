@@ -4,7 +4,7 @@
 # commands share its namespace group, through nsd (ADR-0009). svcd starts it
 # again when it exits.
 
-service=gsh program=/boot/bin/gsh console restart
+service=rc program=/boot/bin/rc console restart
 mount=/ srv=bootfs
 mount=/proc srv=proc
 mount=/net srv=net

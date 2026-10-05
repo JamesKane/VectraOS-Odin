@@ -242,7 +242,7 @@ test_distd :: proc(t: ^testing.T) {
 	store_side.c = {rpc = p9test.loopback, ctx = &store_side.srv, tbuf = store_side.tbuf[:], rbuf = store_side.rbuf[:]}
 	testing.expect_value(t, p9.client_version(&store_side.c, 8192, {}), vx.Status.Ok)
 	testing.expect_value(t, ns.mount(&distd.space, &store_side.c, vx.HANDLE_NONE, "/srv/fsd", "", "/", {}), vx.Status.Ok)
-	rt.spawn.cmdline = "vx.skip=gsh vx.system vx.slot=a"
+	rt.spawn.cmdline = "vx.skip=rc vx.system vx.slot=a"
 	kernel_log_len = 0
 	distd.start()
 	testing.expect_value(t, said(), fmt.tprintf("distd: 1 releases for %s; serving /srv/dist\n", distd.ARCH))

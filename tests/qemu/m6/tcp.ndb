@@ -1,0 +1,15 @@
+# tests/qemu/tcp.ndb: TCP through netd's /net/tcp (M3, step 3), against
+# QEMU's own TCP stack: 10.0.2.100!7 is a `cat` on the host, so 256 KiB sent
+# come back, and hangup ends the stream both ways. A host port nobody listens
+# on refuses the connection.
+
+scenario=tcp timeout=40 cmdline=vx.skip=rc with=tcptest
+expect="netd: 10.0.2.15/24 from dhcp, gateway 10.0.2.2"
+expect="tcptest: connected to 10.0.2.100!7"
+expect="tcptest: 262144 bytes echoed"
+expect="tcptest: end of stream after hangup"
+expect="tcptest: 10.0.2.2!1: connection refused"
+expect="tcptest: ok"
+fail="vx: panic"
+fail="FAILED"
+fail=") killed: "

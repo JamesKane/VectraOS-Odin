@@ -1,10 +1,10 @@
 # tests/user/rctest.ndb: M4's exit test, the shell's part
-# (tests/qemu/rcscript.ndb): svcd runs gsh on /boot/tests/rctest.rc, with
+# (tests/qemu/rcscript.ndb): svcd runs rc on /boot/tests/rctest.rc, with
 # arguments, an environment and the POSIX namespace, where /bin is sbase's.
 # The last env= is LIST=a\x01b in hex: an rc list of two words, as rc
-# exports one, which gsh imports as a list and exports again.
+# exports one, which rc imports as a list and exports again.
 
-service=rctest program=/boot/bin/gsh console entropy
+service=rctest program=/boot/bin/rc console entropy
 arg=/boot/tests/rctest.rc
 arg=one
 arg="two words"

@@ -1,8 +1,8 @@
-# tests/user/fsddump.ndb: gsh runs /boot/tests/fsddump.rc as vectra, with fsd's
+# tests/user/fsddump.ndb: rc runs /boot/tests/fsddump.rc as vectra, with fsd's
 # home branch on /tmp, its adm branch on /adm and its dump view on /n
 # (tests/qemu/fsddump.ndb).
 
-service=fsddump program=/boot/bin/gsh console entropy
+service=fsddump program=/boot/bin/rc console entropy
 user=vectra
 arg=/boot/tests/fsddump.rc
 ns=posix

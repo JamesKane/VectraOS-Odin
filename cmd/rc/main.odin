@@ -1,4 +1,5 @@
-// gsh: the shell (upstream docs/04 §5, M2; rc's language since M4 step 7).
+// rc: the shell, Plan 9's rc (upstream docs/04 §5; M2, its language since M4
+// step 7, named gsh until upstream's M6 step 6a4).
 // Its language is rc's, from vx:rc: lists, quoting, ^, $#x and $x(n), if, if
 // not, for, while, switch, ~, fn, !, && and ||, pipes, redirections, `{...},
 // globbing, $status, $*:
@@ -8,7 +9,7 @@
 //   echo kill > /proc/2/ctl             redirections: > >> < >[2=1] >[2]
 //   for(p in `{ls /proc}) echo $p       command substitution
 //   bind -a /boot/bin /bin              builtins: bind, mount, unmount, and rc's
-//   gsh script.rc a b                   a script, its arguments in $*
+//   rc script.rc a b                    a script, its arguments in $*
 //
 // A command is a program found as given (a path) or in /bin, then /boot/bin,
 // through the shell's namespace. It is loaded by the shell and spawned with a
@@ -25,7 +26,7 @@
 //
 // rc's Host callbacks are contextless, so everything they reach is too; only
 // vx_main has a context.
-package gsh
+package rccmd
 
 import "base:intrinsics"
 import vx "abi:vx"
@@ -107,7 +108,7 @@ report :: proc "contextless" (what: string, st: vx.Status) {
 		set_status("")
 		return
 	}
-	say("gsh: ", what, ": ")
+	say("rc: ", what, ": ")
 	err(p9.error_text(st))
 	err("\n")
 	set_status(p9.error_text(st))
@@ -689,7 +690,7 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 	reap()
 	n := len(stages)
 	if n > MAX_STAGES {
-		say("gsh: too many commands in a pipe", "", "\n")
+		say("rc: too many commands in a pipe", "", "\n")
 		set_status("too many commands")
 		return 0, false
 	}
@@ -743,7 +744,7 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 					to = rc.Fd_Inherit{2}
 				}
 			}
-			for part in ([?]string{"gsh: ", rc.text(c.argv), ": ", why, "\n"}) {
+			for part in ([?]string{"rc: ", rc.text(c.argv), ": ", why, "\n"}) {
 				write_out(nil, to, 2, part)
 			}
 			_ = append(&ends[s], why)
@@ -843,7 +844,7 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 		}
 	}
 	if broken {
-		say("gsh: write error", "", "\n")
+		say("rc: write error", "", "\n")
 	}
 	// The commands' exit strings, joined by |, as rc's $status.
 	status_buf: [MAX_STAGES * (vx.ERRMAX + 1)]u8
@@ -888,7 +889,7 @@ vx_main :: proc() -> int {
 
 shell :: proc() -> string {
 	if procns.from_spawn(&space) != .Ok {
-		rt.eprint("gsh: the namespace is incomplete\n")
+		rt.eprint("rc: the namespace is incomplete\n")
 	}
 	host := rc.Host {
 		run       = run,
@@ -904,17 +905,17 @@ shell :: proc() -> string {
 	}
 	import_env()
 
-	if args := rt.args(); len(args) > 0 { // gsh FILE ARG ...: a script, its arguments in $*, its name in $0
+	if args := rt.args(); len(args) > 0 { // rc FILE ARG ...: a script, its arguments in $*, its name in $0
 		rc.set_var(&sh, "*", ..args[1:])
 		rc.set_var(&sh, "0", args[0])
 		n, ok := read_whole(nil, args[0], text[:])
 		if !ok {
-			say("gsh: ", args[0], ": cannot read it\n")
+			say("rc: ", args[0], ": cannot read it\n")
 			return "cannot read the script"
 		}
 		switch rc.run(&sh, string(text[:n])) {
 		case .Incomplete:
-			rt.eprint("gsh: the script ends inside a construct\n")
+			rt.eprint("rc: the script ends inside a construct\n")
 			return "syntax error"
 		case .Syntax:
 			show_error()
@@ -952,7 +953,7 @@ shell :: proc() -> string {
 					break
 				}
 			}
-			say("gsh: line too long", "", "\n")
+			say("rc: line too long", "", "\n")
 			set_status("line too long")
 			length = 0
 			continue

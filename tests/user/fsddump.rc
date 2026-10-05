@@ -1,5 +1,5 @@
 # tests/user/fsddump.rc: fsd's snapshots, read-only, and its dump view
-# (tests/qemu/fsddump.ndb). gsh runs it as vectra with fsd's home branch on
+# (tests/qemu/fsddump.ndb). rc runs it as vectra with fsd's home branch on
 # /tmp, its adm branch on /adm, and the dump view on /n. Snapshots are made
 # through ctl, dated (home@YYYY-MM-DD) and not, then read: through the dump
 # view, and one mounted by its label. The last line counts the checks.

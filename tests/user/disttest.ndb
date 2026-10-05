@@ -1,13 +1,13 @@
 # tests/user/disttest.ndb: distd (tests/qemu/distd.ndb) over the fsd test
 # volume's store branch, which ./build filled with a small release
-# (storetree, make_test_release); gsh runs /boot/tests/disttest.rc as adm,
+# (storetree, make_test_release); rc runs /boot/tests/disttest.rc as adm,
 # with /dist and the store branch itself (to damage an object) mounted.
 
 service=distd program=/boot/bin/distd post=dist console
 mount=/ srv=bootfs
 mount=/n srv=fsd aname=store
 
-service=disttest program=/boot/bin/gsh console
+service=disttest program=/boot/bin/rc console
 user=adm
 arg=/boot/tests/disttest.rc
 ns=posix

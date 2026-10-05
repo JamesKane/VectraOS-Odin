@@ -1,4 +1,4 @@
-// What the Odin interface adds to upstream's: the checks a host such as gsh
+// What the Odin interface adds to upstream's: the checks a host such as the shell (cmd/rc)
 // relies on that upstream's tests reach only through its C API.
 package rc_test
 

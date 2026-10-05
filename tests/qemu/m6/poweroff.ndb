@@ -1,0 +1,14 @@
+# tests/qemu/poweroff.ndb: the machine off (M5 step 7c). poweroff asks
+# bus-acpi on /srv/acpi, which enters S5 through ACPICA (x86_64) or has
+# devmgr make the kernel's PSCI call (aarch64, whose firmware is
+# hardware-reduced ACPI with no sleep registers); QEMU must then exit by
+# itself (exits).
+
+scenario=poweroff timeout=60 exits cmdline=vx.skip=rc with=offtest
+expect="poweroff: asking bus-acpi"
+expect="bus-acpi: serving /srv/acpi"
+expect="bus-acpi: powering off"
+fail="vx: panic"
+fail="bus-acpi: FAILED"
+fail="the machine is still on"
+fail="ACPI Error"

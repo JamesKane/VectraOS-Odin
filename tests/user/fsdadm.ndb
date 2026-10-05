@@ -1,8 +1,8 @@
-# tests/user/fsdadm.ndb: gsh runs /boot/tests/fsdadm.rc as vectra, with fsd's
+# tests/user/fsdadm.ndb: rc runs /boot/tests/fsdadm.rc as vectra, with fsd's
 # home branch on /tmp, its adm branch on /adm, and home permissively on /n
 # (tests/qemu/fsdadm.ndb).
 
-service=fsdadm program=/boot/bin/gsh console entropy
+service=fsdadm program=/boot/bin/rc console entropy
 user=vectra
 arg=/boot/tests/fsdadm.rc
 ns=posix

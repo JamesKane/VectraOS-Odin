@@ -1,0 +1,14 @@
+# tests/qemu/lua.ndb: Lua 5.5 in the POSIX userland (M4 step 5a, ADR-0015).
+# svcd runs /boot/bin/lua on a script (tests/user/luatest.lua), with
+# arguments, an environment and the POSIX namespace; the script checks the
+# language and the standard libraries, files in /tmp and require among them.
+
+scenario=lua timeout=60 with=luatest cmdline=vx.skip=rc
+expect="luatest: Lua 5.5"
+expect=" checks, 0 failed"
+line="svcd: luatest exited"
+fail="vx: panic"
+fail="svcd: luatest exited: "
+fail="not implemented"
+fail="FAILED"
+fail=") killed: "

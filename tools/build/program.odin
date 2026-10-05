@@ -49,7 +49,7 @@ PROGRAMS := []Program {
 	{name = "ptyd", dir = "servers/ptyd", place = .Bootfs},
 	{name = "devmgr", dir = "servers/devmgr", place = .Bootfs},
 	{name = "netd", dir = "servers/netd", place = .Bootfs},
-	{name = "gsh", dir = "cmd/gsh", place = .Bootfs},
+	{name = "rc", dir = "cmd/rc", place = .Bootfs},
 	{name = "poweroff", dir = "cmd/poweroff", place = .Bootfs},
 	{name = "install", dir = "cmd/install", place = .Bootfs, cports = {"monocypher"}},
 	{name = "ls", dir = "cmd/ls", place = .Bootfs},

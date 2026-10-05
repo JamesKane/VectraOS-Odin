@@ -1,0 +1,21 @@
+# tests/qemu/block.ndb: the block class (docs/proto/block.md) and
+# drv-virtio-blk (M5 step 1). The scenario gives QEMU a second disk of 64 MiB,
+# made fresh for each run (disk=): devmgr matches both disks against
+# boot/drv/virtio-blk.ndb and starts a driver for each, on /srv/disk0 (the boot
+# disk) and /srv/disk1. blktest runs the protocol's conformance checks
+# against disk1, and against the two partitions on it, which partd serves as
+# windows (tests/user/blkparts.ndb); then it kills the drivers, and reads back
+# through a new session what it wrote before. partd and blktest start
+# together, so only partd's line is waited for before blktest's ok. netd and
+# the shell are skipped: nothing here needs them.
+
+scenario=block timeout=40 cmdline=vx.skip=rc,netd with=blktest,blkparts disk=64
+expect="drv-virtio-blk: 64 MiB, 512-byte sectors"
+expect="partd: /srv/disk1: 2 partitions"
+expect="blktest: ok"
+expect="blktest: stopped the drivers; the session ended"
+expect="devmgr: started drv-virtio-blk"
+expect=" checks, 0 failed"
+fail="vx: panic"
+fail="FAILED"
+fail=") killed: "

@@ -6,7 +6,7 @@
 // with a handle to its task; svcd is registered through the "tasks" handle it
 // gives procfs, and registers the services it started before procfs.
 //
-//   /proc/N/status   one ndb record: pid=7 name=gsh state=waiting threads=1 mem=412K sid=7
+//   /proc/N/status   one ndb record: pid=7 name=rc state=waiting threads=1 mem=412K sid=7
 //   /proc/N/ctl      kill · stop [SIG] · start · setsid · childnotes
 //   /proc/N/note     a write posts a note (ADR-0010)
 //   /proc/N/notepg   a write posts a note to every process in N's note group

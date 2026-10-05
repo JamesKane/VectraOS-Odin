@@ -21,7 +21,7 @@ fn check {
 t=/dist/releases/1/tree
 check releases 1 `{sed -n 's/.*releases=\([0-9]*\).*/\1/p' /dist/status}
 check fetched fetched `{sed -n 's/.*state=\([a-z]*\).*/\1/p' /dist/releases/1/status}
-check program same `{if(cmp -s $t/boot/bin/gsh /boot/bin/gsh) echo same; if not echo differs}
+check program same `{if(cmp -s $t/boot/bin/rc /boot/bin/rc) echo same; if not echo differs}
 check record test-1 `{sed -n 's/.* name=\([a-z0-9-]*\).*/\1/p' /n/records/1.ndb}
 check kernel there `{if(test -f $t/boot/vx/kernel.elf) echo there; if not echo missing}
 check objects b2 `{ls /dist/store}

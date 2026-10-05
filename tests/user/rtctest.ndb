@@ -1,7 +1,7 @@
-# tests/user/rtctest.ndb: gsh runs tests/user/rtctest.rc in the POSIX
+# tests/user/rtctest.ndb: rc runs tests/user/rtctest.rc in the POSIX
 # userland (tests/qemu/rtc.ndb).
 
-service=rtctest program=/boot/bin/gsh console
+service=rtctest program=/boot/bin/rc console
 arg=/boot/tests/rtctest.rc
 ns=posix
 connect=nsd

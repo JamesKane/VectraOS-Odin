@@ -1,0 +1,7 @@
+# tests/qemu/write-text-alias.ndb: kernel code is read-only through its other
+# mapping, the direct map, too (W^X; a review finding, M3): writing to it there
+# is a protection fault.
+
+scenario=write-text-alias timeout=10 cmdline=vx.selftest=write-text-alias
+expect="vx: kernel 0.1.0 $arch, "
+expect="(write, protection, kernel) at "

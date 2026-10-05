@@ -1,0 +1,13 @@
+# tests/qemu/sbase.ndb: sbase's commands in the POSIX userland (M4 step 5b,
+# ADR-0016). sbasetest, a C program, runs each one as a shell would (there is
+# no /bin/sh yet): found on PATH, with pipes for its input and output; it
+# checks text tools, files in /tmp, bc and sha256sum among them.
+
+scenario=sbase timeout=60 with=sbasetest cmdline=vx.skip=rc
+expect="sbasetest: running sbase's commands"
+expect=" checks, 0 failed"
+line="svcd: sbasetest exited"
+fail="vx: panic"
+fail="svcd: sbasetest exited: "
+fail="not implemented"
+fail=") killed: "

@@ -11,7 +11,7 @@
 //
 //   slot=a release=1 tree=b2:... kernel=<128 hex> svcd=... ktest=... bootfs=...
 //   slot=b release=2 tree=b2:... ...
-//   boot=b previous=a cmdline="vx.skip=gsh"
+//   boot=b previous=a cmdline="vx.skip=rc"
 //
 // and the configuration is made from it alone, so the two never disagree.
 // Each entry's command line is vx.system vx.slot=X, then the table's cmdline.

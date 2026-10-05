@@ -1,0 +1,25 @@
+# tests/qemu/slots.ndb: boot slots and rollback by hand (M5 step 9d), four
+# boots. 1: the install medium puts release 1 in slot a of a blank disk. 2:
+# release 1 boots; release 2, from a media disk (media), is copied into the
+# store and applied (distd writes slot b and makes it Limine's default). 3:
+# release 2 boots from slot b; /cfg is changed, and the slots rolled back. 4:
+# release 1 boots from slot a again, /cfg as before release 2
+# (tests/user/slottest.ndb, .rc).
+
+scenario=slots timeout=900 alone installer media cmdline=vx.skip=rc with=slottest disk=256 blank
+expect="install: done: "
+reboot
+expect="distd: release 2 staged"
+expect="slottest: stage 0 done, 5 checks, 0 failed"
+reboot
+expect="slottest: stage 1, release 2, slot b"
+expect="distd: rolled back"
+expect="slottest: stage 1 done, 4 checks, 0 failed"
+reboot
+expect="slottest: stage 2 done, 4 checks, 0 failed"
+fail="vx: panic"
+fail="install: FAILED"
+fail="slottest: FAILED"
+fail="fsd: FAILED"
+fail="distd: FAILED"
+fail=") killed: "

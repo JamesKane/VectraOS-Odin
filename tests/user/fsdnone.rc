@@ -1,5 +1,5 @@
 # tests/user/fsdnone.rc: fsd's permissions as none sees them (tests/qemu/fsd.ndb).
-# gsh runs it as user none, with fsd's home branch on /tmp: none gets only
+# rc runs it as user none, with fsd's home branch on /tmp: none gets only
 # other's bits, so it reads what anyone may and is refused what only the owner
 # may, and adm's ctl refuses it. The last line counts the checks.
 

@@ -1,0 +1,26 @@
+# tests/qemu/net.ndb: the virtio network driver (M3, step 2). devmgr matches
+# QEMU's virtio-net card against boot/drv/virtio-net.ndb and starts
+# drv-virtio-net with only that device: its configuration space, BARs, two
+# MSI-X interrupts and a DMA domain, and the server end of /srv/ether0, which
+# svcd made when devmgr's manifest claimed it. nettest connects through
+# /srv/ether0 and sends an ARP request for QEMU's host, whose reply comes back
+# through the receive queue. Then nettest kills the driver; devmgr stops the
+# device's DMA, starts the driver again on the same post, and a new session
+# works as the first did. netd is skipped: the driver serves one client.
+
+scenario=net timeout=30 cmdline=vx.skip=rc,netd with=nettest
+expect="devmgr: started drv-virtio-net"
+expect="drv-virtio-net: 52:54:00:12:34:56, serving /srv/ether0"
+expect="nettest: a second session is refused"
+expect="nettest: MAC 52:54:00:12:34:56, MTU 1500"
+expect="nettest: sent an ARP request for 10.0.2.2"
+expect="nettest: 10.0.2.2 is at 52:55:0a:00:02:02"
+expect="nettest: ok"
+expect="nettest: stopped the driver; its session ended"
+expect="devmgr: started drv-virtio-net"
+expect="nettest: a second session is refused"
+expect="nettest: 10.0.2.2 is at 52:55:0a:00:02:02"
+expect="nettest: ok after the restart"
+fail="vx: panic"
+fail="FAILED"
+fail=") killed: "

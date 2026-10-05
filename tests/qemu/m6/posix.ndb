@@ -1,0 +1,19 @@
+# tests/qemu/posix.ndb: a C program against vectra-musl (M4 step 2d). ctest
+# links musl with the vx back end and compiler-rt's builtins; svcd starts it
+# with arguments, an environment and a namespace over bootfs. The kernel's
+# fault reports do not reach the serial log once the UART driver has it, so a
+# crash shows as svcd reporting ctest's exit string. Every call ctest makes is
+# one the back end implements.
+
+scenario=posix timeout=60 with=ctest cmdline=vx.skip=rc
+expect="ctest: hello from musl"
+expect="ctest: argv one|two words"
+expect="ctest: to stderr"
+expect=" checks, 0 failed"
+expect="ctest: atexit ran"
+line="svcd: ctest exited"
+fail="vx: panic"
+fail="svcd: ctest exited: "
+fail="not implemented"
+fail="FAILED"
+fail=") killed: "

@@ -1,6 +1,6 @@
 # tests/user/installtest.ndb: install (tests/qemu/install.ndb). On the live
 # boot (vx.live), install puts the medium's release on disk0, a blank disk,
-# and powers off; on the installed boot (vx.system), gsh runs
+# and powers off; on the installed boot (vx.system), rc runs
 # /boot/tests/installtest.rc with /dist and the store branch mounted.
 
 service=installer program=/boot/bin/install console storeimage cmdline when=vx.live
@@ -11,7 +11,7 @@ arg=-p
 arg=-e
 arg=64
 
-service=installtest program=/boot/bin/gsh console when=vx.system
+service=installtest program=/boot/bin/rc console when=vx.system
 arg=/boot/tests/installtest.rc
 ns=posix
 mount=/dist srv=dist

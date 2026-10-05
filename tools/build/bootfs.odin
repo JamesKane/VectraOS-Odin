@@ -60,7 +60,7 @@ Bootfs_Entry :: struct {
 // Test programs named in `with` join the image, with their manifests from
 // tests/user/NAME.ndb, after the system's: svcd starts a test after what it
 // tests. A `with` name that is no program is a script test: its manifest
-// runs a program the image has (lua, gsh) on tests/user/NAME.lua or NAME.rc,
+// runs a program the image has (lua, rc) on tests/user/NAME.lua or NAME.rc,
 // at /boot/tests.
 make_bootfs :: proc(a: ^Arch, mode: Mode, out: string, with := "") -> bool {
 	entries := make([dynamic]Bootfs_Entry, context.temp_allocator)

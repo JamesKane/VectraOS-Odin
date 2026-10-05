@@ -1,5 +1,5 @@
 # tests/user/rctest.rc: M4's exit test, the shell's part (tests/qemu/rcscript.ndb).
-# gsh runs it in the POSIX userland: sbase's commands from /bin, files in /tmp.
+# rc runs it in the POSIX userland: sbase's commands from /bin, files in /tmp.
 # Each check compares a command's output with what it should be; the last line
 # counts them; the script's exit status is empty, rc's success, or says how
 # many failed.
@@ -91,9 +91,9 @@ check pipe-dup 1 `{ls $dir/none >[2=1] | wc -l}
 check big-args 300 `{count `{seq 1 300}}
 check big-spawn 300 `{echo `{seq 1 300} | wc -w}
 
-# A script calling a script: gsh itself, with arguments.
+# A script calling a script: rc itself, with arguments.
 echo 'echo $#* $2' > $dir/inner.rc
-check nested '2 b' `{gsh $dir/inner.rc a b}
+check nested '2 b' `{rc $dir/inner.rc a b}
 
 rm -r $dir
 check cleaned no `{if(test -d $dir) echo yes; if not echo no}

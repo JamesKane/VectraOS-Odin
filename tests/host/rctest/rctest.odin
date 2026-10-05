@@ -199,7 +199,7 @@ emit :: proc(h: ^Host, fds: ^[rc.FDS]rc.Fd, which: int, s: string, pipe: ^[dynam
 	}
 }
 
-// A pipeline, its stages run in turn; $status as gsh makes it, each stage's
+// A pipeline, its stages run in turn; $status as the shell makes it, each stage's
 // joined by |.
 run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: bool) -> (pid: u64, ok: bool) {
 	context = runtime.default_context()

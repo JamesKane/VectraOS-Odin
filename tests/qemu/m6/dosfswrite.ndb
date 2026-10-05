@@ -1,0 +1,14 @@
+# tests/qemu/dosfswrite.ndb: dosfs writing (M5 step 8b) on a fresh FAT16 test
+# disk (fat=16: no partition table, as many USB sticks are), through the
+# POSIX userland (tests/user/dosfswrite.ndb, .rc); then the host's fsck.fat -n
+# must find the volume sound (fsck).
+
+scenario=dosfswrite timeout=120 cmdline=vx.skip=rc with=dosfswrite disk=64 fat=16 fsck
+expect="dosfs: /srv/disk1: FAT16 "
+expect="dosfswrite: 14 checks, 0 failed"
+line="svcd: dosfswrite exited"
+fail="vx: panic"
+fail="dosfswrite: FAILED"
+fail="dosfs: FAILED"
+fail="svcd: dosfswrite exited: "
+fail=") killed: "

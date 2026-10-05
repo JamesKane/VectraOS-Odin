@@ -149,7 +149,7 @@ test_dirs :: proc(t: ^testing.T) {
 	entries := []store.Entry {
 		{name = "bin", mode = 0o040555, hash = h},
 		{name = "a file \"quoted\"", mode = 0o100444, size = 12, hash = h},
-		{name = "sh", mode = 0o120777, link = "/bin/gsh"},
+		{name = "sh", mode = 0o120777, link = "/bin/rc"},
 	}
 	text: [4096]u8
 	w := ndb.Writer {
@@ -163,7 +163,7 @@ test_dirs :: proc(t: ^testing.T) {
 		"name=bin mode=040555 hash=b2:abababababababababababababababababababababababababababababababab\n" +
 		"name=\"a file \"\"quoted\"\"\" mode=0100444 size=12 " +
 		"hash=b2:abababababababababababababababababababababababababababababababab\n" +
-		"name=sh mode=0120777 link=/bin/gsh\n"
+		"name=sh mode=0120777 link=/bin/rc\n"
 	testing.expect_value(t, ndb.written(&w), want)
 	dir := text[:w.len]
 	scratch: [4096]u8
@@ -175,7 +175,7 @@ test_dirs :: proc(t: ^testing.T) {
 	e, st = store.dir_find(dir, "sh", scratch[:])
 	testing.expect_value(t, st, vx.Status.Ok)
 	testing.expect(t, store.is_link(e))
-	testing.expect_value(t, e.link, "/bin/gsh")
+	testing.expect_value(t, e.link, "/bin/rc")
 	e, st = store.dir_find(dir, "bin", scratch[:])
 	testing.expect_value(t, st, vx.Status.Ok)
 	testing.expect(t, store.is_dir(e))

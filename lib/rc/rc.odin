@@ -1,5 +1,5 @@
-// The rc shell language (Tom Duff's, as 9front's rc has it), for gsh
-// (upstream docs/milestones.md, M4 step 7). A script is read by a lexer,
+// The rc shell language (Tom Duff's, as 9front's rc has it), for the
+// shell, cmd/rc (upstream docs/milestones.md, M4 step 7). A script is read by a lexer,
 // parsed into a tree, compiled into code, and run by a machine, as rc does;
 // none of it recurses: the parser and the compiler keep stacks of their own,
 // and functions run on the machine's frames.
@@ -7,7 +7,7 @@
 // What runs a command is the host's: Host's callbacks start programs (each
 // stage of a pipeline at once), open the files redirections name, read
 // directories for globbing, and give builtins of the host's own. So the
-// language is tested on the host (tests/host/rc), and gsh puts it on vx:rt and
+// language is tested on the host (tests/host/rc), and the shell puts it on vx:rt and
 // the namespace.
 //
 // Freestanding: the interpreter keeps its words, variables and code in a heap
@@ -19,7 +19,7 @@
 // block); and `{...} and @{...} run in the shell itself, so what they assign
 // is seen after (upstream docs/milestones.md, known gaps).
 //
-// A host drives it like this (upstream gsh's shape):
+// A host drives it like this (upstream's shell's shape):
 //
 //	sh: rc.Rc // large (the machine's stacks): a global
 //	heap: [4 << 20]u8
@@ -117,7 +117,7 @@ Host :: struct {
 	// A directory's entries, for globbing: glob_add(g, name) for each; false
 	// if it cannot be read.
 	readdir:   proc "contextless" (ctx: rawptr, path: string, g: ^Glob) -> bool,
-	// The host's builtins (cd, and gsh's namespace commands): true if argv's
+	// The host's builtins (cd, and the shell's namespace commands): true if argv's
 	// first word is one, which it ran (setting $status).
 	builtin:   proc "contextless" (ctx: rawptr, r: ^Rc, argv: ^Word, argc: u32, fds: ^[FDS]Fd) -> bool,
 	// A file's text, for `.`: its length, read into buf; ok is false if it

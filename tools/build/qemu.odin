@@ -16,7 +16,7 @@ Qemu_Opts :: struct {
 
 // The machine's IOMMU (upstream's M5 steps 6c, 6d): VT-d on q35, SMMUv3 on
 // virt. Upstream's runner has it on for every scenario from M5; here the
-// m5/ scenarios have it (test.odin), and M4's run as M4's runner ran them.
+// m5/ and m6/ scenarios have it (test.odin), and M4's run as M4's runner ran them.
 Iommu_Mode :: enum {
 	Off,
 	On,

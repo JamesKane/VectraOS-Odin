@@ -1,6 +1,6 @@
 # tests/user/slottest.ndb: boot slots and rollback by hand (tests/qemu/slots.ndb).
 # On the live boot, install puts release 1 on disk0; on each installed boot,
-# gsh runs /boot/tests/slottest.rc as adm with /dist, the store branch (/n),
+# rc runs /boot/tests/slottest.rc as adm with /dist, the store branch (/n),
 # the cfg branch (/c) and the media disk's release 2 (/m, dosfs on disk1).
 
 service=installer program=/boot/bin/install console storeimage cmdline when=vx.live
@@ -14,7 +14,7 @@ service=media program=/boot/bin/dosfs post=media console when=vx.system
 connect=disk1
 arg=-r
 
-service=slottest program=/boot/bin/gsh console when=vx.system
+service=slottest program=/boot/bin/rc console when=vx.system
 user=adm
 arg=/boot/tests/slottest.rc
 ns=posix

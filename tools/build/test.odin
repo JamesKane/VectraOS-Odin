@@ -22,7 +22,7 @@ import "vx:ndb"
 // A scenario= record's rtc= starts QEMU's real-time clock at that time
 // (-rtc base=); its exits flag makes QEMU exiting by itself, once every
 // expect= has matched, the pass (power off).
-// The m5/ scenarios run with the machine's IOMMU, as upstream's runner runs
+// The m5/ and m6/ scenarios run with the machine's IOMMU, as upstream's runner runs
 // every scenario from M5; a scenario= record's iommu=caching puts VT-d in
 // caching mode. Its disk=MIB gives QEMU a second disk, made fresh for the run
 // (disk.odin's test_disk), on virtio-blk or, with bus=nvme, on NVMe; with
@@ -122,7 +122,7 @@ load_scenario :: proc(name: string, a: ^Arch) -> (sc: Scenario, ok: bool) {
 			sc.iso = ndb.has(rec, "iso")
 			sc.rtc = val(rec, "rtc")
 			sc.exits = ndb.has(rec, "exits")
-			if strings.has_prefix(name, "m5/") {
+			if strings.has_prefix(name, "m5/") || strings.has_prefix(name, "m6/") {
 				sc.iommu = .On
 			}
 			if ndb.has(rec, "iommu") {

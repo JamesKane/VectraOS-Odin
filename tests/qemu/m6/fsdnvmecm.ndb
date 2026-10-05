@@ -1,0 +1,20 @@
+# tests/qemu/fsdnvmecm.ndb: VT-d in caching mode (M5 step 6c). As fsdnvme, with
+# QEMU's intel-iommu caching what is not present (caching-mode=on, as an
+# emulated IOMMU does), so every new mapping must be invalidated before the
+# device can use it. x86_64 only.
+
+scenario=fsdnvmecm timeout=90 arch=x86_64 iommu=caching cmdline=vx.skip=rc with=ctestfsd,fsdvol disk=64 bus=nvme volume=tests/fsd/home
+expect="vx: VT-d: 1 unit, queued invalidation, caching mode, deny-all"
+expect="drv-nvme: 64 MiB, 512-byte sectors"
+expect="partd: /srv/disk1: 2 partitions"
+expect="fsd: /srv/disk1.vectra: commit "
+expect="fsd: serving /srv/fsd"
+expect="ctest: /tmp/hello.txt: hello from a vx-fs volume"
+expect=" checks, 0 failed"
+line="svcd: ctestfsd exited"
+fail="vx: panic"
+fail="svcd: ctestfsd exited: "
+fail="fsd: FAILED"
+fail="not implemented"
+fail="FAILED"
+fail=") killed: "

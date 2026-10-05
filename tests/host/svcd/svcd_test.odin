@@ -126,9 +126,9 @@ test_when :: proc(t: ^testing.T) {
 	}
 	for c in ([]Case {
 			{"vx.live", "vx.live", true},
-			{"vx.skip=gsh vx.live", "vx.live", true},
-			{"vx.live vx.skip=gsh", "vx.live", true},
-			{"vx.skip=gsh  vx.system vx.slot=a", "vx.system", true},
+			{"vx.skip=rc vx.live", "vx.live", true},
+			{"vx.live vx.skip=rc", "vx.live", true},
+			{"vx.skip=rc  vx.system vx.slot=a", "vx.system", true},
 			{"vx.lively", "vx.live", false},
 			{"xvx.live", "vx.live", false},
 			{"vx.skip=vx.live", "vx.live", false},

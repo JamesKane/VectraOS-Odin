@@ -1,0 +1,14 @@
+# tests/qemu/iso.ndb: the CD image (./build image --iso, M3's deliverables).
+# QEMU has no disk, only the ISO on a virtio-scsi CD drive; the firmware
+# boots its El Torito entry, the same FAT system partition the disk image
+# has, and the system comes up to the shell.
+
+scenario=iso timeout=30 iso
+expect="vx: kernel 0.1.0 $arch, "
+expect="svcd: hello from user space (task 1)"
+prompt="vx% "
+send="ls /"
+line="adm  bin  boot  dev  dist  lib  n  net  proc  srv  sys  tmp"
+fail="vx: panic"
+fail=") killed: "
+fail="FAILED"

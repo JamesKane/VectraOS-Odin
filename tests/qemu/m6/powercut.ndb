@@ -1,0 +1,21 @@
+# tests/qemu/powercut.ndb: M5's power-cut exit test (step 11). Two boots of
+# the image on one volume (again). The first syncs 32 files, then writes and
+# commits 4 MiB at a time until it is killed, as a power cut would cut it,
+# the kill aimed at a commit; the
+# second mounts at once, finds every synced file whole, and fsd's check is
+# clean (tests/posix/powercut.c).
+
+scenario=powercut timeout=90 cmdline=vx.skip=rc with=powercut,fsdvol disk=64 volume=tests/fsd/home
+expect="fsd: serving /srv/fsd"
+expect="powercut: 32 files synced"
+expect="powercut: under load, committing"
+again
+expect="fsd: serving /srv/fsd"
+expect="powercut: after the cut"
+expect="powercut: 34 checks, 0 failed"
+line="svcd: powercut exited"
+fail="vx: panic"
+fail="powercut: FAILED"
+fail="svcd: powercut exited: "
+fail="fsd: FAILED"
+fail=") killed: "

@@ -9,6 +9,9 @@
 // scripts in cases.rc, more in xcheck.rc, and tests/user/rctest.rc); and
 // inputs the mutator makes from them. Each at upstream's heap sizes from 4 MiB
 // down to 64 KiB, where scripts run out of memory as they compile or run.
+// The folds over the seeds and mutated inputs were made again with
+// tests/user/rctest.rc as upstream's M6 step 6a4 renamed its shell (gsh to
+// rc), its rc.c unchanged.
 package rc_test
 
 import "core:testing"
@@ -76,7 +79,7 @@ test_seeds :: proc(t: ^testing.T) {
 	defer rt.mutator_destroy(&m)
 	testing.expect_value(t, len(m.seeds), 117)
 	folds := []Fold {
-		{BIG_HEAP, false, 0x7126a5dc6f09c011},
+		{BIG_HEAP, false, 0xb282a81f54485ca1},
 		{MID_HEAP, false, 0xaaddfe6f42a83a3f},
 		{SMALL_HEAP, false, 0x09bab9a1379713bd},
 		{SMALL_HEAP, true, 0xe9377546a38bac72},
@@ -100,11 +103,11 @@ test_mutated :: proc(t: ^testing.T) {
 	m := mutator()
 	defer rt.mutator_destroy(&m)
 	folds := []Fold {
-		{BIG_HEAP, false, 0x4b6d494a72435284},
-		{MID_HEAP, false, 0xf10cfba325679630},
-		{SMALL_HEAP, false, 0xea4a9fe718d1b69a},
-		{FUZZ_HEAP, true, 0x206b42dbb1994a04},
-		{SMALL_HEAP, true, 0xcd3cd46b446e8096},
+		{BIG_HEAP, false, 0x147d81cb8f912784},
+		{MID_HEAP, false, 0xcb5048ed4a52494a},
+		{SMALL_HEAP, false, 0xfe17fbb404fbf64e},
+		{FUZZ_HEAP, true, 0x058e8b13602f40ca},
+		{SMALL_HEAP, true, 0xb23d6023a40c66bc},
 	}
 	text: [dynamic]u8
 	defer delete(text)

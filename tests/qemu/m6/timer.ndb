@@ -1,0 +1,7 @@
+# tests/qemu/timer.ndb: a deadline 10 ms ahead wakes the kernel from its idle
+# wait, never early (M1; the same check svcd repeats from user space).
+
+scenario=timer timeout=10 cmdline=vx.selftest=timer
+expect="vx: kernel 0.1.0 $arch, "
+expect="vx: selftest timer ok: requested 10.000 ms, woke after "
+fail="vx: panic"
