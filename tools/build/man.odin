@@ -19,8 +19,9 @@ import "vx:p9"
 // out/man/index/base, the index the image holds at /lib/man/index/base, is
 // written from the pages and every link resolves through it, or to a page
 // man/missing promises; everything the inventory lists has a page or a
-// record in man/missing, the ledger that only shrinks, never both; and a
-// program with a page takes its usage message from it.
+// record in man/missing, the ledger that only shrinks, never both; each
+// format's page defines exactly its key table's keys; and a program with a
+// page takes its usage message from it.
 
 // What must have a page: kind and name, and the sections a page may be in.
 @(private="file")
@@ -55,10 +56,30 @@ Man_Check :: struct {
 	errors: int,
 }
 
-// The formats with a section 6 page, each named for its page. Their keys are
-// checked once each parser keeps a key table (12 §7), as upstream's are.
+// The formats with a section 6 page, each named for its page, and the key
+// table of each ndb format with keys of its own (12 §7): its page defines
+// exactly those keys, each in the node the table gives. The parser reads the
+// same table (tools/abigen expands it), so page, parser and table agree.
 @(private="file")
-MAN_FORMATS :: [?]string{"ndb", "guide", "namespace", "svc", "driver", "users", "utf", "vxfs", "store", "release", "slots"}
+Man_Format :: struct {
+	name: string,
+	keys: string, // the key table, "" for none
+}
+
+@(private="file")
+MAN_FORMATS :: [?]Man_Format {
+	{name = "ndb"},
+	{name = "guide"},
+	{name = "namespace"},
+	{name = "svc", keys = "servers/svcd/svc.def"},
+	{name = "driver", keys = "servers/devmgr/driver.def"},
+	{name = "users"},
+	{name = "utf"},
+	{name = "vxfs"},
+	{name = "store", keys = "lib/store/store.def"},
+	{name = "release", keys = "lib/store/release.def"},
+	{name = "slots", keys = "lib/slots/slots.def"},
+}
 
 // Plan 9's headings, in Plan 9's order (12 §8).
 @(private="file")
@@ -146,7 +167,7 @@ man_inventory :: proc(c: ^Man_Check) -> bool {
 		}
 	}
 	for f in MAN_FORMATS {
-		man_need(c, "format", f, {6})
+		man_need(c, "format", f.name, {6})
 	}
 	for n in 1 ..= 8 {
 		man_need(c, "intro", "intro", {n})
@@ -294,6 +315,104 @@ man_body :: proc(c: ^Man_Check, p: ^Man_Page) {
 @(private="file")
 man_discard :: proc "contextless" (ctx: rawptr, s: string) {}
 
+@(private="file")
+Man_Key :: struct {
+	scope, key: string,
+	seen:       bool,
+}
+
+// The next "..." in s, and what follows it.
+@(private="file")
+man_quoted :: proc(s: string) -> (text, rest: string, ok: bool) {
+	q := strings.index_byte(s, '"')
+	if q < 0 {
+		return "", s, false
+	}
+	e := strings.index_byte(s[q + 1:], '"')
+	if e < 0 {
+		return "", s, false
+	}
+	return s[q + 1:][:e], s[q + 1 + e + 1:], true
+}
+
+// A format's page against its key table: each key defined in DESCRIPTION, in
+// the table's node for it, and nothing defined there that the table lacks.
+@(private="file")
+man_check_keys :: proc(c: ^Man_Check, page, table: string) -> bool {
+	def := read_file(table) or_return
+	keys := make([dynamic]Man_Key, context.temp_allocator)
+	line_no := 0
+	for line in strings.split_lines_iterator(&def) {
+		line_no += 1
+		if !strings.has_prefix(line, "KEY(") {
+			continue
+		}
+		scope, after, scope_ok := man_quoted(line[4:])
+		key, _, key_ok := man_quoted(after)
+		if !scope_ok || !key_ok {
+			fmt.eprintfln("build: %s:%d: a KEY line the check cannot read", table, line_no)
+			return false
+		}
+		append(&keys, Man_Key{scope = scope, key = key})
+	}
+	text := read_file(page) or_return
+	g := new(guide.Guide, context.temp_allocator)
+	if !guide.open(g, text) {
+		return true // the first pass reported it
+	}
+	scope := ""
+	description := false
+	for b in guide.next(g) {
+		#partial switch b.kind {
+		case .Node:
+			scope = strings.clone(b.node, context.temp_allocator)
+		case .Heading:
+			description = b.text == "DESCRIPTION"
+		}
+		if b.kind != .Def || !description {
+			continue
+		}
+		checked := false // a node the table names
+		for k in keys {
+			checked = checked || k.scope == scope
+		}
+		if !checked {
+			continue
+		}
+		rest := b.text
+		for {
+			q := strings.index_byte(rest, '`')
+			if q < 0 {
+				break
+			}
+			e := strings.index_byte(rest[q + 1:], '`')
+			if e < 0 {
+				break
+			}
+			term := rest[q + 1:][:e]
+			rest = rest[q + 1 + e + 1:]
+			found: ^Man_Key
+			for &k in keys {
+				if k.scope == scope && k.key == term {
+					found = &k
+					break
+				}
+			}
+			if found == nil {
+				man_error(c, page, b.line, fmt.tprintf("defines `%s`, which %s does not list", term, table))
+			} else {
+				found.seen = true
+			}
+		}
+	}
+	for k in keys {
+		if !k.seen {
+			man_error(c, page, 0, fmt.tprintf("%s lists `%s`, which the page does not define%s%s", table, k.key, k.scope != "" ? " in node " : "", k.scope))
+		}
+	}
+	return true
+}
+
 // The page names in man/<sect>, in byte order.
 man_dir :: proc(sect: int) -> []string {
 	names := make([dynamic]string, context.temp_allocator)
@@ -357,6 +476,13 @@ check_man :: proc() -> bool {
 				}
 			}
 			append(&pages, p)
+		}
+	}
+
+	for f in MAN_FORMATS { // each format's page against its key table
+		page := fmt.tprintf("man/6/%s", f.name)
+		if f.keys != "" && os.exists(page) {
+			man_check_keys(&c, page, f.keys) or_return
 		}
 	}
 

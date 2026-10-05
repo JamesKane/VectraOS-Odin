@@ -228,3 +228,19 @@ test_limits :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, parse(strings.to_string(many), scratch[:]).error != "")
 }
+
+@(test)
+test_unknown_key :: proc(t: ^testing.T) {
+	scratch: [4096]u8
+	// A format's key table: the first key not in it, or none.
+	keys := []string{"service", "program", "restart"}
+	p := parse("service=a program=/bin/a restart", scratch[:])
+	_, unknown := ndb.unknown_key(&p.last, keys)
+	testing.expect(t, !unknown)
+	p = parse("service=a restrat program=/bin/a", scratch[:])
+	bad, found := ndb.unknown_key(&p.last, keys)
+	testing.expect(t, found)
+	testing.expect_value(t, bad, "restrat")
+	bad, _ = ndb.unknown_key(&p.last, keys[:1]) // restrat, before program
+	testing.expect_value(t, bad, "restrat")
+}

@@ -1,14 +1,24 @@
 #!/bin/sh
-# ./build: makes abi/vx/abi_gen.odin from the ABI tables (tools/abigen) and
-# compiles the build tool (tools/build) when their sources change, then runs
-# it from the repository root. See tools/build/main.odin.
+# ./build: makes abi/vx/abi_gen.odin from the ABI tables, and each format's
+# NAME_keys_gen.odin from its key table, NAME.def (tools/abigen); compiles the
+# build tool (tools/build) when their sources change; then runs it from the
+# repository root. See tools/build/main.odin.
 set -eu
 cd "$(dirname "$0")"
 ODIN=/opt/homebrew/bin/odin
 [ -x "$ODIN" ] || ODIN=/opt/odin/odin
 mkdir -p out/bin
 gen=abi/vx/abi_gen.odin
-if [ ! -f "$gen" ] || [ -n "$(find abi/vx tools/abigen -newer "$gen" \( -name '*.def' -o -name '*.odin' \) ! -name abi_gen.odin 2>/dev/null | head -1)" ]; then
+stale=
+[ -f "$gen" ] || stale=1
+# The key tables: .def files of KEY lines in a package of lib, servers, cmd or drivers.
+for def in $(find lib servers cmd drivers -mindepth 2 -maxdepth 2 -name '*.def' 2>/dev/null); do
+  if grep -q '^KEY(' "$def" && [ ! -f "${def%.def}_keys_gen.odin" ]; then stale=1; fi
+done
+if [ -z "$stale" ] && [ -n "$(find abi/vx tools/abigen -newer "$gen" \( -name '*.def' -o -name '*.odin' \) ! -name abi_gen.odin 2>/dev/null | head -1)$(find lib servers cmd drivers -mindepth 2 -maxdepth 2 -newer "$gen" -name '*.def' 2>/dev/null | head -1)" ]; then
+  stale=1
+fi
+if [ -n "$stale" ]; then
   "$ODIN" build tools/abigen -vet -strict-style -warnings-as-errors -out:out/bin/abigen
   out/bin/abigen
 fi

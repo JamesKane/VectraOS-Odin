@@ -80,6 +80,46 @@ test_upstream_transcript :: proc(t: ^testing.T) {
 	}
 }
 
+// Upstream's slots_test.c (M6 step 6b): a table printed and read back the
+// same, and one with a key slots(6) does not name, or no boot slot, refused.
+@(test)
+test_keys :: proc(t: ^testing.T) {
+	s := new(slots.Table)
+	defer free(s)
+	back := new(slots.Table)
+	defer free(back)
+	sl := &s.slots[.A]
+	sl.used = true
+	sl.release = 7
+	append(&sl.tree, "b2:ab")
+	for &h in sl.hash {
+		for _ in 0 ..< slots.HASH_HEX {
+			append(&h, 'c')
+		}
+	}
+	s.boot = .A
+	append(&s.cmdline, "vx.skip=rc")
+	text: [2048]u8
+	w := ndb.Writer {
+		buf = text[:],
+	}
+	testing.expect(t, slots.print(s, &w))
+	written := ndb.written(&w)
+	scratch: [4096]u8
+	testing.expect_value(t, slots.parse(back, written, scratch[:]), vx.Status.Ok)
+	testing.expect_value(t, back.boot, slots.Name.A)
+	testing.expect_value(t, back.previous, nil)
+	testing.expect(t, back.slots[.A].used)
+	testing.expect_value(t, back.slots[.A].release, 7)
+	testing.expect(t, !back.slots[.B].used)
+	testing.expect_value(t, string(back.cmdline[:]), "vx.skip=rc")
+
+	// A key slots(6) does not name, on the table's record.
+	bad := fmt.tprintf("%s booted=a\n", written[:len(written) - 1])
+	testing.expect_value(t, slots.parse(back, bad, scratch[:]), vx.Status.Err_Invalid)
+	testing.expect_value(t, slots.parse(back, "boot=b previous=-\n", scratch[:]), vx.Status.Err_Invalid)
+}
+
 // Added here: a table made in code, written, read back, written again the same.
 @(test)
 test_round_trip :: proc(t: ^testing.T) {

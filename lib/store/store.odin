@@ -269,11 +269,22 @@ dir_put :: proc "contextless" (w: ^ndb.Writer, e: Entry) -> bool {
 	return ndb.end(w)
 }
 
-// An entry from a directory's record: .Err_Invalid if the record is not one.
-// Its strings point where the record's values do (the reader's input or
+// Whether a record of a release record has only release(6)'s keys
+// (RELEASE_KEYS, from release.def): install and distd refuse any other.
+release_known :: proc "contextless" (rec: ^ndb.Record) -> bool {
+	_, unknown := ndb.unknown_key(rec, RELEASE_KEYS[:])
+	return !unknown
+}
+
+// An entry from a directory's record: .Err_Invalid if the record is not one,
+// or has a key store(6) does not name (STORE_KEYS, from store.def). Its
+// strings point where the record's values do (the reader's input or
 // scratch).
 @(require_results)
 dir_entry :: proc "contextless" (rec: ^ndb.Record) -> (e: Entry, st: vx.Status) {
+	if _, unknown := ndb.unknown_key(rec, STORE_KEYS[:]); unknown {
+		return {}, .Err_Invalid
+	}
 	e.name, _ = ndb.get(rec, "name")
 	mode, _ := ndb.get(rec, "mode")
 	if len(e.name) == 0 || len(mode) < 2 || len(mode) > 7 || mode[0] != '0' {

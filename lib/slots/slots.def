@@ -1,0 +1,15 @@
+// The keys of the slot table, slots(6).
+// KEY(scope, key): scope is the node of the format's page that defines the key, or ""
+// for the page itself; ./build man --check holds the page to this list, and
+// the parser refuses any other key (vx_ndb_unknown).
+
+KEY("", "slot")
+KEY("", "release")
+KEY("", "tree")
+KEY("", "kernel")
+KEY("", "svcd")
+KEY("", "ktest")
+KEY("", "bootfs")
+KEY("", "boot")
+KEY("", "previous")
+KEY("", "cmdline")

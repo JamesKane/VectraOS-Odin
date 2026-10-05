@@ -77,8 +77,8 @@ set :: proc "contextless" (dst: ^[dynamic; $N]u8, v: string) {
 	append(dst, v)
 }
 
-// The table from its text: .Err_Invalid if it is not one, or no slot in use
-// boots. scratch holds each record's decoded values while it is read.
+// The table from its text: .Err_Invalid if it is not one, has a key slots(6)
+// does not name (SLOTS_KEYS, from slots.def), or no slot in use boots. scratch holds each record's decoded values while it is read.
 @(require_results)
 parse :: proc "contextless" (t: ^Table, text: string, scratch: []u8) -> vx.Status {
 	t^ = {}
@@ -94,6 +94,9 @@ parse :: proc "contextless" (t: ^Table, text: string, scratch: []u8) -> vx.Statu
 			break
 		}
 		r.scratch_used = 0 // what the record holds is copied out before the next
+		if _, unknown := ndb.unknown_key(&rec, SLOTS_KEYS[:]); unknown {
+			return .Err_Invalid
+		}
 		name, _ := ndb.get(&rec, "slot")
 		if n, ok := name_of(name); ok {
 			sl := &t.slots[n]

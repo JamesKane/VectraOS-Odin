@@ -2,13 +2,14 @@
 # On the live boot, install puts release 1 on disk0; on each installed boot,
 # rc runs /boot/tests/slottest.rc as adm with /dist, the store branch (/n),
 # the cfg branch (/c) and the media disk's release 2 (/m, dosfs on disk1).
+# The ESP holds two slots: 96 MiB, as an aarch64 debug slot is some 34 MB.
 
 service=installer program=/boot/bin/install console storeimage cmdline when=vx.live
 connect=disk0
 connect=acpi
 arg=-y
 arg=-e
-arg=64
+arg=96
 
 service=media program=/boot/bin/dosfs post=media console when=vx.system
 connect=disk1

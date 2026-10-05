@@ -2,4 +2,5 @@ out/
 *.o
 .DS_Store
 abi/vx/abi_gen.odin
+*_keys_gen.odin
 .claude/

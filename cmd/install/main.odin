@@ -458,6 +458,9 @@ vx_main :: proc() -> int {
 	rd := ndb.Reader{src = record, scratch = record_scratch[:]}
 	for ndb.next(&rd, &rec) == .Record {
 		rd.scratch_used = 0
+		if !store.release_known(&rec) {
+			fail("the release record has a key release(6) does not name")
+		}
 		if ndb.has(&rec, "release") {
 			seq, _ = ndb.get_u64(&rec, "release")
 		}

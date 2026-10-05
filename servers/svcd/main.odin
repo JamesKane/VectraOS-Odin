@@ -210,18 +210,24 @@ is_device_record :: proc "contextless" (rec: ^ndb.Record) -> bool {
 }
 
 // Reads one manifest's service= records, and mints its drivers' devices. A
-// malformed manifest is reported and skipped whole.
+// malformed manifest, or one with a key svc(6) does not name (SVC_KEYS, from
+// svc.def), is reported and skipped whole.
 read_manifest :: proc "contextless" (path, text: string) {
 	// Through it once for errors first: a manifest is used whole or not at all,
 	// never a service with its records cut off at a typo.
 	r := manifest_reader(text, 0)
 	for {
 		rec: ndb.Record
-		if res := ndb.next(&r, &rec); res == .Error {
+		res := ndb.next(&r, &rec)
+		if res == .Error {
 			say(path, ": ", r.error, ", so none of it is used\n")
 			return
 		} else if res != .Record {
 			break
+		}
+		if key, unknown := ndb.unknown_key(&rec, SVC_KEYS[:]); unknown {
+			say(path, ": unknown key ", key, ", so none of it is used\n")
+			return
 		}
 	}
 	r = manifest_reader(text, 0)

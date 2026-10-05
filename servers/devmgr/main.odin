@@ -451,6 +451,28 @@ start_drivers :: proc "contextless" () {
 }
 
 // Reads the driver manifests and starts a driver for each function one matches.
+// Whether a driver manifest reads cleanly with only driver(6)'s keys
+// (DRIVER_KEYS, from driver.def): one is used whole or not at all, as svcd's
+// are.
+@(private="file")
+manifest_ok :: proc "contextless" (path, text: string, scratch: []u8) -> bool {
+	r := ndb.Reader{src = text, scratch = scratch}
+	for {
+		rec: ndb.Record
+		res := ndb.next(&r, &rec)
+		if res == .Error {
+			say(path, ": ", r.error, ", so none of it is used\n")
+			return false
+		} else if res != .Record {
+			return true
+		}
+		if key, unknown := ndb.unknown_key(&rec, DRIVER_KEYS[:]); unknown {
+			say(path, ": unknown key ", key, ", so none of it is used\n")
+			return false
+		}
+	}
+}
+
 match_drivers :: proc "contextless" () {
 	DIR :: "/boot/drv/"
 	dir: ns.File
@@ -474,6 +496,9 @@ match_drivers :: proc "contextless" () {
 				continue
 			}
 			length := read_whole(path, text[:])
+			if !manifest_ok(path, string(text[:length]), scratch[:]) {
+				continue
+			}
 			r := ndb.Reader{src = string(text[:length]), scratch = scratch[:]}
 			rec: ndb.Record
 			for ndb.next(&r, &rec) == .Record {

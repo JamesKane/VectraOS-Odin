@@ -1,0 +1,15 @@
+// The keys of a release record, release(6).
+// KEY(scope, key): scope is the node of the format's page that defines the key, or ""
+// for the page itself; ./build man --check holds the page to this list, and
+// the parser refuses any other key (vx_ndb_unknown).
+
+KEY("", "release")
+KEY("", "name")
+KEY("", "channel")
+KEY("", "commit")
+KEY("", "vx-abi")
+KEY("", "unsigned")
+KEY("", "set")
+KEY("", "arch")
+KEY("", "tree")
+KEY("", "size")

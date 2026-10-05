@@ -237,9 +237,10 @@ rescan :: proc "contextless" () {
 			// release=N ...; set=base arch=ARCH tree=b2:...
 			rd := ndb.Reader{src = string(r.record[:]), scratch = record_scratch[:]}
 			rec: ndb.Record
-			have_seq, have_tree := false, false
+			have_seq, have_tree, known := false, false, true
 			for ndb.next(&rd, &rec) == .Record {
 				rd.scratch_used = 0
+				known = known && store.release_known(&rec) // a key release(6) does not name: not a release
 				if ndb.has(&rec, "release") {
 					r.seq, have_seq = ndb.get_u64(&rec, "release")
 				}
@@ -250,7 +251,7 @@ rescan :: proc "contextless" () {
 					r.tree, have_tree = store.parse(tree)
 				}
 			}
-			if !have_seq || !have_tree {
+			if !have_seq || !have_tree || !known {
 				resize(&releases, len(releases) - 1)
 			}
 		}

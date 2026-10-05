@@ -4,8 +4,9 @@
 // tree's shape (RFC 6962's split) for one to five leaves; a file's index
 // checked whole and each block against it, and refused when a hash, a length
 // or the size is wrong; directories written canonically and read back, names
-// with spaces and quotes included, and records that are not entries refused;
-// and one small tree's hash, fixed, so the format cannot drift unnoticed (the
+// with spaces and quotes included, and records that are not entries refused,
+// a key store(6) does not name among them; a release record's keys; and one
+// small tree's hash, fixed, so the format cannot drift unnoticed (the
 // same value upstream's C prints).
 // host-links: monocypher
 package store_test
@@ -197,11 +198,22 @@ test_dirs :: proc(t: ^testing.T) {
 		"name=x mode=0120777\n", // no target
 		"name=x mode=060644 hash=b2:abababababababababababababababababababababababababababababababab\n", // a device
 		"name=x mode=0100444 size=1 hash=b2:ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB\n",
+		"name=x mode=0100444 size=1 owner=adm hash=b2:abababababababababababababababababababababababababababababababab\n", // a key not in store(6)
 	}
 	for b in bad {
 		_, st = store.dir_find(transmute([]u8)b, "y", scratch[:])
 		testing.expectf(t, st == .Err_Invalid, "%q: got %v", b, st)
 	}
+
+	// A release record's keys (release(6)).
+	rs: [256]u8
+	r := ndb.Reader{src = "release=3 name=x unsigned set=base", scratch = rs[:]}
+	rec: ndb.Record
+	testing.expect_value(t, ndb.next(&r, &rec), ndb.Result.Record)
+	testing.expect(t, store.release_known(&rec))
+	r = ndb.Reader{src = "release=3 expires=9", scratch = rs[:]}
+	testing.expect_value(t, ndb.next(&r, &rec), ndb.Result.Record)
+	testing.expect(t, !store.release_known(&rec))
 
 	// Paths and names.
 	path := store.path(h)

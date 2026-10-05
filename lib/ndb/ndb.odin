@@ -148,6 +148,23 @@ get_u64 :: proc "contextless" (rec: ^Record, key: string) -> (n: u64, ok: bool) 
 	return n, true
 }
 
+// The first key of rec that is not one of keys; ok is false if every key is:
+// how a format refuses a key it does not know (ndb(6)). A format keeps its
+// keys in a .def table of KEY("scope", "key") lines, which ./build expands
+// into Odin (tools/abigen) and holds the format's page to (tools/build/man.odin).
+@(require_results)
+unknown_key :: proc "contextless" (rec: ^Record, keys: []string) -> (key: string, ok: bool) {
+	tuple: for t in rec.tuples {
+		for k in keys {
+			if t.key == k {
+				continue tuple
+			}
+		}
+		return t.key, true
+	}
+	return "", false
+}
+
 // --- The parser ---
 
 @(private="file")
