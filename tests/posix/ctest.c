@@ -1048,6 +1048,8 @@ static void test_shared_offsets_and_locks(void) {
   struct flock whole = {.l_type = F_WRLCK, .l_whence = SEEK_SET}, first = {.l_type = F_WRLCK, .l_len = 4};
   CHECK(fcntl(fd, F_SETLK, &first) == 0);
   pid_t me = getpid();
+  int ready[2];
+  CHECK(pipe(ready) == 0);
   child = fork();
   if (child == 0) {
     struct flock probe = whole, other = {.l_type = F_WRLCK, .l_start = 4, .l_len = 4};
@@ -1055,10 +1057,14 @@ static void test_shared_offsets_and_locks(void) {
     ok = ok && fcntl(fd, F_GETLK, &probe) == 0 && probe.l_type == F_WRLCK && probe.l_pid == me;
     ok = ok && probe.l_start == 0 && probe.l_len == 4;
     ok = ok && fcntl(fd, F_SETLK, &other) == 0; // the bytes after: free
+    ok = write(ready[1], "r", 1) == 1 && ok;    // checked while the parent holds it, however slow the machine
     ok = ok && fcntl(fd, F_SETLKW, &(struct flock){.l_type = F_RDLCK, .l_len = 4}) == 0; // once let go
     _exit(ok ? 0 : 1);
   }
-  nanosleep(&(struct timespec){.tv_nsec = 100'000'000}, nullptr);
+  char r;
+  CHECK(read(ready[0], &r, 1) == 1); // not a sleep: under load the child may start late
+  close(ready[0]);
+  close(ready[1]);
   CHECK(fcntl(fd, F_SETLK, &(struct flock){.l_type = F_UNLCK, .l_len = 4}) == 0); // the child's wait ends
   CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
   CHECK(fcntl(fd, F_SETLK, &whole) == 0); // the child's went with it
