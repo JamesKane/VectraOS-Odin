@@ -117,21 +117,24 @@ exception_port :: proc "contextless" (t: ^Task, first: bool) -> (p: ^Port, key: 
 }
 
 // A fault in user mode: true if the thread may go back to user mode, its
-// frame perhaps changed; false for the default, which kills the task.
-exception_raise :: proc "contextless" (f: ^Trap_Frame, kind: vx.Exception_Kind, code: u32, address: u64) -> bool {
+// frame perhaps changed; false for the default, which kills the task. kind
+// and address become the exception's as everyone sees it (a pager's late
+// page is Pager_Timeout at the page), so the default's exit string says the
+// same (upstream ab83fe6, from this tree's finding).
+exception_raise :: proc "contextless" (f: ^Trap_Frame, kind: ^vx.Exception_Kind, code: u32, address: ^u64) -> bool {
 	th := this_cpu().current
 	t := th.task
-	e_kind, e_address := kind, address
-	if kind == .Page_Fault { // a pager's page, perhaps: taken in before anyone sees a fault
-		switch pager_fault(address, code) {
+	if kind^ == .Page_Fault { // a pager's page, perhaps: taken in before anyone sees a fault
+		switch pager_fault(address^, code) {
 		case .Mapped, .Killed:
 			return true // made again; or user_return ends it
 		case .Timeout:
-			e_kind, e_address = .Pager_Timeout, address &~ (PAGE_SIZE - 1)
+			kind^, address^ = .Pager_Timeout, address^ &~ (PAGE_SIZE - 1)
 		case .Not_Mine:
 		}
 	}
-	if kind == .Step {
+	e_kind, e_address := kind^, address^
+	if e_kind == .Step {
 		arch_frame_step(f, false) // one instruction, done
 	}
 	e := vx.Exception {
@@ -159,7 +162,7 @@ exception_raise :: proc "contextless" (f: ^Trap_Frame, kind: vx.Exception_Kind, 
 			return false
 		}
 	}
-	if kind == .Step {
+	if e_kind == .Step {
 		return true // a step is the debugger's alone
 	}
 	if exception_divert(f, &e) {

@@ -1,0 +1,5 @@
+# What dbg -c does to ctest's segv child (tests/qemu/dbgmusl.ndb): run to
+# its fault, then on, past its handler, to the end.
+run
+cont
+quit

@@ -199,6 +199,9 @@ make_users :: proc(t: ^Tool, name: string, now: i64) -> vx.Status {
 		return .Ok // no adm branch: no users file
 	}
 	text := fmt.tprintf("0:adm:adm:%s\n1:none::\n%d:%s:%s:\n", name, USER_ID, name, name)
+	if len(text) >= 256 {
+		return .Err_Range // as upstream's 256-byte text refuses it (f24356f): a name too long for users(6)'s 32 bytes anyway
+	}
 	root, f: fs.File
 	if st == .Ok {
 		root, st = fs.root(v, &br.t)

@@ -46,7 +46,13 @@ import "vx:ring"
 import "vx:rt"
 import "vx:str"
 
-TEXT_MAX :: 256 // the most a file's text, or a query's answer, holds
+TEXT_MAX :: 256 // the most a file's text holds
+
+// The most a query's answer holds: the longest is a DNS answer, DNS_ADDRS
+// lines of "NAME ip A.B.C.D\n", a name of up to 253 bytes (upstream
+// ab83fe6). An answer that does not fit fails the query rather than give
+// part of a line (an address cut short can be another valid address).
+ANSWER_MAX :: net.DNS_ADDRS * (253 + 4 + 15 + 1)
 
 SECOND :: vx.Instant(1_000_000_000)
 
@@ -360,7 +366,7 @@ QUERIES :: 16
 Query :: struct {
 	used:   bool,
 	gen:    u32,
-	answer: [dynamic; TEXT_MAX]u8, // lines, each read one at a time
+	answer: [dynamic; ANSWER_MAX]u8, // lines, each read one at a time
 }
 
 queries: [QUERIES]Query
@@ -719,15 +725,16 @@ service_port :: proc "contextless" (s: string) -> net.Port {
 	return 0
 }
 
-// An answer as long as any can be: DNS_ADDRS lines of a name (at most 254
-// bytes) and an address. A query keeps the first TEXT_MAX bytes of it, as
-// upstream's buffer does.
+// More than an answer can hold, so a cut is seen.
 ANSWER_SCRATCH :: 2048
 
-// Keeps what fits of an answer.
-keep_answer :: proc "contextless" (q: ^Query, t: ^str.Buf) {
+// Keeps what fits of an answer; Err_Range if that is not all of it, which
+// fails the query (the bytes that fit are kept, as upstream's are).
+keep_answer :: proc "contextless" (q: ^Query, t: ^str.Buf) -> vx.Status {
 	clear(&q.answer)
-	_ = append(&q.answer, ..str.to_bytes(t))
+	whole := str.to_bytes(t)
+	n := append(&q.answer, ..whole)
+	return t.failed || n < len(whole) ? .Err_Range : .Ok
 }
 
 // "NET!HOST!SERVICE" into the clone files and addresses to dial (or, with
@@ -776,8 +783,7 @@ cs_query :: proc "contextless" (q: ^Query, query: string, now: vx.Instant) -> vx
 		}
 		str.write_byte(&t, '\n')
 	}
-	keep_answer(q, &t)
-	return .Ok
+	return keep_answer(q, &t)
 }
 
 // "NAME ip" (or "NAME"): a line "NAME ip ADDR" for each address.
@@ -795,8 +801,7 @@ dns_query :: proc "contextless" (q: ^Query, w: []string, now: vx.Instant) -> vx.
 		net.write_ip(&t, addr)
 		str.write_byte(&t, '\n')
 	}
-	keep_answer(q, &t)
-	return .Ok
+	return keep_answer(q, &t)
 }
 
 // A query's answer, a line a read: the line that starts at offset.

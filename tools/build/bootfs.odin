@@ -61,8 +61,8 @@ Bootfs_Entry :: struct {
 // Test programs named in `with` join the image, with their manifests from
 // tests/user/NAME.ndb, after the system's: svcd starts a test after what it
 // tests. A `with` name that is no program is a script test: its manifest
-// runs a program the image has (lua, rc) on tests/user/NAME.lua or NAME.rc,
-// at /boot/tests.
+// runs a program the image has (lua, rc, dbg) on tests/user/NAME.lua, NAME.rc
+// or NAME.cmds, at /boot/tests.
 make_bootfs :: proc(a: ^Arch, mode: Mode, out: string, with := "") -> bool {
 	entries := make([dynamic]Bootfs_Entry, context.temp_allocator)
 	// Programs, then the system's manifests, then the tests': svcd starts
@@ -167,7 +167,7 @@ make_bootfs :: proc(a: ^Arch, mode: Mode, out: string, with := "") -> bool {
 		}
 		data := read_file(fmt.tprintf("tests/user/%s.ndb", name)) or_return
 		append(&entries, Bootfs_Entry{path = fmt.tprintf("boot/svc/%s.ndb", name), data = data, mode = 0o644})
-		for ext in ([]string{"lua", "rc"}) {
+		for ext in ([]string{"lua", "rc", "cmds"}) { // a Lua or an rc script, or dbg's
 			script := fmt.tprintf("tests/user/%s.%s", name, ext)
 			if os.exists(script) {
 				append(&entries, Bootfs_Entry{path = fmt.tprintf("boot/tests/%s.%s", name, ext), data = read_file(script) or_return, mode = 0o644})

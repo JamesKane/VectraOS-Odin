@@ -820,7 +820,7 @@ aarch64_trap :: proc "c" (f: ^Trap_Frame, index: u64) {
 		if index & 3 != 0 {
 			kind = .General // an SError or FIQ
 		}
-		if index & 3 != 0 || !exception_raise(f, kind, code, address) { // nobody took it
+		if index & 3 != 0 || !exception_raise(f, &kind, code, &address) { // nobody took it
 			task_fault_start()
 			kput_exception(f, index)
 			kput(" at pc ")

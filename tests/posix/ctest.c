@@ -117,6 +117,8 @@ static void on_fault(int sig, siginfo_t *info, void *uc) {
 }
 
 static int child_main(char **argv) {
+  // default: the end, as SIGSEGV; before the parent's check, as dbg runs it too (tests/qemu/dbgmusl.ndb)
+  if (strcmp(argv[1], "segv") == 0) return *nowhere_at();
   pid_t parent = (pid_t)strtol(argv[2], nullptr, 10);
   if (getppid() != parent || getpid() == parent || getsid(0) != getsid(parent)) return 1;
   if (strcmp(argv[1], "exit") == 0) return argv[3] ? (int)strtol(argv[3], nullptr, 10) : 7;
@@ -164,7 +166,6 @@ static int child_main(char **argv) {
     bool interrupted = sigsuspend(&none) == -1 && errno == EINTR;
     return interrupted && signals[SIGUSR2] == 1 ? 13 : 2;
   }
-  if (strcmp(argv[1], "segv") == 0) return *nowhere_at(); // default: the end, as SIGSEGV
   if (strcmp(argv[1], "kept") == 0) { // what its parent ignored and blocked, kept through posix_spawn
     struct sigaction now;
     sigset_t mask;

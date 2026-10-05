@@ -351,6 +351,41 @@ test_9front_reading :: proc(t: ^testing.T) {
 		{"cat <<[0]EOF\nzero\nEOF\n", "zero\n"},
 	})
 	expect_result(t, b, "cat <<EOF\nnever ends\n", .Incomplete)
+	// A pipeline stage's here document is fed as written, not freed before the
+	// stage runs; a here document closes no file (slot 0 is a real one: the
+	// block's output here) (upstream ab83fe6, from this tree's findings).
+	expect_out(t, b, "cat <<EOF | wc\nhello there\nEOF\n", "2\n")
+	closes := b.host.closed
+	expect_out(t, b, "{ cat <<EOF\nhi\nEOF\n echo y } >/tmp/o", "")
+	testing.expect_value(t, b.host.closed - closes, 1) // the block's output alone, not a here document's slot 0
+	expect_out(t, b, "cat </tmp/o", "hi\ny\n")
+	expect_out(t, b, "cat </tmp/o | wc", "2\n")
+	// A compile nested past rc's stack is refused, not written past it
+	// (upstream f24356f).
+	deep := strings.builder_make(context.temp_allocator)
+	strings.write_string(&deep, "echo a")
+	for _ in 0 ..< 1020 {
+		strings.write_string(&deep, "^`{echo x}")
+	}
+	res := script(b, strings.to_string(deep))
+	testing.expect(t, res != .Ok)
+	testing.expectf(t, strings.contains(rc.err(b.sh), "nested too deeply"), "error %q", rc.err(b.sh))
+	// exit with more than one word: the whole usage message (upstream f24356f).
+	expect_result(t, b, "exit a b", .Exit)
+	testing.expectf(t, strings.contains(string(b.host.err[:]), "Exiting anyway\n"), "errors %q", string(b.host.err[:]))
+	b.sh.trapped = false
+	// More redirections in one pipeline than rc keeps for it: refused, its
+	// stages not run, nothing closed under them (upstream ab83fe6).
+	many := strings.builder_make(context.temp_allocator)
+	for _ in 0 ..< 60 {
+		strings.write_string(&many, "echo a >[2]/tmp/o >[3]/tmp/o >[4]/tmp/o >[5]/tmp/o >[6]/tmp/o | ")
+	}
+	strings.write_string(&many, "cat")
+	b.host.used_closed = false
+	res = script(b, strings.to_string(many))
+	testing.expect(t, res != .Ok || status_now(b) != "")
+	testing.expect(t, !b.host.used_closed)
+	testing.expect_value(t, string(b.host.out[:]), "")
 	// Descriptors of more digits lex, and past the ones there are, are refused.
 	expect_result(t, b, "echo x >[10] f\n", .Syntax)
 	// flag, and what the flags do.

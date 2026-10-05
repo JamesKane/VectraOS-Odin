@@ -58,8 +58,9 @@ count :: proc(s, sub: string) -> int {
 	return n
 }
 
-// A stage's file keeps its path until the stage has run: upstream frees the
-// path when the redirection is undone, before its pipeline runs.
+// A stage's file keeps its path until the stage has run (upstream freed the
+// path when the redirection was undone, before its pipeline ran, until its
+// ab83fe6).
 @(test)
 test_stage_path :: proc(t: ^testing.T) {
 	b := shell(t)
@@ -83,8 +84,8 @@ test_stage_path :: proc(t: ^testing.T) {
 }
 
 // A stage's here document keeps its text until the stage has run, and has no
-// file to close: upstream frees the text when the redirection is undone,
-// before its pipeline runs, and closes handle 0 for it.
+// file to close (upstream freed the text when the redirection was undone,
+// before its pipeline ran, and closed handle 0 for it, until its ab83fe6).
 @(test)
 test_here_stage :: proc(t: ^testing.T) {
 	b := shell(t)

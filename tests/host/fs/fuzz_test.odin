@@ -178,9 +178,10 @@ fuzz_one :: proc(fz: ^Fuzz, input: []u8) {
 
 	// A log at the arena's first block, replayed as a header says. As the tail
 	// (the first byte's top bit clear): its covered prefix's hash made to
-	// match. As a whole block before the tail: its hash made to match (as the
-	// log hash was before M5 step 10 put the header in it), and its chain led
-	// to an empty tail.
+	// match. As a whole block before the tail: its hash made to match, seeded
+	// with its header as M5 step 10 made it (upstream's fuzzer stamped the old
+	// hash until its f24356f, so the path never loaded), and its chain led to
+	// an empty tail.
 	whole := input[0] & 0x80 != 0
 	logsz := fs.get16(b.buf[2:])
 	if logsz > fs.LOGSPC {
@@ -192,7 +193,7 @@ fuzz_one :: proc(fz: ^Fuzz, input: []u8) {
 	}
 	if whole {
 		fs.pack_bptr(b.buf[12:], {addr = 2 * B})
-		fs.put64(b.buf[4:], fs.xxh64(b.buf[fs.LOGHDSZ:][:logsz], 0))
+		fs.put64(b.buf[4:], fs.log_hash(b.buf[:], logsz))
 		h.logtl, h.tailsz, h.tailhash = 2 * B, 0, fs.xxh64(fz.disk[:0], 0)
 	} else {
 		h.tailsz &~= 7
@@ -312,6 +313,6 @@ test_fuzz :: proc(t: ^testing.T) {
 		fuzz_one(fz, mutate(&m, i))
 	}
 	got := fs.xxh64(fz.out.buf[:], 0)
-	testing.expectf(t, got == 0xa7c5efa87e26be8a, "mutated: transcript %016x, upstream's a7c5efa87e26be8a", got)
-	testing.expect_value(t, len(fz.out.buf), 58416)
+	testing.expectf(t, got == 0x37f00cd08f869211, "mutated: transcript %016x, upstream's 37f00cd08f869211", got)
+	testing.expect_value(t, len(fz.out.buf), 58411)
 }

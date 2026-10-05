@@ -1,0 +1,12 @@
+# tests/qemu/dbgmusl.ndb: a musl program's fault under dbg (the Odin port's
+# finding): its handler declines the fault and runs the instruction again,
+# and procfs passes that one on without a second stop, so the program ends
+# with the fault after one cont.
+
+scenario=dbgmusl timeout=60 with=dbgmusl,ctest cmdline=vx.skip=rc
+expect="dbg: stopped: fault addr=0x"
+expect="dbg: ctest exited: sys: trap: fault"
+line="svcd: dbgmusl exited"
+fail="vx: panic"
+fail="svcd: dbgmusl exited: "
+fail="dbg: cannot"

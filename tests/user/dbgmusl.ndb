@@ -1,0 +1,16 @@
+# tests/user/dbgmusl.ndb: dbg on a musl program (tests/qemu/dbgmusl.ndb):
+# ctest's segv child, whose own handler declines the fault and runs the
+# instruction again. dbg sees the fault once; after cont it ends.
+
+service=dbgmusl program=/boot/bin/dbg console
+arg=-c
+arg=-x
+arg=/boot/tests/dbgmusl.cmds
+arg=/boot/bin/ctest
+arg=segv
+arg=x
+ns=posix
+mount=/proc srv=proc
+connect=nsd
+env=PATH=/bin
+env=HOME=/tmp

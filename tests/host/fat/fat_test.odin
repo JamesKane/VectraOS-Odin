@@ -571,12 +571,11 @@ test_format :: proc(t: ^testing.T) {
 	testing.expect_value(t, fat.format(dev, 60_000, 0, "SMALL", 1), vx.Status.Err_Invalid) // under 65525 clusters
 }
 
-// Added here: hostile directories and offsets that upstream's C mishandles
-// (docs/UPSTREAM-FINDINGS.md): a long-name slot numbered 0 first in the
-// directory (upstream stores its units 13 places before its buffer), a long
-// name of 20 slots of units at U+0800 and up (780 bytes of UTF-8, which
-// overrun upstream's 766-byte name), and a write at an offset whose end
-// wraps (upstream's check wraps with it and fills the volume with zeros).
+// Added here: hostile directories and offsets that upstream's C mishandled
+// until its f24356f (docs/UPSTREAM-FINDINGS.md): a long-name slot numbered
+// 0 first in the directory, a long name of 20 slots of units at U+0800 and
+// up (780 bytes of UTF-8, cut at 762 as upstream's 766-byte name now cuts
+// it), and a write at an offset whose end wraps.
 @(test)
 test_hostile :: proc(t: ^testing.T) {
 	bytes := load("fat16.img")
@@ -634,7 +633,7 @@ test_hostile :: proc(t: ^testing.T) {
 	it, st = fat.open_dir(v, &root)
 	testing.expect_value(t, st, vx.Status.Ok)
 	testing.expect_value(t, fat.dir_next(v, &it, &e), vx.Status.Ok)
-	testing.expect_value(t, len(fat.entry_name(&e)), 780)
+	testing.expect_value(t, len(fat.entry_name(&e)), 762) // 254 runes: a fifth byte would not leave the NUL's room
 	testing.expect_value(t, fat.entry_name(&e)[:6], "\xe4\xb8\x80\xe4\xb8\x80")
 	testing.expect_value(t, fat.entry_alias(&e), "HOSTILE")
 
@@ -644,4 +643,81 @@ test_hostile :: proc(t: ^testing.T) {
 	free_before := free_clusters(v)
 	testing.expect_value(t, fat.write(v, &e, max(u64) - 1, transmute([]u8)string("xyz")), vx.Status.Err_No_Space)
 	testing.expect_value(t, free_clusters(v), free_before)
+}
+
+// Upstream's check_slot_zero (ab83fe6): a long-name slot numbered 0, not the
+// name's last part, with the checksum a fresh run starts with (0): refused,
+// not written before units. The name is then no name, and its entry is
+// found by its 8.3 alias alone.
+@(test)
+test_slot_zero :: proc(t: ^testing.T) {
+	bytes := load("fat16.img")
+	defer delete(bytes)
+	if !testing.expect(t, len(bytes) > 0) {
+		return
+	}
+	m := new_image(bytes)
+	v := new(fat.Vol)
+	defer free(v)
+	testing.expect_value(t, fat.mount(v, readable(&m)), vx.Status.Ok)
+	slot: []u8
+	for i in 0 ..< int(v.root_entries) {
+		s := bytes[int(v.root_start) * int(v.sector_size) + i * 32:][:32]
+		if s[11] == 0x0f && s[0] & 0x40 != 0 && s[0] & 0x1f > 1 { // a name of two slots or more
+			slot = s
+			break
+		}
+	}
+	if !testing.expect(t, slot != nil, "a long name of two slots or more") {
+		return
+	}
+	slot[0], slot[13] = 0x20, 0
+	testing.expect_value(t, fat.mount(v, readable(&m)), vx.Status.Ok)
+	e: fat.Entry
+	testing.expect(t, !walk(v, "Long Directory Name", &e))
+	testing.expect(t, walk(v, "big.bin", &e)) // the rest of the directory reads as before
+}
+
+// Upstream's check_hostile_names (f24356f): a hostile name of 20 slots, all
+// 260 units used, every one a 3-byte rune: cut at NAME_MAX, the alias after
+// it intact; and a write whose end wraps 64 bits refused.
+@(test)
+test_hostile_names :: proc(t: ^testing.T) {
+	m := new_image(make([]u8, 64 << 20))
+	defer delete(m.bytes)
+	v := new(fat.Vol)
+	defer free(v)
+	dev := writable(&m)
+	testing.expect_value(t, fat.format(dev, u64(len(m.bytes)) / 512, 2048, "HOSTILE", 7), vx.Status.Ok)
+	testing.expect_value(t, fat.mount(v, dev), vx.Status.Ok)
+	name := strings.repeat("\xe4\xb8\x80", 255, context.temp_allocator) // U+4E00, 255 times
+	e: fat.Entry
+	testing.expect(t, make_entry(v, name, {}, &e))
+	testing.expect_value(t, fat.flush(v), vx.Status.Ok)
+	last: []u8 // the name's 20th slot, its last part: units 247 to 259
+	for at := 0; at + 32 <= len(m.bytes); at += 32 {
+		if m.bytes[at] == 0x54 && m.bytes[at + 11] == 0x0f {
+			last = m.bytes[at:][:32]
+			break
+		}
+	}
+	if testing.expect(t, last != nil, "the name's last slot") {
+		pos := [13]int{1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30}
+		for i in 8 ..< 13 { // its padding, runes too
+			last[pos[i]], last[pos[i] + 1] = 0x00, 0x4e
+		}
+	}
+	testing.expect_value(t, fat.mount(v, dev), vx.Status.Ok)
+	root := fat.root_entry(v)
+	it, st := fat.open_dir(v, &root)
+	testing.expect_value(t, st, vx.Status.Ok)
+	got: fat.Entry
+	found := false
+	for !found && fat.dir_next(v, &it, &got) == .Ok {
+		found = len(fat.entry_alias(&got)) > 0 && strings.has_prefix(fat.entry_name(&got), "\xe4")
+	}
+	testing.expect(t, found, "the hostile name")
+	testing.expect(t, len(fat.entry_name(&got)) < fat.NAME_MAX)
+	testing.expect(t, !strings.has_prefix(fat.entry_alias(&got), "\xe4"), "the alias not written over")
+	testing.expect_value(t, fat.write(v, &got, max(u64) - 1, transmute([]u8)string("abcd")), vx.Status.Err_No_Space)
 }

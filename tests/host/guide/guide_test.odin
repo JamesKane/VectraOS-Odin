@@ -287,11 +287,16 @@ test_pages :: proc(t: ^testing.T) {
 	testing.expect(t, pages >= 1)
 }
 
-// A cell of more than 512 bytes is cut at the buffer's end, on a whole rune.
-// Upstream's cuts it at the 512th byte, inside a rune when one straddles it,
-// so its rendering of the second page is not UTF-8 (docs/UPSTREAM-FINDINGS.md).
+// A cell of more than 512 bytes is cut at the buffer's end, on a whole rune
+// (upstream's cut inside a rune until its f24356f, from this tree's finding).
+// long_cell.txt is upstream's guide.c at 08cc12f rendering the same two
+// pages, each after a line "=== lead L ok 1", which both must match byte for
+// byte.
+LONG_CELL :: #load("long_cell.txt", string)
+
 @(test)
 test_long_cell :: proc(t: ^testing.T) {
+	all := strings.builder_make(context.temp_allocator)
 	for lead in ([]string{"", "x"}) {
 		cell := strings.concatenate({lead, strings.repeat("é", 300, context.temp_allocator)}, context.temp_allocator)
 		page := strings.concatenate({"page=t sect=7 summary=s\n\n| ", cell, " | b |\n| c | d |\n"}, context.temp_allocator)
@@ -300,5 +305,7 @@ test_long_cell :: proc(t: ^testing.T) {
 		testing.expectf(t, utf.valid(got), "lead %q: not UTF-8", lead)
 		// The cell is one long word, written in two at 256 bytes, then cut.
 		testing.expectf(t, strings.contains(got, "é  b\n"), "lead %q: %q", lead, got)
+		fmt.sbprintf(&all, "=== lead %s ok %d\n%s", lead, int(ok), got)
 	}
+	testing.expect_value(t, strings.to_string(all), LONG_CELL)
 }

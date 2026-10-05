@@ -237,7 +237,7 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 			esc(&h.log, word)
 		}
 		for fd in fds {
-			fd_desc(&h.log, fd, with_path = false) // upstream's has been freed by now: not compared
+			fd_desc(&h.log, fd) // kept until the stage runs, upstream's as well since its ab83fe6
 		}
 		put(&h.log, "\n")
 		for fd in fds {
@@ -254,9 +254,8 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 		if f, is := fds[0].(rc.Fd_File); is && f.kind == .Read && f.handle < FILES {
 			input = h.files[f.handle].data[:]
 		}
-		// A here document's text; not a pipeline stage's, which upstream has
-		// freed by now: not compared.
-		if here, is := fds[0].(rc.Fd_Here); is && len(stages) == 1 {
+		// A here document's text, a pipeline stage's too.
+		if here, is := fds[0].(rc.Fd_Here); is {
 			input = transmute([]u8)here.text
 		}
 		in_copy := make([]u8, len(input))
@@ -508,7 +507,7 @@ run_min :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, asy
 			esc(&h.log, word)
 		}
 		for fd in c.fds {
-			fd_desc(&h.log, fd, with_path = false)
+			fd_desc(&h.log, fd)
 		}
 		put(&h.log, "\n")
 	}

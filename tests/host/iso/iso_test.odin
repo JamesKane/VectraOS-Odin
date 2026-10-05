@@ -182,6 +182,9 @@ test_plain :: proc(t: ^testing.T) {
 	testing.expect(t, walk(v, "link_to_readme", &e)) // a link without Rock Ridge: an empty file
 	testing.expect(t, !e.link)
 	testing.expect_value(t, e.size, 0)
+	// The writer's longest name, 30 characters, keeps its version (upstream
+	// f24356f, from this tree's finding: ";1" lost its 1).
+	testing.expect(t, strings.contains(string(image), "A_LONG_MIXED_CASE_NAME_THA.TXT;1"), "the long name's version")
 }
 
 @(test)
@@ -234,4 +237,60 @@ test_damage :: proc(t: ^testing.T) {
 	testing.expect_value(t, iso.mount(v, dev_of(&c), {}), vx.Status.Ok)
 	testing.expect_value(t, v.kind, iso.Kind.Rock)
 	testing.expect(t, !reads(v, LONG, "long\n"))
+}
+
+// Upstream's check_hostile (ab83fe6, from this tree's findings), through the
+// package's own calls: a root directory claiming 4 GiB of records is
+// refused at once rather than walked until its offset wraps; and a sector
+// whose read fails is not kept as the sector it replaced, so what is read
+// once the device answers again is the volume's.
+@(private="file")
+failing: bool
+
+@(private="file")
+flaky_read :: proc "contextless" (ctx: rawptr, off: u64, buf: []u8) -> bool {
+	if failing {
+		for &b in buf {
+			b = 0xee // what a partial read might leave
+		}
+		return false
+	}
+	return image_read(ctx, off, buf)
+}
+
+@(test)
+test_hostile :: proc(t: ^testing.T) {
+	image := load_image(t)
+	defer delete(image)
+	v := new(iso.Vol)
+	defer free(v)
+
+	// The primary descriptor's root record (sector 16, at 156): its length,
+	// both-endian, at 10.
+	c := make([]u8, len(image))
+	defer delete(c)
+	copy(c, image)
+	root := c[16 * iso.SECTOR + 156:]
+	root[10], root[11], root[12], root[13] = 0x00, 0xf0, 0xff, 0xff
+	root[14], root[15], root[16], root[17] = 0xff, 0xff, 0xf0, 0x00
+	if iso.mount(v, dev_of(&c), {.Rock, .Joliet}) == .Ok {
+		r: iso.Entry
+		iso.root_entry(v, &r)
+		it, _ := iso.open_dir(&r)
+		e: iso.Entry
+		testing.expect_value(t, iso.dir_next(v, &it, &e), vx.Status.Err_Io)
+	}
+
+	// Every file read once, the device failing for one more, then every
+	// file again: the volume's bytes, never the failed read's.
+	failing = false
+	testing.expect_value(t, iso.mount(v, {ctx = &image, read = flaky_read}, {}), vx.Status.Ok)
+	testing.expect(t, reads(v, "README.txt", "readme\n"))
+	testing.expect(t, reads(v, "deep/er/still/deeper/file.txt", "deep\n"))
+	failing = true
+	testing.expect(t, !reads(v, "dir with spaces/same name.txt", "lower\n"))
+	failing = false
+	testing.expect(t, reads(v, "dir with spaces/same name.txt", "lower\n"))
+	testing.expect(t, reads(v, "README.txt", "readme\n"))
+	testing.expect(t, reads(v, "deep/er/still/deeper/file.txt", "deep\n"))
 }

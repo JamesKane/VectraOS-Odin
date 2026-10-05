@@ -1,7 +1,8 @@
 // The image every suite here reads: the ISO upstream's tests read
 // (out/host/test.iso, which its build makes with make_test_iso and
 // write_iso, with Rock Ridge and Joliet). The image was made by upstream's
-// own write_iso, compiled with clang from build.c at 1976c1f, with
+// own write_iso, compiled with clang from build.c at 08cc12f (an ISO 9660
+// name of 30 characters keeps its ";1" since its f24356f), with
 // SOURCE_DATE_EPOCH=1759536000; test.iso.gz is that image cut before
 // big.bin's extent, its last 147 sectors, which load_image makes again from
 // the pattern make_test_iso writes. The whole image's SHA-256 is checked, so
@@ -17,7 +18,7 @@ import "core:testing"
 import "vx:iso"
 
 FIXTURE :: #load("test.iso.gz")
-IMAGE_SHA256 :: "750a934fa683638debd1242d51d185f96d12d2c528fe668a70bc763777cfc5a1"
+IMAGE_SHA256 :: "01b276ce65211768bbb08da3b250c90ed559442bbf126ee74d83a2e23e405a6c"
 IMAGE_SECTORS :: 194
 BIG_LBA :: 47 // big.bin's extent: the image's tail
 BIG_SIZE :: 300_000

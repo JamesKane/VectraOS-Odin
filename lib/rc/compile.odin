@@ -293,8 +293,8 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 		}
 		if it.phase == 0 && is_cmd(t.kind) && t.kind != .Seq && t.kind != .If_Not {
 			c.r.iflast = false
-			// Room for the command's next phase too, which upstream pushes
-			// unchecked, past its array when this took the last place.
+			// Room for the command's next phase too, which upstream pushed
+			// unchecked, past its array, until its f24356f.
 			if ni + 1 >= CITEMS {
 				c.why = "nested too deeply"
 				return false

@@ -389,9 +389,9 @@ test_replay_and_release :: proc(t: ^testing.T) {
 	testing.expect_value(t, used_fids(&fx.dev_srv), before) // the failed creates clunked what they walked to
 }
 
-// Not upstream's: a connection that only a bind still uses is kept when its
-// mount goes. (Upstream's M3 lets it go, and the walk below follows a null
-// client.)
+// A connection that only a bind still uses is kept when its mount goes.
+// (Upstream's M3 let it go, and the walk below followed a null client;
+// fixed in its 002a9a8, and tested since its f24356f, as here.)
 @(test)
 test_release_keeps_bound :: proc(t: ^testing.T) {
 	space := new(ns.Namespace)

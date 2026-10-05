@@ -214,7 +214,7 @@ Rc :: struct {
 	// though the redirection that opened it is undone at once (pop_redirs):
 	// each such close waits here, with how many stages were gathered then.
 	stages:   [dynamic; STAGES]Command,
-	closes:   [dynamic; 2 * STAGES]Pending_Close,
+	closes:   [dynamic; 4 * STAGES]Pending_Close,
 	compiler: Compiler_Scratch,
 	ifnot:    bool, // the last if's condition was false: what `if not` runs on
 	iflast:   bool, // the last command compiled was an if, so `if not` may follow (rc's lex->iflast)

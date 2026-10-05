@@ -1,10 +1,10 @@
 mount avoid=0 st=0 kind=4 root=24/2048 skip=0 sectors=194 label=VECTRAOS
 /abs-link|node=4000000018000098 lba=0 size=0 dir=0 link=1 mode=777 mtime=1759536000 target=/boot/limine/limine.conf parent=0:1 get=0:abs-link read=-4:0:00000000
 /A Long Mixed-Case Name That Goes On And On, Past What One Directory Record Can Hold, So Its Rock Ridge NM Entry Has To Continue In The Directory's Continuation Area, Which Is The Point Of It.txt|node=4000000018000124 lba=41 size=5 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:A Long Mixed-Case Name That Goes On And On, Past What One Directory Record Can Hold, So Its Rock Ridge NM Entry Has To Continue In The Directory's Continuation Area, Which Is The Point Of It.txt read=0:5:0626090e
-/big.bin|node=40000000180001b0 lba=47 size=300000 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:big.bin read=0:300000:a94b2c66
-/boot.catalog|node=4000000018000216 lba=37 size=2048 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:boot.catalog read=0:2048:9247ce09
-/deep|node=4000000018000288 lba=25 size=2048 dir=1 link=0 mode=555 mtime=1759536000 target= parent=0:1 get=0:deep read=-4:0:00000000
-/deep/er|node=40000000190000a4 lba=27 size=2048 dir=1 link=0 mode=555 mtime=1759536000 target= parent=0:4000000018000288 get=0:er read=-4:0:00000000
+/big.bin|node=40000000180001b2 lba=47 size=300000 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:big.bin read=0:300000:a94b2c66
+/boot.catalog|node=4000000018000218 lba=37 size=2048 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:boot.catalog read=0:2048:9247ce09
+/deep|node=400000001800028a lba=25 size=2048 dir=1 link=0 mode=555 mtime=1759536000 target= parent=0:1 get=0:deep read=-4:0:00000000
+/deep/er|node=40000000190000a4 lba=27 size=2048 dir=1 link=0 mode=555 mtime=1759536000 target= parent=0:400000001800028a get=0:er read=-4:0:00000000
 /deep/er/still|node=400000001b0000a4 lba=28 size=2048 dir=1 link=0 mode=555 mtime=1759536000 target= parent=0:40000000190000a4 get=0:still read=-4:0:00000000
 /deep/er/still/deeper|node=400000001c0000a4 lba=29 size=2048 dir=1 link=0 mode=555 mtime=1759536000 target= parent=0:400000001b0000a4 get=0:deeper read=-4:0:00000000
 /deep/er/still/deeper/file.txt|node=400000001d0000a4 lba=44 size=5 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:400000001c0000a4 get=0:file.txt read=0:5:05b0a09e
@@ -13,15 +13,15 @@ mount avoid=0 st=0 kind=4 root=24/2048 skip=0 sectors=194 label=VECTRAOS
 /deep/er/up-link|node=400000001b000104 lba=0 size=0 dir=0 link=1 mode=777 mtime=1759536000 target=../../dir with spaces/./same name.txt parent=0:40000000190000a4 get=0:up-link read=-4:0:00000000
 /deep/er/end=-15
 /deep/end=-15
-/dir with spaces|node=40000000180002e8 lba=26 size=2048 dir=1 link=0 mode=555 mtime=1759536000 target= parent=0:1 get=0:dir with spaces read=-4:0:00000000
-/dir with spaces/same name.txt|node=400000001a0000a4 lba=45 size=6 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:40000000180002e8 get=0:same name.txt read=0:6:be9f3529
-/dir with spaces/Same Name.txt|node=400000001a000116 lba=46 size=6 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:40000000180002e8 get=0:Same Name.txt read=0:6:ce05bba8
+/dir with spaces|node=40000000180002ea lba=26 size=2048 dir=1 link=0 mode=555 mtime=1759536000 target= parent=0:1 get=0:dir with spaces read=-4:0:00000000
+/dir with spaces/same name.txt|node=400000001a0000a4 lba=45 size=6 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:40000000180002ea get=0:same name.txt read=0:6:be9f3529
+/dir with spaces/Same Name.txt|node=400000001a000116 lba=46 size=6 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:40000000180002ea get=0:Same Name.txt read=0:6:ce05bba8
 /dir with spaces/end=-15
-/efiboot.img|node=400000001800035c lba=38 size=4096 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:efiboot.img read=0:4096:00000000
-/link-to-readme|node=40000000180003ca lba=0 size=0 dir=0 link=1 mode=777 mtime=1759536000 target=README.txt parent=0:1 get=0:link-to-readme read=-4:0:00000000
-/README.txt|node=4000000018000450 lba=40 size=7 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:README.txt read=0:7:4065dc1c
-/Ünïcode file.txt|node=40000000180004be lba=42 size=8 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:Ünïcode file.txt read=0:8:edaae0cd
-/😀 smile.txt|node=400000001800053c lba=43 size=6 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:😀 smile.txt read=0:6:ca6eae02
+/efiboot.img|node=400000001800035e lba=38 size=4096 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:efiboot.img read=0:4096:00000000
+/link-to-readme|node=40000000180003cc lba=0 size=0 dir=0 link=1 mode=777 mtime=1759536000 target=README.txt parent=0:1 get=0:link-to-readme read=-4:0:00000000
+/README.txt|node=4000000018000452 lba=40 size=7 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:README.txt read=0:7:4065dc1c
+/Ünïcode file.txt|node=40000000180004c0 lba=42 size=8 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:Ünïcode file.txt read=0:8:edaae0cd
+/😀 smile.txt|node=400000001800053e lba=43 size=6 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:😀 smile.txt read=0:6:ca6eae02
 /end=-15
 mount avoid=4 st=0 kind=2 root=30/2048 skip=0 sectors=194 label=VECTRAOS
 /A Long Mixed-Case Name That Goes On And On, Past What One Direct|node=400000001e000044 lba=41 size=5 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:A Long Mixed-Case Name That Goes On And On, Past What One Direct read=0:5:0626090e
@@ -48,10 +48,10 @@ mount avoid=4 st=0 kind=2 root=30/2048 skip=0 sectors=194 label=VECTRAOS
 mount avoid=6 st=0 kind=1 root=24/2048 skip=0 sectors=194 label=VECTRAOS
 /abs_link|node=4000000018000098 lba=0 size=0 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:abs_link read=0:0:00000000
 /a_long_mixed_case_name_tha.txt|node=4000000018000124 lba=41 size=5 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:a_long_mixed_case_name_tha.txt read=0:5:0626090e
-/big.bin|node=40000000180001b0 lba=47 size=300000 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:big.bin read=0:300000:a94b2c66
-/boot.catalog|node=4000000018000216 lba=37 size=2048 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:boot.catalog read=0:2048:9247ce09
-/deep|node=4000000018000288 lba=25 size=2048 dir=1 link=0 mode=555 mtime=1759536000 target= parent=0:1 get=0:deep read=-4:0:00000000
-/deep/er|node=40000000190000a4 lba=27 size=2048 dir=1 link=0 mode=555 mtime=1759536000 target= parent=0:4000000018000288 get=0:er read=-4:0:00000000
+/big.bin|node=40000000180001b2 lba=47 size=300000 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:big.bin read=0:300000:a94b2c66
+/boot.catalog|node=4000000018000218 lba=37 size=2048 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:boot.catalog read=0:2048:9247ce09
+/deep|node=400000001800028a lba=25 size=2048 dir=1 link=0 mode=555 mtime=1759536000 target= parent=0:1 get=0:deep read=-4:0:00000000
+/deep/er|node=40000000190000a4 lba=27 size=2048 dir=1 link=0 mode=555 mtime=1759536000 target= parent=0:400000001800028a get=0:er read=-4:0:00000000
 /deep/er/still|node=400000001b0000a4 lba=28 size=2048 dir=1 link=0 mode=555 mtime=1759536000 target= parent=0:40000000190000a4 get=0:still read=-4:0:00000000
 /deep/er/still/deeper|node=400000001c0000a4 lba=29 size=2048 dir=1 link=0 mode=555 mtime=1759536000 target= parent=0:400000001b0000a4 get=0:deeper read=-4:0:00000000
 /deep/er/still/deeper/file.txt|node=400000001d0000a4 lba=44 size=5 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:400000001c0000a4 get=0:file.txt read=0:5:05b0a09e
@@ -60,13 +60,13 @@ mount avoid=6 st=0 kind=1 root=24/2048 skip=0 sectors=194 label=VECTRAOS
 /deep/er/up_link|node=400000001b000104 lba=0 size=0 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:40000000190000a4 get=0:up_link read=0:0:00000000
 /deep/er/end=-15
 /deep/end=-15
-/dir_with_spaces|node=40000000180002e8 lba=26 size=2048 dir=1 link=0 mode=555 mtime=1759536000 target= parent=0:1 get=0:dir_with_spaces read=-4:0:00000000
-/dir_with_spaces/same_name.txt|node=400000001a0000a4 lba=45 size=6 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:40000000180002e8 get=0:same_name.txt read=0:6:be9f3529
-/dir_with_spaces/same_name~1.txt|node=400000001a000116 lba=46 size=6 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:40000000180002e8 get=0:same_name~1.txt read=0:6:ce05bba8
+/dir_with_spaces|node=40000000180002ea lba=26 size=2048 dir=1 link=0 mode=555 mtime=1759536000 target= parent=0:1 get=0:dir_with_spaces read=-4:0:00000000
+/dir_with_spaces/same_name.txt|node=400000001a0000a4 lba=45 size=6 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:40000000180002ea get=0:same_name.txt read=0:6:be9f3529
+/dir_with_spaces/same_name~1.txt|node=400000001a000116 lba=46 size=6 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:40000000180002ea get=0:same_name~1.txt read=0:6:ce05bba8
 /dir_with_spaces/end=-15
-/efiboot.img|node=400000001800035c lba=38 size=4096 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:efiboot.img read=0:4096:00000000
-/link_to_readme|node=40000000180003ca lba=0 size=0 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:link_to_readme read=0:0:00000000
-/readme.txt|node=4000000018000450 lba=40 size=7 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:readme.txt read=0:7:4065dc1c
-/__n__code_file.txt|node=40000000180004be lba=42 size=8 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:__n__code_file.txt read=0:8:edaae0cd
-/_____smile.txt|node=400000001800053c lba=43 size=6 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:_____smile.txt read=0:6:ca6eae02
+/efiboot.img|node=400000001800035e lba=38 size=4096 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:efiboot.img read=0:4096:00000000
+/link_to_readme|node=40000000180003cc lba=0 size=0 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:link_to_readme read=0:0:00000000
+/readme.txt|node=4000000018000452 lba=40 size=7 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:readme.txt read=0:7:4065dc1c
+/__n__code_file.txt|node=40000000180004c0 lba=42 size=8 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:__n__code_file.txt read=0:8:edaae0cd
+/_____smile.txt|node=400000001800053e lba=43 size=6 dir=0 link=0 mode=444 mtime=1759536000 target= parent=0:1 get=0:_____smile.txt read=0:6:ca6eae02
 /end=-15

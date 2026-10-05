@@ -313,10 +313,9 @@ d_char :: proc(b: u8) -> u8 {
 	return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ? c : '_'
 }
 
-// The ISO 9660 name for a real one, unique among kids. Cut at 31 bytes, as
-// upstream's 32-byte buffer cuts it: a file's name of 26 characters or more
-// before an extension of 3 loses the version's "1" (upstream's own finding,
-// kept for the same bytes).
+// The ISO 9660 name for a real one, unique among kids: at most 30
+// characters, then ";1" (32 bytes, as upstream's 33-byte buffer holds them
+// since its f24356f; its 32-byte one lost the version's "1").
 @(private="file")
 iso_mangle :: proc(name: string, is_file: bool, kids: []Iso_Kid) -> string {
 	dot := is_file ? strings.last_index_byte(name, '.') : -1
@@ -343,7 +342,7 @@ iso_mangle :: proc(name: string, is_file: bool, kids: []Iso_Kid) -> string {
 		tail := k > 0 ? fmt.tprintf("~%d", k) : ""
 		keep := len(b) + len(tail) > room ? room - len(tail) : len(b)
 		out := is_file ? fmt.tprintf("%s%s.%s;1", b[:keep], tail, e) : fmt.tprintf("%s%s", b[:keep], tail)
-		out = out[:min(len(out), 31)]
+		out = out[:min(len(out), 32)]
 		taken := false
 		for kid in kids {
 			taken = taken || kid.iso == out

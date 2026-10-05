@@ -454,13 +454,16 @@ pop_redirs :: proc "contextless" (r: ^Rc, to: int) {
 		}
 		// A file the host opened: closed, or once a stage that may have been
 		// given it has run. Its path waits with it, for that stage's Fd_File,
-		// as a here document's text does for its Fd_Here; upstream frees them
-		// here, and a stage's are read after the free. A here document has no
-		// file to close; upstream closes handle 0 for it.
+		// as a here document's text does for its Fd_Here. A here document has
+		// no file to close. More than rc keeps for one pipeline fail the
+		// command, so its stages never run (upstream ab83fe6).
 		file, is_file := d.to.(Fd_File)
-		if len(r.stages) > 0 && len(r.closes) < cap(r.closes) {
-			append(&r.closes, Pending_Close{handle = file.handle, level = u32(len(r.stages)), path = d.path, close = is_file && r.host.close != nil})
-			continue
+		if len(r.stages) > 0 {
+			if len(r.closes) < cap(r.closes) {
+				append(&r.closes, Pending_Close{handle = file.handle, level = u32(len(r.stages)), path = d.path, close = is_file && r.host.close != nil})
+				continue
+			}
+			fail(r, "", "too many redirections in one pipeline")
 		}
 		if is_file && r.host.close != nil {
 			r.host.close(r.host.ctx, file.handle)
@@ -752,8 +755,7 @@ builtin :: proc "contextless" (r: ^Rc, argv: ^Word, argc: u32) -> bool {
 	switch text(argv) {
 	case "exit": // exit [status]: with no status, $status as it is (rc's execexit)
 		if argc > 2 {
-			// Upstream gives 34 bytes of the message's 36: kept, byte for byte.
-			errout(r, "Usage: exit [status]\nExiting anyway\n"[:34])
+			errout(r, "Usage: exit [status]\nExiting anyway\n") // whole, as upstream's f24356f writes it
 		}
 		if argc > 1 {
 			set_status(r, text(argv.next))

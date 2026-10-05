@@ -1,12 +1,13 @@
 // Added here: lib/iso against upstream's lib/vx-iso, compiled with clang on
-// the host as an oracle (a dump program over iso.c at 1976c1f). Both print
+// the host as an oracle (a dump program over iso.c at 08cc12f, whose 16 MiB
+// limit on a directory's extent changes one damaged copy's listing). Both print
 // every entry of the image, each of the three ways, recursively: its node,
 // extent, flags, mode, time, link target, parent, the entry its node gives
 // again, and its bytes' hash. upstream.txt is the oracle's listing of the
 // whole image; FUZZ_HASH, of 1000 damaged copies of it (each with one to
 // eight bytes of its descriptors, path tables, directories and continuation
 // areas overwritten, chosen by xorshift64 as the oracle chose them), hashed
-// (FNV-1a) one listing at a time: 419 different listings, the rest the
+// (FNV-1a) one listing at a time: 417 different listings, the rest the
 // undamaged one. The oracle ran under ASan and UBSan without a report.
 package iso_test
 
@@ -19,7 +20,7 @@ import "vx:iso"
 
 UPSTREAM :: #load("upstream.txt", string)
 FUZZ_COUNT :: 1000
-FUZZ_HASH :: u64(0xa7c628e42dfee5bc)
+FUZZ_HASH :: u64(0xafb9053dc6d772a0)
 
 // The oracle's limits: 300 entries a mount, four directories down.
 @(private="file")

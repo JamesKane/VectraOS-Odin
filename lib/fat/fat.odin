@@ -40,11 +40,10 @@ import "vx:utf"
 
 CACHE :: 32 // sectors cached
 MAX_SECTOR :: 4096
-// The longest name dir_next gives: 20 long-name slots of 13 UTF-16 units,
-// each at most 3 bytes of UTF-8 (a surrogate pair is 2 units and 4 bytes).
-// (Upstream's buffer is 255 * 3 + 1, which a hostile 20-slot name of units
-// at U+0800 and above overruns.)
-NAME_MAX :: 20 * 13 * 3
+// The longest name dir_next gives, as upstream's buffer holds it (255 runes
+// of 3 bytes, and its NUL): 20 long-name slots hold 260 units, so a name
+// past it is cut on a whole rune (upstream f24356f).
+NAME_MAX :: 255 * 3 + 1
 ALIAS_MAX :: 12 // "ALONGD~1.TXT"
 
 // A device's callbacks. off and len(buf) are multiples of 512 (the boot
@@ -314,6 +313,7 @@ sector_of :: proc "contextless" (v: ^Vol, sector: u64) -> (s: []u8, ok: bool) {
 		}
 	}
 	line := &v.cache[victim]
+	line.valid = false // until a read fills it: a failed one leaves no stale sector behind
 	if sector >= v.sectors || !v.dev.read(v.dev.ctx, sector * u64(v.sector_size), line.data[:v.sector_size]) {
 		return nil, false
 	}
@@ -579,7 +579,7 @@ checksum :: proc "contextless" (short_name: ^[11]u8) -> u8 {
 put_rune :: proc "contextless" (out: ^[dynamic; NAME_MAX]u8, c: rune) {
 	buf: [utf.UTF_MAX]u8
 	n := utf.encode(&buf, c)
-	_ = append(out, ..buf[:n]) // NAME_MAX holds the longest name
+	_ = append(out, ..buf[:n]) // dir_next stops while 4 bytes are left
 }
 
 // FAT's date and time (local, taken as UTC) as seconds since 1970.
@@ -682,16 +682,8 @@ dir_next :: proc "contextless" (v: ^Vol, it: ^Iter, e: ^Entry) -> vx.Status {
 					continue
 				}
 				count, sum = seq, l.sum
-			} else if seq != expect || l.sum != sum {
+			} else if seq < 1 || seq != expect || l.sum != sum { // 0 would index before units
 				expect = 0
-				continue
-			}
-			if seq == 0 {
-				// A slot numbered 0 where none was expected, with the
-				// checksum in hand. Upstream stores its units 13 places
-				// before the buffer and expects slot -1 next, which no slot
-				// is: so no name forms; expect -1 likewise, and keep nothing.
-				expect = -1
 				continue
 			}
 			for at, i in LFN_UNITS {
@@ -732,6 +724,9 @@ dir_next :: proc "contextless" (v: ^Vol, it: ^Iter, e: ^Entry) -> vx.Status {
 				}
 				if c == '/' || c == 0 {
 					c = utf.RUNE_ERROR
+				}
+				if len(e.name) + 4 >= NAME_MAX {
+					break // 20 slots hold 260 units, past a name's 255: cut, as upstream's
 				}
 				put_rune(&e.name, c)
 			}

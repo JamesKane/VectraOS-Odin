@@ -737,6 +737,13 @@ own_fd :: proc "contextless" (which: u8) -> vx.Handle {
 	return vx.HANDLE_NONE
 }
 
+// A channel no one is at the other end of: reads end, writes fail.
+unheard :: proc "contextless" () -> (io: vx.Handle, st: vx.Status) {
+	a, b := rt.channel_create() or_return
+	_ = rt.handle_close(b)
+	return a, .Ok
+}
+
 // A stage's standard descriptor i: the program's channel end (or none, for
 // the console), making relays and joining pipes as need be.
 stage_io :: proc "contextless" (fd: rc.Fd, i: int, pipe_in, pipe_out: vx.Handle) -> (io: vx.Handle, st: vx.Status) {
@@ -748,11 +755,14 @@ stage_io :: proc "contextless" (fd: rc.Fd, i: int, pipe_in, pipe_out: vx.Handle)
 		share = pipe_in
 	case rc.Fd_Pipe_Out:
 		share = pipe_out
-	case rc.Fd_Closed, rc.Fd_Dup: // a channel no one is at the other end of (a copy left is of no descriptor)
-		a, b := rt.channel_create() or_return
-		_ = rt.handle_close(b)
-		return a, .Ok
-	case rc.Fd_File, rc.Fd_Capture, rc.Fd_Here:
+	case rc.Fd_Closed, rc.Fd_Dup: // a copy left is of no descriptor
+		return unheard()
+	case rc.Fd_Here: // read; on an output it is no file, as 9front's read-only one takes no writes (upstream f24356f)
+		if i != 0 {
+			return unheard()
+		}
+		return relay_for(fd, true)
+	case rc.Fd_File, rc.Fd_Capture:
 		return relay_for(fd, i == 0)
 	}
 	if share == vx.HANDLE_NONE {

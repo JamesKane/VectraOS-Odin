@@ -680,7 +680,13 @@ apply_binary :: proc "contextless" (c: ^Session, op: Punct, a: ^Value, b_in: Val
 	case .Minus:
 		switch {
 		case pa && pb:
-			// Signed: &a[0] - &a[1] is -1.
+			// Signed: &a[0] - &a[1] is -1. A size the target's types give
+			// past max(i64) is no real one: refused, not divided (upstream
+			// f24356f, from this tree's finding).
+			if scale_a > u64(max(i64)) {
+				c.err = "a pointer's type is too large to subtract"
+				return false
+			}
 			r = scale_a != 0 ? u64(div_i64(i64(x - y), i64(scale_a))) : 0
 			type = SYN_LONG
 		case pb:

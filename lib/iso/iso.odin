@@ -31,6 +31,10 @@ SECTOR :: 2048
 CACHE :: 16 // sectors kept
 NAME_CAP :: 255 * 3 // a name's bytes: 255 UTF-16 units' worth, as upstream's buffer holds
 LINK_CAP :: 1023 // a symbolic link's target's bytes, as upstream's buffer holds
+// A directory's extent is refused at this size or more (upstream ab83fe6):
+// offsets in it fit a node's 24 bits (node_of). A real one is a few
+// sectors; this would be some 400,000 entries.
+DIR_MAX :: 1 << 24
 
 // A directory record's place; ROOT for the root, which has none.
 Node :: distinct u64
@@ -276,6 +280,9 @@ sector :: proc "contextless" (v: ^Vol, s: u64) -> []u8 {
 // sector: a zero length byte means the rest of the sector is padding).
 @(private, require_results)
 record_at :: proc "contextless" (v: ^Vol, lba: u32, length: u64, off: u64, r: ^Rec) -> (next: u64, st: vx.Status) {
+	if length >= DIR_MAX {
+		return 0, .Err_Io
+	}
 	off := off
 	for off < length {
 		s := sector(v, u64(lba) + off / SECTOR)

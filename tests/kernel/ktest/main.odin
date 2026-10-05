@@ -457,9 +457,10 @@ start_child :: proc "contextless" (what: Child_Code) -> (task: vx.Handle, ok: bo
 }
 
 // A child task running `what`, started, with its faults going to exc_port if
-// that is not HANDLE_NONE (bound before it starts), and a handle to itself as
-// its first argument.
-start_child_bound :: proc "contextless" (what: Child_Code, exc_port: vx.Handle, options: vx.Exception_Options, watches: ^vx.Watches = nil) -> (task: vx.Handle, ok: bool) {
+// that is not HANDLE_NONE (bound before it starts), data's first page mapped
+// read-only at CHILD_DATA if data is not HANDLE_NONE, and a handle to itself
+// as its first argument.
+start_child_bound :: proc "contextless" (what: Child_Code, exc_port: vx.Handle, options: vx.Exception_Options, watches: ^vx.Watches = nil, data := vx.HANDLE_NONE) -> (task: vx.Handle, ok: bool) {
 	code := write_child(what)
 	text, stack, th, itself: vx.Handle
 	defer rt.close_all(text, stack, th, itself) // itself is the child's once started
@@ -479,16 +480,21 @@ start_child_bound :: proc "contextless" (what: Child_Code, exc_port: vx.Handle, 
 	if _, st = rt.as_map(task, stack, 0, 4096, {.Write}, CHILD_STACK_TOP - 4096); st != .Ok {
 		return
 	}
+	if data != vx.HANDLE_NONE {
+		if _, st = rt.as_map(task, data, 0, 4096, {}, CHILD_DATA); st != .Ok {
+			return
+		}
+	}
 	if exc_port != vx.HANDLE_NONE && rt.exception_bind(task, exc_port, 5, options) != .Ok {
 		return
 	}
 	if what == .Store_Data {
-		data, dst := rt.vmo_create(4096)
-		defer rt.close_all(data)
+		store, dst := rt.vmo_create(4096)
+		defer rt.close_all(store)
 		if dst != .Ok {
 			return
 		}
-		if _, st = rt.as_map(task, data, 0, 4096, {.Write}, CHILD_DATA); st != .Ok {
+		if _, st = rt.as_map(task, store, 0, 4096, {.Write}, CHILD_DATA); st != .Ok {
 			return
 		}
 	}
@@ -1764,6 +1770,23 @@ test_pager :: proc "contextless" () {
 	n, _ = rt.port_wait(port, after_ms(100), 0, pk[:])
 	check(n == 1 && pk[0].key == 43 && pk[0].source == 78)
 	check(rt.as_unmap(rt.self, at, 4096) == .Ok)
+	// A deadline missed with no one to handle it: the task ends with the
+	// timeout's words, not the page fault's (upstream ab83fe6, from this
+	// tree's finding), so a POSIX parent sees SIGBUS.
+	exits, est := rt.port_create() // apart from the pager's port, which gets the request
+	check(est == .Ok)
+	never_vmo: vx.Handle
+	never_vmo, st = rt.vmo_create_pager(quick, 79, 4096)
+	check(st == .Ok)
+	child, cok := start_child_bound(.Fault_Load, vx.HANDLE_NONE, {}, data = never_vmo)
+	check(cok)
+	check(exits_starting(exits, child, "sys: trap: page not supplied addr=0x300000 pc="))
+	rt.close_all(child, exits, never_vmo)
+	for { // its request, never answered
+		if k, _ := rt.port_wait(port, 0, 0, pk[:]); k != 1 {
+			break
+		}
+	}
 	rt.close_all(late.vmo, quick, pager, src, port)
 }
 

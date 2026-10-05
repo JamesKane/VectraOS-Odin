@@ -11,15 +11,14 @@
 // upstream's heap sizes from 4 MiB down to 64 KiB, where scripts run out of
 // memory as they compile or run.
 //
-// The digests are those of upstream's rc.c at its M6 step 6a6c (f33715d;
-// 3cb6968 is the same rc.c). Its host has exists, read_line (its standard
-// input rctest's STDIN) and two builtins more: note N calls rc_trap, and
-// exportx lists the functions too; each callback is logged as the others
-// are, and a pipeline's statuses are joined by rc_concstatus. Two
-// differences are kept out of the comparison: the oracle's rc.c is patched
-// to call no close as a here document's redirection is undone (upstream
-// closes handle 0), and a pipeline stage's here document is not read
-// (upstream's text has been freed by then); api_test checks both.
+// The digests are those of upstream's rc.c at 08cc12f, unpatched: its
+// ab83fe6 and f24356f fixed what this tree's findings said (a here
+// document's redirection closes nothing; a stage's paths and here document
+// are kept until it runs), so a stage's paths are logged and its here
+// document read, as the shell does. Its host has exists, read_line (its
+// standard input rctest's STDIN) and two builtins more: note N calls
+// rc_trap, and exportx lists the functions too; each callback is logged as
+// the others are, and a pipeline's statuses are joined by rc_concstatus.
 package rc_test
 
 import "core:testing"
@@ -58,7 +57,7 @@ test_corpus :: proc(t: ^testing.T) {
 	}
 	// From upstream's rc_fuzz.c driver and host, built with clang, logging.
 	cases := []Case {
-		{"script", 0xcee067c8e8737338}, // lists, for, if, `{}, switch, ||, |, fn, $*, $"*
+		{"script", 0x7245e0feec4264bc}, // lists, for, if, `{}, switch, ||, |, fn, $*, $"*
 		{"words", 0xd6616c534890f036}, // quotes, subscripts, = in a word, globs, >[2=1], <<<, a continued line
 	}
 	testing.expect_value(t, len(CORPUS), len(cases))
@@ -88,10 +87,10 @@ test_seeds :: proc(t: ^testing.T) {
 	defer rt.mutator_destroy(&m)
 	testing.expect_value(t, len(m.seeds), 209)
 	folds := []Fold {
-		{BIG_HEAP, false, 0x9ee6b4e90d255fa3},
-		{MID_HEAP, false, 0x88a6d41756bba011},
-		{SMALL_HEAP, false, 0x9ecfe7440df5cc88},
-		{SMALL_HEAP, true, 0xb81f236671177567},
+		{BIG_HEAP, false, 0x2bf6d2a057b8f4a7},
+		{MID_HEAP, false, 0x9b45f4fcbc7630bb},
+		{SMALL_HEAP, false, 0x3c4a54c404a65b45},
+		{SMALL_HEAP, true, 0xefbb55644a12ea1a},
 	}
 	for f in folds {
 		b := rt.bench_make(f.heap, f.minimal)
@@ -112,11 +111,11 @@ test_mutated :: proc(t: ^testing.T) {
 	m := mutator()
 	defer rt.mutator_destroy(&m)
 	folds := []Fold {
-		{BIG_HEAP, false, 0xcbbb6627171ebd02},
-		{MID_HEAP, false, 0x6fe271635936af10},
-		{SMALL_HEAP, false, 0x95cbd01cf8b0ed45},
-		{FUZZ_HEAP, true, 0xa1ffb2fd140e029d},
-		{SMALL_HEAP, true, 0x2e7dff460f2a6e58},
+		{BIG_HEAP, false, 0x5681bbfd445b2b9c},
+		{MID_HEAP, false, 0x49348e4254c591a4},
+		{SMALL_HEAP, false, 0x154a410dce82c368},
+		{FUZZ_HEAP, true, 0x304fb33a1a879acf},
+		{SMALL_HEAP, true, 0x5db50de3ab4ce00f},
 	}
 	text: [dynamic]u8
 	defer delete(text)

@@ -99,11 +99,13 @@ Held :: struct {
 // A fault the debugger has seen and passed on, on one thread: if the program's
 // handler declines it and runs the instruction again (the musl back end's
 // fatal path does), the same fault comes back, and goes on without a second
-// stop. Upstream never meets this: the programs it debugs have no handler.
+// stop, so it reaches the default and the crash directory (upstream
+// f24356f, from this tree's finding).
 @(private)
 Passed :: struct {
 	tid:     u32,
 	kind:    vx.Exception_Kind,
+	code:    u32,
 	pc:      u64,
 	address: u64,
 }
@@ -447,14 +449,21 @@ remember_pass :: proc "contextless" (p: ^Proc, h: ^Held) {
 	if rt.thread_state(p.task, h.tid, .Get_Exception, &e) != .Ok {
 		return
 	}
-	slot := &d.passed[0]
+	// The thread's place, or a free one; neither (more threads than procfs
+	// follows): it is then stopped again, as upstream's.
+	slot: ^Passed
 	for &q in d.passed {
-		if q.tid == h.tid || q.tid == 0 {
+		if q.tid == h.tid {
 			slot = &q
 			break
 		}
+		if q.tid == 0 && slot == nil {
+			slot = &q
+		}
 	}
-	slot^ = {tid = h.tid, kind = e.kind, pc = reg_pc(&e.regs)^, address = e.address}
+	if slot != nil {
+		slot^ = {tid = h.tid, kind = e.kind, code = e.code, pc = reg_pc(&e.regs)^, address = e.address}
+	}
 }
 
 // Whether this fault is the one the thread was just let go past, come back
@@ -463,7 +472,7 @@ remember_pass :: proc "contextless" (p: ^Proc, h: ^Held) {
 passed_again :: proc "contextless" (d: ^Debugger, tid: u32, e: ^vx.Exception) -> bool {
 	for &q in d.passed {
 		if q.tid == tid {
-			again := q.kind == e.kind && q.pc == reg_pc(&e.regs)^ && q.address == e.address
+			again := q.kind == e.kind && q.code == e.code && q.pc == reg_pc(&e.regs)^ && q.address == e.address
 			q = {}
 			return again
 		}

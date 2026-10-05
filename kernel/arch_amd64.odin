@@ -1005,7 +1005,7 @@ x86_trap :: proc "c" (f: ^Trap_Frame) {
 		}
 		if from_user {
 			kind, code, address := x86_exception_kind(f)
-			if !exception_raise(f, kind, code, address) { // nobody took it
+			if !exception_raise(f, &kind, code, &address) { // nobody took it
 				task_fault_start()
 				kput_exception(f)
 				kput(" at rip ")
