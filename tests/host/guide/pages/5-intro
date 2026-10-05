@@ -1,0 +1,20 @@
+page=intro sect=5 summary="introduction to 9Px, the file protocol"
+    keys=9p,9px,protocol,messages
+
+# DESCRIPTION
+
+Section 5 describes 9Px, the protocol every file server speaks: Plan 9's 9P2000 with extensions.
+There is one page for each kind of message, its request and reply together, named for the request without its `T`, as `walk` covers `Twalk` and `Rwalk`.
+
+A client offers its version and extensions in `Tversion`, such as `9P2000.x/1 +map +posix`, and the server replies with those it has.
+A client or server that speaks only `9P2000`, or one of its dialects such as `9P2000.L`, is answered with `9P2000`, and the extensions are off; so VectraOS mounts Plan 9's and Linux's servers, and they mount its.
+An extension word the other side does not know is ignored.
+
+The extensions are `dref`, `map`, `lease`, `notify`, `xattr` and `posix`.
+`posix` and `xattr` add 9P2000.L's messages for what POSIX programs need, such as `Tgetattr`, `Tsymlink` and `Tlock`, and messages of 9Px's own for open files shared between connections; `map` adds `Tmap`, which gives a file's range as memory.
+
+Locally a connection is a ring of shared memory, one per connection; over a network, TCP.
+
+# SEE ALSO
+
+intro(4)

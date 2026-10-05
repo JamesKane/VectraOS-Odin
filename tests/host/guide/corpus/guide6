@@ -1,0 +1,198 @@
+page=guide sect=6 summary="the manual's page format"
+    src=lib/vx-guide/guide.h,lib/vx-guide/guide.c
+    keys=manual,page,format,amigaguide
+
+# SYNOPSIS
+
+```text
+page=NAME sect=N summary="..."
+    names=... src=... keys=...
+
+# HEADING
+
+Paragraph text, with `literal`, <param>, name(N) and {label|target}.
+
+@node=id title="Title"
+```
+
+# DESCRIPTION
+
+A page of the manual is one UTF-8 file in guide, the format this page describes.
+It holds a header, then a body of lines.
+Each body line's kind is decided by how it begins, so a reader needs no more than the current line and whether it is inside a fence.
+The page reads well with `cat`; man(1) refills it to the terminal's width.
+Every reader of the format parses it with `lib/vx-guide`, and nothing else does.
+
+The parser is strict.
+What it does not know it refuses, with the line, and it never guesses: a typo in a key, a fence kind or a link target is an error, not a page shown wrongly.
+
+A page may start with the line `@guide=1`.
+It names the version of the format, and a page without it is version 1, permanently.
+A later version is a new value; the parser refuses one it does not know.
+
+@node=header title="The header"
+
+The header is ndb records (see ndb(6)), ended by the first blank line.
+It is one record, and its first tuple is `page=`.
+Its lines after the first are indented, as any ndb record's may be.
+Its keys are:
+
+: `page`
+  The page's name, in lower case: a letter or digit, then letters, digits, `.`, `_`, `+` or `-`.
+  It is also the file's name, `/lib/man/<sect>/<page>`.
+: `sect`
+  The section, `1` to `8`.
+: `summary`
+  One line for NAME and the index, with no full stop.
+: `names`
+  Every name the page documents, separated by commas.
+  It defaults to the page's name.
+  Each is an index entry and a link target.
+: `src`
+  The repository paths SOURCE lists, separated by commas.
+: `lang`
+  `c`, `lua` or `rc`: the language of a section 2 page's interface.
+: `level`
+  The ABI level that introduced a section 2 page's names.
+: `host`
+  A flag: the page's program runs on the development host, not on VectraOS.
+: `keys`
+  More words for lookman(1), separated by commas.
+
+`page`, `sect` and `summary` are required.
+Any other key is an error.
+The author never writes NAME or SOURCE: man(1) makes them from the header, and a heading of either is refused.
+
+@node=blocks title="Blocks"
+
+A body line is one of these, by how it starts:
+
+| Start | Is |
+| (blank) | the end of a paragraph, list item or definition |
+| `# ` | a section heading |
+| `## ` | a subsection heading |
+| `- ` | a list item |
+| `: ` | a definition's term, described by the indented lines after |
+| two spaces | a continuation of the list item or definition above |
+| `|` | a table row; the first row of a run is the header |
+| ```` ``` ```` | a fence |
+| `@` | a directive |
+| anything else | paragraph text, its lines joined and refilled |
+
+Headings are in capitals, in the order Plan 9's pages keep: SYNOPSIS, DESCRIPTION, EXAMPLES, FILES, SEE ALSO, DIAGNOSTICS, BUGS.
+A heading of the author's own is in capitals too.
+A line starting `#` but not with `#` or `##` and a space is an error.
+
+There is no nesting.
+A list item holds no list and a definition no fence; a page that wants more structure wants a node.
+A continuation line with nothing above to continue is an error.
+
+A table row's cells are separated by `|`; a `|` inside a literal belongs to its cell, and the row's last `|` may be left off.
+A run of rows is one table, its columns as wide as their widest cell.
+
+@node=fences title="Fences"
+
+A line of three backticks, followed by a kind or by nothing, opens a fence; a line of three backticks alone closes it.
+What lies between is shown exactly as written, never refilled, and must fit 80 columns.
+A fence that is never closed is an error.
+The kinds are:
+
+: `usage`
+  A command's synopsis in Plan 9's notation: the command and its flags literal, every other word a parameter, `[ ]` optional and `...` repeated.
+  It is the program's usage message: the build makes the message from it.
+: `c`
+  C declarations in a section 2 SYNOPSIS, checked against the installed header; elsewhere, example code.
+: `rc`
+  A transcript or a script.
+  Lines starting with `%` and a space are typed; the others are output.
+: `ndb`
+  ndb records.
+: `lua`
+  Lua.
+: `text`
+  Anything: a diagram, a table of bytes.
+  A fence with no kind is the same.
+
+Any other kind is an error.
+
+@node=inline title="Text inside a line"
+
+Four things are special in paragraphs, list items, definitions, headings and table cells, and nothing else is:
+
+: `` `cat -u` ``
+  A literal: what is typed, a file's name, code.
+  A literal opened by <n> backticks closes at the next run of exactly <n>, so one containing a backtick is opened by more.
+  With two or more, one space just inside each end is dropped, so a literal may start with a backtick.
+  An unclosed literal is an error.
+: `<file>`
+  A parameter: `<`, a letter, then letters, digits, `.`, `_` or `-`, then `>`.
+: `rc(1)`
+  A link to a page: a name followed by a section number in parentheses.
+: `{label|target}`, `{target}`
+  A link with words of its own, or to a node, or out of the manual.
+  man(1) shows it as `label (target)`, or as the target alone.
+
+A link's target is `name(N)`, `name(N)#node`, `#node` for a node of the same page, or a URL whose scheme is `https:`, `gemini:` or `gopher:`.
+Any other target, and a `{` with no `}`, is an error.
+A literal `{`, a `<word>` that is not a parameter, or a `name(2)` that is not a link goes inside backticks.
+There is no emphasis.
+
+@node=nodes title="Nodes"
+
+A page is one node unless it says otherwise.
+A line `@node=<id>` starts a node, its id lower-case letters, digits and `-`, unique in the page; it may carry `title=`, which a contents list shows, and `keys=`, more words for lookman(1).
+Text before the first node is the main node, which every page has, and which holds SYNOPSIS and DESCRIPTION.
+
+Reading order is the file's order, so a page split into nodes still prints, greps and pipes as one text: `man rc` prints every node, and `man rc quoting` prints one.
+Nodes are for long pages; a short page has none.
+A page has at most 64.
+
+`@node` is the only directive.
+Any other is an error, and `@guide=` is allowed only on the first line.
+
+# EXAMPLES
+
+A page, whole:
+
+```text
+page=cat sect=1 summary="concatenate files"
+    src=cmd/cat.c
+
+# SYNOPSIS
+
+```
+
+followed by a `usage` fence holding `cat [-u] [file ...]`, then:
+
+```text
+# DESCRIPTION
+
+`cat` reads each <file> in order and writes it to standard
+output. With no <file> it reads standard input.
+
+: `-u`
+  Write each read as it arrives.
+
+# SEE ALSO
+
+tail(1), read(2)
+```
+
+# FILES
+
+: `/lib/man/<sect>/<page>`
+  The installed pages.
+: `man/<sect>/<page>`
+  The pages in the repository, mirroring the installed tree.
+
+# SEE ALSO
+
+man(1), ndb(6); the design is `docs/12-manual.md` in the repository
+
+# DIAGNOSTICS
+
+The parser reports the first error it meets with its line, such as `a fence kind guide does not know`, and stops.
+
+# BUGS
+
+A fence cannot show a line of three backticks alone, since that line closes it; the example above is split in two for that reason.

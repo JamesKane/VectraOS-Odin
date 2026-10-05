@@ -1,0 +1,14 @@
+page=intro sect=7 summary="introduction to the concepts"
+    keys=concepts,overview
+
+# DESCRIPTION
+
+Section 7 explains the ideas the rest of the manual takes for granted, as Plan 9's papers did: namespaces and how they are made; rings, which carry 9Px and bulk data between processes; how time and waiting work; and how the system is installed and updated.
+A reader new to the system starts here, before the reference pages of the other sections.
+
+Its pages are still to be written.
+Until they are, the design documents in the source tree, `docs/`, say what the system is meant to be.
+
+# SEE ALSO
+
+intro(1)

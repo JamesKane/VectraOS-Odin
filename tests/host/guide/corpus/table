@@ -1,0 +1,9 @@
+page=t sect=7 summary=s
+
+| A | `x|y` |
+| b | c
+
+@node=n title="T"
+
+: `-x`
+  d {l|rc(1)#n}

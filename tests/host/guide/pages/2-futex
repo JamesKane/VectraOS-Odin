@@ -1,0 +1,48 @@
+page=futex sect=2 summary="wait for a word in memory to change, or wake its waiters"
+    names=futex_wait,futex_wake
+    src=kernel/obj/futex.c,lib/vx-rt/base.c
+    keys=lock,mutex,wait,wake
+
+# SYNOPSIS
+
+```c
+vx_status vx_futex_wait(const _Atomic uint32_t *word, uint32_t expected,
+                        vx_instant deadline);
+int64_t vx_futex_wake(const _Atomic uint32_t *word, uint32_t count);
+```
+
+# DESCRIPTION
+
+A futex is a 32-bit word in memory that threads wait on, the building block of locks and condition variables (see the kernel's design, 01 §4.6).
+It is keyed by the physical address of the word, so the same word mapped into two tasks, through a shared VMO, is one futex.
+
+`vx_futex_wait` blocks the calling thread while <word> holds <expected>, until `vx_futex_wake` wakes it or <deadline> passes.
+The word is checked and the thread queued under the futex's lock, so a wake that comes after the check is never missed, and a word changed before it makes the wait return at once.
+A <deadline> of `VX_INFINITE` never comes.
+
+`vx_futex_wake` wakes up to <count> threads waiting on <word>, the most recent first, and returns how many it woke.
+
+<word> must be 4-byte aligned and mapped in the caller's address space, in ordinary memory, not a device's.
+
+# DIAGNOSTICS
+
+`vx_futex_wait` returns:
+
+: `VX_OK`
+  A wake woke it.
+: `VX_ERR_BAD_STATE`
+  <word> did not hold <expected>.
+: `VX_ERR_TIMED_OUT`
+  <deadline> passed.
+: `VX_ERR_INTERRUPTED`
+  `thread_interrupt` woke it; the interrupt is delivered on the way out.
+: `VX_ERR_KILLED`
+  The calling task is being killed.
+: `VX_ERR_INVALID`
+  <word> is misaligned, not mapped, or not in ordinary memory.
+
+`vx_futex_wake` returns the number woken, or `VX_ERR_INVALID` as above.
+
+# BUGS
+
+A thread that dies holding a lock built on a futex leaves its waiters asleep: robust futexes, which mark such a lock, come in M6 step 6d.

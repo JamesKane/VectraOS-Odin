@@ -1,0 +1,32 @@
+page=cat sect=1 summary="concatenate files"
+    names=cat
+    src=cmd/cat.c
+
+# SYNOPSIS
+
+```usage
+cat [-u] [file ...]
+```
+
+# DESCRIPTION
+
+`cat` reads each <file> in order and writes it to standard output. With no
+<file>, or with a <file> of `-`, it reads standard input. Data is copied as
+bytes and never checked: see {text and bytes|utf(6)#bytes}.
+
+: `-u`
+  Write each read as it arrives, without collecting full blocks.
+
+# EXAMPLES
+
+```rc
+% cat /proc/1/status
+```
+
+# SEE ALSO
+
+tail(1), read(2)
+
+# DIAGNOSTICS
+
+The exit string is the first error met, such as `cat: /x: file does not exist`.

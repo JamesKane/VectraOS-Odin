@@ -1,0 +1,77 @@
+page=install sect=8 summary="put the system on a disk from an install medium"
+    src=cmd/install.c
+    keys=installer,medium,esp,slot
+
+# SYNOPSIS
+
+```usage
+install [-y] [-p] [-e mib]
+```
+
+# DESCRIPTION
+
+`install` copies the release on an install medium onto a disk, erasing the disk.
+It runs on the medium's live system, as a service whose manifest (see svc(6)) passes it the medium's store image (`storeimage`) and connects it to the disk (`connect=`); it takes no disk name.
+
+It works in four stages, and stops at the first failure:
+
+- It checks the whole tree in the store image: the release's record, then each directory, file index and block against its name, as the live system checks its own medium.
+- It writes a GPT on the disk: an EFI system partition, FAT32, of 512 MiB unless `-e` says otherwise, then the system volume over the rest.
+- It writes slot a on the ESP: Limine at the firmware's fallback path, the slot's kernel, bootfs and modules under `\EFI\vectra\a`, the slot table, and Limine's configuration made from that table, each file with its BLAKE2b hash, which Limine checks. The slot's command line is `vx.system vx.slot=a` with the live command line's other words.
+- It makes the system volume, a vx-fs volume with the branches `store`, `cfg`, `home` and `adm`; the users `adm`, `none` and `vectra`, who owns `home`; and the release's objects and record copied into `store`, where distd(8) finds them.
+
+Without `-y` it checks the medium and the disk, says what it would erase, and stops.
+No UEFI boot entry is made: the firmware boots Limine from the fallback path.
+
+: `-y`
+  Erase the disk and install. Without it, nothing is written.
+: `-p`
+  Power the machine off when done, through `/srv/acpi` (`connect=acpi`).
+: `-e` <mib>
+  The ESP's size, in MiB.
+
+# EXAMPLES
+
+A manifest for the live system, as the install test uses:
+
+```ndb
+service=installer program=/boot/bin/install console storeimage
+    cmdline when=vx.live
+connect=disk0
+connect=acpi
+arg=-y
+arg=-p
+```
+
+and what it prints:
+
+```text
+install: release 1 on the medium, checked: 3519 objects, 203 MiB of files
+install: erasing /srv/disk0
+install: slot a written; the ESP is FAT32 "VECTRA"
+install: done: 802 objects in the store, release 1 in slot a
+```
+
+# FILES
+
+: `\EFI\vectra\a\`
+  Slot a: the kernel, the root task's modules and bootfs.
+: `\EFI\vectra\slots.ndb`
+  The slot table (see slots(6)).
+: `\EFI\BOOT\BOOTX64.EFI`, `\EFI\BOOT\BOOTAA64.EFI`
+  Limine, at the firmware's fallback path.
+: `\boot\limine\limine.conf`
+  Limine's configuration, made from the slot table.
+
+# SEE ALSO
+
+distd(8), fsd(4), slots(6), release(6), svc(6)
+
+# DIAGNOSTICS
+
+A failure prints `install: FAILED:` and what failed, with the error when there is one, and that is the exit string: `install: FAILED: the disk is too small: the ESP and 64 MiB at least`.
+The disk must have 512-byte sectors and room for the ESP and 64 MiB more.
+
+# BUGS
+
+`-e` does not check that <mib> is a number; anything else gives a size of nonsense, which the disk's size then usually refuses.
