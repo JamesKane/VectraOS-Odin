@@ -24,6 +24,9 @@ if [ -n "$stale" ]; then
 fi
 tool=out/bin/build
 if [ ! -x "$tool" ] || [ -n "$(find tools/build lib abi -newer "$tool" -name '*.odin' 2>/dev/null | head -1)" ]; then
-  "$ODIN" build tools/build -collection:vx=lib -collection:abi=abi -vet -strict-style -warnings-as-errors -out:"$tool"
+  # Optimised: the manual's pass (./build man --check) has a 200 ms budget, as
+  # upstream's, and unoptimised it takes some 175 ms on a quiet machine, 90 ms
+  # so; the cost is some 5 s each time the tool is rebuilt.
+  "$ODIN" build tools/build -collection:vx=lib -collection:abi=abi -vet -strict-style -warnings-as-errors -o:speed -out:"$tool"
 fi
 exec "$tool" "$@"
