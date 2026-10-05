@@ -1056,25 +1056,27 @@ fs_readdir :: proc "contextless" (ctx: rawptr, dir: p9.Node, index: u32) -> (chi
 @(private="file")
 conns: [MAX_PROCS]p9ring.Server_Conn // a connection for each process, at most
 
-// Not file-private: tests/host drives its Fs and hooks on the host.
-server := p9ring.Server {
-	fs = {
-		attach = fs_attach,
-		walk = fs_walk,
-		parent = fs_parent,
-		stat = fs_stat,
-		open = fs_open,
-		read = fs_read,
-		readdir = fs_readdir,
-		write = fs_write,
-	},
-	name = "procfs",
-	event = event,
-	listen_msg = registered,
-}
+// Not file-private: tests/host drives its Fs and hooks on the host. Filled
+// in by vx_main, not given a value here: a value would put all of it
+// (~840 KiB, its connection tables) in .data, in every boot slot; zero, it
+// is .bss, as upstream's is.
+server: p9ring.Server
 
 @(export, link_name="vx_main")
 vx_main :: proc() -> int {
+	server.fs = {
+		attach  = fs_attach,
+		walk    = fs_walk,
+		parent  = fs_parent,
+		stat    = fs_stat,
+		open    = fs_open,
+		read    = fs_read,
+		readdir = fs_readdir,
+		write   = fs_write,
+	}
+	server.name = "procfs"
+	server.event = event
+	server.listen_msg = registered
 	tasks := rt.spawn_take("tasks")
 	nsd = rt.spawn_take("srv:nsd")
 	tmpfs = rt.spawn_take("srv:tmpfs") // for crash directories
