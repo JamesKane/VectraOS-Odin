@@ -96,7 +96,7 @@ New vendored imports: Monocypher (ADR-0011) and ACPICA (ADR-0012), each behind a
 
 ## P6: M6, chasing upstream
 
-Upstream's M6 steps are ported as they land; scenarios are upstream's as of the step last ported (`tests/qemu/m6/`, from `3cb6968`).
+Upstream's M6 steps are ported as they land; scenarios are upstream's as of the step last ported (`tests/qemu/m6/`, from `3cb6968`; unchanged at `366394f`, but `tests/user/slottest.ndb`).
 
 | Step | Here | Commit |
 |---|---|---|
@@ -108,7 +108,12 @@ Upstream's M6 steps are ported as they land; scenarios are upstream's as of the 
 | 6a6a. rc behaves as 9front's rc | `vx:rc`'s grammar, statuses, errors at file:line, globbing and functions as 9front's; `cmd/rc`'s wait messages and concstatus. rc_test.c's 9front block; the cross-check against upstream's rc.c at `439b30a`, 1,000,000 transcripts, none differing | `12a3004` |
 | 6a6b. rc reads and starts as 9front's | Reading a command at a time, here documents, flag and -e -x -s -v -r, `.` -biq, eval; `cmd/rc` a bootstrap running `/rc/lib/rcmain` (upstream's, in the image). Cross-checked at `57e7c3a`, 1,000,000 transcripts, none differing | `ecfeb6b` |
 | 6a6c. rc's builtins, exported functions and notes | builtin, exit, shift, whatis, exec, wait; functions exported as `fn#name`; notes to sig* functions, sigexit. Cross-checked at `f33715d` (upstream's rc.c at `3cb6968`): of 1,000,000 transcripts 2 differ, at one heap, where this tree's P4 fix holds a stage's path 64 bytes longer | `14300b7` |
+| 6b, the kernel fix (upstream `89b3ce8`) | `as_query` on an ended task answers `Err_Bad_State`; `exception_resume` needs DEBUG for a debugger's stop, MANAGE for an exception port's; ktest checks both | `c0f1e0a` |
+| 6b, waves A-E (upstream `b6ab2ae`, `cd2548c`, `b1af1bc`, `300676f`) | The manual's pages at `366394f`, copied as contracts; `man/missing` upstream's, 97 records. Usage from pages for cs, dbg, ping, tail, rc (and its builtins, `usage.TEXT_bind` and the like), dosfs, isofs; a program that prints no usage message needs none. `vx:rc`'s pattern matcher decodes runes with `vx:utf` | `6daab42` |
+| 6b, the key tables (upstream `1ac9468`) | svc, driver, store, release and slots `.def` tables beside their parsers, expanded by `tools/abigen`; `ndb.unknown_key`; svcd and devmgr use a manifest with an unknown key (or an error) not at all, install fails on such a release record and distd does not serve it, a slot table or store directory with one is invalid; `./build man --check` holds each format's page to its table. slottest's ESP is 96 MiB | `7b7cd4d` |
 
 After 6a5, `m6/man`, `shell`, `rc`, `rcscript`, `boot`, `ns`, `ktest`, `posix`, `fsd` and `net` pass on x86_64 and aarch64 (2026-10-05).
 
 After 6a6c, `m6/rc`, `rcscript`, `shell`, `boot`, `iso`, `mount`, `netd`, `ns`, `man`, `ktest`, `posix`, `fsd`, `net` and the scenarios that run rc scripts (`fsdadm`, `fsddump`, `fsdperm`, `fsddref`, `dosfs`, `dosfswrite`, `distd`, `install`, `isofs`, `powercut`, `rtc`) pass on x86_64 and aarch64 (`rtc` x86_64 only); `slots` fails on both, as it does at `b626d78` before 6a6 (distd's apply: the store full).
+
+After 6b, `m6/ktest`, `man`, `boot`, `shell`, `rc`, `slots`, `install`, `distd`, `block`, `net`, `dbg`, `proc`, `posix` and `fsd` pass on x86_64 and aarch64, with `acpi` (x86_64) and `acpiarm` (aarch64) (2026-10-05).
