@@ -126,7 +126,7 @@ M6 step 6e brings the three calls, and leases lent for one `channel_call`, revok
 There are no reservations, and so no `AS_FIXED` inside one with the receiver choosing the base: `as_reserve` is reserved, and a fixed address in `as_map` is checked only against the page tables (`as_protect` came with M6 step 6c4).
 M6 step 6e brings them, with `<vx/shared.h>` in libvx, its offsets and links followed only within a VMO's bounds, and a host and plugin scenario that tests the discipline above.
 
-Protection keys (as(2), M6 step 6c4) let a thread deny itself access to chosen mappings, on x86 only: aarch64 has none until 6c5 finds Arm's permission overlays, which neither tiered board's cores have.
+Protection keys (as(2), M6 step 6c4) let a thread deny itself access to chosen mappings, on x86 only: aarch64 has none, as Arm's permission overlays (FEAT_S1POE) are on neither tiered board's cores nor QEMU's `max` CPU (M6 step 6c5).
 
 A thread that dies holding a lock in shared memory leaves its waiters asleep: robust futexes come in M6 step 6d, which also checks whether keying a futex by physical address strands its waiters when a pager evicts the page and supplies it again elsewhere.
 

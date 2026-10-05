@@ -309,13 +309,17 @@ trap_restore:
     add sp, sp, #FRAME_SIZE
     eret
 
-// vx_user_copy(dst, src, n) -> u64: copies to or from user memory, and
-// returns the bytes not copied: 0 means it all was. A fault inside resumes at
-// vx_user_copy_fault (uaccess_fixup, aarch64_trap), which returns what is left.
-// Eight bytes at a time where dst and src share their alignment (upstream's
-// M6 step 6c2), bytes otherwise and at the edges; x2 drops only once a load
-// and its store are both done, so at a fault it is exact (an aligned word
-// never spans two pages).
+// vx_user_copy_in(dst, src, n) and vx_user_copy_out(dst, src, n) -> u64:
+// copy from user memory and to it, and return the bytes not copied: 0 means
+// it all was. A fault inside either resumes at vx_user_copy_fault
+// (uaccess_fixup, aarch64_trap), which returns what is left. The user side
+// goes through the unprivileged loads and stores (LDTR, STTR; upstream's M6
+// step 6c5), so it gets exactly the permissions EL0 has, as Arm's permission
+// overlays (POR_EL0) would need. Eight bytes at a time where dst and src
+// share their alignment (6c2), bytes otherwise and at the edges; x2 drops
+// only once a load and its store are both done, so at a fault it is exact
+// (an aligned word never spans two pages). Scalar: no SIMD load or store is
+// unprivileged.
 .macro USER_COPY ld8, st8, ld1, st1
     cbz x2, 2f
     eor x3, x0, x1
@@ -349,10 +353,13 @@ trap_restore:
 2:  mov x0, #0
     ret
 .endm
-    .globl vx_user_copy, vx_user_copy_fault
-    .type vx_user_copy, %function
-vx_user_copy:
-    USER_COPY ldr, str, ldrb, strb
+    .globl vx_user_copy_in, vx_user_copy_out, vx_user_copy_fault
+    .type vx_user_copy_in, %function
+vx_user_copy_in:
+    USER_COPY ldtr, str, ldtrb, strb
+    .type vx_user_copy_out, %function
+vx_user_copy_out:
+    USER_COPY ldr, sttr, ldrb, sttrb
 vx_user_copy_fault:
     mov x0, x2              // counts down as it goes: what is left
     ret
@@ -362,7 +369,8 @@ vx_user_copy_fault:
     .globl vx_user_load32, vx_user_load32_fault
     .type vx_user_load32, %function
 vx_user_load32:
-    ldar w2, [x0]
+    ldtr w2, [x0]           // unprivileged, as the copies (6c5); then a barrier, for ldar's order
+    dmb ishld
     str w2, [x1]
     mov x0, #1
     ret

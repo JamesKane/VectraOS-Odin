@@ -275,12 +275,14 @@ vx_enter_user:
     andq $~63, %rsp
     jmp trap_restore
 
-// vx_user_copy(dst, src, n) -> u64: copies to or from user memory, and
-// returns the bytes not copied: 0 means it all was. A fault inside resumes at
+// vx_user_copy_in(dst, src, n) and vx_user_copy_out(dst, src, n) -> u64:
+// copy from user memory and to it, and return the bytes not copied: 0 means
+// it all was. A fault inside resumes at
 // vx_user_copy_fault (uaccess_fixup, x86_trap), which returns what is left.
-    .globl vx_user_copy, vx_user_copy_fault
-    .type vx_user_copy, @function
-vx_user_copy:
+    .globl vx_user_copy_in, vx_user_copy_out, vx_user_copy_fault
+    .type vx_user_copy_in, @function
+vx_user_copy_in:            // both ways one routine: PKU checks the kernel's accesses to user pages as they are
+vx_user_copy_out:
     movq %rdx, %rcx
     rep movsb
     xorl %eax, %eax

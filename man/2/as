@@ -65,7 +65,7 @@ It is a guard against a task's own mistakes, not a wall: any code in the task ca
 
 `vx_as_key_alloc` gives <task> a free key, 1 to `vx_cpu_info.keys` (thread(2)), 15 on x86 with PKU; key 0 is every mapping's default and is never allocated.
 `vx_as_key_free` frees one, but not while any mapping still has it, so a key's next owner inherits no protected memory.
-Both need `VX_RIGHT_MANAGE` on <task>, and answer `VX_ERR_UNSUPPORTED` where the CPU has no keys: aarch64 today (M6 step 6c5 looks for Arm's permission overlays).
+Both need `VX_RIGHT_MANAGE` on <task>, and answer `VX_ERR_UNSUPPORTED` where the CPU has no keys: aarch64 today, whose permission overlays (FEAT_S1POE) neither tiered board nor QEMU's `max` CPU has (M6 step 6c5).
 
 `vx_keys_set` sets the calling thread's rights to <key>: `VX_KEY_READ`, `VX_KEY_READ | VX_KEY_WRITE`, or 0 for none (x86 has no write-only key, so `VX_KEY_WRITE` alone is read and write); `vx_keys_get` says what they are.
 They run the instruction, with no syscall, and change no other thread's rights.
@@ -162,4 +162,4 @@ Large pages, which the design lets `as_map` ask for, are not offered, and a mapp
 An IoRange without `VX_RIGHT_MAP` is reported as `VX_ERR_BAD_HANDLE`, not `VX_ERR_ACCESS`.
 Mapping the same IoRange twice takes two of the task's 32 ranges.
 A <addr> the caller can read but not write fails with `VX_ERR_INVALID` after the mapping is made, and the mapping stays.
-Protection keys exist on x86 alone until 6c5.
+Protection keys exist on x86 alone: aarch64 gets them with a CPU that has FEAT_S1POE.

@@ -27,7 +27,8 @@ options_of :: proc "contextless" ($T: typeid, a: u64) -> (T, bool) where intrins
 // the trap handler), which reports the failure. So a range another thread
 // unmaps between the check and the copy fails the copy, not the kernel.
 foreign _ {
-	vx_user_copy :: proc "c" (dst, src: rawptr, n: u64) -> u64 --- // the bytes not copied
+	vx_user_copy_in :: proc "c" (dst, src: rawptr, n: u64) -> u64 --- // from user memory; the bytes not copied
+	vx_user_copy_out :: proc "c" (dst, src: rawptr, n: u64) -> u64 --- // to it
 	vx_user_copy_fault :: proc "c" () --- // an address only
 	vx_user_load32 :: proc "c" (src: rawptr, dst: ^u32) -> bool ---
 	vx_user_load32_fault :: proc "c" () --- // an address only
@@ -36,7 +37,7 @@ foreign _ {
 // Where a kernel fault on a user address at pc resumes, if pc is inside one
 // of the user-access routines; 0 if it is not.
 uaccess_fixup :: proc "contextless" (pc: u64) -> u64 {
-	copy_at, copy_fault := u64(uintptr(rawptr(vx_user_copy))), u64(uintptr(rawptr(vx_user_copy_fault)))
+	copy_at, copy_fault := u64(uintptr(rawptr(vx_user_copy_in))), u64(uintptr(rawptr(vx_user_copy_fault))) // _out lies between them
 	load_at, load_fault := u64(uintptr(rawptr(vx_user_load32))), u64(uintptr(rawptr(vx_user_load32_fault)))
 	switch {
 	case pc >= copy_at && pc < copy_fault:
@@ -56,7 +57,8 @@ user_load32 :: proc "contextless" (src: Uva) -> (v: u32, ok: bool) {
 }
 
 // User pointers are checked against the current task's page tables before
-// the kernel touches them, and then touched only through vx_user_copy.
+// the kernel touches them, and then touched only through vx_user_copy_in and
+// vx_user_copy_out.
 user_range_ok :: proc "contextless" (addr: Uva, length: u64, write: bool) -> bool {
 	if length == 0 {
 		return true
@@ -81,7 +83,7 @@ copy_from_user :: proc "contextless" (dst: rawptr, src: Uva, length: u64) -> vx.
 	if !user_range_ok(src, length, false) {
 		return .Err_Invalid
 	}
-	if vx_user_copy(dst, rawptr(uintptr(src)), length) != 0 {
+	if vx_user_copy_in(dst, rawptr(uintptr(src)), length) != 0 {
 		return arch_user_copy_denied() ? .Err_Access : .Err_Invalid
 	}
 	return .Ok
@@ -92,7 +94,7 @@ copy_to_user :: proc "contextless" (dst: Uva, src: rawptr, length: u64) -> vx.St
 	if !user_range_ok(dst, length, true) {
 		return .Err_Invalid
 	}
-	if vx_user_copy(rawptr(uintptr(dst)), src, length) != 0 {
+	if vx_user_copy_out(rawptr(uintptr(dst)), src, length) != 0 {
 		return arch_user_copy_denied() ? .Err_Access : .Err_Invalid
 	}
 	return .Ok
