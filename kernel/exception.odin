@@ -310,7 +310,9 @@ sys_exception_resume :: proc "contextless" (h: vx.Handle, id, action_arg: u64, r
 	if regs_ptr != 0 {
 		copy_in(&regs, regs_ptr) or_return
 	}
-	t := handle_get_as(current_task(), h, Task, {.Manage}) or_return
+	// Its own thread leaving its handler needs MANAGE on its own task; another
+	// thread's stop is checked below, by whose stop it is.
+	t := handle_get_as(current_task(), h, Task, id == 0 ? {.Manage} : {}) or_return
 	if id == 0 { // the caller, leaving its handler
 		self := this_cpu().current
 		own := t == self.task
@@ -328,10 +330,19 @@ sys_exception_resume :: proc "contextless" (h: vx.Handle, id, action_arg: u64, r
 	}
 	defer object_release(&target.obj)
 	tt := target.task
+	// A stop at the debugger's port is the debugger's to answer: DEBUG, as
+	// binding that port takes; one at the task's exception port, MANAGE, as
+	// binding that takes (upstream's M6 step 6b: MANAGE alone answered both).
+	spin_lock(&tt.lock)
+	first := target.exc_stopped && target.exc_first
+	spin_unlock(&tt.lock)
+	auth := handle_get_as(current_task(), h, Task, first ? {.Debug} : {.Manage}) or_return
+	object_release(&auth.obj)
 	{
 		spin_guard(&tt.lock)
 		debuggers := action == .Pass || action == .Step // from a debugger's port only
-		if !target.exc_stopped || target.exc_action != nil || (debuggers && !target.exc_first) {
+		// The stop answered must be the one the rights were checked for.
+		if !target.exc_stopped || target.exc_action != nil || target.exc_first != first || (debuggers && !target.exc_first) {
 			return 0, .Err_Bad_State
 		}
 		if regs_ptr != 0 {

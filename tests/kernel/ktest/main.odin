@@ -1812,10 +1812,18 @@ test_debugger :: proc "contextless" () {
 	check(exits_with(port, child, ""))
 	_ = rt.handle_close(child)
 
-	// Passed on, the breakpoint reaches nobody else: the default kills it.
+	// Passed on, the breakpoint reaches nobody else: the default kills it. A
+	// handle without DEBUG cannot answer the debugger's stop, whatever it does.
 	child, ok = start_child_bound(.Break_Step, port, {.First_Chance})
 	check(ok)
 	check(child_stopped(port))
+	{
+		nodebug, dst := rt.handle_dup(child, vx.ALL_RIGHTS - {.Debug})
+		check(dst == .Ok)
+		check(rt.exception_resume(nodebug, 1, .Continue) == .Err_Access)
+		check(rt.exception_resume(nodebug, 1, .Pass) == .Err_Access)
+		_ = rt.handle_close(nodebug)
+	}
 	check(rt.exception_resume(child, 1, .Pass) == .Ok)
 	check(exits_starting(port, child, "sys: breakpoint pc="))
 	_ = rt.handle_close(child)
@@ -1900,6 +1908,8 @@ test_debugger :: proc "contextless" () {
 	again := rt.thread_resume(child, 1) // counted: not suspended any more, or
 	check(again == .Err_Bad_State || again == .Err_Not_Found) // already run on to its end
 	check(exits_with(port, child, ""))
+	_, qst = rt.as_query(child, 0)
+	check(qst == .Err_Bad_State) // an ended task: refused, not a fault (upstream's M6 step 6b)
 	rt.close_all(weak, child)
 
 	// A thread blocked in a call holds still too, and goes on waiting once resumed.

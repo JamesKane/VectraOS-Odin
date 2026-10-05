@@ -480,16 +480,18 @@ task_name :: proc "contextless" (t: ^Task) -> string {
 	return string(t.name[:n])
 }
 
-// The first of t's mappings that ends after addr (as_query).
+// The first of t's mappings that ends after addr (as_query). An ended task's
+// table is gone (task_teardown): nothing to find, as task_map refuses.
 @(require_results)
 task_query :: proc "contextless" (t: ^Task, addr: Uva) -> (info: vx.Map_Info, st: vx.Status) {
 	spin_guard(&t.lock)
+	if t.maps == nil {
+		return {}, .Err_Bad_State
+	}
 	best: ^Mapping
-	if t.maps != nil {
-		for &m in t.maps {
-			if m.size != 0 && m.va + Uva(m.size) > addr && (best == nil || m.va < best.va) {
-				best = &m
-			}
+	for &m in t.maps {
+		if m.size != 0 && m.va + Uva(m.size) > addr && (best == nil || m.va < best.va) {
+			best = &m
 		}
 	}
 	if best == nil {
