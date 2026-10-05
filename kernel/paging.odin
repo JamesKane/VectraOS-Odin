@@ -21,6 +21,13 @@ page_bytes :: #force_inline proc "contextless" (pa: Paddr) -> []u8 {
 	return (cast([^]u8)phys_to_virt(pa))[:PAGE_SIZE]
 }
 
+// One whole page copied to another, the architecture's fastest way
+// (arch_page_copy: rep movsb on x86_64, NEON on aarch64; M6 step 6c2): a
+// fork's, a pager's supply, vmo_clone's, a mapping's private copy.
+page_copy :: #force_inline proc "contextless" (dst, src: Paddr) {
+	arch_page_copy(phys_to_virt(dst), phys_to_virt(src), PAGE_SIZE)
+}
+
 // A page-table entry, in the architecture's format (arch_pte_*).
 Pte :: distinct u64
 

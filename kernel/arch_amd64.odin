@@ -1002,6 +1002,17 @@ arch_frame_set_fpregs :: proc "contextless" (f: ^Trap_Frame, r: ^vx.Fpregs) {
 	x.xstate_bv |= XSTATE_X87 | XSTATE_SSE // what was written, not their initial state
 }
 
+// Whole pages, page-aligned: memset and memcpy, vx:memory's rep stosb and
+// rep movsb, which ERMS and FSRM make as fast as vector code for a page
+// (upstream's M6 step 6c2).
+arch_page_zero :: proc "contextless" (va: rawptr, bytes: u64) {
+	intrinsics.mem_zero(va, int(bytes))
+}
+
+arch_page_copy :: proc "contextless" (dst, src: rawptr, bytes: u64) {
+	intrinsics.mem_copy_non_overlapping(dst, src, int(bytes))
+}
+
 // .Get_Cpu's (ADR-0035): what the kernel saves, and lets user code use.
 arch_cpu_info :: proc "contextless" () -> vx.Cpu_Info {
 	return {xstate_size = xsave_bytes, xfeatures = xcr0, mxcsr_mask = mxcsr_mask}

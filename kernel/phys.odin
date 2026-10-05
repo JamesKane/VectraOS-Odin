@@ -97,7 +97,7 @@ phys_alloc :: proc "contextless" (order: uint) -> Paddr {
 phys_alloc_zeroed :: proc "contextless" (order: uint) -> Paddr {
 	pa := phys_alloc(order)
 	if pa != 0 {
-		intrinsics.mem_zero(phys_to_virt(pa), int(PAGE_SIZE << order))
+		arch_page_zero(phys_to_virt(pa), PAGE_SIZE << order)
 	}
 	return pa
 }

@@ -635,7 +635,7 @@ task_fork_copy :: proc "contextless" (parent, child: ^Task) -> vx.Status {
 		}
 		dup := vmo_create(m.size) or_return
 		for i in 0 ..< m.size / PAGE_SIZE {
-			copy(page_bytes(vmo_page(dup, i)), page_bytes(vmo_page(m.vmo, m.offset / PAGE_SIZE + i)))
+			page_copy(vmo_page(dup, i), vmo_page(m.vmo, m.offset / PAGE_SIZE + i))
 		}
 		_, st := task_map(child, dup, 0, m.size, m.flags, m.va)
 		object_release(&dup.obj) // the child's mapping holds it, if it was made

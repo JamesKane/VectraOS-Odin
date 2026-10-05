@@ -1808,6 +1808,127 @@ test_vmo_clone :: proc "contextless" () {
 	rt.close_all(c, v)
 }
 
+// --- vx:memory's copies (upstream's mem_test.c and mem_words_test.c, M6 step 6c2) ---
+//
+// memcpy, memset, memmove and memcmp as the program links them (vx:memory's
+// arch/*/mem.S: the string instructions and words on x86_64, words for all
+// four on aarch64, which upstream tests on an x86 host by forcing them), each
+// against a byte reference: every length to 72 at every pair of alignments,
+// a difference at the end and in the middle, and overlaps both ways, near
+// and far. The references go a byte at a time through volatile accesses, so
+// no compiler makes them calls to what they check.
+
+foreign _ {
+	@(link_name = "memcpy")
+	c_memcpy :: proc "c" (dst, src: rawptr, n: uint) -> rawptr ---
+	@(link_name = "memset")
+	c_memset :: proc "c" (dst: rawptr, c: i32, n: uint) -> rawptr ---
+	@(link_name = "memmove")
+	c_memmove :: proc "c" (dst, src: rawptr, n: uint) -> rawptr ---
+	@(link_name = "memcmp")
+	c_memcmp :: proc "c" (a, b: rawptr, n: uint) -> i32 ---
+}
+
+MEM_BYTES :: 160
+
+mem_src, mem_dst, mem_want: [MEM_BYTES]u8
+
+ref_fill :: proc "contextless" (b: []u8, v: u8) {
+	for i in 0 ..< len(b) {
+		intrinsics.volatile_store(&b[i], v)
+	}
+}
+
+// A byte reference memmove: from the end when dst starts inside src.
+ref_move :: proc "contextless" (dst, src: []u8) {
+	n := len(dst)
+	if uintptr(raw_data(dst)) > uintptr(raw_data(src)) {
+		for i := n - 1; i >= 0; i -= 1 {
+			intrinsics.volatile_store(&dst[i], intrinsics.volatile_load(&src[i]))
+		}
+		return
+	}
+	for i in 0 ..< n {
+		intrinsics.volatile_store(&dst[i], intrinsics.volatile_load(&src[i]))
+	}
+}
+
+ref_cmp :: proc "contextless" (a, b: []u8) -> int {
+	for i in 0 ..< len(a) {
+		x, y := intrinsics.volatile_load(&a[i]), intrinsics.volatile_load(&b[i])
+		if x != y {
+			return int(x) - int(y)
+		}
+	}
+	return 0
+}
+
+same_sign :: proc "contextless" (a: i32, b: int) -> bool {
+	return (a < 0) == (b < 0) && (a > 0) == (b > 0)
+}
+
+test_mem :: proc "contextless" () {
+	b: [16]u8
+	check(c_memset(&b, 0xab, 5) == &b && b[4] == 0xab && b[5] == 0)
+	x, y, hi, lo := u8('a'), u8('b'), u8(0x80), u8(0x01)
+	check(c_memcmp(&x, &y, 1) < 0 && c_memcmp(&y, &x, 1) > 0)
+	check(c_memcmp(&hi, &lo, 1) > 0) // bytes compare unsigned
+	check(c_memcmp(&b, &b, 0) == 0)
+	for &v, i in mem_src {
+		v = u8(i * 37 + 11)
+	}
+	same := true
+	for sa in 0 ..< 8 {
+		for da in 0 ..< 8 {
+			for n in 0 ..= 72 {
+				ref_fill(mem_dst[:], 0xee)
+				ref_fill(mem_want[:], 0xee)
+				ref_move(mem_want[da:][:n], mem_src[sa:][:n])
+				same = same && c_memcpy(&mem_dst[da], &mem_src[sa], uint(n)) == &mem_dst[da]
+				same = same && ref_cmp(mem_dst[:], mem_want[:]) == 0
+				ref_fill(mem_dst[:], 0xee)
+				same = same && c_memmove(&mem_dst[da], &mem_src[sa], uint(n)) == &mem_dst[da]
+				same = same && ref_cmp(mem_dst[:], mem_want[:]) == 0
+				ref_fill(mem_dst[:], 0xee)
+				ref_fill(mem_want[:], 0xee)
+				ref_fill(mem_want[da:][:n], 0x5a)
+				same = same && c_memset(&mem_dst[da], 0x5a, uint(n)) == &mem_dst[da]
+				same = same && ref_cmp(mem_dst[:], mem_want[:]) == 0
+				// A difference in the last byte, which the word path hands to
+				// the bytes; then in the middle.
+				ref_move(mem_dst[:], mem_src[:])
+				if n > 0 {
+					mem_dst[da + n - 1] ~= 1
+				}
+				same = same && same_sign(c_memcmp(&mem_dst[da], &mem_src[da], uint(n)), ref_cmp(mem_dst[da:][:n], mem_src[da:][:n]))
+				ref_move(mem_dst[:], mem_src[:])
+				if n > 0 {
+					mem_dst[da + n / 2] += 3
+				}
+				same = same && same_sign(c_memcmp(&mem_dst[da], &mem_src[da], uint(n)), ref_cmp(mem_dst[da:][:n], mem_src[da:][:n]))
+				// Overlaps, each way, within one buffer: near, then 16 apart.
+				for gap in ([2]int{0, 16}) {
+					for &v, i in mem_dst {
+						v = u8(i * 3 + gap)
+					}
+					ref_move(mem_want[:], mem_dst[:])
+					ref_move(mem_want[da + gap:][:n], mem_want[sa:][:n])
+					c_memmove(&mem_dst[da + gap], &mem_dst[sa], uint(n))
+					same = same && ref_cmp(mem_dst[:], mem_want[:]) == 0
+					for &v, i in mem_dst {
+						v = u8(i * 5 + gap)
+					}
+					ref_move(mem_want[:], mem_dst[:])
+					ref_move(mem_want[da:][:n], mem_want[sa + gap:][:n])
+					c_memmove(&mem_dst[da], &mem_dst[sa + gap], uint(n))
+					same = same && ref_cmp(mem_dst[:], mem_want[:]) == 0
+				}
+			}
+		}
+	}
+	check(same)
+}
+
 // --- Debugging ---
 
 test_debugger :: proc "contextless" () {
@@ -2322,6 +2443,15 @@ test_fp :: proc "contextless" () {
 	wait_for_stage(&fp_shared, 2)
 	check(intrinsics.atomic_load(&fp_worker_bad) == 0)
 	_ = rt.handle_close(th)
+	// A call whose pages the kernel copies (vmo_clone; on aarch64 with NEON,
+	// M6 step 6c2) gives the caller back its registers.
+	rt.fp_probe_put(0xc3c3_c3c3_c3c3_c3c3, FP_CTL_ZERO)
+	v, vst := rt.vmo_create(4 * 4096)
+	c, cst := rt.vmo_clone(v, 0, 4 * 4096)
+	got, ctl := rt.fp_probe_get()
+	check(vst == .Ok && cst == .Ok && got == 0xc3c3_c3c3_c3c3_c3c3 && ctl == FP_CTL_ZERO)
+	rt.fp_probe_put(0, FP_CTL_DEFAULT)
+	rt.close_all(c, v)
 	// And floating point itself, compiled: 1/3 rounds differently by mode.
 	third, three := 1.0, 3.0
 	q := intrinsics.volatile_load(&third) / intrinsics.volatile_load(&three)
@@ -2353,6 +2483,7 @@ vx_main :: proc() -> int {
 	test_rings()
 	test_vmo_rw()
 	test_pager()
+	test_mem()
 	test_devices()
 	rt.print("ktest: ", u64(checks), " checks, ", u64(failures), failures != 0 ? " FAILED\n" : " failed\n")
 	port, _ := rt.port_create()

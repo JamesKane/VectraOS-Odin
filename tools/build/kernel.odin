@@ -3,6 +3,7 @@ package build
 import "core:fmt"
 import "core:os"
 import "core:path/filepath"
+import "core:slice"
 import "core:strings"
 
 // The kernel's pipeline (ADR-0003): Odin emits LLVM IR per package; llc
@@ -33,9 +34,43 @@ IR_ODIN_FLAGS :: []string {
 	"-thread-count:1",
 }
 
+// The Odin runtime's module of the C library's memory functions (procs.odin:
+// memset, memcpy and memmove as byte loops, and bzero, which nothing calls).
+// compile_ir leaves it out and assembles vx:memory's in its place
+// (lib/memory/arch/ARCH/mem.S, upstream's vx-mem; M6 step 6c2), so the
+// kernel's and every program's copies are those.
+@(private="file")
+RUNTIME_MEM_MODULE :: "runtime-procs.ll"
+@(private="file")
+RUNTIME_MEM_FUNCS :: []string{"memset", "memcpy", "memmove", "bzero"}
+
+// The module's functions must be those alone, or leaving it out would lose
+// something: a new Odin that moves more into it fails here, not at the link.
+@(private="file")
+check_runtime_mem :: proc(ll: string) -> bool {
+	text := read_file(ll) or_return
+	for line in strings.split_lines_iterator(&text) {
+		if !strings.has_prefix(line, "define ") {
+			continue
+		}
+		at := strings.index_byte(line, '@')
+		paren := strings.index_byte(line, '(')
+		if at < 0 || paren < at {
+			fmt.eprintfln("build: %s: cannot read %q", ll, line)
+			return false
+		}
+		if !slice.contains(RUNTIME_MEM_FUNCS, line[at + 1:paren]) {
+			fmt.eprintfln("build: %s defines %s, which vx:memory does not replace", ll, line[at + 1:paren])
+			return false
+		}
+	}
+	return true
+}
+
 // Compiles an Odin package to objects: odin to IR, scrub_ir, llc per
-// module, and clang for each .S file under asm_dir. out (emptied first)
-// holds the ir and obj directories. Returns the objects in link order.
+// module, and clang for each .S file under asm_dir and lib/memory's for the
+// architecture. out (emptied first) holds the ir and obj directories.
+// Returns the objects in link order.
 compile_ir :: proc(a: ^Arch, mode: Mode, pkg, asm_dir, out: string, odin_flags, llc_flags: []string) -> (objs: [dynamic]string, ok: bool) {
 	ir := fmt.tprintf("%s/ir", out)
 	obj := fmt.tprintf("%s/obj", out)
@@ -64,6 +99,10 @@ compile_ir :: proc(a: ^Arch, mode: Mode, pkg, asm_dir, out: string, odin_flags, 
 		if !strings.has_suffix(ll, ".ll") {
 			continue
 		}
+		if filepath.base(ll) == RUNTIME_MEM_MODULE {
+			check_runtime_mem(ll) or_return
+			continue
+		}
 		o := fmt.tprintf("%s/%s.o", obj, filepath.stem(ll))
 		l := cmd_make(LLC, "--frame-pointer=all", "--enable-shrink-wrap=false", MODES[mode].llc_opt, "-relocation-model=static", "-filetype=obj")
 		append(&l, ..llc_flags)
@@ -73,6 +112,8 @@ compile_ir :: proc(a: ^Arch, mode: Mode, pkg, asm_dir, out: string, odin_flags, 
 	}
 	prefix_map := file_prefix_map() or_return
 	asm_files := tree_files(asm_dir) or_return
+	mem_files := tree_files(fmt.tprintf("lib/memory/arch/%s", a.name)) or_return
+	append(&asm_files, ..mem_files[:])
 	for s in asm_files {
 		if !strings.has_suffix(s, ".S") {
 			continue

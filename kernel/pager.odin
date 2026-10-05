@@ -225,7 +225,7 @@ pager_supply :: proc "contextless" (g: ^Pager, v: ^Vmo, offset, size: u64, src: 
 			st = .Err_No_Memory
 			break
 		}
-		copy(page_bytes(pa), page_bytes(vmo_page(src, src_offset / PAGE_SIZE + i)))
+		page_copy(pa, vmo_page(src, src_offset / PAGE_SIZE + i))
 		at := offset / PAGE_SIZE + i
 		spin_lock(&v.lock)
 		// Past the end now (a shrink since the check above): not kept.

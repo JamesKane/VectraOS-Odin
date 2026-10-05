@@ -766,7 +766,7 @@ mapping_privatize :: proc "contextless" (t: ^Task, m: ^Mapping) -> (old: ^Vmo, s
 	dup := vmo_create(m.size) or_return
 	mf := user_map_flags(m.flags, false)
 	for off := u64(0); off < m.size; off += PAGE_SIZE {
-		copy(page_bytes(vmo_page(dup, off / PAGE_SIZE)), page_bytes(vmo_page(m.vmo, (m.offset + off) / PAGE_SIZE)))
+		page_copy(vmo_page(dup, off / PAGE_SIZE), vmo_page(m.vmo, (m.offset + off) / PAGE_SIZE))
 		unmap_page(t.root, u64(m.va) + off)
 		if !map_range(t.root, u64(m.va) + off, vmo_page(dup, off / PAGE_SIZE), PAGE_SIZE, mf) {
 			st = .Err_No_Memory
@@ -878,7 +878,7 @@ sys_vmo_clone :: proc "contextless" (h: vx.Handle, offset, size, options: u64, o
 	}
 	dup := vmo_create(size) or_return
 	for i in 0 ..< size / PAGE_SIZE {
-		copy(page_bytes(vmo_page(dup, i)), page_bytes(vmo_page(src, offset / PAGE_SIZE + i)))
+		page_copy(vmo_page(dup, i), vmo_page(src, offset / PAGE_SIZE + i))
 	}
 	return return_handle(&dup.obj, vx.ALL_RIGHTS - {.Debug}, out) // as vmo_create
 }

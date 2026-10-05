@@ -4,8 +4,8 @@ package bus_acpi
 // (ADR-0012): one thread, so locks and semaphores are counters and deferred
 // work runs at once; memory from a heap of its own (ACPICA frees without
 // saying how much); and the few C library functions ACPICA calls, since it
-// is told the C library is the system's (Odin's runtime gives memset, memcpy
-// and memmove). Every procedure is proc "c" and needs no context.
+// is told the C library is the system's (vx:memory gives memset, memcpy,
+// memmove and memcmp). Every procedure is proc "c" and needs no context.
 //
 // Tables, memory, ports and PCI configuration space are in tables.odin and
 // regions.odin.
@@ -243,16 +243,6 @@ stack_chk_fail :: proc "c" () -> ! {
 }
 
 // --- The C library functions ACPICA calls ---
-
-@(export, link_name = "memcmp")
-c_memcmp :: proc "c" (a, b: [^]u8, n: uint) -> i32 {
-	for i in 0 ..< n {
-		if a[i] != b[i] {
-			return i32(a[i]) - i32(b[i])
-		}
-	}
-	return 0
-}
 
 @(export, link_name = "strlen")
 c_strlen :: proc "c" (s: [^]u8) -> uint {

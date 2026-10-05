@@ -421,3 +421,41 @@ vx_psci_smc:
     mov x3, xzr
     smc #0
     ret
+
+// (va: rawptr, bytes: u64): whole pages zeroed (upstream's M6 step 6c2). DC
+// ZVA zeroes a block of 4 << DCZID_EL0.BS bytes at once; where DCZID_EL0.DZP
+// prohibits it, paired stores, 16 bytes at a time. va and bytes are whole
+// pages, so whole blocks.
+    .globl vx_page_zero
+    .type vx_page_zero, %function
+vx_page_zero:
+    mrs x2, dczid_el0
+    tbnz x2, #4, 2f
+    and x2, x2, #0xf
+    mov x3, #4
+    lsl x3, x3, x2
+1:  dc zva, x0
+    add x0, x0, x3
+    subs x1, x1, x3
+    b.hi 1b
+    ret
+2:  stp xzr, xzr, [x0], #16
+    subs x1, x1, #16
+    b.hi 2b
+    ret
+
+// (dst, src: rawptr, bytes: u64): whole pages copied with NEON, 64 bytes a
+// round, in q4-q7, which a call may clobber (AAPCS64 keeps only v8-v15's low
+// halves); the user's are in its trap frame (ADR-0004).
+    .globl vx_page_copy
+    .type vx_page_copy, %function
+vx_page_copy:
+1:  ldp q4, q5, [x1]
+    ldp q6, q7, [x1, #32]
+    stp q4, q5, [x0]
+    stp q6, q7, [x0, #32]
+    add x0, x0, #64
+    add x1, x1, #64
+    subs x2, x2, #64
+    b.hi 1b
+    ret

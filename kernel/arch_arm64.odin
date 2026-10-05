@@ -54,6 +54,8 @@ foreign _ {
 	vx_read_id_aa64pfr0 :: proc "c" () -> u64 ---
 	vx_read_id_aa64pfr1 :: proc "c" () -> u64 ---
 	vx_read_id_aa64mmfr3 :: proc "c" () -> u64 ---
+	vx_page_zero :: proc "c" (va: rawptr, bytes: u64) ---
+	vx_page_copy :: proc "c" (dst, src: rawptr, bytes: u64) ---
 	vx_watch_slot :: proc "c" (slot: u32, value, control: u64) ---
 	vx_read_cntkctl :: proc "c" () -> u64 ---
 	vx_write_cntkctl :: proc "c" (v: u64) ---
@@ -740,6 +742,21 @@ arch_frame_set_fpregs :: proc "contextless" (f: ^Trap_Frame, r: ^vx.Fpregs) {
 	fp^ = r^
 	fp.fpcr &= FPCR_DEFINED
 	fp.fpsr &= FPSR_DEFINED
+}
+
+// Whole pages, page-aligned (cpu.S; upstream's M6 step 6c2): zeroed with
+// DC ZVA, a block of DCZID_EL0's size at a time, or with paired stores where
+// DCZID_EL0 prohibits it; copied with NEON, 64 bytes a round. Upstream's
+// kernel, built for general registers alone, copies inside a simd_begin
+// section; this one uses vector registers anywhere and has saved the user's
+// at its entry (ADR-0004), so the copy is an ordinary call, clobbering only
+// registers a call may.
+arch_page_zero :: proc "contextless" (va: rawptr, bytes: u64) {
+	vx_page_zero(va, bytes)
+}
+
+arch_page_copy :: proc "contextless" (dst, src: rawptr, bytes: u64) {
+	vx_page_copy(dst, src, bytes)
 }
 
 // The extended state is the Fpregs image (ADR-0035): SVE's and SME's join it

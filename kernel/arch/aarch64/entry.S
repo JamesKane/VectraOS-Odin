@@ -312,16 +312,47 @@ trap_restore:
 // vx_user_copy(dst, src, n) -> u64: copies to or from user memory, and
 // returns the bytes not copied: 0 means it all was. A fault inside resumes at
 // vx_user_copy_fault (uaccess_fixup, aarch64_trap), which returns what is left.
-    .globl vx_user_copy, vx_user_copy_fault
-    .type vx_user_copy, %function
-vx_user_copy:
+// Eight bytes at a time where dst and src share their alignment (upstream's
+// M6 step 6c2), bytes otherwise and at the edges; x2 drops only once a load
+// and its store are both done, so at a fault it is exact (an aligned word
+// never spans two pages).
+.macro USER_COPY ld8, st8, ld1, st1
     cbz x2, 2f
-1:  ldrb w3, [x1], #1
-    strb w3, [x0], #1
+    eor x3, x0, x1
+    tst x3, #7
+    b.ne 1f                 // not co-aligned: bytes
+3:  tst x0, #7              // bytes up to the alignment
+    b.eq 4f
+    \ld1 w3, [x1]
+    \st1 w3, [x0]
+    add x1, x1, #1
+    add x0, x0, #1
+    subs x2, x2, #1
+    b.eq 2f
+    b 3b
+4:  cmp x2, #8
+    b.lo 1f
+5:  \ld8 x3, [x1]
+    \st8 x3, [x0]
+    add x1, x1, #8
+    add x0, x0, #8
+    sub x2, x2, #8
+    cmp x2, #8
+    b.hs 5b
+    cbz x2, 2f
+1:  \ld1 w3, [x1]           // the rest, a byte at a time
+    \st1 w3, [x0]
+    add x1, x1, #1
+    add x0, x0, #1
     subs x2, x2, #1
     b.ne 1b
 2:  mov x0, #0
     ret
+.endm
+    .globl vx_user_copy, vx_user_copy_fault
+    .type vx_user_copy, %function
+vx_user_copy:
+    USER_COPY ldr, str, ldrb, strb
 vx_user_copy_fault:
     mov x0, x2              // counts down as it goes: what is left
     ret

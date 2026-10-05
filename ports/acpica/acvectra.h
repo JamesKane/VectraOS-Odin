@@ -10,9 +10,10 @@
  * bus-acpi is a native VectraOS program: freestanding, 64-bit, one thread.
  * ACPICA is told the C library is the system's (ACPI_USE_SYSTEM_CLIBRARY),
  * so that its utclib.c defines none of it; bus-acpi's OS layer, in Odin,
- * gives the string, character and memcmp functions ACPICA calls, and Odin's
- * runtime memset, memcpy and memmove. Its object caches are ACPICA's own
- * (ACPI_USE_LOCAL_CACHE). No debugger, no disassembler, no debug output.
+ * gives the string and character functions ACPICA calls, and vx:memory
+ * (lib/memory/arch) memset, memcpy, memmove and memcmp. Its object caches
+ * are ACPICA's own (ACPI_USE_LOCAL_CACHE). No debugger, no disassembler, no
+ * debug output.
  */
 
 #ifndef __ACENV_H__
