@@ -103,16 +103,33 @@ Most of the "Idiomatic Odin" section below came out of the October 2026 review o
 
 ## Checking your work
 
+Testing is risk-based: the full scenario matrix runs only at the close of a
+milestone. Every change runs the cheap checks, then the scenarios its risk calls
+for, on both architectures:
+
 ```sh
-./build loc
-odin test tests/host/<name> -collection:vx=lib -collection:abi=abi -vet -strict-style -warnings-as-errors -sanitize:address
+./build all          # both architectures; warnings are errors
+./build check        # host tests under ASan, vendor-check
 odin check lib/<name> -no-entry-point -target:freestanding_arm64 -collection:vx=lib -collection:abi=abi -vet -strict-style -warnings-as-errors
-./build check
-# The gate, both architectures: P1's simd and the M4-era scenarios (plain
-# `./build test` also runs later milestones' scenarios, which are expected to
-# fail until their phase; m4/u9fs needs Linux user namespaces):
-./build test simd m4/boot m4/cons m4/dbg m4/iso m4/ktest m4/lower-half m4/lua \
-  m4/mount m4/net m4/netd m4/ns m4/panic m4/pci m4/phys m4/posix m4/proc m4/rc \
-  m4/rcscript m4/sbase m4/shell m4/smp m4/stack-overflow m4/tcp m4/timer m4/u9fs \
-  m4/write-text-alias m4/write-text
+./build test m5/<scenario> ...   # the scenarios the change can affect
 ```
+
+Which scenarios a change can affect:
+- **A library or program:** the scenarios that run it (grep `tests/qemu/m5/` and
+  `tests/user/` for the program's name), plus its host suite.
+- **The kernel, lib/rt, the ring or 9P transport, svcd, devmgr or the build
+  tool's image or runner code:** these sit under everything, so add a broad
+  sample: `m5/ktest m5/boot m5/shell m5/posix m5/fsd m5/net`.
+- **An on-disk or wire format:** its host cross-check suites, and every scenario
+  that reads or writes that format.
+
+At a milestone's close, the full matrix, every scenario of the newest
+`tests/qemu/mN/` on both architectures (some are for one architecture only,
+and `u9fs` needs Linux user namespaces):
+
+```sh
+ls tests/qemu/m5/*.ndb | xargs -n1 basename | sed 's/\.ndb$//; s#^#m5/#' | xargs ./build test simd
+```
+
+(In zsh, don't put the scenario names in one unquoted variable: it does not
+split, and the runner sees one name.)
