@@ -1,0 +1,35 @@
+page=chroot sect=1 summary="run a command with another root directory"
+    src=third_party/sbase/chroot.c
+    keys=root,directory,jail
+
+# SYNOPSIS
+
+```usage
+chroot dir [cmd [arg ...]]
+```
+
+# DESCRIPTION
+
+`chroot` makes <dir> the root directory, changes to it, and runs <cmd> with its <arg>s, found by `PATH`.
+With no <cmd> it runs `$SHELL -i`, or `/bin/sh -i` if `SHELL` is not set.
+
+On VectraOS it always fails: the C library does not implement `chroot`, so the call fails with `Function not implemented` and nothing is run.
+A namespace (see namespace(6) and ns(1)) is how a VectraOS program is given another root.
+
+`chroot` is sbase's, a hard link to `/boot/bin/posix/sbase-box`; there is no native one.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so a POSIX program finds it as `/bin/chroot`.
+
+# SEE ALSO
+
+namespace(6), ns(1); sbase's page is `third_party/sbase/chroot.1` in the repository
+
+# DIAGNOSTICS
+
+With no <dir> or with any flag it prints `usage: chroot dir [cmd [arg ...]]` and exits 1.
+A failed `chroot` or `chdir` is reported, as `chroot: chroot /n/x: Function not implemented`, and it exits 1.
+If <cmd> cannot be run it says so and exits 127 when it was not found, 126 otherwise.
+
+# BUGS
+
+It cannot work on VectraOS, as above; the C library also writes `vx-musl: system call ... is not implemented` to the debug console the first time.
+There is no `/bin/sh`, so even where `chroot` worked, running it with no <cmd> would fail.

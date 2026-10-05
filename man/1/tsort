@@ -1,0 +1,39 @@
+page=tsort sect=1 summary="topological sort"
+    src=third_party/sbase/tsort.c
+    keys=sort,topological,graph,order,dependencies,partial
+
+# SYNOPSIS
+
+```usage
+tsort [file]
+```
+
+# DESCRIPTION
+
+`tsort` reads a directed graph from <file>, or from standard input if there is none or it is `-`, and prints its vertices one to a line, each before every vertex it leads to.
+
+The input is pairs of names separated by white space, on any number of lines: each pair is an edge from its first name to its second.
+A pair of the same name twice is a vertex with no edges.
+Where the graph leaves the order open, names are taken in their bytes' order.
+
+A loop is reported, and does not stop the sort: every vertex is still printed once.
+
+`tsort` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/tsort`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/tsort`.
+There is no native `tsort`.
+
+# SEE ALSO
+
+sort(1), make(1); sbase's page is `third_party/sbase/tsort.1` in the repository
+
+# DIAGNOSTICS
+
+A loop is reported as `tsort: loop detected between` <a> `and` <b>, and the exit status is 1.
+An odd number of names is reported as `tsort: odd number of tokens in input`, and nothing is printed.
+That, a <file> that cannot be opened (`tsort: fopen` <file>`:` and the error), a write error, and the usage message exit 2.
+
+# BUGS
+
+Names are separated by ASCII white space only.
+
+`tsort` is untested on VectraOS.

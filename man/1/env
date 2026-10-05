@@ -1,0 +1,41 @@
+page=env sect=1 summary="set the environment for a command"
+    src=third_party/sbase/env.c
+    keys=environment,variable,run,exec,posix
+
+# SYNOPSIS
+
+```usage
+env [-i] [-u var] ... [var=value] ... [cmd [arg ...]]
+```
+
+# DESCRIPTION
+
+`env` changes its environment as its arguments say, then runs <cmd> with the <arg>s in it, or, with no <cmd>, prints the environment, one `name=value` to a line.
+
+: `-i`
+  Start from an empty environment instead of the one `env` was given.
+: `-u` <var>
+  Remove <var> from the environment; it may be given more than once.
+
+Each <var>`=`<value> after the flags sets <var>; the first argument without `=` is <cmd>.
+<cmd> is looked for in the directories of `PATH` unless it holds a `/`, and is run in place of `env`, as the same process, so its exit status is the command's.
+
+`env` is sbase's, and found only in the POSIX namespace: `/boot/bin/posix/env` is a hard link to `sbase-box`, which runs the command its name names, and `/lib/ns/posix` (a manifest's `ns=posix`, see namespace(6)) binds `/boot/bin/posix` before `/boot/bin` on `/bin`, so a POSIX program that runs `env` finds it there.
+There is no native `env`.
+
+# SEE ALSO
+
+printenv(1), nohup(1); sbase's page is `third_party/sbase/env.1` in the repository
+
+# DIAGNOSTICS
+
+A <cmd> that cannot be run is reported on standard error, as `env: execvp nothing: No such file or directory`, and `env` exits 127 if it was not found and 126 otherwise.
+A bad flag, or `-u` without <var>, prints the usage message and exits 1.
+Printing the environment, `env` exits 1 if the output cannot be written and 0 otherwise.
+
+# BUGS
+
+`-` alone, POSIX's old spelling of `-i`, is taken as the name of a command.
+
+Untested on VectraOS: running a <cmd>, and every flag.
+A file that is not a program is handed by the C library to `/bin/sh`, which VectraOS does not have.

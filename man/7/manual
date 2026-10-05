@@ -1,0 +1,187 @@
+page=manual sect=7 summary="the manual, how it is checked, and how to write a page"
+    keys=manual,man,page,documentation,guide,index,coverage,missing,usage,writing
+
+# DESCRIPTION
+
+The system is documented by this manual, as Unix and Plan 9 are.
+Every program, system call, driver, file server, 9Px message and file format has a page, and a page says what the code of the same release does.
+The design documents in the source tree, `docs/`, say why and what is meant; once a piece is built, its page is the authority on what it does, and where the two disagree the page is right, or is a bug.
+
+The manual is Plan 9's, kept whole: eight sections, each opened by an `intro` page; a page for each thing a reader looks up, or for a group of names used together; the fixed headings NAME, SYNOPSIS, DESCRIPTION, EXAMPLES, FILES, SOURCE, SEE ALSO, DIAGNOSTICS and BUGS; references written `name(N)`; and man(1), `lookman` and `sig` to read it.
+What it adds is the Amiga's: a long page may be split into nodes, read one at a time, and every reference is a link that the build checks resolves.
+
+Pages are plain text in a format of the system's own, guide(6), which reads well with `cat` and keeps a page's structure as data, so the build can hold each page to the code it describes.
+
+@node=sections title="The sections"
+
+| Section | Holds |
+| 1 | commands, the shell's builtins, and host tools, marked `host` |
+| 2 | system calls and library functions |
+| 3 | devices: each driver, and the classes they serve |
+| 4 | file servers: what each serves, its files and its `ctl` |
+| 5 | 9Px: a page for each message, as Plan 9's for 9P |
+| 6 | file formats and conventions |
+| 7 | concepts: what the reference pages take for granted |
+| 8 | administration: booting, services, disks, updates |
+
+Section 7 holds what Plan 9 kept as papers in `/sys/doc`.
+A newcomer reads intro(1), then the section 7 pages, such as storage(7) and updates(7), and then the reference pages they lead to.
+
+@node=reading title="Reading it"
+
+man(1) prints a page, refilled to 80 columns and indented as Plan 9's pages are; with a node's id after the page's name it prints that node alone, and `man -t` lists a page's headings and nodes.
+A <title> is a page's name or any name the page documents, so `man lookman` prints man(1), and `man rc quoting` prints a node of rc(1).
+There is no pager: the terminal scrolls.
+NAME is made from the page's header and SOURCE from its `src=`, so neither is written by hand.
+
+`lookman` prints the pages and nodes whose names, summaries, titles or keys hold every word it is given, each as the `man` command that shows it.
+`sig` prints the C declarations of section 2 functions, from their pages' SYNOPSIS, for pasting into code.
+
+On the development machine, `./build man` renders the same pages from `man/` with the same code, so the manual can be read before an image boots (see build(1)).
+
+Installed, the pages are `/lib/man/<sect>/<page>` in the boot image, served by bootfs(4), so every namespace that has the boot image at `/` has the manual.
+The man(1) of a release always matches the programs it runs, because both are one tree.
+
+@node=format title="The format"
+
+A page is one UTF-8 file in guide, whose grammar guide(6) gives in full, written in itself.
+
+A page starts with a header, one ndb(6) record: `page=`, `sect=` and `summary=` are required, and `names=`, `src=`, `keys=`, `host`, `lang=` and `level=` may follow; a key the parser does not know is an error.
+Then come lines, each of whose kind is decided by how it starts: `#` and `##` headings, `-` list items, `:` definitions with indented descriptions, `|` table rows, fences of three backticks, `@node` lines, and paragraphs, which are refilled.
+Four things are special inside a line: a literal in backticks, a parameter such as <file>, a link to a page such as rc(1), and a link with words of its own, in braces.
+There is no emphasis and no nesting, and nothing in a page runs anything.
+
+A fence's kind says what it holds: `usage` a command's synopsis, `c` declarations or C, `rc` a transcript or script, `ndb` records, `lua` Lua, `text` anything.
+A `usage` fence is the program's usage message, as {the check|#check} describes.
+
+Every reader of the format parses it with `lib/vx-guide`: man(1), `lookman`, `sig` and `./build`.
+The parser is strict: what it does not know it refuses, with the line, rather than show a page wrongly.
+
+@node=index title="The index"
+
+The index is `/lib/man/index/`, a directory of ndb files, one for each tree of pages; the base system's is `base`.
+It has a record for each name a page documents, with its page, section, summary and keys, and one for each node, with its title.
+`./build` writes it from the pages whenever it checks the manual or makes an image, so it cannot fall behind them.
+
+Links resolve through it: `vx_create(2)` finds the page that names `vx_create`, and a page's own name is always one of its names.
+man(1) and `lookman` read every file in the directory, not only `base`.
+
+@node=check title="The check"
+
+`./build man --check` parses every page and holds the manual to the code, in milliseconds; `./build check` runs the same pass with its others, and a failure fails the build.
+It enforces:
+
+- that every page parses, is named for its file and directory, keeps every fence line within 80 columns, has no trailing blanks and no tabs outside fences, and has its headings in capitals and Plan 9's in Plan 9's order;
+- that every link resolves to a page, or to a node of one, through the index;
+- that every program in the image, every server and driver, every POSIX port's program, every tool under `host/` and `./build` itself has a page in a section that suits it, as does every system call in `abi/vx/syscalls.def`, every 9Px message in `lib/vx-9p/messages.def`, every format the check lists, and the `intro` of each section;
+- that a program with a page takes its usage message from the page;
+- that the page of each format with a key table defines exactly the table's keys.
+
+Usage messages come from pages.
+For each program whose page, in section 1, 8, 4 or 3, has a `usage` fence, `./build` writes `out/gen/usage/<name>.h`, defining `VX_USAGE` as the fence's lines for that program after the word `usage:`, and compiles the program with it.
+A program with a page that spells out a usage message of its own fails the check, and so does a page whose program prints one when the page has no usage line for it.
+So the message a program prints and its page's SYNOPSIS cannot differ.
+
+A format's key table is a `.def` file of `KEY(`<node>`, `<key>`)` lines that the format's parser includes as its list of keys and refuses every other: `servers/svcd/svc.def` for svc(6), `servers/devmgr/driver.def` for driver(6), and `lib/vx-store/store.def`, `lib/vx-store/release.def` and `lib/vx-slots/slots.def` for store(6), release(6) and slots(6).
+Each literal a definition names in the page's DESCRIPTION, in a node the table names, must be a key the table has for that node, and each key in the table must be defined there.
+A key added to a parser without a page, or a page that describes a key the parser refuses, fails the build.
+
+`man/missing` is the ledger of what has no page yet, one record each, such as `kind=syscall name=port_wait`.
+The check fails on anything undocumented that is not on the list, and on anything on the list that now has a page, so the list can only shrink.
+A link may name a page the ledger promises, so a page can point at one not yet written; any other link to nothing fails.
+
+What the check cannot judge is the prose: whether DESCRIPTION is true.
+That is review's, and a page is reviewed with the code it describes.
+
+@node=writing title="Writing a page"
+
+A page is `man/<sect>/<page>` in the repository, and a change to what a program does changes its page in the same commit.
+
+Write in Plan 9's voice: present tense, third person, about the program and not the reader; short and exact.
+Say what it does, what it does not, and its limits.
+
+- The header's `summary` is lower case, with no full stop; `names` lists every name the page documents; `src` the files a reader opens to see the code; `keys` the words a reader might look for.
+- SYNOPSIS is exact: a `usage` fence for a command, `c` declarations for a function, the shape of a record for a format.
+- DESCRIPTION is complete. A long page is split into nodes, each `@node=<id>` with a `title`, read in file order, so the whole page still prints, greps and pipes as one text.
+- EXAMPLES are real: manifests from `boot/` or `tests/user/`, transcripts and output copied from a session or a test's log, never invented.
+- FILES, DIAGNOSTICS and SEE ALSO as Plan 9's; link the first mention of another page in a paragraph, not every one.
+- BUGS says where the code falls short, of the design or of what a reader would expect, so a reader learns it from the page and not by finding it.
+
+A concept page in section 7 has no SYNOPSIS as a rule; its DESCRIPTION explains, and its nodes are short essays on the parts, linking the reference pages a reader will meet.
+It says what is built and tested; what is planned is in BUGS, with the milestone that brings it.
+
+Then run `./build man --check`, and read the page as a reader will, with `./build man <sect> <page>`.
+
+# EXAMPLES
+
+The header and SYNOPSIS of cat(1), and what `./build` makes of its usage fence, `out/gen/usage/cat.h`:
+
+```text
+page=cat sect=1 summary="catenate files"
+    src=cmd/cat.c,third_party/sbase/cat.c
+    keys=concatenate,print,file,copy
+
+# SYNOPSIS
+```
+
+followed by a `usage` fence holding `cat [file ...]`;
+
+```c
+// Made by ./build from man/1/cat's usage fence (docs/12 §7). Not to be edited.
+#pragma once
+static const char VX_USAGE[] = "usage: cat [file ...]";
+```
+
+Records of the index, `out/man/index/base`, for a page, a name it documents and one of its nodes, the keys cut short here:
+
+```ndb
+name=rc page=rc sect=1 summary="command language" keys=shell,script,...
+name=mount page=rc sect=1 summary="command language" keys=shell,script,...
+name=commands page=rc sect=1 node=commands title="Command lines"
+```
+
+The manual reached through the index, from man(1):
+
+```rc
+% lookman format
+man 6 guide # the manual's page format
+man 6 intro # introduction to file formats
+% man -w lookman
+/lib/man/1/man
+```
+
+# FILES
+
+: `man/<sect>/<page>`
+  The pages, in the repository.
+: `man/missing`
+  The ledger of what has no page yet.
+: `out/man/index/base`
+  The index, as the check writes it.
+: `out/gen/usage/<name>.h`
+  A program's usage message, made from its page.
+: `/lib/man/<sect>/<page>`, `/lib/man/index/base`
+  The pages and the index, installed in the boot image.
+
+# SEE ALSO
+
+man(1), guide(6), build(1), ndb(6), intro(1); `docs/12-manual.md` and ADR-0028 in the repository
+
+# BUGS
+
+`docs/12-manual.md` plans more than is built.
+
+There is no `hv` to show a page as hypertext, no plumbing rule that opens `name(N)` from any text, and no `.help` files made from pages; these are M7's.
+
+The check holds less than the design says.
+Section 2's inventory is the system calls alone, not every function an installed header declares, and the C declarations in SYNOPSIS are not compared with the headers.
+Servers' and drivers' FILES and `ctl` verbs are not compared with a `.schema`, which no server serves yet; ring fields have no inventory; `rc` and `ndb` fences are not parsed; and examples are not run.
+None of these has a step yet.
+Only five formats have key tables; the pages of users(6), vxfs(6), namespace(6) and the rest are checked for form alone.
+
+There is one index, `base`: packages' pages and a user's own in `$home/lib/man` come with packages, from M7.
+
+man(1) on the system refills to 80 columns whatever the terminal, since nothing tells it the width; `./build man` uses the terminal's.
+`lookman` matches a word anywhere in a word.
+
+The manual is in the boot image, whose server holds at most 1022 files and 64 KiB of names, which the pages and the index share with everything else in it.

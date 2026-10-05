@@ -1,0 +1,144 @@
+page=sharing sect=7 summary="memory shared between processes, without serialising"
+    keys=shared,memory,vmo,map,mapping,zero-copy,structure,publish,offset,pager,mmap,file,token,dma,seal,lease
+
+# DESCRIPTION
+
+Processes share data by sharing memory, not by encoding it.
+Memory is a VMO, a run of pages named by a handle (see vmo(2)); a task that holds the handle maps the VMO into its address space with as(2), and two tasks that map one VMO see the same pages.
+A handle is sent through a channel, or beside a ring's entry in one of its handle slots (see rings(7)), so the data never passes through a message: what is sent is the right to map it.
+
+A handle's rights say what its holder may do with the VMO, and a handle given away may have fewer rights than the giver's, never more (see handle_dup(2)): a VMO to read but not to write is a duplicate without `VX_RIGHT_WRITE`.
+Mapping needs `VX_RIGHT_MAP` and `VX_RIGHT_READ`, and a writable mapping `VX_RIGHT_WRITE`.
+handles(7) describes rights.
+
+The same pieces carry a file's pages and a device's buffers.
+fsd(4) gives a mapped file as one VMO of its page cache, shared by every process that maps the file; a 9Px read or write can take its data from a VMO rather than the message; and a disk's driver gives its device the client's own buffers by DMA.
+Bulk data moves by sharing pages, and is copied only where a copy is cheaper than a mapping, or where the receiver must have bytes that cannot change under it.
+
+@node=vmos title="Memory objects" keys=vmo,anonymous,physical,pager,clone,rights,commit
+
+A VMO is one of three kinds.
+An anonymous VMO, vmo_create(2), has all its pages allocated and zeroed when it is made: memory is committed, not overcommitted, so a task learns it has run out from a failed call, never from a fault later.
+A physical VMO is a device's memory, which only a driver is given.
+A pager-backed VMO starts with no pages, and a trusted task supplies them as they are touched (see {files|#files}).
+A VMO is a whole number of 4096-byte pages, at most 256 MiB, and lives until its last handle and its last mapping are gone.
+
+`vmo_rw` copies bytes between a VMO and the caller's memory without mapping it, as a server does with a VMO it does not trust enough to map.
+`vmo_clone` makes a new anonymous VMO holding a copy of a range of another, at once.
+
+@node=mapping title="Mapping" keys=as_map,address,offset,fixed,fork,futex
+
+`as_map` maps a range of a VMO into a task, at an address the kernel picks or, given one, at that address if its pages are free.
+A mapping is readable always, and writable or executable but never both; a JIT maps one VMO twice.
+The mapping holds the VMO, so its handle may be closed once it is mapped.
+A task holds at most 102 mappings.
+
+Since each side picks its own address, a structure in shared memory links its parts by offsets from the start of the VMO, which mean the same in every task that maps it.
+Plain pointers need both sides to map the VMO at one base, which `as_map` can be asked for, but nothing yet reserves that range for the receiver, and the kernel places its own mappings one after another from a fixed base.
+
+A lock in shared memory is a futex (see futex(2)), keyed by the word's physical address, so the word one VMO holds is one futex in every task that maps it.
+
+`fork` copies a task's anonymous mappings into new VMOs of the child's, so an anonymous VMO the parent shares with another task is the child's own copy; a pager-backed mapping, a mapped file, is shared with the child, and a ring's memory is not mapped in the child at all.
+POSIX's `mmap` of a file with `MAP_SHARED` is so shared across `fork`; `MAP_SHARED` of anonymous memory is refused.
+
+@node=publish title="Handing over a structure" keys=publish,commit,version,offset,table,trust,plugin,validate
+
+The kernel's design (`docs/01-kernel-ipc.md` §6.6) gives one discipline for handing another process a whole structure, a syntax tree or a symbol table, to read in place, and today's calls hold most of it.
+
+- **Build, then send.** The writer builds the structure in a VMO of its own and then sends a handle to it. The send is the commit point: a writer that dies while building has sent nothing, so no reader sees half a structure. A new version is a new VMO, never the old one written again.
+- **Link by offsets.** A link is an offset from the VMO's start, which the reader checks against the VMO's size before it follows it, once for each link.
+- **Link between VMOs through a table.** A structure in several VMOs, sent together in one message, names each by its position among the message's handles, and a link is a pair: a slot in a table at the head of the VMO, and an offset. The reader maps each handle once, and checks a slot against the table's length as it checks an offset. A position in a message, not a global name, so a link carries no authority the message did not.
+- **Trust follows the direction.** A trusted writer sends its reader a handle without `VX_RIGHT_WRITE`, and the reader reads in place. A reader that does not trust its writer treats the VMO as a ring's memory is treated (see rings(7)): it reads each value it depends on once, into memory of its own, and checks it there, since until a VMO can be sealed nothing stops a writer that kept its handle from changing the bytes under it.
+
+So a host and a plugin can be separate processes, a plugin that crashes taking nothing of the host with it, and neither serialises what it shares.
+The cost is that a structure built to be shared is laid out for it, in one VMO with offsets, rather than spread over the writer's heap.
+
+@node=files title="Files as memory" keys=tmap,mmap,pager,page,cache,fault,dirty,writeback,dref,treadref,twriteref
+
+A file is mapped through 9Px's `Tmap` (see map(5)), which only fsd(4) answers, as the system's pager.
+A pager is a trusted task that supplies the pages of the VMOs it makes (see pager(2)): only a service whose manifest says `pager` holds the authority, so a server that is not trusted cannot stall another process's page fault.
+`fsd` answers every `Tmap` of a file, from any connection and any user, with the same VMO, the file's page cache, so every process that maps the file maps the same pages, and every `Tread` and `Twrite` of it sees them too.
+
+A thread that touches a page not yet there faults, and the kernel asks the pager on its port; the thread waits, up to the pager's deadline, for the page to be supplied, and takes a `VX_EXCEPTION_PAGER_TIMEOUT` exception, POSIX's `SIGBUS`, if it is not.
+A page is mapped read-only until it is written; that write marks it dirty, and `fsd` asks the kernel for the dirty pages and writes them back every 5 seconds while files are mapped, and before each commit.
+Only the pager resizes the VMO, so no process can shrink a file under the others by its mapping.
+The kernel's own copies to and from user memory do not fault pages in, so a program touches a mapped file's pages before it hands them to a system call.
+
+The musl back end sends `Tmap` for POSIX's `mmap` of a file that is `MAP_SHARED`, or `MAP_PRIVATE` and not writable; a writable private mapping is read into a VMO of its own.
+
+`Treadref` and `Twriteref` (see dref(5)) are a read and a write whose data is in a VMO of the client's, sent beside the request, not in the message: one message moves any amount, whatever the msize, and `fsd` copies once, between the volume and the VMO.
+`fsd` does not map a client's VMO, since it may be `fsd`'s own page cache, which it cannot fault on itself; it copies with `vmo_rw`.
+
+@node=open-files title="Open files shared" keys=share,join,token,offset,fork,exec,append
+
+An open file's offset is state, not memory, and it is shared through the file's server.
+With the `posix` extension a server keeps an open file for each fid it opens: its offset and whether it appends (see share(5)).
+`Tshare` gives a token for an open file, 16 random bytes good for a number of joins, and `Tjoin` on any connection to the same server makes a fid on the same open file; the token is the authority, and permissions are not checked again.
+A token's holds run out 10 seconds after the file's last share or its last close, so one no child took cannot be used later.
+
+The musl back end shares each open file so before a `fork` and writes the tokens into the child's spawn record, and the child joins them on its own connections: parent and child then move one offset, as POSIX says they do.
+posix(7) describes the rest of a POSIX program's descriptors.
+
+@node=devices title="Devices" keys=dma,iommu,domain,pin,driver,arena
+
+A device reaches memory by DMA only through a DmaDomain (see dma(2)), which devmgr(8) makes for each PCI function and keeps.
+`dma_map` gives the device a range of an anonymous VMO, and the device addresses of its pages, and holds the pages for the device until it is unmapped; where an IOMMU covers the function, the device can reach nothing else.
+A pager's VMO cannot be mapped for a device, since its pages come and go.
+
+The block drivers, drv-virtio-blk(3) and drv-nvme(3), keep the memory of each session's ring and map its client arena for their device, so a disk reads into and writes from the client's buffers with no copy in the driver (see rings(7)).
+
+# EXAMPLES
+
+From `tests/user/dreftest.c`, run on `fsd` with its `home` branch on `/tmp`: a file written from a 200 KiB VMO in one `Twriteref`, more than ten of the ring's 16 KiB messages, then read back with one `Treadref` into another VMO at an offset (lines rewrapped):
+
+```c
+CHECK(vx_vmo_create(SIZE, 0, &out) == VX_OK &&
+      vx_vmo_create(SIZE + 4096, 0, &in) == VX_OK);
+CHECK(vx_vmo_rw(out, VX_VMO_WRITE, 0, data, SIZE) == VX_OK);
+CHECK(vx_ns_create(&ns, VX_STR("/tmp/dref"), 0644, P9_ORDWR, &f) == VX_OK);
+CHECK(p9c_writeref(f.c, f.fid, 0, out, 0, SIZE, &done) == VX_OK &&
+      done == SIZE);
+CHECK(p9c_readref(f.c, f.fid, 0, in, 4096, SIZE, &done) == VX_OK &&
+      done == SIZE);
+```
+
+From `tests/posix/maptest.c`, a POSIX program: a file mapped shared, written through the mapping, and read back through a second attach of the same branch after a commit, as another process would see it:
+
+```c
+char *p = mmap(nullptr, SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+memset(p, 'D', SIZE);
+CHECK(msync(p, SIZE, MS_SYNC) == 0);
+CHECK(ctl("sync"));
+int other = open("/s/m.bin", O_RDONLY);
+CHECK(other >= 0 && read_all(other, back) && all(back, 'D'));
+```
+
+# SEE ALSO
+
+vmo(2), as(2), handle(2), channel(2), ring(2), futex(2), pager(2), dma(2), map(5), dref(5), share(5), fsd(4), devmgr(8), rings(7), handles(7), posix(7); the design is `docs/01-kernel-ipc.md` §5, §6 and §6.6, with §13's questions 6 to 8, and `docs/11-storage.md` §8 for the pager
+
+# BUGS
+
+A VMO cannot be sealed, leased or revoked: `vmo_seal`, `vmo_lease` and `vmo_revoke` are reserved calls that answer `VX_ERR_UNSUPPORTED`.
+So a reader cannot be sure an untrusted writer's bytes stay still, and memory once given cannot be taken back while the reader runs.
+M6 step 6e brings the three calls, and leases lent for one `channel_call`, revoked by the kernel at the reply, the deadline, or either side's death.
+
+There are no reservations, and so no `AS_FIXED` inside one with the receiver choosing the base: `as_reserve` and `as_protect` are reserved, and a fixed address in `as_map` is checked only against the page tables.
+M6 step 6e brings them, with `<vx/shared.h>` in libvx, its offsets and links followed only within a VMO's bounds, and a host and plugin scenario that tests the discipline above.
+
+Protection keys, which would let a thread deny itself writes to chosen mappings, come in M6 step 6c.
+
+A thread that dies holding a lock in shared memory leaves its waiters asleep: robust futexes come in M6 step 6d, which also checks whether keying a futex by physical address strands its waiters when a pager evicts the page and supplies it again elsewhere.
+
+`MAP_SHARED` anonymous mappings are refused, and `fork` copies every anonymous mapping at once; shared anonymous mappings come in M6 step 6e.
+`vmo_clone` copies at once, not page by page as written, and is charged in full.
+
+VMOs are at most 256 MiB, are not charged to a memory budget, and `dma_map`'s pinned pages to no pin budget; `vmo_op` has no operation that succeeds, so there are no hints, purgeable VMOs or priorities.
+
+`Tmap` and `dref` are local only, and only `fsd` has them; `fsd` maps at most 64 files at once and serves one request at a time, so one large `Treadref` holds its other clients.
+`msync(MS_SYNC)` does not wait for the volume, and pages supplied to a mapping are not synced to the instruction cache, which matters on aarch64 hardware.
+A mapped file's VMO comes with `VX_RIGHT_TRANSFER`, so a client may pass the mapping on.
+
+`dosfs`, `isofs` and `distd` have no entropy and refuse `Tshare`, so a child's descriptors on their files are opened again and do not share their parent's offset.
+
+`dma_map` takes one range of at most 2 MiB a call, and one device cannot be given another's memory: peer-to-peer DMA comes later.

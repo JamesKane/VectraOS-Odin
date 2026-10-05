@@ -1,0 +1,59 @@
+page=cron sect=1 summary="run commands at set times"
+    src=third_party/sbase/cron.c
+    keys=crontab,schedule,daemon,periodic,timer
+
+# SYNOPSIS
+
+```usage
+cron [-f file] [-n]
+```
+
+# DESCRIPTION
+
+`cron` reads a table of commands and the times to run them, then runs each at its times, for ever.
+It wakes at the start of each minute, and runs every command whose time matches the wall clock's, in UTC, with `/bin/sh -c`, in a session of its own.
+A command still running from an earlier match is not started again.
+
+Without `-n` it becomes a daemon: it forks, leaves its terminal, writes its process id to `/var/run/crond.pid`, and logs to `syslog` as `LOG_CRON`.
+
+: `-f` <file>
+  Read the table from <file> instead of `/etc/crontab`.
+: `-n`
+  Stay in the foreground, and log to standard output and standard error instead of `syslog`.
+
+Each line of the table is five fields and a command, separated by blanks; an empty line or one starting `#` is skipped.
+The fields are the minute (0 to 59), hour (0 to 23), day of the month (1 to 31), month (1 to 12) and day of the week (0 to 6, Sunday 0).
+A field is `*` (any), a number, a range <N>`-`<M>, a list <N>`,`<M>`,`..., or `*/`<N> (every <N>th).
+The command is the rest of the line.
+
+On a hangup signal `cron` reads the table again; on a terminate signal it exits.
+
+`cron` is sbase's, a hard link to `/boot/bin/posix/sbase-box`; there is no native one.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so a POSIX program finds it as `/bin/cron`.
+
+# FILES
+
+: `/etc/crontab`
+  The table.
+: `/var/run/crond.pid`
+  The daemon's process id.
+
+# SEE ALSO
+
+svcd(8), sleep(1); sbase's page is `third_party/sbase/cron.1` in the repository
+
+# DIAGNOSTICS
+
+Any argument but the flags, or an unknown flag, prints `usage: cron [-f file] [-n]` and exits 1.
+A table that cannot be read or parsed is logged, as `` error: failed to parse `hour' field on line 3 ``, and `cron` goes on with no commands.
+Each command run and each that ends is logged, with its process id and status.
+
+# BUGS
+
+Nothing runs on VectraOS: there is no `/bin/sh` to run the commands, nor any `/etc` in the POSIX namespace for the table.
+Without `-n` the log is lost: the C library's `syslog` needs a Unix-domain socket, which VectraOS does not have, and there is no `/dev/console` to fall back on; there is no `/var/run` either.
+There is no service that runs `cron`, and it is untested on VectraOS.
+
+The month is compared with the C library's month counted from 0, so a month of 1 matches February and 12 never matches.
+A `*/`<N> field matches when the value is a multiple of <N>, so `*/7` in the day of the month runs on the 7th, 14th, 21st and 28th, not every seventh day.
+By a reading of the source, the minute after a command ends, or after the table is reloaded, is skipped: VectraOS's C library restarts the sleep the signal interrupted, as `SA_RESTART` asks, so `cron` notices the signal only at the minute's start, and deals with it instead of running that minute's commands.

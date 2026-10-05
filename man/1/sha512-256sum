@@ -1,0 +1,43 @@
+page=sha512-256sum sect=1 summary="compute and check SHA-512/256 message digests"
+    src=third_party/sbase/sha512-256sum.c,third_party/sbase/libutil/crypt.c,third_party/sbase/libutil/sha512-256.c
+    keys=checksum,digest,hash,sha2,sha-512-256,verify
+
+# SYNOPSIS
+
+```usage
+sha512-256sum [-c] [file ...]
+```
+
+# DESCRIPTION
+
+`sha512-256sum` reads each <file> and writes a line for it: its SHA-512/256 digest as 64 lower-case hexadecimal digits, two spaces, and the <file>'s name.
+With no <file> it reads standard input and names it `<stdin>`; a <file> of `-` is standard input too, and is also named `<stdin>`.
+
+: `-c`
+  Check digests instead.
+  Each <file>, or standard input with none, is a list of lines as `sha512-256sum` writes them; for each line, `sha512-256sum` computes the digest of the file it names and writes the name followed by `: OK` or `: FAILED`.
+  A digest and a name may also be separated by a space and `*`.
+: `-b`, `-t`
+  Accepted and ignored: every file is read as bytes.
+
+`sha512-256sum` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/sha512-256sum`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/sha512-256sum`.
+There is no native `sha512-256sum`.
+
+# SEE ALSO
+
+sha256sum(1), sha384sum(1), sha512sum(1), sha512-224sum(1), sha224sum(1), sha1sum(1), md5sum(1), cksum(1); sbase's page is `third_party/sbase/sha512-256sum.1` in the repository
+
+# DIAGNOSTICS
+
+Messages go to standard error, after the name `sha512-256sum` was run by.
+A <file> that cannot be opened is reported as `sha512-256sum: open` <file>`:` and the error, and the next is read; a failed read is reported as <file>`: read error:` and the error.
+With `-c`, a list that cannot be opened is reported as `fopen` <file>`:`, and at the end `sha512-256sum` counts what went wrong, as `2 improperly formatted lines`, `1 listed file could not be read` and `1 computed checksum did NOT match`.
+An unknown flag prints the usage message and exits 1.
+The exit status is 1 if anything failed or did not match, otherwise 0.
+
+# BUGS
+
+With `-c`, a listed name of `-` is a file of that name, not standard input; a name is the rest of its line, so one containing a newline cannot be checked.
+
+Only sha256sum(1) is run by VectraOS's tests; `sha512-256sum` shares all of its code but its own digest, and is untested on VectraOS.

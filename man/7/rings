@@ -1,0 +1,228 @@
+page=rings sect=7 summary="channels and rings: how processes talk"
+    keys=ipc,channel,ring,doorbell,port,counter,futex,message,queue,arena,sqe,cqe,9px,transport,session,connect,flow,backpressure,server,loop
+
+# DESCRIPTION
+
+Processes talk in two tiers.
+A channel carries small messages and handles, copied by the kernel: it is the control plane, for bootstrap, for passing capabilities and for rare requests.
+A ring is memory both sides map, holding two queues and two arenas: it is the data plane, for everything with volume, and when both sides are busy the kernel is not on its path at all.
+A server normally hands out a ring through a channel, and the client then speaks its protocol, 9Px most often, over the ring.
+
+```text
+             control plane                          data plane
+client -- channel (copied, <= 64 KiB, <= 64 handles) --> server
+client == ring (one shared VMO; no kernel on the path) == server
+            doorbell: a counter; the wake-up lands on a port
+```
+
+Every wait is on a port.
+A thread binds what it cares about, a channel end, a ring end's doorbell, a counter, a task's exit, an interrupt, to one port, and makes one call, `port_wait`, with a deadline as its argument; there is no timer object.
+Locks, which are held briefly, wait on a futex instead.
+time(7) says more of deadlines and the one clock.
+
+The kernel provides the objects and checks the rights on their handles (see handles(7)); the protocols are user space's.
+`lib/vx-ring` keeps a ring's queues, `lib/vx-ring/session.c` opens one through a channel, and `lib/vx-9p` speaks 9Px over one, client and server.
+
+@node=channels title="Channels" keys=message,datagram,txid,call,reply,listen,post
+
+A channel, made by channel_create(2), is a pair of ends.
+What is written to one end is queued at the other, as a datagram, not part of a stream: a body of 16 bytes to 64 KiB, which starts with a 16-byte header, and up to 64 handles.
+The header's <txid> matches a reply to its call, <ordinal> is the protocol's operation, <flags> is the protocol's, and <sender_intent> is written by the kernel, so a reader can trust it.
+The body is copied twice, into the kernel and out; the handles move, leaving the writer's table with the rights they had.
+
+Each end's queue holds at most 64 messages and 1 MiB, and a write to a full one fails with `VX_ERR_SHOULD_WAIT`: a flood fails its sender and never grows the kernel.
+Reading never blocks; a reader binds its end to a port with `VX_TRIGGER_READABLE`, and with `VX_TRIGGER_PEER_CLOSED` to hear that the other end has gone.
+
+`channel_call` writes a request and waits for its reply in one call.
+The kernel picks the request's <txid>, and a reply with that <txid> goes straight to the waiting caller, never through the queue.
+It is how a client asks a server for a ring, and how small requests are made, such as bus-acpi(8)'s to devmgr(8) for a region of a device's memory, answered with its handle.
+
+A service's channel is its post.
+svcd(8) makes a channel for each `post=` in a manifest (see svc(6)), keeps the client end as `/srv/<name>`, and gives the server end to the service as its listen channel; a client is given a duplicate of the client end, its connector, and a mount names a post.
+svcd keeps a second handle to the server end, so a connection asked for while a service restarts waits for it.
+services(7) describes posts and manifests.
+
+@node=waiting title="Ports, counters and futexes" keys=wait,binding,trigger,packet,deadline,leeway,counter,futex
+
+A port, port_create(2), is a queue of 32-byte packets, each with a key chosen by whoever bound or posted it, a value, a timestamp on the monotonic clock, the source's handle and the trigger.
+A binding, `port_bind`, is one-shot: when its trigger holds on its source, the port gets one packet and the binding is gone.
+If the trigger already holds when the call is made the packet comes at once, so no event is lost between looking at a source and binding it; a program re-binds after handling each packet.
+Each binding is allocated as the packet it will deliver, so bindings never overflow a port.
+`port_wait` returns up to 64 packets at once, and `port_post` queues packets of a program's own, to wake itself.
+
+A counter, counter_create(2), holds a 64-bit value that only goes up.
+`counter_signal` raises it, and a `VX_TRIGGER_COUNTER_GE` binding fires when it reaches the binding's threshold.
+It is a timeline: a producer raises it as work completes, and any holder of a handle waits for a value.
+Each ring end has one as its doorbell, which `counter_read` reads and `port_bind` waits on through the end itself.
+
+A futex, futex_wait(2), is a 32-bit word in memory a thread sleeps on while it holds a value it saw.
+It is keyed by the word's physical address, so a word in a VMO two tasks map is one futex for both (see sharing(7)).
+It is for locks and condition variables; anything waited on for long goes through a port.
+
+@node=layout title="A ring's memory" keys=header,vxrb,index,line,entry,sqe,cqe,arena,layout
+
+ring_create(2) makes a ring from its parameters: the lengths of the submission queue (SQ) and the completion queue (CQ), powers of two up to 4096; the size of their entries, multiples of 16 up to 256 bytes; and the size of each side's arena.
+It returns three handles: the client's end, the server's end, and the ring's memory, one VMO, which each side maps with as_map(2) wherever it likes.
+The kernel writes the header into the VMO and never reads the ring again.
+
+A ring as 9Px uses it, with 8 entries in each queue, `vx_sqe` and `vx_cqe` entries and 16 KiB arenas, is laid out so, in bytes from the start of the VMO:
+
+```text
+     0  header: magic "VXRB", version 1, queue lengths, entry sizes,
+        features, offsets and sizes of the queues and arenas, size
+  4096  SQ tail     written by the client     each index line has a
+  4160  SQ head     written by the server     64-byte cache line of
+          and its NEED_WAKEUP flag            its own, so no two sides
+  4224  CQ tail     written by the server     write one line
+  4288  CQ head     written by the client
+          and its NEED_WAKEUP flag
+  8192  SQ: 8 entries of 64 bytes (vx_sqe), the client's requests
+  8704  CQ: 8 entries of 32 bytes (vx_cqe), the server's completions
+ 12288  client arena, 16 KiB: written by the client, read by the server
+ 28672  server arena, 16 KiB: written by the server, read by the client
+ 45056  end
+```
+
+The queues start a page past the index lines, the CQ on the next 64-byte boundary after the SQ, and the arenas on page boundaries; `vx_ring_layout` in `lib/vx-ring/ring.c` computes the offsets, the kernel and both sides alike.
+
+The generic entries are in `abi/vx/abi.h`.
+A submission, `vx_sqe`, is one 64-byte line: an <opcode>, <flags> (`VX_SQE_DREF`, data in the arena; `VX_SQE_HANDLES`, handles in a slot; `VX_SQE_LINK` and `VX_SQE_FENCE`, which no protocol uses yet), a <user_data> echoed in the completion, a <target> and an <offset> that the protocol defines, an arena range <arena_off> and <len>, a <handle_slot>, and 16 bytes inline.
+A completion, `vx_cqe`, is 32 bytes: the <user_data>, a <result>, and <flags>, <aux> and <aux2> that the protocol defines.
+An entry has no priority of its own: a ring's service class is meant to be the ring's, fixed when it is made.
+
+Each side writes only its own index lines and its own arena, and allocates in its arena as it likes: there is no shared allocator.
+A buffer in an arena is free again when the peer's reply has said it is done with it.
+Payloads too large or too long-lived for an arena go in VMOs of their own, sent as handles (see sharing(7)).
+
+@node=protocol title="Producing, consuming and sleeping" keys=spsc,wait-free,release,acquire,fence,need_wakeup,doorbell,notify,hostile,handles,slot
+
+Each queue has one producer and one consumer: the client produces submissions and consumes completions, the server the reverse.
+So both are wait-free, and one client cannot corrupt another's queue, since each client has a ring of its own.
+Indices run free and wrap at 2^32, masked by the queue's length less one.
+
+A producer writes an entry, stores the new tail with release order, then, after a full fence, looks at the consumer's `NEED_WAKEUP` flag; only if it is set does it ring the consumer's doorbell with ring_notify(2).
+A consumer loads the tail with acquire order, copies out each entry up to it, and stores its head with release order.
+When it finds nothing, it reads its own doorbell, sets its flag, fences, and looks at the tail once more: only if the queue is still empty does it bind its end to its port with `VX_TRIGGER_COUNTER_GE` and a threshold one past the doorbell it read, and wait.
+One of the two fences always sees the other side's store, so a wake-up is never lost, and while both sides are busy neither enters the kernel.
+`vx-check`, an exhaustive checker of interleavings, explores this protocol, and four broken variants of it that it must reject, in `tests/host/ring_model_test.c`.
+
+`lib/vx-ring` has these as `vx_ring_produce_slot` and `vx_ring_produce`, which says whether to ring; `vx_ring_consume`; and `vx_ring_prepare_sleep` and `vx_ring_end_sleep` around the wait.
+
+Shared memory is hostile, since whoever made the ring, or the peer, may be.
+A side attaches with `vx_ring_attach`, which takes the header only if it is exactly what its own protocol's parameters make, and keeps a private copy; the header in shared memory is never read again.
+Each entry is copied out exactly once and then checked, never read twice.
+An index that runs ahead of the other, more entries ready than the queue holds, marks the ring broken, and the side treats the peer as gone; an arena range outside the peer's arena does the same in vx-9p.
+
+An entry cannot carry a handle, since the kernel never reads the ring.
+A side moves up to 4 handles into one of 16 slots the kernel keeps for its direction, with ring_xfer_handles(2), and names the slot in the entry; the peer takes them from the slot as it handles the entry.
+Handles left in slots go with the ring.
+
+@node=sessions title="Opening a ring" keys=connect,dial,accept,session,listen,connector
+
+A ring is opened through a channel.
+The client sends a request with `channel_call` to its connector; the server, reading its listen channel, makes a ring with its protocol's parameters, maps it, keeps the server end, and replies with two handles, the client end and the ring's memory.
+The client maps the memory, attaches, and closes the memory's handle, which the mapping keeps.
+A refusal is a reply with no handles, its <flags> a status when the server gives one.
+
+So every connection is its own ring, as one producer per queue requires, and a connection is never shared: a child that inherits a mount connects again with its copy of the connector, and `fork` copies no ring's memory into the child.
+`lib/vx-ring/session.c` has this as `vx_session_dial` for the client and `vx_session_accept` for the server, with a version that asks without waiting, `vx_session_ask` and `vx_session_answer`, for a client that cannot stall on a server not yet there, as netd(4) waits for its network driver.
+9Px makes the same exchange, with its own ordinal, in `lib/vx-9p`.
+
+@node=9px title="9Px on a ring, and over TCP" keys=9p,9px,msize,transport,tcp,dial,9px+shm
+
+On a ring, the local transport, each 9Px message is one submission: opcode `P9_RING_MSG`, its bytes in the client's arena at <arena_off>, <len> long.
+Its reply is one completion: <result> is the reply's length, and <aux2> its offset in the server's arena.
+The connection request is the ordinal `P9_CONNECT`, "cnp9", on the server's listen channel.
+The ring has 8 entries each way and two 16 KiB arenas, so a message is at most 16384 bytes, the msize version(5) negotiates on a ring.
+
+A VMO travels beside a message in a handle slot: `Tmap`'s reply carries the file's VMO, with `P9_CQE_HANDLE` in the completion's <flags> and the slot in <aux> (see map(5)), and `Treadref` and `Twriteref` carry the client's, with `VX_SQE_HANDLES` and <handle_slot> (see dref(5)).
+These, and the server-kept open files of the `posix` extension, are why the client offers 9Px's extensions only on a ring.
+
+Over a network a connection is TCP.
+A mount of `tcp!`<host>`!`<port> asks the namespace's `/net/cs` where to dial, connects a conversation in `/net/tcp`, and speaks 9P over its data file, each message framed by its size as on any 9P stream: netd(4) serves the conversation, over a ring of its own.
+The client offers `9P2000.x/1` with no extensions, which a Plan 9 server answers with `9P2000`, and asks for an msize of 16384.
+Each process dials its own connection, since a child cannot be handed one as it is handed a connector.
+vx9pserve(8) is a host's server for such mounts; namespace(7) describes mounts.
+
+@node=flow title="Flow control" keys=backpressure,credit,budget,queue,full,defer,held
+
+Nothing in the system grows without bound because a peer is fast.
+A channel's queue is bounded, and a full one fails its writer.
+A ring's queue is bounded by its length, and its depth is the client's credit: a client can have no more requests outstanding than the queue holds, and a server can complete no more than the client has asked for.
+A port's posts are bounded at 64, and its bindings cannot overflow it.
+
+vx-9p's server keeps to these.
+It serves at most 8 requests from one connection before it turns to the next, so a client that keeps its queue full gets its share and not the whole server.
+A request it cannot answer yet, such as a read of a terminal with nothing typed, is held, and its connection takes nothing more until it is answered; every other connection is served meanwhile.
+A client that leaves its completion queue full, so a reply has nowhere to go, is disconnected, as is one that breaks the protocol.
+A server holds 16 connections unless it gives itself more.
+
+vx-9p's client has one request in flight on a connection, at offset 0 of its arena, and waits for its reply.
+The block protocol (`docs/proto/block.md`) is the one that keeps many in flight today: 128 entries each way, completions in any order, and a 1 MiB client arena that the disk's driver gives its device by DMA, so the device reads and writes the client's buffers directly (see sharing(7)).
+
+@node=server title="A server's loop" keys=loop,serve,drain,arm,sleep,port_wait,key,generation
+
+A server is one loop around one port, as `p9_ring_serve` in `lib/vx-9p/ring_server.c` is:
+
+- Drain each connection: consume its submissions, up to its budget, copy each request out of the client's arena, serve it, and produce its completion, ringing the client's doorbell if the client sleeps.
+- Read the listen channel until it is empty, answering each connection request with a new ring.
+- If nothing is left to do, prepare to sleep on each connection, which sets its `NEED_WAKEUP` and looks once more; bind each idle connection's doorbell, and the listen channel, to the port where they are not bound already.
+- Wait on the port, with a deadline if the server has timers of its own, and handle what comes: a doorbell, a client gone (`VX_TRIGGER_PEER_CLOSED` on its end), the listen channel, or a source of the server's own, such as a driver's interrupt.
+- End the sleep on every connection, and go round again.
+
+A packet's key names a connection by its slot and the slot's generation, so a packet from a binding on a connection that has gone is not taken for the slot's next connection.
+A server that works so needs one thread, and the file servers built on vx-9p have one.
+
+# EXAMPLES
+
+vx-9p's client waiting for its reply (`lib/vx-9p/ring.c`, `p9_ring_rpc`, lines rewrapped): the doorbell is read before the sleep is announced, and the wait ends early if the server has gone.
+
+```c
+for (;;) {
+  int64_t n = p9_ring_take(k, resp, cap);
+  if (n > 0) return (size_t)n;
+  if (n < 0) break;
+  int64_t seen = vx_counter_read(k->end);
+  if (vx_ring_prepare_sleep(&k->ring)) {
+    vx_packet pk = {};
+    vx_port_bind(k->port, k->end, VX_TRIGGER_COUNTER_GE, P9_KEY_BELL,
+                 (uint64_t)seen + 1);
+    int64_t got = vx_port_wait(k->port, deadline, 0, &pk, 1);
+    if (got == VX_ERR_INTERRUPTED) {
+      vx_ring_end_sleep(&k->ring);
+      continue;
+    }
+    if (got != 1 || pk.key == P9_KEY_CLOSED) break;
+  }
+  vx_ring_end_sleep(&k->ring);
+}
+```
+
+The `P9_KEY_CLOSED` packet comes from a `VX_TRIGGER_PEER_CLOSED` binding made once, when the connection was opened.
+
+# SEE ALSO
+
+channel(2), ring(2), port(2), counter(2), futex(2), handle(2), vmo(2), as(2), intro(5), version(5), map(5), dref(5), svc(6), svcd(8), netd(4), handles(7), sharing(7), services(7), namespace(7), time(7); the design is `docs/01-kernel-ipc.md` §4 and `docs/02-namespace-swarm.md` §3.2, and the ring protocols are `docs/proto/block.md` and `lib/vx-driver/netproto.h`
+
+# BUGS
+
+`channel_call` does not yet switch straight to a waiting server on the caller's scheduling context, nor lend handles for the length of a call; every message's <sender_intent> is `VX_INTENT_INTERACTIVE`, and `ring_create` takes no service class, so a ring has none (01 §4.5, §4.3).
+Scheduling contexts are not built yet; leases lent for one call come in M6 step 6e.
+
+A counter's value is not yet in a read-only shared page, so every doorbell read before a sleep is a system call.
+A consumer never spins before it sleeps, as the design lets a real-time one.
+
+vx-9p's client has one request in flight, and every reply is at arena offset 0: pipelining, and `Tflush` with it, come in M6 step 6d, so a read a server holds waits until it is answered.
+Each process dials its own TCP connection for a `tcp!` mount (sharing one through a post comes with 6d), and TCP connections have no Noise handshake: 9Px over TCP is plain 9P2000 with no authentication.
+
+Handles are lost, not left in place, when all 16 of a direction's slots are full or a take is too small; a reply too large for a call's buffers is thrown away (see ring(2) and channel(2)); both are to be fixed with 6d.
+`port_cancel` does nothing, and bindings are made one at a time, not in the design's batches.
+
+A server's 16 connections have no per-client limit, so one client can take them all; that comes before M10.
+Channel queues, port posts and rings are not charged to any budget.
+
+Both sides map the whole ring writable, the header and the peer's lines and arena included, where the design makes the header read-only after creation; each side reads only its validated copy of the header, so a peer that writes there changes nothing but its own connection.
+
+A ring is one VMO, and a VMO is at most 256 MiB, so `ring_create` refuses arenas larger in all than that, though it takes each up to 1 GiB.
+
+Pipes between POSIX processes are channels of 4 KiB messages, not rings (see posix(7)).

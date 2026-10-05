@@ -304,13 +304,15 @@ VectraOS has no `/env` device; the environment is all there is.
 A function with one of these names runs when `rc` receives a note that starts as the table says, before its next instruction:
 
 | Function | Note |
-| `sighup` | `hangup` |
-| `sigint` | `interrupt` |
-| `sigquit` | `quit` |
-| `sigalrm` | `alarm` |
+| `sighup` | `hangup`, `posix: SIGHUP` |
+| `sigint` | `interrupt`, `posix: SIGINT` |
+| `sigquit` | `quit`, `posix: SIGQUIT` (`^\` at a terminal) |
+| `sigalrm` | `alarm`, `posix: SIGALRM` |
 | `sigkill` | `kill` |
-| `sigfpe` | `sys: fp:` |
-| `sigterm` | `term` |
+| `sigfpe` | `sys: fp:`, `sys: trap: arithmetic` |
+| `sigterm` | `term`, `posix: SIGTERM` |
+
+The first of each is 9front's word; the rest are VectraOS's notes for the same signal (notes(7)), with or without the sender's ` pid=`<n>.
 
 Without its function, an interrupt or quit stops what `rc` is doing and goes back to reading commands if it is interactive, and ends it if not; any other of these notes ends `rc`.
 A note `rc` has no name for is handled as the system does by default.

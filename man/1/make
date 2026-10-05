@@ -1,0 +1,88 @@
+page=make sect=1 summary="maintain groups of programs"
+    src=third_party/sbase/make/main.c,third_party/sbase/make/parser.c,third_party/sbase/make/rules.c,third_party/sbase/make/posix.c,third_party/sbase/make/defaults.c
+    keys=build,makefile,target,dependency,rule,recipe,macro,suffix
+
+# SYNOPSIS
+
+```usage
+make [-eiknprSstd] [-f file] [-j jobs] [macro=value ...] [target ...]
+```
+
+# DESCRIPTION
+
+`make` brings each <target> up to date, or the first target of the makefile when none is given.
+It reads the rules from each `-f` <file> in order, or from `makefile`, or failing that `Makefile`, in the current directory.
+A target is remade when it does not exist, when a prerequisite is newer, or when a prerequisite was itself remade; its prerequisites are brought up to date first.
+It is sbase's `make`, linked alone as `/boot/bin/posix/make` rather than into the box that holds sbase's other commands: the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) binds `/boot/bin/posix` before `/boot/bin` on `/bin`, so a POSIX program finds it there.
+
+A makefile holds rules, `target ... : prerequisite ...` followed by command lines each beginning with a tab, or by `;` and a command on the same line; macro definitions, `name = value`; comments from `#`; and `include` lines, which read another file in place.
+A line ending in a backslash goes on to the next.
+`$(name)` and `${name}` are replaced by the macro's value, `$(name:a=b)` by its value with each word's ending <a> changed to <b>, and `$$` by `$`.
+In commands, `$@` is the target, `$<` the prerequisite an inference rule found, `$*` the target without its suffix, and `$?` the prerequisites newer than the target.
+
+Macros come, from weakest to strongest, from `make`'s defaults, the environment, the makefiles, `MAKEFLAGS` and the command line; with `-e` the environment wins over the makefiles.
+Each <macro>`=`<value> given is also exported to the commands' environment.
+`SHELL` and `MAKEFLAGS` are never taken from the environment, and `SHELL`, `/bin/sh` by default, is never exported.
+The flags given are passed to recursive `make`s in `MAKEFLAGS`.
+
+Inference rules make a target from a file of the same name with another suffix, for the suffixes listed by `.SUFFIXES`; the defaults (`make -p` prints them) build `.o` from `.c`, `.y`, `.l` and `.f` with `c99`, `yacc`, `lex` and `fort77`.
+The special targets `.DEFAULT` (the rule for a target no other rule makes), `.IGNORE` and `.SILENT` (with no prerequisites, for every target; with them, for those), `.PRECIOUS` (targets not removed on an interrupt) and `.SUFFIXES` (with no prerequisites, clearing the list) are understood.
+
+Each command line is run as `$SHELL -ec` <line>, after its macros are expanded, and printed first.
+A line beginning with `@` is not printed, one beginning with `-` has its failure ignored (and runs with `-c` alone), and one beginning with `+` runs even with `-n`, `-q` or `-t`.
+A failing command stops `make`; when a signal stops it while a target is being made, that target is removed unless it is precious or a directory.
+
+: `-d`
+  Print what `make` decides, and why.
+: `-e`
+  Let environment variables override macros the makefiles define.
+: `-f` <file>
+  Read rules from <file>; `-` is standard input.
+  May be given more than once.
+: `-i`
+  Ignore every command's failure, as if each began with `-`.
+: `-j` <jobs>
+  Accepted and ignored: one command runs at a time.
+: `-k`
+  When a target fails, go on with the targets that do not depend on it.
+: `-n`
+  Print the commands without running them.
+: `-p`
+  Print every macro and rule, then exit without making anything.
+: `-q`
+  Run nothing, and exit 1 if any target is out of date, 0 otherwise.
+: `-r`
+  Forget the default suffixes, and so the inference rules.
+: `-S`
+  Stop at the first failure, undoing an earlier `-k`.
+: `-s`
+  Print no commands, as if each began with `@`.
+: `-t`
+  Touch out-of-date targets, with `touch`, instead of running their commands.
+
+# SEE ALSO
+
+rc(1), touch(1); sbase has no page for `make`
+
+# DIAGNOSTICS
+
+`make` reports a problem as `make: error:` followed by the makefile and line, where there is one, and the problem, such as `don't know how to make x` or `target x: error 256`, and exits 1.
+With `-k` a failed target is `make: warning: target x: error 256`, and its dependents `make: warning: target y not remade because of errors`; the exit status is still 1.
+With nothing to make it says `make: no target to make` and exits 0.
+An interrupt is reported as `make: signal 2 arrived`, and the removal of a target as `make: trying to remove target x`; `make` then ends by the signal.
+
+# BUGS
+
+VectraOS has no `/bin/sh`, so with the default `SHELL` every command fails: the child exits 127, and `make` reports `error 32512`.
+`SHELL` may name another program that takes `-e` and `-c` as `sh` does, set in the makefile or on the command line; rc(1) is untested for this.
+`-t` runs `touch` with the C library's `system`, which needs `/bin/sh`, and so fails the same way.
+There is no C compiler on VectraOS to run the default rules' `c99`.
+
+The error number reported is the command's wait status, 256 times its exit status, not the exit status itself.
+
+A `-f` <file> that cannot be opened is skipped without a word; with no makefile at all `make` says `no target to make`, or `don't know how to make` the <target>, rather than that there is no makefile.
+
+`-j` is ignored, and `-q` is missing from the usage message.
+There are no `::` rules, no `+=`, `?=`, `:=` or `!=`, and no internal macros but the four above: no `$%`, and `$(@D)` and `$(@F)` are errors.
+
+Untested on VectraOS.

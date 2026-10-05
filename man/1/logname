@@ -1,0 +1,30 @@
+page=logname sect=1 summary="print the login name"
+    src=third_party/sbase/logname.c
+    keys=login,user,name,logname
+
+# SYNOPSIS
+
+```usage
+logname
+```
+
+# DESCRIPTION
+
+`logname` prints the user's login name, as the C library's `getlogin` gives it, followed by a newline.
+That is the environment variable `LOGNAME`.
+It takes no arguments.
+It is sbase's command, in `/boot/bin/posix`: the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) binds that directory before `/boot/bin` on `/bin`, so a POSIX program finds it there.
+
+# SEE ALSO
+
+whoami(1), users(6), svc(6); sbase's page is `third_party/sbase/logname.1` in the repository
+
+# DIAGNOSTICS
+
+With no login name `logname` says `logname: no login name` and exits 1.
+An argument prints the usage message and exits 1.
+
+# BUGS
+
+Nothing on VectraOS sets `LOGNAME`, so `logname` fails unless the environment it was given has it, as a manifest's `env=` can (see svc(6)).
+The name is not checked against the users file.

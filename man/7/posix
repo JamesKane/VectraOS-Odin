@@ -1,0 +1,182 @@
+page=posix sect=7 summary="the POSIX environment: musl, its back end, sbase and the POSIX namespace"
+    keys=posix,unix,musl,libc,ape,sbase,fork,exec,signals,descriptors,pipes,sockets,terminal,pty,termios,errno
+
+# DESCRIPTION
+
+VectraOS is not Unix, but it runs Unix programs, as Plan 9's APE does: in an environment of their own, made of a C library that speaks POSIX above and VectraOS below, and a namespace arranged as such programs expect.
+It is the one compatibility layer the system has (rule 13 of `docs/00-overview.md`), and it lives entirely inside the C library and the namespace: the kernel and the servers know nothing of POSIX beyond what any client may use.
+
+A POSIX program is a C program built against musl 1.2.6, vendored unchanged (ADR-0007), and VectraOS's back end, `ports/musl/vx`, which answers musl's system calls.
+musl asks for the kernel by Linux's system-call numbers, with Linux's structures and errors; the back end answers each with VectraOS's own calls and servers: files through the process's namespace, over 9Px; processes and signals through procfs(4) and notes; terminals through ptyd(4); sockets through netd(4); memory through VMOs.
+What it does not do yet answers `ENOSYS`, and is reported once, by number, to the kernel log.
+Programs are linked statically, for the target <arch>`-vectra-unknown-musl`, which defines neither `__linux__` nor `__unix__`.
+
+A POSIX program and a native one are both ordinary processes: each is spawned the same way, sees a namespace, has a pid in the one process table, and can be piped to the other.
+
+@node=namespace title="The POSIX namespace"
+
+A POSIX program expects names a native program does without: `/dev/null`, `/tmp`, `/bin` with its commands.
+The namespace template `/lib/ns/posix` (see namespace(6) and namespace(7)) gives them, and a service manifest's `ns=posix` gives a service that namespace (see svc(6)):
+
+```text
+mount /srv/bootfs /
+bind -a /boot/bin /bin
+bind -b /boot/bin/posix /bin
+mount -c /srv/tmpfs /tmp
+mount /srv/null /dev
+mount -a /srv/ptyd /dev
+mount /srv/proc /proc
+mount /srv/net /net
+mount /srv/sys /sys
+```
+
+`/bin` is a union with `/boot/bin/posix` first, then the boot image's own `/bin` and `/boot/bin`, as Plan 9 binds `/bin/ape` over `/bin`: a POSIX program looking up `ls` finds sbase's, and a native program, whose `/bin` has only `/boot/bin`, finds the native one.
+Nothing is renamed, and one page in section 1 describes both (see intro(1)).
+`/tmp` is tmpfs(4), `/dev` nullfs(4)'s `null`, `zero`, `random` and `urandom` with ptyd's `ptmx` and `pts/` after them, `/proc` procfs, `/net` netd and `/sys` sysfs(4), for the clock.
+
+The console shell's namespace is not this one: it has no `/dev` and no `/boot/bin/posix` on `/bin`, so a POSIX program run from it finds less than it expects.
+
+@node=library title="musl and the back end"
+
+The kernel starts a program with one channel holding its spawn message (svc(6)); the back end's `crt1.o` reads it and builds what musl's start expects of a Linux stack: the arguments, the environment, and the auxiliary vector, whose `AT_RANDOM` comes from the seed the parent gave (`entropy`).
+A program given no seed has an unseeded generator, and `getrandom` fails rather than pretend.
+
+The descriptor table lives in the process, as Fuchsia's fdio keeps it: a descriptor names an open file description, the console, an end of a pipe, a file or directory, a terminal or a socket.
+The namespace is built from the spawn message the first time a name is used.
+The current directory is the back end's too, a path it puts in front of each relative name, since the namespace itself takes only absolute ones.
+
+The process's identity is its task: `getpid` is the task's id, which `exec` keeps (ADR-0011, ADR-0012); `uname` says `VectraOS`.
+Time is the kernel's monotonic clock, and the realtime clocks add the kernel's offset from UTC, which devmgr sets from the hardware clock at boot, on x86_64 (see time(7)).
+
+@node=files title="Files and descriptors"
+
+`open`, `read`, `write`, `stat` and the rest resolve a name through the namespace to a server, then speak 9Px to it over that mount's ring (see rings(7)): walk(5), open(5), read(5), getattr(5) and the rest.
+`rename`, `symlink`, locks and `fsync` use the `posix` extension's messages, 9P2000.L's, on a server that has it: tmpfs, fsd(4) and dosfs(4).
+
+An open file's offset and `O_APPEND` belong to the open file description, which POSIX shares between a process and its children, and between descriptors made by `dup`.
+On a server with `posix`, the server keeps them: reads and writes go at the server's offset, `lseek` is `Tseek`, and appends from two processes are atomic.
+A child, by `fork`, `posix_spawn` or `exec`, joins the same open file with a token from share(5), on a connection of its own; so `(a; b) > f` writes `f` once through, as a Unix shell's would.
+On a server without `posix`, bootfs or u9fs, a child opens the file again, with an offset of its own.
+
+A pipe is a channel between the processes, each write one message of up to 4 KiB, the same pipes native programs' standard input and output use, so a POSIX program and a native one can be piped together.
+The reader sees the end of the file when the last writer anywhere has closed.
+
+`mmap` of a file on a server with the `map` extension, fsd, maps the VMO map(5) gives: the file's page cache, which every process mapping it shares, so `MAP_SHARED` writes reach the file and the others.
+A private mapping that may be written, or one of another server's file, is a copy of the file's bytes, and a shared mapping of another server's file is refused.
+Anonymous memory is a VMO of its own.
+
+@node=processes title="fork, exec and the process calls"
+
+`fork` makes a task with a copy of the caller's memory and handles, made at once (see task(2)).
+The rings of the parent's connections are not shared, since a ring has one producer: the child lets them go, opens connections of its own, builds its namespace again (in its namespace group, through a channel of its own to nsd(4)), and joins its open files by token.
+`exec` loads the new program into a scratch task and moves it into the caller with `task_exec`, so the process keeps its task, and with it its pid, its parent and its children; descriptors cross it as they cross a spawn, all but those marked close-on-exec.
+`posix_spawn` builds the child directly, never cloning the parent, and registers it with procfs before it runs.
+
+Every other process call is a file in `/proc`, as APE's are (ADR-0011): `getppid` reads `/proc/`<pid>`/ppid`, `getpgrp` and `setpgid` read and write `noteid`, since a process group is a note group, `setsid` writes `ctl`, and `waitpid` reads `/proc/`<pid>`/wait`, keeping a record for a child it was not asked about.
+Without `/proc` in its namespace a process is alone: no parent, group or children.
+
+`exit(0)` ends the process with an empty exit string, and `exit(`<n>`)` with <n> in decimal; `wait` turns them back, and turns a note that ended the process into the signal that killed it (see notes(7)).
+
+@node=signals title="Signals"
+
+Signals are built on notes, as 9front's APE builds them (ADR-0010).
+`kill` writes a note to `/proc/`<pid>`/note`, or to `notepg` for a group, which procfs posts: `posix: SIGTERM pid=12`, or Plan 9's own words where Plan 9 has a note for the signal, `interrupt` for `SIGINT`, `hangup`, `alarm`, `sys: write on closed pipe`.
+The back end's note handler maps the note back to its signal, and a fault, which arrives as a note in Plan 9's words such as `sys: trap: fault read addr=… pc=…`, to `SIGSEGV`, `SIGBUS`, `SIGILL`, `SIGFPE` or `SIGTRAP`.
+A note that is no signal ends the process with it, as in Plan 9.
+
+The dispositions, the mask, the pending set and `SA_RESTART` live in the back end.
+A handler never runs inside the back end, which may be in the middle of a ring submission: a signal that arrives there is made pending, the call returns, and the signal is delivered on the way out, with `EINTR` for a handler without `SA_RESTART`.
+A stopping signal stops the process through its `ctl`, and `SIGKILL`, `SIGSTOP` and `SIGCONT` from another process procfs carries out itself.
+`SIGCHLD` is a note procfs posts to a parent when a child ends, stops or goes on.
+
+@node=terminals title="Terminals"
+
+ptyd(4) serves `/dev/ptmx` and `/dev/pts/`<n>: opening `ptmx` makes a terminal, and the program on it reads and writes its slave.
+The line discipline is in ptyd, with termios's settings in Linux's numbers; `tcgetattr`, `tcsetattr`, the window size and `tcsetpgrp` read and write the terminal's `ctl` file.
+`^C`, `^\` and `^Z` are notes written to the foreground group's `notepg`, so they reach every process in it.
+
+A program whose standard input and output are the console, a handle its spawn message gave it, sees a terminal with no termios: the UART driver's cooked console (see services(7)).
+
+@node=sockets title="Sockets"
+
+The BSD socket calls are files in `/net`, as APE has them.
+`socket` opens `/net/tcp/clone` or `/net/udp/clone` and then the conversation's `data` file, which the descriptor holds; `bind` and `listen` write `announce` to its `ctl`, `connect` writes `connect`, `accept` opens `listen`, and `getsockname` and `getpeername` read `local` and `remote`.
+A UDP socket reads and writes after netd's header, so `sendto` and `recvfrom` carry addresses.
+A socket waits as a terminal does, with a read kept outstanding on a connection of its own, so `poll`, `select`, `O_NONBLOCK` and `EINTR` work on it.
+A `fork` or `exec` opens the conversation's `data` again by its path.
+
+@node=commands title="The commands"
+
+The POSIX commands are sbase's, at a pinned commit, vendored unchanged (ADR-0016): one binary, `sbase-box`, in `/boot/bin/posix` with each command's name as a link to it, and `make` beside it.
+lua(1) is a POSIX program too (ADR-0015).
+Each command has its page in section 1, which says where it falls short; much of that is this layer's, below.
+
+# EXAMPLES
+
+A test's manifest, `tests/user/ctest.ndb`, its comment left out: a POSIX program, with arguments, an environment, the POSIX namespace and nsd's post:
+
+```ndb
+service=ctest program=/boot/bin/ctest console entropy
+arg=one
+arg="two words"
+env=GREETING=hello
+ns=posix
+connect=nsd
+```
+
+and its lines from the POSIX test's log:
+
+```text
+ctest: hello from musl
+ctest: argv one|two words
+ctest: to stderr
+ctest: 340 checks, 0 failed
+ctest: atexit ran
+```
+
+# FILES
+
+: `/lib/ns/posix`
+  The POSIX namespace.
+: `/boot/bin/posix`
+  sbase's commands and `make`.
+: `ports/musl/vx`
+  The back end, in the repository.
+: `third_party/musl`, `third_party/sbase`
+  musl and sbase, vendored.
+
+# SEE ALSO
+
+intro(1), lua(1), make(1), namespace(6), svc(6), procfs(4), ptyd(4), netd(4), tmpfs(4), nullfs(4), fsd(4), share(5), map(5), task(2), namespace(7), notes(7), rings(7), time(7); `docs/01-kernel-ipc.md` §9, ADR-0007, ADR-0010, ADR-0011, ADR-0012, ADR-0015 and ADR-0016
+
+# BUGS
+
+There are no threads: `clone` is `ENOSYS`, so `pthread_create` fails, and the back end does not lock (M6 step 6d).
+
+There is no `/bin/sh`, and `exec` runs only ELF programs, so `system`, `popen`, `make`'s recipes, Lua's `os.execute` and `io.popen`, `env`, cron, and `ed`'s and `dc`'s `!` fail.
+
+Everyone is root: `getuid` and its kin answer 0, and a file's owner and group read as 0, though fsd keeps owners and checks permissions (M6 step 6e).
+There is no `/etc/passwd`, `/etc/group`, `/etc/services`, `/dev/log` or `/dev/tty`, and no `LOGNAME`, and `ttyname` needs `/proc/self/fd`, so `chown`, `chgrp`, `whoami`, `logname`, `logger`, `tty` and others fail or misbehave.
+`faccessat` checks only that a file exists, so every file is readable, writable and executable to `test`, `which` and `rm`'s prompt.
+`umask` is fixed at 022, and `mkdirat` masks a mode to 0755.
+`st_dev` is 0, so `du` and `find` take two servers' files with equal qid paths for one.
+
+Not implemented: `link` and `linkat` (`EPERM`), `mknod`, `chroot`, `flock`, `getpriority` and `setpriority`, `sethostname`, `clock_settime`, `times`, `sync` and `mprotect` (`ENOSYS`; `PROT_NONE` is mapped readable, so guard pages do not fault, until M6 step 6e).
+`getrlimit` answers infinity for every limit.
+The CPU-time clocks are the monotonic clock.
+
+Signals have no alternate stack, no registers in a handler's `ucontext` (M6 step 6d), and no `sigqueue` or real-time queueing.
+A signal does not interrupt a 9P call in progress, such as a file read or the console's; its handler runs when the call is done (with the client's `Tflush`, M6 step 6d), though ptyd ends the reads it holds.
+Job control is partial: no `SIGTTIN` or `SIGTTOU`, no controlling terminal kept for a session, and anyone who can write a terminal's `ctl` can set its foreground group.
+
+Sockets are IPv4 only, with no `AF_UNIX` and no `socketpair`; `getaddrinfo` reads `/etc/resolv.conf` and `/etc/hosts`, which the namespace lacks, so only numeric addresses work; a bound port is used only by `listen`; a UDP datagram is at most 16 KiB.
+There is no `epoll` or `kqueue`.
+
+`MAP_SHARED` anonymous mappings and `MREMAP_FIXED` are refused (M6 step 6e); a mapping past a file's last page faults with `SIGSEGV`, not `SIGBUS`; `msync(MS_SYNC)` does not wait; at most 64 files are mapped at once.
+`fork` copies all of a process's memory at once.
+
+An offset is shared with a child only on a server with `posix`; elsewhere the child opens the file again.
+Closing a descriptor that a `dup2` or `dup3` replaces does not drop the file's locks.
+A pipe is a channel of 4 KiB messages, and a writer to a full pipe polls.
+`O_APPEND` is atomic only on a server with `posix`.
+musl's `mktemp` names are guessable.

@@ -1,0 +1,40 @@
+page=comm sect=1 summary="select or reject lines common to two sorted files"
+    src=third_party/sbase/comm.c
+    keys=common,lines,compare,sorted,set
+
+# SYNOPSIS
+
+```usage
+comm [-123] file1 file2
+```
+
+# DESCRIPTION
+
+`comm` reads <file1> and <file2>, which must be sorted by their bytes, and prints three columns: lines only in <file1>, lines only in <file2>, and lines in both.
+The second column is indented by a tab and the third by two.
+A file named `-` is standard input.
+
+: `-1`, `-2`, `-3`
+  Leave out column 1, 2 or 3; the columns left keep their order, and lose the indent a left-out column would have given.
+  `comm -12` prints only the lines in both.
+
+Lines are compared byte by byte, as `sort` with no locale orders them.
+
+`comm` is sbase's, a hard link to `/boot/bin/posix/sbase-box`; there is no native one.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so a POSIX program finds it as `/bin/comm`.
+
+# SEE ALSO
+
+cmp(1), sort(1), uniq(1), join(1); sbase's page is `third_party/sbase/comm.1` in the repository
+
+# DIAGNOSTICS
+
+Other than two files, or an unknown flag, prints `usage: comm [-123] file1 file2` and exits 1.
+A file that cannot be opened or read is reported, as `comm: fopen /x: No such file or directory`, and it exits 1.
+It exits 0 otherwise.
+
+# BUGS
+
+Input that is not sorted gives wrong output, without a complaint.
+A last line with no newline is printed without one, and does not equal the same line with one.
+`comm` is untested on VectraOS.

@@ -1,0 +1,58 @@
+page=touch sect=1 summary="set a file's access and modification times"
+    src=third_party/sbase/touch.c
+    keys=time,timestamp,mtime,atime,create,empty
+
+# SYNOPSIS
+
+```usage
+touch [-acm] [-d time | -r ref_file | -t time | -T time] file ...
+```
+
+# DESCRIPTION
+
+`touch` sets the access and modification times of each <file> to the current time.
+A <file> that does not exist is created, empty.
+
+: `-a`
+  Set the access time only.
+: `-m`
+  Set the modification time only.
+  With neither `-a` nor `-m`, or with both, both times are set.
+: `-c`
+  Do not create a <file> that does not exist; it is passed over without a word.
+: `-d` <time>
+  Use <time>, written `YYYY-MM-DDThh:mm:SS`, optionally followed by `Z`, instead of the current time.
+: `-t` <time>
+  Use <time>, written `[[CC]YY]MMDDhhmm[.SS]`, instead of the current time.
+  A year left out is the current year.
+: `-T` <time>
+  Use <time>, a whole number of seconds since 1970-01-01 00:00:00 UTC.
+: `-r` <ref_file>
+  Use the access and modification times of <ref_file>.
+
+`-d` and `-t` share one parser, which picks the form by the argument's length, so each also takes the other's form.
+
+`touch` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/touch`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/touch`.
+There is no native `touch`.
+
+# SEE ALSO
+
+date(1), ls(1); sbase's page is `third_party/sbase/touch.1` in the repository
+
+# DIAGNOSTICS
+
+A <file> whose times cannot be set or that cannot be created is reported as `touch: utimensat` <file>`:` or `touch: open` <file>`:`, followed by the error, and `touch` exits 1 at once.
+A <ref_file> that cannot be found is reported as `touch: stat '`<ref_file>`':` and the error.
+A <time> of the wrong length is reported as `touch: Invalid date format length`, and one of the right length that does not parse as `touch: strptime` <time>`: Invalid date format`; a 20-character `-d` <time> that does not end in `Z` is `touch: Invalid time zone`.
+These exit 1, as does a wrong flag or no <file>, after the usage message.
+
+# BUGS
+
+The first <file> that fails ends `touch`: the ones after it are left alone.
+
+`-d` takes no fractions of a second, no space in place of the `T`, and no time zone but `Z`; and `Z` changes nothing, since the time is read as local time either way.
+
+The message for a <time> of the wrong length does not name it.
+
+On VectraOS only the creation of a new file has been tested; setting given times, `-r` and `-c` are untested.

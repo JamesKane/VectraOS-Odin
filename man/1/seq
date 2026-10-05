@@ -1,0 +1,59 @@
+page=seq sect=1 summary="print a sequence of numbers"
+    src=third_party/sbase/seq.c
+    keys=sequence,numbers,count,range,loop
+
+# SYNOPSIS
+
+```usage
+seq [-f fmt] [-s sep] [-w] [startnum [step]] endnum
+```
+
+# DESCRIPTION
+
+`seq` prints the numbers from <startnum> to <endnum>, <step> apart, one to a line.
+<startnum> and <step> are 1 when left out, and a negative <step> counts down.
+Numbers are floating-point, written as C's `strtod` reads them.
+By default each is printed with as many digits after the point as the most any of the arguments has, so `seq 1 .5 2` prints `1.0`, `1.5` and `2.0`.
+
+: `-f` <fmt>
+  Print each number with the C format <fmt>, which must hold exactly one floating-point conversion (`%f`, `%g`, `%e`, `%a` or their capitals, with flags, width, precision and `L`); `%%` is a `%`.
+: `-s` <sep>
+  Separate the numbers with <sep> instead of a newline; a newline still ends the output.
+  <sep> is used as it is, its backslashes included.
+: `-w`
+  Pad the numbers with leading zeros to one width.
+
+A <startnum> that begins with `-` is read as a flag; put `--` before it.
+
+`seq` is not in POSIX.
+It is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/seq`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/seq`.
+There is no native `seq`.
+
+# EXAMPLES
+
+As `tests/posix/sbasetest.c` runs it in the POSIX namespace:
+
+```text
+% seq 3
+1
+2
+3
+```
+
+# SEE ALSO
+
+printf(1), namespace(6); sbase's page is `third_party/sbase/seq.1` in the repository
+
+# DIAGNOSTICS
+
+A <fmt> that `seq` refuses is reported on standard error as `seq: %d: invalid format`, and it exits 1.
+A number it cannot read, or the wrong number of arguments, prints a message or the usage message and exits 1.
+When the sequence is empty, because <step> is 0 or points away from <endnum>, `seq` prints nothing, not even a newline, and exits 1.
+Otherwise it exits 0, or 1 if the output could not be written.
+
+# BUGS
+
+Each number is the last plus <step>, in floating point, so a long run with a <step> such as `0.1` can drift and lose its last number.
+
+Untested on VectraOS beyond the example.

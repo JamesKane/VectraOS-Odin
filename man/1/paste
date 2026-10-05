@@ -1,0 +1,48 @@
+page=paste sect=1 summary="merge corresponding or subsequent lines of files"
+    src=third_party/sbase/paste.c,third_party/sbase/libutil/unescape.c
+    keys=merge,join,columns,lines,delimiter,posix
+
+# SYNOPSIS
+
+```usage
+paste [-s] [-d list] file ...
+```
+
+# DESCRIPTION
+
+`paste` joins the lines of its files and writes the result on standard output.
+It reads each <file> named; a <file> of `-` is standard input.
+Without `-s` it writes the first lines of all the files as one line, then the second lines, and so on until every file is at its end, each line's parts separated by a tab.
+A file that ends early contributes empty parts.
+
+: `-s`
+  Join the lines of each <file> in turn instead: each file's lines become one line, separated by tabs.
+: `-d` <list>
+  Separate the parts with the characters of <list> in turn, starting again from the first when it runs out, instead of with tabs.
+  Without `-s` the list starts again on each output line; with `-s`, on each file.
+  <list> may hold the escapes `\n`, `\t`, `\\`, `\0`, which is no separator at all, and the others `printf`'s format takes (see printf(1)).
+  Characters are UTF-8, so a separator may be any character.
+
+`paste` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/paste`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/paste`.
+There is no native `paste`.
+
+# SEE ALSO
+
+cut(1), join(1), namespace(6); sbase's page is `third_party/sbase/paste.1` in the repository
+
+# DIAGNOSTICS
+
+With no <file>, an unknown flag or an empty <list>, `paste` prints its usage message on standard error and exits 1; an escape it does not know in <list> is reported as `invalid escape sequence` and it exits 1.
+A <file> that cannot be opened is reported as `paste: fopen` <file>`:` and the error, and `paste` exits 1 at once, having written nothing.
+Otherwise the exit status is 0, or 1 if a file could not be read or the output written.
+
+# BUGS
+
+A <file> that cannot be opened ends `paste` before anything is written, rather than being reported and left out.
+
+`-d ''`, an empty <list>, is a usage error; `-d '\0'` gives no separator.
+
+With `-s`, a file whose last line has no newline gives an output line with none.
+
+Untested on VectraOS: `tests/posix/sbasetest.c` does not run it.

@@ -1,0 +1,61 @@
+page=nl sect=1 summary="number lines"
+    src=third_party/sbase/nl.c
+    keys=number,lines,line,numbering,page
+
+# SYNOPSIS
+
+```usage
+nl [-p] [-b type] [-d delim] [-f type] [-h type] [-i num] [-l num]
+   [-n format] [-s sep] [-v num] [-w num] [file]
+```
+
+# DESCRIPTION
+
+`nl` copies <file>, or standard input when there is no <file> or it is `-`, to standard output, numbering lines.
+A numbered line is preceded by its number, right-aligned in 6 columns, and a tab.
+It is sbase's command, in `/boot/bin/posix`: the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) binds that directory before `/boot/bin` on `/bin`, so a POSIX program finds it there.
+
+The input is read as logical pages, each a header, a body and a footer.
+A line holding only the delimiter three times starts a header, twice a body, and once a footer; the delimiter is `\:`, and the line itself is not copied.
+Input before any such line is body.
+Numbering starts again at each logical page.
+
+: `-b` <type>
+  How to number body lines; the default is `t`.
+  The types are `a`, every line; `t`, every non-empty line; `n`, none; and `p`<expr>, the lines that match the basic regular expression <expr>.
+: `-d` <delim>
+  Use <delim> as the delimiter; a single character is followed by `:`.
+: `-f` <type>
+  How to number footer lines; the default is `n`.
+: `-h` <type>
+  How to number header lines; the default is `n`.
+: `-i` <num>
+  Add <num> to the number for each numbered line, instead of 1.
+: `-l` <num>
+  With type `a`, count <num> empty lines in a row as one, numbering only the last of each group.
+: `-n` <format>
+  Write numbers right-aligned (`rn`, the default), left-aligned (`ln`), or right-aligned with leading zeros (`rz`).
+: `-p`
+  Do not start numbering again at logical pages.
+: `-s` <sep>
+  Write <sep>, in which backslash escapes such as `\t` are understood, after each number instead of a tab.
+: `-v` <num>
+  Start each logical page at <num>, instead of 1.
+: `-w` <num>
+  Write numbers <num> columns wide, instead of 6.
+
+# SEE ALSO
+
+cat(1); sbase's page is `third_party/sbase/nl.1` in the repository
+
+# DIAGNOSTICS
+
+A <file> that cannot be opened is `nl: fopen x: ` and the error, and exits 1.
+A bad <type> or more than one <file> prints the usage message and exits 1; an unknown <format> is `nl: x: bad format`, an empty <delim> `nl: empty logical page delimiter`, and a malformed <expr> or <num> is reported, each exiting 1.
+Otherwise the exit status is 0, or 1 when the output could not be written.
+
+# BUGS
+
+A delimiter line is dropped, where POSIX has it written as an empty line.
+
+Untested on VectraOS.

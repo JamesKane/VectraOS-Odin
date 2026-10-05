@@ -443,6 +443,30 @@ test_9front_builtins :: proc(t: ^testing.T) {
 	rc.trap(b.sh, .Int)
 	expect_out(t, b, "echo next", "caught\nnext\n")
 	_ = script(b, "fn sigint")
+	// Which function a note runs: 9front's words, and VectraOS's notes as signals.
+	Note_Case :: struct {
+		note: string,
+		want: Maybe(rc.Sig),
+	}
+	notes := []Note_Case {
+		{"interrupt", .Int},
+		{"hangup", .Hup},
+		{"sys: fp: divide by zero", .Fpe},
+		{"sys: trap: arithmetic pc=0x401000", .Fpe},
+		{"term", .Term},
+		{"posix: SIGTERM pid=12", .Term},
+		{"posix: SIGQUIT", .Quit},
+		{"posix: SIGQUIT pid=4", .Quit},
+		{"posix: SIGUSR1 pid=4", nil},
+		{"sys: trap: fault read", nil},
+	}
+	for c in notes {
+		got: Maybe(rc.Sig)
+		if s, ok := rc.note_trap(c.note); ok {
+			got = s
+		}
+		testing.expectf(t, got == c.want, "%q runs %v, want %v", c.note, got, c.want)
+	}
 	rc.trap(b.sh, .Hup)
 	expect_result(t, b, "echo never", .Exit)
 	testing.expect_value(t, string(b.host.out[:]), "")

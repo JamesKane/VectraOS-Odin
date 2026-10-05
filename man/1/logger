@@ -1,0 +1,40 @@
+page=logger sect=1 summary="make entries in the system log"
+    src=third_party/sbase/logger.c
+    keys=syslog,log,message,priority,facility
+
+# SYNOPSIS
+
+```usage
+logger [-is] [-p priority] [-t tag] [message ...]
+```
+
+# DESCRIPTION
+
+`logger` sends a message to the system log with the C library's `syslog`.
+The message is the <message> words joined by spaces; with none, each line of standard input is sent as a message of its own.
+It is sbase's command, in `/boot/bin/posix`: the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) binds that directory before `/boot/bin` on `/bin`, so a POSIX program finds it there.
+
+: `-i`
+  Add the process's id to each message, after the tag.
+: `-p` <priority>
+  Send at <priority>, written <facility>`.`<level> by name, as `user.err` or `local0.info`, in either case; the default is level `notice`.
+: `-s`
+  Write each message on standard error as well, as <tag>`: `<message>.
+: `-t` <tag>
+  Begin each message with <tag>; the default is the login name, from `$LOGNAME`.
+
+# SEE ALSO
+
+logname(1); sbase's page is `third_party/sbase/logger.1` in the repository
+
+# DIAGNOSTICS
+
+A <priority> that is malformed or names no facility or level is `logger: invalid priority name: x`, and exits 1.
+Otherwise the exit status is 0, whether or not a message reached a log.
+
+# BUGS
+
+VectraOS has no system log: the C library sends to the socket `/dev/log`, but its sockets are the network's only (no `AF_UNIX`), so every message is lost without a word.
+With `-s` it still reaches standard error.
+
+With no `-t` and no `$LOGNAME`, which nothing on VectraOS sets, the tag is empty, and `-s` writes `: ` before each message.

@@ -1,0 +1,49 @@
+page=flock sect=1 summary="run a command holding a lock on a file"
+    src=third_party/sbase/flock.c
+    keys=lock,file,exclusive,shared,mutex,posix
+
+# SYNOPSIS
+
+```usage
+flock [-nosux] file cmd [arg ...]
+```
+
+# DESCRIPTION
+
+`flock` opens <file>, creating it, mode 0644 less the umask, if it does not exist, takes a lock on it with the C library's `flock`, and runs <cmd> with the <arg>s, found in the directories of `PATH`, as a child.
+When <cmd> exits `flock` closes <file>, which lets the lock go, and exits as <cmd> did.
+By default it takes an exclusive lock, and waits until it can.
+
+: `-x`
+  Take an exclusive lock, the default.
+: `-s`
+  Take a shared lock.
+: `-u`
+  Remove a lock instead of taking one.
+: `-n`
+  Do not wait: if the lock is held elsewhere, exit 1 at once without running <cmd>.
+: `-o`
+  Close <file> in the child before running <cmd>, so the lock is not held by <cmd> nor by anything it leaves running.
+
+`flock` is sbase's, and found only in the POSIX namespace: `/boot/bin/posix/flock` is a hard link to `sbase-box`, which runs the command its name names, and `/lib/ns/posix` (a manifest's `ns=posix`, see namespace(6)) binds `/boot/bin/posix` before `/boot/bin` on `/bin`, so a POSIX program that runs `flock` finds it there.
+There is no native `flock`.
+
+# SEE ALSO
+
+lock(5); sbase's page is `third_party/sbase/flock.1` in the repository
+
+# DIAGNOSTICS
+
+Messages go to standard error, prefixed `flock: `, with the system's reason, as `flock: flock: Function not implemented`.
+`flock` exits 1 when it cannot open <file>, lock it, start <cmd> or wait for it, and 1 at once with no message when `-n` finds the lock held.
+A <cmd> that is not found makes the child exit 127, and one that cannot be run 126.
+A <cmd> killed by a signal makes `flock` exit 128 and the signal's number; otherwise it exits as <cmd> did.
+A bad flag, or fewer than two arguments, prints the usage message and exits 1.
+
+# BUGS
+
+`flock` does not work on VectraOS: the POSIX layer does not implement the `flock` system call, so every lock fails, as `flock: flock: Function not implemented`, exit 1, and the console shows `vx-musl: system call 73 is not implemented` once on x86_64 (32 on aarch64).
+The POSIX layer's locks are `fcntl`'s, which 9Px's Tlock carries (see lock(5)); `flock` does not use them.
+This is read from the code; untested on VectraOS.
+
+`-n` exits 1 when the lock is held, the same status as any error, so a script cannot tell the two apart.

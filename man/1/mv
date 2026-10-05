@@ -1,0 +1,47 @@
+page=mv sect=1 summary="move or rename files"
+    src=third_party/sbase/mv.c,third_party/sbase/libutil/enmasse.c,third_party/sbase/libutil/cp.c,third_party/sbase/libutil/rm.c
+    keys=move,rename,file,directory
+
+# SYNOPSIS
+
+```usage
+mv [-f] source ... dest
+```
+
+# DESCRIPTION
+
+`mv` renames <source> to <dest>.
+When <dest> is a directory, or there are several <source>s, each <source> is moved into <dest> under its last element; with several, <dest> must be a directory.
+It is sbase's command, in `/boot/bin/posix`: the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) binds that directory before `/boot/bin` on `/bin`, so a POSIX program finds it there.
+
+What is already at the new name is replaced, as `rename` does: a file by a file, a directory by an empty directory.
+A rename works within one file server only (see link(5)).
+When it fails because the new name is on another, `mv` copies <source> there instead, with its contents, subdirectories, symbolic links as links, modes and times, then removes <source>, leaving it if the copy failed.
+
+: `-f`
+  Accepted and ignored: `mv` never asks before replacing.
+
+# EXAMPLES
+
+sbase's test (`tests/posix/sbasetest.c`) runs this in the POSIX namespace, within tmpfs(4), and checks that it exits 0 and that the file is then at its new name:
+
+```text
+mv /tmp/sb/sub/g /tmp/sb/h
+```
+
+# SEE ALSO
+
+cp(1), rm(1), ln(1), link(5); sbase's page is `third_party/sbase/mv.1` in the repository
+
+# DIAGNOSTICS
+
+A rename that fails for any reason but another server is reported, as `mv: a -> b: ` and the error, and the next <source> is tried; a <source> that is already <dest> is `mv: a -> b: same file`.
+Several <source>s and a <dest> that is not a directory is `mv: x: not a directory`, and exits 1 before anything is moved.
+If anything failed, or a copy or the removal after it did, the exit status is 1.
+
+# BUGS
+
+There is no `-i`: `mv` never asks.
+
+The copy between servers is untested on VectraOS, and is not atomic: a failure part way leaves a partial copy at <dest> and all of <source>.
+fsd(4) renames only within one branch, and a rename between two of its branches is refused with `bad message` rather than answered with a copy.

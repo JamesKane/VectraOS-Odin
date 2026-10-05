@@ -1,0 +1,42 @@
+page=setsid sect=1 summary="run a command in a new session"
+    src=third_party/sbase/setsid.c,ports/musl/vx/process.c
+    keys=session,process,group,detach,daemon
+
+# SYNOPSIS
+
+```usage
+setsid [-f] cmd [arg ...]
+```
+
+# DESCRIPTION
+
+`setsid` runs <cmd>, found on `$PATH`, with the <arg>s, in a new session and process group of its own, with no controlling terminal.
+A process group leader cannot start a session, so when `setsid` is one it first forks, and the parent exits 0 at once, without waiting for <cmd>; otherwise <cmd> replaces `setsid` in the same process.
+
+: `-f`
+  Always fork, so `setsid` returns at once.
+
+On VectraOS the C library starts the session by writing `setsid` to the process's `ctl` file in procfs(4), which gives it a session and a note group named by its pid; `/proc` must be in the namespace, as `/lib/ns/posix` puts it.
+
+`setsid` is not in POSIX.
+It is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/setsid`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/setsid`.
+There is no native `setsid`.
+
+# SEE ALSO
+
+procfs(4), ptyd(4), namespace(6); sbase's page is `third_party/sbase/setsid.1` in the repository
+
+# DIAGNOSTICS
+
+Messages go to standard error, after the name `setsid` was run by.
+`setsid: fork:` or `setsid: setsid:` and the error means no session was made, and the exit status is 1.
+When <cmd> cannot be run, `setsid: execvp` <cmd>`:` and the error is reported, and the exit status is 127 if it was not found, 126 otherwise.
+With no <cmd> or an unknown flag `setsid` prints its usage message and exits 1.
+Otherwise the exit status is <cmd>'s, or 0 from the parent that forked.
+
+# BUGS
+
+When `setsid` forks, <cmd>'s exit status is lost: the parent has already exited 0.
+
+Untested on VectraOS: `tests/posix/sbasetest.c` does not run it.

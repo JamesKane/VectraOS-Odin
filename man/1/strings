@@ -1,0 +1,46 @@
+page=strings sect=1 summary="print strings of printable characters in files"
+    src=third_party/sbase/strings.c
+    keys=printable,text,binary,extract,offset
+
+# SYNOPSIS
+
+```usage
+strings [-a] [-n num] [-t format] [file ...]
+```
+
+# DESCRIPTION
+
+`strings` reads each <file>, or standard input with none, as UTF-8, and writes each run of at least 4 printable characters it finds, one run to a line.
+A character is printable as Unicode's tables say, so a run may hold letters of any script; a <file> of `-` is standard input.
+
+: `-a`
+  Accepted and ignored: every <file> is read whole, as POSIX asks of `-a`.
+: `-n` <num>
+  Write runs of at least <num> characters, not 4; <num> is 1 or more.
+: `-t` <format>
+  Write before each run its offset in the file, in decimal (`d`), octal (`o`) or hexadecimal (`x`), right-justified in 8 columns and followed by `: `.
+
+`strings` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/strings`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/strings`.
+There is no native `strings`.
+
+# SEE ALSO
+
+od(1), utf(6); sbase's page is `third_party/sbase/strings.1` in the repository
+
+# DIAGNOSTICS
+
+Messages go to standard error, after the name `strings` was run by.
+A <file> that cannot be opened is reported as `strings: fopen` <file>`:` and the error, and the next is read.
+A bad <num> is reported as `strtonum` <num>`:` and why, and exits 1; an unknown flag or <format> prints the usage message and exits 1.
+The exit status is 1 if any <file> failed or the output could not be written, otherwise 0.
+
+# BUGS
+
+POSIX's `-t` writes the offset and a space; `strings` writes it padded to 8 columns, with a colon.
+
+The offset is wrong after a character of more than one byte: `strings` counts the run's characters back from the bytes read, as if each were one byte.
+
+Bytes that are not UTF-8 are skipped without ending a run, so a run may span them.
+
+`strings` is untested on VectraOS.

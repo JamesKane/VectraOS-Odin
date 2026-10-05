@@ -1,0 +1,61 @@
+page=cut sect=1 summary="cut out selected parts of each line"
+    src=third_party/sbase/cut.c
+    keys=columns,fields,delimiter,select,bytes,characters
+
+# SYNOPSIS
+
+```usage
+cut -b list [-n] [file ...]
+cut -c list [file ...]
+cut -f list [-d delim] [-s] [file ...]
+```
+
+# DESCRIPTION
+
+`cut` prints the selected parts of each line of each <file>, or of standard input, as a line.
+A <file> of `-` is standard input.
+
+A <list> is numbers and ranges separated by commas or blanks, counted from 1: `N`, `N-M`, `N-` (from <N> to the end) or `-M` (from the start to <M>).
+They may come in any order and overlap; each part is printed once, in the order it is in the line.
+
+: `-b` <list>
+  Select bytes.
+: `-n`
+  With `-b`, do not split a UTF-8 character: a range ending inside one ends before it.
+: `-c` <list>
+  Select characters, which are UTF-8 decoded.
+: `-f` <list>
+  Select fields, which are separated by the delimiter, a tab unless `-d` says otherwise; the fields printed are joined by it.
+  A line with no delimiter in it is printed whole.
+: `-d` <delim>
+  Separate fields by <delim>, a string, in which backslash escapes such as `\t` are understood.
+: `-s`
+  With `-f`, leave out lines with no delimiter.
+
+`cut` is sbase's, a hard link to `/boot/bin/posix/sbase-box`; there is no native one.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so a POSIX program finds it as `/bin/cut`.
+
+# EXAMPLES
+
+From the sbase test, `tests/posix/sbasetest.c`, which runs each command as a shell would:
+
+```text
+input:   a:b:c
+command: cut -d: -f2
+output:  b
+```
+
+# SEE ALSO
+
+paste(1), sed(1), join(1); sbase's page is `third_party/sbase/cut.1` in the repository
+
+# DIAGNOSTICS
+
+No `-b`, `-c` or `-f`, an unknown flag, or a missing argument prints the usage message and exits 1.
+A <list> that is empty or malformed is reported as `cut: empty list` or `cut: bad list value`, and an empty <delim> as `cut: empty delimiter`; each exits 1.
+A <file> that cannot be opened is reported, as `cut: fopen /x: No such file or directory`, and the rest are read; the exit status is then 1.
+
+# BUGS
+
+A <delim> of more than one character is accepted, where POSIX allows one.
+`-b`, `-c` and `-f` may all be given; the last decides the mode, and the lists of all of them are merged.

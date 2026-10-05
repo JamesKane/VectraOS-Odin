@@ -1,0 +1,31 @@
+page=whoami sect=1 summary="print the user's name"
+    src=third_party/sbase/whoami.c
+    keys=user,name,uid,login,identity
+
+# SYNOPSIS
+
+```usage
+whoami
+```
+
+# DESCRIPTION
+
+`whoami` prints the name of the user the process runs as, looked up by its effective user id in the C library's users database, `/etc/passwd`.
+
+`whoami` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/whoami`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/whoami`.
+There is no native `whoami`.
+
+# SEE ALSO
+
+logname(1), users(6); sbase's page is `third_party/sbase/whoami.1` in the repository
+
+# DIAGNOSTICS
+
+A user id with no entry is reported as `whoami: getpwuid` <uid>`: no such user`, or with the error that stopped the lookup, and `whoami` exits 1.
+Any argument prints the usage message and exits 1.
+
+# BUGS
+
+`whoami` cannot work on VectraOS: the C library gives every process the user id 0, and the POSIX namespace has no `/etc/passwd`; VectraOS's users are in its own database, users(6), which the C library does not read.
+It is expected to fail as above; what it says is untested.

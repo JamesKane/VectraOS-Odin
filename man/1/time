@@ -1,0 +1,39 @@
+page=time sect=1 summary="time a command"
+    src=third_party/sbase/time.c
+    keys=timing,elapsed,real,user,system,clock,benchmark
+
+# SYNOPSIS
+
+```usage
+time [-p] cmd [arg ...]
+```
+
+# DESCRIPTION
+
+`time` runs <cmd> with its <arg>s, found by the `PATH` environment variable as a shell would, waits for it to finish, and writes on standard error how long it took, as POSIX's `-p` format has it: three lines, `real`, `user` and `sys`, each a space and a number of seconds with six decimal places.
+`real` is the time that passed, `user` and `sys` the processor time <cmd> and its children spent in user mode and in the system.
+
+: `-p`
+  Accepted and ignored: this format is the only one.
+
+`time` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/time`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/time`.
+There is no native `time`.
+
+# SEE ALSO
+
+sleep(1), rc(1); sbase's page is `third_party/sbase/time.1` in the repository
+
+# DIAGNOSTICS
+
+The exit status is <cmd>'s.
+If <cmd> cannot be run, `time` reports `time: execvp` <cmd>`:` and the error, and the status is 127 when <cmd> was not found and 126 otherwise.
+If <cmd> is killed by a signal, `time` writes `Command terminated by signal` and its number before the times, and the status is 128 and the signal's number.
+With no <cmd>, or an unknown flag, it prints the usage message and exits 1.
+
+# BUGS
+
+VectraOS's C library does not implement the `times` system call (`ports/musl/vx/backend.c` has no case for it), which `time` takes every figure from.
+The call's failure is not the one `time` checks for, so it goes on: `real` is written as 0, and `user` and `sys` are whatever the uninitialized memory held.
+The first call in a process writes `vx-musl: system call` and its number `is not implemented` on the debug console.
+`time` is untested on VectraOS.

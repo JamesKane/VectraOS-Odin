@@ -1,0 +1,64 @@
+page=cp sect=1 summary="copy files"
+    src=third_party/sbase/cp.c,third_party/sbase/libutil/cp.c
+    keys=copy,duplicate,files,recursive
+
+# SYNOPSIS
+
+```usage
+cp [-afipv] [-R [-H | -L | -P]] source ... dest
+```
+
+# DESCRIPTION
+
+`cp` copies <source> to <dest>.
+If <dest> is a directory, or there is more than one <source>, each <source> is copied into <dest> under its last name, and <dest> must then be a directory.
+A file is copied by creating <dest> with the source's mode, or truncating it if it exists, and writing the source's bytes to it.
+
+: `-R`, `-r`
+  Copy directories and their contents, recursively, making each directory that does not exist; without it a directory is reported and skipped.
+  Symbolic links are copied as links.
+: `-H`, `-L`, `-P`
+  With `-R`: follow symbolic links named as a <source> only; follow every symbolic link; or follow none, the default.
+  Without `-R` every link is followed.
+: `-a`
+  Copy as an archive: `-R`, `-P` and `-p`, and special files are made anew rather than read.
+: `-f`
+  If <dest> cannot be opened, remove it and try again.
+: `-i`
+  Ask, on standard error, before overwriting a file that exists; only an answer beginning `y` or `Y` copies it.
+: `-p`
+  Keep each file's access and modification times, owner, group and mode.
+: `-v`
+  Print `source -> dest` for each file copied.
+
+`cp` is sbase's, a hard link to `/boot/bin/posix/sbase-box`; there is no native one.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so a POSIX program finds it as `/bin/cp`.
+
+# EXAMPLES
+
+From the sbase test, `tests/posix/sbasetest.c`, which runs each command as a shell would, on tmpfs(4):
+
+```text
+command: cp /tmp/sb/f /tmp/sb/sub/g
+output:  (none; exit status 0)
+```
+
+# SEE ALSO
+
+mv(1), ln(1), xinstall(1), tmpfs(4); sbase's page is `third_party/sbase/cp.1` in the repository
+
+# DIAGNOSTICS
+
+Fewer than two arguments or an unknown flag prints the usage message and exits 1.
+With more than two arguments and a <dest> that is not a directory it says `cp: /x: not a directory` and exits 1.
+A <source> that cannot be copied is reported, as `cp: stat /x: No such file or directory` or `cp: /d is a directory`, and the rest are copied; the exit status is then 1.
+
+# BUGS
+
+A <source> and <dest> that are the same file are reported as `same file` and skipped, but the exit status stays 0.
+
+With `-a`, a device, FIFO or socket is made with `mknod`, which the C library does not implement on VectraOS, so it fails with `Function not implemented`.
+With `-p` or `-a`, whether the owner and group can be set depends on the file server; a failure is reported and the exit status is 1.
+Neither is tested on VectraOS.
+
+Hard links are not kept: each name of a file is copied as a file of its own.

@@ -1,0 +1,26 @@
+page=true sect=1 summary="do nothing, successfully"
+    src=third_party/sbase/true.c
+    keys=success,status,exit,nothing
+
+# SYNOPSIS
+
+```usage
+true
+```
+
+# DESCRIPTION
+
+`true` does nothing and exits 0.
+It ignores any arguments.
+
+`true` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/true`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/true`.
+There is no native `true`.
+
+# SEE ALSO
+
+false(1), test(1); sbase's page is `third_party/sbase/true.1` in the repository
+
+# DIAGNOSTICS
+
+None: the exit status is always 0.

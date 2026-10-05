@@ -1049,26 +1049,16 @@ wait_builtin :: proc "contextless" (argv: ^rc.Word, argc: int) -> bool {
 	return true
 }
 
-// Notes, to rc's functions for them (rc's notifyf): what rc has a name for,
-// sigint and the rest; any other, as the system does by default.
+// Notes, to rc's functions for them (rc's notifyf): what rc has a name for
+// (rc.note_trap), sigint and the rest; any other, as the system does by
+// default.
 on_note :: proc "contextless" (e: ^vx.Exception, note: string) -> rt.Noted {
-	NAMES := [rc.Sig]string {
-		.Exit = "exit",
-		.Hup  = "hangup",
-		.Int  = "interrupt",
-		.Quit = "quit",
-		.Alrm = "alarm",
-		.Kill = "kill",
-		.Fpe  = "sys: fp: ",
-		.Term = "term",
+	sig, ok := rc.note_trap(note)
+	if !ok {
+		return .Dflt
 	}
-	for name, sig in NAMES {
-		if sig != .Exit && str.has_prefix(note, name) {
-			rc.trap(&sh, sig)
-			return .Cont
-		}
-	}
-	return .Dflt
+	rc.trap(&sh, sig)
+	return .Cont
 }
 
 // --- The shell ---

@@ -1,0 +1,47 @@
+page=uudecode sect=1 summary="decode a uuencoded file"
+    src=third_party/sbase/uudecode.c
+    keys=uuencode,decode,base64,binary,mail
+
+# SYNOPSIS
+
+```usage
+uudecode [-m] [-o output] [file]
+```
+
+# DESCRIPTION
+
+`uudecode` decodes what uuencode(1) made, read from <file> or, if there is none or it is `-`, from standard input.
+The first line is the header: `begin`, the file's mode and its name for the traditional encoding, or `begin-base64`, the mode and the name for Base64.
+The decoded bytes are written to the file the header names, created or truncated, whose mode is then set to the header's, octal or symbolic as chmod(1) takes it.
+A name of `-` or `/dev/stdout` is standard output.
+The traditional encoding ends at a line `end`, and Base64 at `====`.
+
+For safety, `uudecode` writes only a regular file, a new one, or standard output: a name that is a link, a directory or a device is refused.
+
+: `-o` <output>
+  Write to <output> instead of the name in the header.
+: `-m`
+  Accepted, and ignored: the encoding is told from the header.
+
+`uudecode` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/uudecode`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/uudecode`.
+There is no native `uudecode`.
+
+# SEE ALSO
+
+uuencode(1), chmod(1); sbase's page is `third_party/sbase/uudecode.1` in the repository
+
+# DIAGNOSTICS
+
+A bad header is reported as `empty or nil header string`, `malformed mode string in header, expected ' '`, `header string does not contain output file` or `unknown header`; bad data as `character` <c> `out of range`, `invalid byte`, or a line number and `unexpected "=" appeared`; a missing end as `invalid uudecode footer "end" not found` or its `====` form.
+A file that is not regular is `for safety uudecode operates only on regular files and /dev/stdout`.
+Each, prefixed `uudecode:`, exits 1, as do open, read, write and `chmod` errors and the usage message.
+
+# BUGS
+
+The name in the header is used as it is: an absolute path, or one with `..`, writes wherever the user may.
+Only the first encoded file in the input is decoded.
+
+The message for an unknown header ends with an unrelated error string.
+
+`uudecode` is untested on VectraOS.

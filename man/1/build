@@ -75,7 +75,7 @@ The network is QEMU's user networking on virtio-net, where the guest is 10.0.2.1
 
 @node=test title="test"
 
-`test` runs the test scenarios, each a file `tests/qemu/<scenario>.ndb`: those named, or all of them, at most 64.
+`test` runs the test scenarios, each a file `tests/qemu/<scenario>.ndb`: those named, or all of them but the release gates, at most 64.
 It builds the image and the host programs the scenarios use (`vx9pserve`, `u9fs` and `vxfs`), then, for each architecture at once, boots each scenario's machine headless under QEMU, as `qemu` does, and watches its serial console for what the scenario expects.
 On x86_64 it uses KVM when it can, unless `--tcg` says not to.
 
@@ -99,6 +99,8 @@ The first is `scenario=` and the scenario's name, with these attributes:
   Test programs, and their manifests from `tests/user/<name>.ndb`, put in this image's bootfs; also script tests.
 : `alone`
   Run by itself, after the rest.
+: `release`
+  A release gate, not a milestone's: run only when named (`./build test install`), not when `test` runs them all.
 : `arch=`<arch>
   Run on that architecture only; skipped on the other.
 : `disk=`<mib>
@@ -156,7 +158,7 @@ It exits with status 1 if the kernel is over its budget of 25000 lines (`docs/01
 
 `man` shows a page of `man/` as man(1) shows it, so the manual can be read before an image boots: the page <title> in the first of the <section>s that has one, or in any section, filled to the terminal's width, or 80 columns, and only its node <node> if one is given.
 
-With `--check` it runs the manual's pass of `check` alone, in milliseconds: every page parsed, its headings in order, its links resolved, its fences within 80 columns; every program, server, driver, system call, 9Px message and format either documented or listed in `man/missing`, and nothing listed that is documented; every program with a page taking its usage message from the page's usage fence.
+With `--check` it runs the manual's pass of `check` alone, in milliseconds: every page parsed, its headings in order, its links resolved, its fences within 80 columns; every program, server, driver, system call, 9Px message and format either documented or listed in `man/missing`, and nothing listed that is documented; every program with a page taking its usage message from the page's usage fence; each format with a key table (a `.def` file of `KEY` lines) defining exactly its keys on its page.
 It writes the index, `out/man/index/base`, and fails if the pass takes more than 200 ms.
 
 The usage fences are where the native programs' usage messages come from: a program whose page has one is compiled with a header, `out/gen/usage/<name>.h`, that defines `VX_USAGE` from the fence's lines that start with its name.

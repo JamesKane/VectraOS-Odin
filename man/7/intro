@@ -6,9 +6,33 @@ page=intro sect=7 summary="introduction to the concepts"
 Section 7 explains the ideas the rest of the manual takes for granted, as Plan 9's papers did: namespaces and how they are made; rings, which carry 9Px and bulk data between processes; how time and waiting work; and how the system is installed and updated.
 A reader new to the system starts here, before the reference pages of the other sections.
 
-Its pages are still to be written.
-Until they are, the design documents in the source tree, `docs/`, say what the system is meant to be.
+The pages, in the order a newcomer might read them:
+
+: services(7)
+  How the system comes up and runs: Limine, the kernel, svcd and its manifests, devmgr and the drivers.
+: namespace(7)
+  Per-process namespaces: names, mount and bind, unions, `/srv`, and how a process gets its own.
+: handles(7)
+  Kernel objects, handles and their rights, what a service is granted, and users.
+: rings(7)
+  Channels and rings, which carry 9Px and bulk data between processes.
+: sharing(7)
+  Structured data shared without serialising: VMOs, mappings, file mappings and open files.
+: notes(7)
+  Notes, note groups, signals, exceptions and crash directories.
+: time(7)
+  The clock, deadlines, futexes, ports and the scheduler.
+: storage(7)
+  Disks, the system volume, branches and snapshots, and the other file systems.
+: updates(7)
+  Releases, the content store, installing, boot slots, apply and rollback.
+: posix(7)
+  The POSIX environment: musl on VectraOS, sbase's commands, and what is missing.
+: manual(7)
+  The manual itself: its sections, its format, its index and its check.
+
+Each explains what is built now; what the design documents in `docs/` plan beyond it is in its BUGS.
 
 # SEE ALSO
 
-intro(1)
+intro(1), and the pages above

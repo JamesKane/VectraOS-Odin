@@ -1,0 +1,34 @@
+page=nohup sect=1 summary="run a command immune to hangups"
+    src=third_party/sbase/nohup.c
+    keys=hangup,sighup,background,detach,terminal
+
+# SYNOPSIS
+
+```usage
+nohup cmd [arg ...]
+```
+
+# DESCRIPTION
+
+`nohup` runs <cmd> with its <arg>s in its place, found on `$PATH`, with the hangup signal (`SIGHUP`) ignored, so that it goes on when its terminal hangs up.
+If standard output is a terminal, it is sent instead to the end of `nohup.out` in the current directory, made readable and writable by its owner only if it is new; if standard error is a terminal, it goes where standard output goes.
+It is sbase's command, in `/boot/bin/posix`: the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) binds that directory before `/boot/bin` on `/bin`, so a POSIX program finds it there.
+
+A signal ignored is kept ignored by the program run, as POSIX's `exec` keeps it: the C library passes it on when it starts the program.
+
+# SEE ALSO
+
+nice(1), setsid(1), kill(1), ptyd(4); sbase's page is `third_party/sbase/nohup.1` in the repository
+
+# DIAGNOSTICS
+
+When `nohup` cannot ignore the signal, open `nohup.out` or redirect its output, it says so, as `nohup: open nohup.out: ` and the error, and exits 127.
+If <cmd> cannot be run it is reported, as `nohup: execvp x: No such file or directory`, and the exit status is 127 when <cmd> was not found and 126 otherwise; otherwise it is <cmd>'s.
+
+# BUGS
+
+When `nohup.out` cannot be made in the current directory `nohup` gives up, where POSIX has it try `$HOME/nohup.out`.
+It does not say that output is being appended to `nohup.out`.
+
+The ignored signal reaches only programs built on the POSIX C library, which read it as they start; a native program it runs is not protected.
+Untested on VectraOS.

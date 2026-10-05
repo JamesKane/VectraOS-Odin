@@ -1,0 +1,44 @@
+page=pathchk sect=1 summary="check path names for validity and portability"
+    src=third_party/sbase/pathchk.c
+    keys=path,name,portable,portability,length,posix
+
+# SYNOPSIS
+
+```usage
+pathchk [-pP] filename...
+```
+
+# DESCRIPTION
+
+`pathchk` checks that each <filename> could name a file, and with `-p` that it could on any POSIX system.
+It writes nothing for a good name.
+Without `-p` it checks that <filename> is shorter than `PATH_MAX` bytes, 4096, that no component is longer than `NAME_MAX` bytes, 255, and that each directory on the way to it can be searched: any error from looking the name up but `file does not exist` is reported.
+A name that does not exist yet passes, and so does a symbolic link that leads nowhere.
+
+: `-p`
+  Check instead that <filename> uses only the portable file name characters, the letters, digits, `.`, `_`, `-` and `/`, that it is shorter than 256 bytes, and that no component is longer than 14 bytes.
+  The lookup is still made.
+: `-P`
+  Check also that <filename> is not empty and that no component begins with `-`.
+
+`pathchk` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/pathchk`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/pathchk`.
+There is no native `pathchk`.
+
+# SEE ALSO
+
+namespace(6); sbase's page is `third_party/sbase/pathchk.1` in the repository
+
+# DIAGNOSTICS
+
+A bad name is reported on standard error, after the name `pathchk` was run by, as one of <filename>`: nonportable character '`<c>`'`, <filename>`: is longer than` <n> `bytes`, <filename>`: includes component longer than` <n> `bytes`, <filename>`: leading '-' in component of filename`, `empty filename`, or <filename>`:` and the lookup's error; `pathchk` then exits 1.
+With no <filename> or an unknown flag it prints its usage message and exits 1.
+It exits 0 when every name is good.
+
+# BUGS
+
+`pathchk` stops at the first bad name, so the names after it are not checked.
+
+Without `-p`, the limits are the C library's constants, not what the file server holding the name allows: VectraOS's servers are not asked.
+
+Untested on VectraOS: `tests/posix/sbasetest.c` does not run it.

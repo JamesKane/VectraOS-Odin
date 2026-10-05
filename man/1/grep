@@ -1,0 +1,82 @@
+page=grep sect=1 summary="search files for lines matching a pattern"
+    src=third_party/sbase/grep.c
+    keys=search,pattern,regular,expression,match,lines,find,posix
+
+# SYNOPSIS
+
+```usage
+grep [-EFHchilnqsvwx] [-e pattern] [-f file] [pattern] [file ...]
+```
+
+# DESCRIPTION
+
+`grep` reads each <file>, or standard input if there is none, and prints every line that matches a <pattern>; a <file> of `-` is standard input, named `<stdin>`.
+A <pattern> is a basic regular expression, as musl's `regcomp` compiles it, unless `-E` or `-F` says otherwise.
+Without `-e` or `-f` the first argument is the pattern; with them it is a <file>.
+A pattern that holds newlines is several patterns, one a line, and a line matches if any of them matches it.
+With more than one <file>, each line printed is prefixed by its file's name and `:`.
+
+: `-E`
+  The patterns are extended regular expressions.
+: `-F`
+  The patterns are fixed strings, matched as they are.
+: `-e` <pattern>
+  Use <pattern>; it may be given more than once.
+: `-f` <file>
+  Use each line of <file> as a pattern; it may be given more than once.
+: `-c`
+  Print only a count of the matching lines of each <file>.
+: `-l`
+  Print only the name of each <file> that has a matching line, once.
+: `-n`
+  Prefix each line printed with its line number and `:`.
+: `-q`
+  Print nothing; exit 0 at the first matching line.
+: `-H`, `-h`
+  Prefix each line printed with its file's name, or never, however many <file>s there are.
+: `-i`
+  Ignore case in matching.
+: `-s`
+  Do not report a <file> that cannot be opened.
+: `-v`
+  Select the lines that do not match.
+: `-w`
+  Match only whole words: the match must have no letter, digit or `_` next to it on either side.
+: `-x`
+  Match only whole lines.
+
+Of `-c`, `-l`, `-n` and `-q`, the last given wins.
+
+`grep` is sbase's, and found only in the POSIX namespace: `/boot/bin/posix/grep` is a hard link to `sbase-box`, which runs the command its name names, and `/lib/ns/posix` (a manifest's `ns=posix`, see namespace(6)) binds `/boot/bin/posix` before `/boot/bin` on `/bin`, so a POSIX program that runs `grep` finds it there.
+There is no native `grep`.
+
+# EXAMPLES
+
+`tests/posix/sbasetest.c` runs `grep ^c` in the POSIX namespace with the lines `cat`, `dog` and `cow` on standard input, and checks that it prints `cat` and `cow` and exits 0.
+It runs `grep dog` with `cat` alone, and checks that it prints nothing and exits 1.
+
+# SEE ALSO
+
+sed(1), find(1); sbase's page is `third_party/sbase/grep.1` in the repository
+
+# DIAGNOSTICS
+
+A <file> that cannot be opened is reported on standard error, as `grep: fopen /nothing: No such file or directory`, unless `-s` is given.
+A pattern that does not compile is reported as `grep: invalid regex: ` and the reason.
+
+The exit status is 0 if a line was selected, 1 if none was, and 2 on an error: a bad flag or no pattern, which print the usage message, a pattern that does not compile, or a <file> that cannot be opened or read.
+An error wins over a selected line, except with `-q`, which exits 0 at the first.
+
+# BUGS
+
+`-w` is ignored with `-F`: a fixed string matches inside a word.
+
+`-i` with `-F` ignores the case of ASCII letters only.
+
+`-c` with more than one <file> prints the counts alone, one a line, without the files' names that POSIX puts before them.
+
+`-l` names standard input `<stdin>`, not POSIX's `(standard input)`.
+
+A failure of `fmemopen` while reading a pattern exits 1, not 2.
+
+Untested on VectraOS beyond the examples.

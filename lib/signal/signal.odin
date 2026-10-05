@@ -19,6 +19,7 @@ Signal :: distinct i64
 
 SIGHUP :: Signal(1)
 SIGINT :: Signal(2)
+SIGQUIT :: Signal(3)
 SIGILL :: Signal(4)
 SIGTRAP :: Signal(5)
 SIGBUS :: Signal(7)
@@ -27,6 +28,7 @@ SIGKILL :: Signal(9)
 SIGSEGV :: Signal(11)
 SIGPIPE :: Signal(13)
 SIGALRM :: Signal(14)
+SIGTERM :: Signal(15)
 SIGCHLD :: Signal(17)
 SIGCONT :: Signal(18)
 SIGSTOP :: Signal(19)
@@ -92,6 +94,7 @@ PLAN9_NOTES := [?]Plan9_Note {
 	{"sys: trap: fp disabled", SIGILL, true},
 	{"sys: trap: arithmetic", SIGFPE, true},
 	{"sys: trap: misaligned", SIGBUS, true},
+	{"sys: trap: page not supplied", SIGBUS, true}, // a pager that did not answer in time
 	{"sys: breakpoint", SIGTRAP, true},
 	{"sys: trap: step", SIGTRAP, true},
 }

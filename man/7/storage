@@ -1,0 +1,219 @@
+page=storage sect=7 summary="how disks, volumes and file systems fit together"
+    keys=storage,disk,partition,volume,file,system,branch,snapshot,dump,crash,fat,iso
+
+# DESCRIPTION
+
+Storage is a chain of servers, each holding only what the one below hands it.
+A driver serves a whole disk; partd(8) cuts the disk into partitions and serves each as a disk of its own; a file server is given one partition and serves the file system on it as 9Px; and a process sees those files only where its namespace mounts them.
+No server sees a sector it was not given, and none of them is in the kernel.
+
+```text
+  disk ── drv-virtio-blk(3) or drv-nvme(3)       /srv/disk0
+            │ the block class: a ring session for a window of sectors
+          partd(8)                               /srv/disk0.esp
+            │                                    /srv/disk0.system
+      ┌─────┴──────────────┐
+    dosfs(4): the ESP    fsd(4): the system volume
+    /srv/esp             /srv/fsd: store, cfg, home, adm, dump
+            │ 9Px
+          namespaces: mount=/n srv=fsd aname=home, ...
+```
+
+The system volume is vx-fs, a file system of the project's own after 9front's gefs: copy-on-write trees whose every block is checked against a hash its parent holds, so a power cut costs at most the last few seconds of changes and never the volume, and snapshots cost nothing until the trees part.
+Other formats are served by small servers of their own: FAT by dosfs(4), for the EFI system partition and removable media; ISO 9660 by isofs(4), for install media.
+Two file systems have no disk at all: bootfs(4), the boot image, which is the root of nearly every namespace, and tmpfs(4), scratch files in memory.
+
+The servers are started by svcd(8) from manifests (see svc(6)), and drivers by devmgr(8) when it finds their devices; the manifest is what wires one to the next, by naming the post a server connects to (`connect=`) and the post it serves (`post=`, `claim=`).
+
+@node=disks title="Disks and partitions"
+
+A disk is a device of the block class, described in `docs/proto/block.md`.
+devmgr(8) starts a driver for each disk controller it finds on the bus and has a driver for, drv-virtio-blk(3) for a virtio disk and drv-nvme(3) for an NVMe controller, and numbers their posts in the order it finds them: `/srv/disk0` is the first disk, whichever driver serves it.
+A driver reaches its device's memory only through its DMA domain, which the IOMMU enforces where the machine has one (see dma(2)).
+
+A client opens a session by sending `CONNECT` to a disk's post, naming a window of sectors and whether it is read-only; it gets back a ring (see ring(2)) whose requests reach that window and nothing else.
+The requests are few: `INFO`, `READ` and `WRITE` into the client's own arena, `WRITE_FUA`, `FLUSH`, a barrier that completes once everything before it is durable, and `DISCARD`.
+The driver gives the arena to the device, so data moves between the disk and the client's memory without a copy.
+
+partd(8) holds the disk's connector, reads its GUID partition table once with `lib/vx-gpt`, and claims a post for each partition its manifest names, by type GUID or by name.
+A `CONNECT` on a partition's post is checked against the partition and passed to the driver as a window counted in the disk, so the session belongs to the client and the driver alone; partd keeps nothing of it.
+
+A driver that crashes is restarted by devmgr.
+A client loses nothing it had not seen completed: its block client dials the post again until the driver is back, and repeats the requests it had in flight, which the protocol allows.
+
+@node=volume title="The system volume"
+
+fsd(4) serves one vx-fs volume, the system volume, from a block session on its partition.
+The format is vxfs(6); fsd, install(8), and vxfs(8) on the development machine all use `lib/vx-fs`, and nothing else reads or writes it.
+
+The volume is blocks of 16 KiB in arenas, each with a log of what it has taken and freed, and two superblocks, in its first and last blocks.
+Each file system on it is one Bε tree of keys: a file's data by offset, a directory's entries by name, an entry by its qid.
+Nothing written is changed in place; a change copies the path to the root, and the old blocks stay as long as a snapshot reaches them.
+Every block is reached through a pointer that holds its XXH64 hash, so a block read wrongly is found and refused, and the volume turns read-only rather than return it.
+That hash is for failing media and bugs, not for tampering: the release's files are checked against BLAKE2b by distd(8) as well, as {where an installed system keeps what|#layout} says.
+
+fsd serves 9Px with the `posix` and `xattr` extensions, so POSIX programs get modes, owners, times, symbolic links and renames.
+With `pager` in its manifest it is also the system's pager (see pager(2)): a mapped file is a VMO whose pages fsd supplies as they are touched and writes back before each commit, and `Tread` and `Twrite` go through the same pages, so reads, writes and mappings see one file (see map(5)).
+A client with a lot to move can name a VMO of its own instead of carrying the bytes in messages (see dref(5)).
+
+@node=branches title="Branches, snapshots and the dump"
+
+A volume holds several trees and labels that name them.
+A branch is a label that moves to the newest tree at every commit, and is what a client changes; every other label names a snapshot that never changes.
+A snapshot shares every block it has not changed with the tree it came from, so making one costs nothing, and deleting one frees only what it alone held, found through deadlists rather than a collector.
+
+An installed volume has four branches, which install(8) makes:
+
+: `store`
+  The content store: releases' objects and records, which distd(8) serves as `/dist`.
+: `cfg`
+  The machine's configuration, which distd snapshots before it applies a release.
+: `home`
+  The user's files, owned by the first user.
+: `adm`
+  The administrative files: the users, and fsd's `ctl` and `status`.
+
+The attach name picks the tree: `mount /srv/fsd /n home` mounts the `home` branch, and `mount=/n srv=fsd aname=home` in a manifest does the same for a service.
+A snapshot's label attaches that snapshot, read-only.
+The attach name `dump` serves the dated snapshots, labels such as `home@2027-03-14`, as directories by date, `/2027/0314/home`, after Plan 9's dump.
+
+Snapshots are made, forked, rolled back and deleted by writing commands to `/adm/ctl`: `snap`, `fork`, `rollback` and `del` (see fsd(4)).
+A rollback keeps the tree it leaves as a snapshot of its own, `BRANCH@before-N`, and a branch open at the time is rolled back under its clients, whose files then read as the snapshot's.
+fsd makes no snapshot by itself and keeps no policy: labels are made only by whoever writes `ctl`, today distd's `apply` and an administrator.
+
+@node=adm title="Users and the adm branch"
+
+The users are the file `users` at the root of the `adm` branch, in Plan 9's format (see users(6)), and fsd checks every request against the attaching user with Plan 9's permissions.
+Group 0 is the administrators': its members may write `/adm/ctl`, give files away, and attach a branch permissively, `%home`, with no permission checked.
+distd reads the same file to decide who may apply or roll back a release.
+
+The user is the one the attach names, which a service's manifest sets with `user=` and a child inherits from its parent.
+Nothing yet proves it, so the permissions stop mistakes, not a program that names another user.
+
+`/adm/status` gives the volume's last commit, its space, the verdict of its last check, and each label.
+
+@node=crashes title="Commits, power cuts and the checker"
+
+A change is not durable until a commit, and a commit makes every change before it durable at once.
+fsd commits 5 seconds after the first change since the last commit, at each `Tfsync` (see fsync(5)), which waits for its commit, and before each `ctl` command but `del`.
+A crash, or a power cut, loses the changes since the last commit, and nothing older.
+
+A commit is gefs's protocol of phases separated by barriers, the block class's `FLUSH`: the new trees' blocks first, then the arenas' logs and headers, then the superblock, the one write that commits, then the second superblock and the arenas' footers.
+The two superblocks are never in flight together, so a cut can tear at most one; mounting takes the newer whole one and, before it writes anything, makes every other copy agree with it, so a second cut finds them whole too.
+There is nothing to repair after a crash, and no repair tool.
+
+A full volume refuses the change that does not fit and changes nothing; a reserve kept for commits and frees means a full volume can always be emptied.
+
+`ctl`'s `check` walks the mounted volume whole, every block's hash and structure, every tree, snapshot, label and deadlist, and every block in use reached and nothing else, and leaves its verdict in `/adm/status`; `vxfs check` does the same to an image on the development machine.
+The host's power-cut test replays a recorded workload and cuts it at every barrier and between them, landing writes in any order or torn; every cut must mount to the last commit and check clean.
+In QEMU, the `powercut` scenario kills the machine during commits under load, and the next boot finds every synced file whole.
+
+`ctl`'s `halt` commits and then refuses changes, for a clean shutdown.
+
+@node=other title="Other file systems"
+
+: dosfs(4)
+  FAT12, FAT16 and FAT32, read and write, with long names: the EFI system partition, USB sticks and SD cards.
+  FAT has no owners or permissions, so dosfs makes them up, and no journal, so it orders its writes so that a cut leaves lost clusters at worst.
+: isofs(4)
+  ISO 9660, read-only, with Rock Ridge's POSIX names, modes and links, or Joliet's long names: install media and CD images, read from a disk.
+: bootfs(4)
+  The boot image, `bootfs.tar`, which Limine loads beside the kernel and checks against its hash, served read-only from memory.
+  It holds the programs, manifests, namespace files and this manual, and is mounted on `/` in nearly every namespace.
+: tmpfs(4)
+  Files in memory, mounted on `/tmp` by the POSIX template and the console shell; procfs(4) writes crash directories there.
+  It is not restarted, and what it holds is lost when it exits or the machine stops.
+
+None of these has snapshots, a pager or a commit: only the system volume has.
+A tree on another machine is reached over 9P, by mounting it (see namespace(7)), not by reading its disk.
+
+@node=layout title="Where an installed system keeps what"
+
+install(8) erases a disk and gives it two partitions: an EFI system partition, FAT32, 512 MiB unless told otherwise, and the system volume over the rest.
+On each boot from it, the manifest `/boot/svc/system.ndb` starts partd on `disk0`, fsd on the system partition as `/srv/fsd`, dosfs on the ESP as `/srv/esp`, and distd, as `adm`, with the store, the `adm` branch and the ESP in its namespace.
+
+On the ESP, which dosfs serves to distd:
+
+: `\EFI\BOOT\`
+  Limine, at the firmware's fallback path, which the firmware boots.
+: `\EFI\vectra\a`, `b`, `c`
+  The boot slots, each one release's kernel, modules and `bootfs.tar`.
+: `\EFI\vectra\slots.ndb`
+  The slot table (see slots(6)).
+: `\boot\limine\limine.conf`
+  Limine's configuration, made from the table.
+
+On the system volume, which fsd serves:
+
+: `store`
+  The content store: objects under `b2/` (see store(6)) and release records under `records/` (see release(6)), which distd serves as `/dist`.
+: `cfg`
+  The machine's configuration, empty when installed.
+: `home`
+  The user's files.
+: `adm`
+  `users`, `ctl` and `status`.
+
+In memory:
+
+: `/`
+  The running base, the programs in `/boot/bin`, the manifests, `/lib` and this manual, from the slot's `bootfs.tar`, served by bootfs(4).
+: `/tmp`
+  Scratch files, served by tmpfs(4).
+
+The running system's base is the `bootfs.tar` of the slot it booted, checked by Limine against the hash in its configuration.
+The same release's whole tree is in the store, every block of it checked by distd against the release's BLAKE2b hash tree as it is read, at `/dist/releases/`<n>`/tree`; the store is what an update copies from, as updates(7) describes.
+
+# EXAMPLES
+
+What an installed system says as its storage comes up, from the install test's second boot on x86_64 (the other services' lines left out):
+
+```text
+devmgr: 00:02.0 1af4:1042 storage msi-x bar1=4K bar4=16K
+devmgr: started drv-virtio-blk
+drv-virtio-blk: 256 MiB, 512-byte sectors, write cache, discard
+svcd: started sys-partd (task 12)
+partd: /srv/disk0: 2 partitions
+svcd: started sys-fsd (task 14)
+partd: /srv/disk0.esp is sectors 2048-133119 (EFI system partition)
+partd: /srv/disk0.system is sectors 133120-524254 (vectra)
+svcd: started sys-dosfs (task 15)
+dosfs: /srv/disk0.esp: FAT32 "VECTRA", 129008 clusters of 512 bytes
+svcd: started sys-distd (task 16)
+fsd: /srv/disk0.system: commit 4, 1 arenas, 3 users
+fsd: serving /srv/fsd
+distd: 1 releases for x86_64; serving /srv/dist
+```
+
+A file written in the `home` branch, a dated snapshot of it, and the file read back through the dump view, from `tests/user/fsddump.rc`, whose manifest mounts `home` on `/tmp`, `adm` on `/adm` and `dump` on `/n`, and in which `ctl` is a function that writes its words to `/adm/ctl`:
+
+```rc
+% echo first >/tmp/a.txt
+% ctl snap home home@2027-03-14
+% cat /n/2027/0314/home/a.txt
+first
+```
+
+# SEE ALSO
+
+drv-virtio-blk(3), drv-nvme(3), devmgr(8), partd(8), fsd(4), vxfs(6), vxfs(8), users(6), dosfs(4), isofs(4), bootfs(4), tmpfs(4), install(8), distd(8), slots(6), store(6), updates(7), namespace(7); `docs/11-storage.md`, `docs/proto/block.md` and ADR-0025 in the repository; gefs's paper, 9front's `/sys/doc/gefs.ms`
+
+# BUGS
+
+fsd serves one request at a time, so a request that waits for the disk delays every client; it attaches at most 16 branches in a run and keeps each until it exits, and opens at most 32 snapshots, through labels and the dump view together, until it restarts.
+Threads and the pipelined server of M6 step 6d are to lift these.
+
+Who a client is stays advisory until keyd (M10), and POSIX programs see every file owned by user 0 until M6 step 6e.
+
+Nothing makes dated snapshots or drops them: the retention policy of `docs/06-install-update.md` §10, with `/home` snapshotted before an update, has no step yet, and `/home` and `/cfg` are snapshotted only by hand and by distd's `apply`.
+No namespace of an installed system has `/home` or `/cfg` but one whose manifest mounts it; the console shell's has neither.
+
+poweroff(8) stops no service first, so fsd is not halted and a power-off is a crash, which loses the last seconds of changes; an orderly shutdown through svcd is M6 step 6g's.
+drv-nvme trusts a device's volatile write cache to survive a reset, until 6g flushes it first on a real disk.
+
+A hostile volume image can make fsd free live blocks or spin; only the system volume, which the system made, is mounted, and a fuzz target that mounts crafted images is 6d's.
+
+partd and install take disks of 512-byte sectors only.
+A volume cannot grow, and has one device: no mirroring, compression or encryption, for which the format leaves room.
+There is no exFAT, and no ext4 even read-only.
+The design's `fsd -c`, checking an unmounted volume, and `fsd -r`, making one, do not exist.

@@ -1,0 +1,86 @@
+page=od sect=1 summary="dump files in octal and other formats"
+    src=third_party/sbase/od.c,third_party/sbase/libutil/parseoffset.c
+    keys=octal,hexadecimal,hex,dump,bytes,binary,decimal
+
+# SYNOPSIS
+
+```usage
+od [-bdosvx] [-A addressformat] [-E | -e] [-j skip] [-t outputformat] [file ...]
+```
+
+# DESCRIPTION
+
+`od` reads each <file> in order, as one stream, and writes its bytes on standard output as lines of numbers or characters.
+With no <file>, or for a <file> of `-`, it reads standard input.
+
+Each line starts with the offset of its first byte in the stream, then shows the bytes that follow, interpreted as each type asked for.
+A line holds 16 bytes, or the least common multiple of the types' sizes, doubled until it is 16 or more.
+When more than one type is asked for, each shows the same bytes on a line of its own, the offset written only on the first.
+A short last line is padded with zero bytes to a whole value of each type.
+A last line holds the offset after the last byte: the length read.
+With no type, `od` shows the bytes as octal 4-byte words.
+
+: `-A` <addressformat>
+  Write offsets in decimal (`d`), octal (`o`, the default) or hexadecimal (`x`), seven digits at least; or not at all (`n`).
+: `-b`
+  As `-t o1`: octal bytes.
+: `-d`
+  As `-t u2`: unsigned decimal 2-byte words.
+: `-o`
+  As `-t o2`: octal 2-byte words.
+: `-s`
+  As `-t d2`: signed decimal 2-byte words.
+: `-x`
+  As `-t x2`: hexadecimal 2-byte words.
+: `-E`, `-e`
+  Read words of more than one byte as big-endian, or as little-endian.
+  The default is the machine's: little-endian on x86_64 and arm64.
+: `-j` <skip>
+  Skip the first <skip> bytes of the stream.
+  <skip> is decimal, octal with a leading `0` or hexadecimal with a leading `0x`, and may end in `b`, `k`, `m` or `g` for units of 512, 1024, 1024² or 1024³ bytes.
+: `-N` <count>
+  Read no more than <count> bytes after those skipped, written as <skip> is.
+: `-t` <outputformat>
+  Show the bytes as each type <outputformat> lists, in order.
+  `a` is a named character, its high bit ignored, such as `nl` or `sp`; `c` is a character, a C escape such as `\n`, or three octal digits.
+  `d`, `o`, `u` and `x` are signed decimal, octal, unsigned decimal and hexadecimal 4-byte words.
+  Bytes and 2-byte words are had with the flags above.
+: `-v`
+  Accepted and ignored: every line is written, and a run of identical lines is never folded into `*`.
+
+`od` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/od`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/od`.
+There is no native `od`.
+
+# EXAMPLES
+
+As `tests/posix/sbasetest.c` runs it in the POSIX namespace, with `a` and a newline on standard input:
+
+```text
+% echo a | od -b
+0000000 141  12
+0000002
+```
+
+# SEE ALSO
+
+namespace(6); sbase's page is `third_party/sbase/od.1` in the repository
+
+# DIAGNOSTICS
+
+Messages go to standard error, after the name `od` was run by.
+A malformed flag, address format, type or offset prints the usage message, after `parseoffset` <skip>`: invalid value` or the like for an offset, and exits 1.
+A <file> that cannot be opened is reported as `od: open` <file>`:` and the error, and the next is read; a failed read is reported as `od: read` <file>`:` and the error.
+The exit status is 1 if any <file> failed or the output could not be written, otherwise 0.
+
+# BUGS
+
+`-N` works but is left out of the usage message.
+
+With no type, POSIX asks for octal 2-byte words, as `-o` gives; `od` shows 4-byte words.
+
+Signed types are not sign-extended: `-s` shows the bytes `ff ff` as `65535`, not `-1`.
+A size after a type in `-t`, as in POSIX's `-t x2` or `-t dL`, is refused with the usage message: the size is read, then read again as a type.
+The floating-point type `f` is refused too.
+
+`-E` also left-justifies each value in its column, which `-e` does not.

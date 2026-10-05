@@ -1,0 +1,59 @@
+page=du sect=1 summary="disk usage"
+    src=third_party/sbase/du.c,third_party/sbase/libutil/recurse.c
+    keys=disk,usage,space,size,blocks,directory,posix
+
+# SYNOPSIS
+
+```usage
+du [-a | -s] [-d depth] [-h] [-k] [-H | -L | -P] [-x] [file ...]
+```
+
+# DESCRIPTION
+
+`du` prints the space used by each <file>, and by everything below it if it is a directory, as a number of blocks, a tab and the name, one to a line.
+With no <file> it measures `.`, the current directory.
+Every directory met is printed, after what it holds, with the total for it and all below; the last line for each <file> is its own total.
+
+A block is 512 bytes, or the number of bytes in the environment variable `BLOCKSIZE`; a size is rounded up to a whole number of blocks.
+The space a file uses is what `stat` says it holds in 512-byte blocks: on VectraOS, what its file server reports, or its length rounded up where the server reports no blocks.
+A file with more than one link is counted only once.
+
+: `-a`
+  Print a line for every file, not only for directories.
+: `-s`
+  Print only the total for each <file>.
+: `-d` <depth>
+  Print lines only for files at most <depth> levels below a <file>; everything below is still counted.
+: `-h`
+  Print sizes in bytes, or in units of `K`, `M`, `G` and larger with one decimal, as `1.5M`.
+: `-k`
+  Count in blocks of 1024 bytes, whatever `BLOCKSIZE` says.
+: `-H`, `-L`, `-P`
+  Follow symbolic links named as <file>s, or every symbolic link, or none, the default; a link not followed is counted as itself.
+: `-x`
+  Do not count directories on another file system than the <file> they are below.
+
+`-a` and `-s` exclude each other, as do `-d` and `-s`.
+
+`du` is sbase's, and found only in the POSIX namespace: `/boot/bin/posix/du` is a hard link to `sbase-box`, which runs the command its name names, and `/lib/ns/posix` (a manifest's `ns=posix`, see namespace(6)) binds `/boot/bin/posix` before `/boot/bin` on `/bin`, so a POSIX program that runs `du` finds it there.
+There is no native `du`.
+
+# SEE ALSO
+
+ls(1), find(1); sbase's page is `third_party/sbase/du.1` in the repository
+
+# DIAGNOSTICS
+
+A file that cannot be looked at, or a directory that cannot be opened, is reported on standard error, as `du: stat /nothing: No such file or directory`, and left out of the totals; `du` then exits 1.
+A bad flag, or flags that exclude each other, print the usage message and exit 1, as does a <depth> or `BLOCKSIZE` that is not a number, after `strtonum` and the reason.
+Otherwise `du` exits 0.
+
+# BUGS
+
+The POSIX layer gives a file whose server answers Tgetattr (see getattr(5)), as most do, a device number of 0.
+So `-x` cannot tell where one file system meets another, and two directories on different servers whose qids have the same path look like one, so the second is left out without a word.
+This is read from the code; untested on VectraOS.
+
+A directory found again below itself, through a symbolic link with `-L`, is skipped without a word.
+
+Untested on VectraOS: every flag, and `BLOCKSIZE`.

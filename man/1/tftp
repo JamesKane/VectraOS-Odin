@@ -1,0 +1,50 @@
+page=tftp sect=1 summary="trivial file transfer protocol client"
+    src=third_party/sbase/tftp.c,ports/musl/vx/socket.c
+    keys=network,transfer,udp,download,upload,boot
+
+# SYNOPSIS
+
+```usage
+tftp -h host [-p port] [-x | -c] file
+```
+
+# DESCRIPTION
+
+`tftp` fetches <file> from, or sends it to, the TFTP server on <host>, over UDP, as RFC 1350 describes, in octet mode.
+<file> is the name the server knows; the data goes through `tftp`'s standard input and output, never a local file.
+
+: `-h` <host>
+  The server: a name or an address, which `getaddrinfo` resolves.
+: `-p` <port>
+  The server's port, a number or a service name; `tftp` by default (see BUGS).
+: `-x`
+  Fetch <file>, writing it on standard output.
+  This is the default.
+: `-c`
+  Send standard input as <file>.
+
+Each packet is waited for 5 seconds, and sent again; after 5 waits in a row with no reply, `tftp` gives up.
+
+`tftp` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/tftp`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/tftp`.
+There is no native `tftp`, and it is not a POSIX command.
+
+# SEE ALSO
+
+netd(4); sbase's page is `third_party/sbase/tftp.1` in the repository
+
+# DIAGNOSTICS
+
+Messages go to standard error, after the name `tftp` was run by, and each exits 1: `getaddrinfo:` and why, when <host> or <port> cannot be resolved; `cannot create socket`; `transfer timed out`; `error:` and the server's error text, such as `File not found`; and `bad opcode`, `bad error code`, `truncated packet` or `filename too long` for a packet or a name `tftp` cannot use.
+No `-h`, no <file>, or an unknown flag prints the usage message and exits 1.
+The exit status is 0 once the transfer is done.
+
+# BUGS
+
+VectraOS has no `/etc/services`, so the default port, named `tftp`, cannot be looked up: `-p 69` is needed.
+Its sockets are IPv4 alone, through netd(4); a host name is looked up as the C library does, which is untested on VectraOS, so a numeric address is the sure way.
+
+With `-c`, a read of standard input shorter than 512 bytes ends the transfer, as a short last packet does: from a pipe that delivers less, the server gets a truncated file.
+A failed write of standard output with `-x` is not noticed.
+
+`tftp` is untested on VectraOS.

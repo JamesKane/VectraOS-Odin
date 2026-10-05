@@ -104,3 +104,46 @@ test_round_trip :: proc(t: ^testing.T) {
 		testing.expectf(t, sender == 99, "%s was sent by %d", s, sender)
 	}
 }
+
+// Upstream's posix_test.c (M6 step 6b): each note and exit string to the
+// signal it stands for and its sender, and the wait status a parent sees, a
+// pager's timeout among them (SIGBUS).
+@(test)
+test_posix :: proc(t: ^testing.T) {
+	Case :: struct {
+		note:   string,
+		sig:    signal.Signal, // 0: no signal
+		sender: i64,
+	}
+	cases := []Case {
+		{"posix: SIGTERM pid=12", signal.SIGTERM, 12},
+		{"interrupt", signal.SIGINT, 0},
+		{"sys: trap: arithmetic pc=0x401000", signal.SIGFPE, 0},
+		{"sys: trap: page not supplied addr=0x7000 pc=0x401000", signal.SIGBUS, 0},
+		{"no such thing", 0, 0},
+	}
+	for c in cases {
+		sig, sender, _ := signal.note_signal(c.note)
+		testing.expectf(t, sig == c.sig, "%q: signal %d, want %d", c.note, sig, c.sig)
+		testing.expectf(t, sender == c.sender, "%q: sender %d, want %d", c.note, sender, c.sender)
+	}
+
+	Status_Case :: struct {
+		exit: string,
+		want: i64,
+	}
+	statuses := []Status_Case {
+		{"", 0},
+		{"3", 3 << 8},
+		{"sys: trap: page not supplied addr=0x7000 pc=0x401000", i64(signal.SIGBUS)},
+		{"killed", i64(signal.SIGKILL)},
+		{"cannot open", 1 << 8},
+	}
+	for c in statuses {
+		got := signal.wait_status(c.exit)
+		testing.expectf(t, got == c.want, "%q: wait status %d, want %d", c.exit, got, c.want)
+	}
+
+	out: [note.ERRMAX]u8
+	testing.expect_value(t, signal.signal_note(signal.SIGQUIT, 0, &out), "posix: SIGQUIT") // ^\ at a terminal: no Plan 9 words
+}

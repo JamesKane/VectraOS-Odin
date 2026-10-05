@@ -1,0 +1,41 @@
+page=expand sect=1 summary="convert tabs to spaces"
+    src=third_party/sbase/expand.c
+    keys=tab,tabs,spaces,blank,column,indent,posix
+
+# SYNOPSIS
+
+```usage
+expand [-i] [-t tablist] [file ...]
+```
+
+# DESCRIPTION
+
+`expand` copies each <file>, or standard input if there is none, to standard output, with each tab replaced by the spaces that reach the next tab stop; a <file> of `-` is standard input.
+Columns are counted in characters, a UTF-8 sequence as one; a backspace moves back a column, and a newline starts again at the first.
+
+: `-i`
+  Replace only the tabs among the blanks that begin a line; later tabs are copied as they are.
+: `-t` <tablist>
+  Set the tab stops.
+  A single number <n> puts one every <n> columns; the default is 8.
+  A list of numbers, separated by commas or blanks and strictly ascending, puts a stop at each: a tab moves on to the first stop past the current column, so that what follows it starts that many columns into the line; past the last stop, a tab becomes one space.
+
+`expand` is sbase's, and found only in the POSIX namespace: `/boot/bin/posix/expand` is a hard link to `sbase-box`, which runs the command its name names, and `/lib/ns/posix` (a manifest's `ns=posix`, see namespace(6)) binds `/boot/bin/posix` before `/boot/bin` on `/bin`, so a POSIX program that runs `expand` finds it there.
+There is no native `expand`.
+
+# SEE ALSO
+
+unexpand(1), fold(1); sbase's page is `third_party/sbase/expand.1` in the repository
+
+# DIAGNOSTICS
+
+A <file> that cannot be opened is reported on standard error, as `expand: fopen /nothing: No such file or directory`, and the next is read; `expand` then exits 1.
+A bad <tablist> is reported, as `tablist must be ascending`, `empty field in tablist` or `strtonum 0: too small`, and a read error as `fgetrune file: ` and the reason, each with exit status 1.
+A bad flag prints the usage message and exits 1.
+Otherwise `expand` exits 0.
+
+# BUGS
+
+Bytes that are not valid UTF-8 are written as U+FFFD, the replacement character, so `expand` changes more than the tabs in such a file.
+
+Untested on VectraOS.

@@ -1,0 +1,47 @@
+page=tee sect=1 summary="pipe fitting"
+    src=third_party/sbase/tee.c
+    keys=copy,pipe,duplicate,log,fitting
+
+# SYNOPSIS
+
+```usage
+tee [-ai] [file ...]
+```
+
+# DESCRIPTION
+
+`tee` copies standard input to standard output and to each <file>, as it reads it.
+Each <file> is created, asking for mode 0666, or truncated if it exists.
+
+: `-a`
+  Append to each <file> instead of truncating it.
+: `-i`
+  Ignore the interrupt signal, `SIGINT`.
+
+A <file> that cannot be opened, or that a write fails on, is left out from then on, and the copying goes on to the rest.
+
+`tee` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/tee`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/tee`.
+There is no native `tee`.
+
+# EXAMPLES
+
+As `tests/posix/sbasetest.c` runs it in the POSIX namespace, with `data` and a newline on standard input, after making `/tmp/sb`:
+
+```text
+% echo data | tee /tmp/sb/f
+data
+```
+
+`/tmp/sb/f` then holds the same line.
+
+# SEE ALSO
+
+sponge(1), cat(1); sbase's page is `third_party/sbase/tee.1` in the repository
+
+# DIAGNOSTICS
+
+Messages go to standard error, after the name `tee` was run by: `tee: open` <file>`:` and the error for a <file> that cannot be opened, and `write` <file>`:` or `write <stdout>:` for a failed write.
+A failed read of standard input is reported as `read <stdin>:` and exits 1 at once.
+An unknown flag prints the usage message and exits 1.
+The exit status is 1 if any <file> or write failed, otherwise 0.

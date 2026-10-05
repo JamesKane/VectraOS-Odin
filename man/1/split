@@ -1,0 +1,51 @@
+page=split sect=1 summary="split a file into pieces"
+    src=third_party/sbase/split.c,third_party/sbase/libutil/parseoffset.c
+    keys=pieces,chunks,lines,bytes,suffix,prefix
+
+# SYNOPSIS
+
+```usage
+split [-a num] [-b num[k|m|g] | -l num] [-d] [file [prefix]]
+```
+
+# DESCRIPTION
+
+`split` copies <file>, or standard input if there is no <file> or it is `-`, into files of 1000 lines each; the last may be shorter.
+The pieces are named <prefix>, `x` by default, followed by a suffix of two letters counting up from `aa`: `xaa`, `xab` and on to `xzz`.
+
+: `-a` <num>
+  Make each suffix <num> characters long, not 2.
+: `-b` <num>
+  Start a new piece every <num> bytes.
+  <num> may end in `b`, `k`, `m` or `g`, in either case, for units of 512, 1024, 1024² or 1024³ bytes.
+: `-l` <num>
+  Start a new piece every <num> lines, from 1 up.
+  Of `-b` and `-l`, the last given is used.
+: `-d`
+  Count suffixes in decimal digits from `00`, not letters.
+
+`split` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/split`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/split`.
+There is no native `split`.
+
+# SEE ALSO
+
+cat(1), head(1); sbase's page is `third_party/sbase/split.1` in the repository
+
+# DIAGNOSTICS
+
+Messages go to standard error, after the name `split` was run by, and each exits 1.
+A <file> that cannot be opened is reported as `split: fopen` <file>`:` and the error; a piece that cannot be created, as its name in quotes and the error.
+When the suffixes run out, `split` stops with `fopen:` and a name, after writing the last piece it could name.
+A bad `-b` size is reported as `parseoffset` <num>`: invalid value` or the like, a size of 0 as `size needs to be positive`, a bad `-a` or `-l` number as `strtonum` <num>`:` and why, and a <prefix> that leaves no room in a file name for the suffix as `names cannot exceed 255 bytes`.
+A third operand or an unknown flag prints the usage message.
+
+# BUGS
+
+A `-b` size is read as C reads a number: one with a leading `0` is octal, and one with `0x` hexadecimal, so `-b 010` is 8 bytes.
+
+`-a 0` is accepted: the first piece is named <prefix> alone, and a second fails as the suffixes running out.
+
+`-d` is not POSIX, and nor is the unit `g`.
+
+`split` is untested on VectraOS.

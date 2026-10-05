@@ -1,0 +1,45 @@
+page=fold sect=1 summary="break long lines"
+    src=third_party/sbase/fold.c
+    keys=wrap,width,line,lines,columns,posix
+
+# SYNOPSIS
+
+```usage
+fold [-bs] [-w num | -num] [file ...]
+```
+
+# DESCRIPTION
+
+`fold` copies each <file>, or standard input if there is none, to standard output, breaking every line longer than 80 columns by putting a newline where it reaches that width; a <file> of `-` is standard input.
+
+Columns are counted in characters, a UTF-8 sequence as one.
+A tab moves to the next multiple of 8 columns, a backspace moves back one and a carriage return goes back to the first; other control characters take no room.
+
+: `-b`
+  Count bytes, not columns: tabs, backspaces and carriage returns count one each, as other bytes do, and a UTF-8 sequence is never split.
+: `-s`
+  Break a long line after the last blank before the width, when there is one, rather than at the width.
+: `-w` <num>, `-`<num>
+  Break at <num> columns instead of 80.
+
+`fold` is sbase's, and found only in the POSIX namespace: `/boot/bin/posix/fold` is a hard link to `sbase-box`, which runs the command its name names, and `/lib/ns/posix` (a manifest's `ns=posix`, see namespace(6)) binds `/boot/bin/posix` before `/boot/bin` on `/bin`, so a POSIX program that runs `fold` finds it there.
+There is no native `fold`.
+
+# SEE ALSO
+
+expand(1), cut(1); sbase's page is `third_party/sbase/fold.1` in the repository
+
+# DIAGNOSTICS
+
+A <file> that cannot be opened is reported on standard error, as `fold: fopen /nothing: No such file or directory`, and the next is read; `fold` then exits 1.
+Input that is not valid UTF-8 ends `fold` with `fold: charntorune: file: invalid utf`, exit status 1, as does a read error.
+A width of 0 is refused, as `strtonum 0: too small` or `illegal width value, too small`; a bad flag prints the usage message; both exit 1.
+Otherwise `fold` exits 0.
+
+# BUGS
+
+Without `-b`, every character is one column wide, so wide characters, such as most CJK ones, and combining ones are measured wrongly.
+
+Input that is not UTF-8 cannot be folded at all, even with `-b`.
+
+Untested on VectraOS.

@@ -1,0 +1,49 @@
+page=readlink sect=1 summary="print the target of a symbolic link"
+    src=third_party/sbase/readlink.c
+    keys=symlink,symbolic,link,target,canonical,realpath,posix
+
+# SYNOPSIS
+
+```usage
+readlink [-fn] path
+```
+
+# DESCRIPTION
+
+`readlink` prints the target of the symbolic link <path>, as it is stored, then a newline.
+
+: `-f`
+  Print instead the absolute path <path> leads to, every symbolic link on the way followed and every `.` and `..` resolved, as C's `realpath` makes it; <path> need not be a link, but it and each directory on the way must exist.
+: `-n`
+  Print no newline.
+
+`readlink` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/readlink`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/readlink`.
+There is no native `readlink`.
+Symbolic links are made and read with the posix extension of 9P (see symlink(5)), which tmpfs(4) and fsd(4) serve.
+
+# EXAMPLES
+
+As `tests/posix/sbasetest.c` runs it in the POSIX namespace, in `/tmp`:
+
+```text
+% ln -s /tmp/sb/f /tmp/sb/link
+% readlink /tmp/sb/link
+/tmp/sb/f
+```
+
+# SEE ALSO
+
+ln(1), symlink(5), namespace(6); sbase's page is `third_party/sbase/readlink.1` in the repository
+
+# DIAGNOSTICS
+
+When <path> is not a symbolic link or cannot be found, `readlink` reports `readlink: readlink` <path>`:` and the error on standard error, or `readlink: realpath` <path>`:` with `-f`, and exits 1.
+A <path> of 4096 bytes or more is reported as `path too long`; no <path>, more than one or an unknown flag prints the usage message; each exits 1.
+Otherwise `readlink` exits 0, or 1 if the output could not be written.
+
+# BUGS
+
+`-f` is not POSIX's; POSIX's `readlink` has `-n` alone.
+
+`-f` is untested on VectraOS.

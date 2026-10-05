@@ -1,0 +1,51 @@
+page=chmod sect=1 summary="change the permissions of files"
+    src=third_party/sbase/chmod.c,third_party/sbase/libutil/mode.c
+    keys=mode,permissions,octal,umask,access
+
+# SYNOPSIS
+
+```usage
+chmod [-R] mode file ...
+```
+
+# DESCRIPTION
+
+`chmod` sets the permission bits of each <file> from <mode>.
+
+A <mode> of octal digits, up to `7777`, is the new bits outright.
+Otherwise it is a list of clauses separated by commas, each one or more of `u`, `g`, `o` and `a` (the user, the group, others, all three), then one or more of an operator `+`, `-` or `=` followed by permissions: any of `r`, `w`, `x`, `X` (execute, if the file is a directory or already executable by someone), `s` (set-user-ID and set-group-ID) and `t` (sticky), or one of `u`, `g` and `o` to copy that class's current bits.
+`+` adds the permissions, `-` takes them away and `=` sets exactly them.
+A clause with no class applies to all three, less the bits the file-creation mask clears.
+
+: `-R`
+  Change directories' contents too, recursively; symbolic links found inside are left alone.
+
+A mode such as `-w` is a mode, not a flag: `chmod -w f` takes write permission away.
+
+`chmod` is sbase's, a hard link to `/boot/bin/posix/sbase-box`; there is no native one.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so a POSIX program finds it as `/bin/chmod`.
+
+# EXAMPLES
+
+From the sbase test, `tests/posix/sbasetest.c`, which runs each command as a shell would, and then finds the file's mode is `0600`:
+
+```text
+command: chmod 600 /tmp/sb/empty
+output:  (none; exit status 0)
+```
+
+# SEE ALSO
+
+chown(1), chgrp(1), ls(1), tmpfs(4); sbase's page is `third_party/sbase/chmod.1` in the repository
+
+# DIAGNOSTICS
+
+Fewer than two arguments or an unknown flag prints `usage: chmod [-R] mode file ...` and exits 1.
+A <mode> it cannot parse is reported when the first <file> is reached, as `chmod: u+q: invalid mode`, and it exits 1.
+A <file> that cannot be found or changed is reported, as `chmod: chmod /x: Operation not permitted`, and the rest are done; the exit status is then 1.
+
+# BUGS
+
+The file-creation mask is always `022` on VectraOS: the C library's `umask` neither keeps nor returns another.
+
+What a mode means beyond the nine permission bits is up to the file server; set-user-ID, set-group-ID and sticky bits are untested on VectraOS.

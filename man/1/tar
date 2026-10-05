@@ -1,0 +1,80 @@
+page=tar sect=1 summary="tape archiver"
+    src=third_party/sbase/tar.c,third_party/sbase/libutil/recurse.c
+    keys=archive,ustar,extract,bundle,tarball,pack,unpack
+
+# SYNOPSIS
+
+```usage
+tar [x | t | -x | -t] [-C dir] [-J | -Z | -a | -j | -z] [-m] [-p]
+    [-f file] [file ...]
+tar [c | -c] [-C dir] [-J | -Z | -a | -j | -z] [-h] path ... [-f file]
+```
+
+# DESCRIPTION
+
+`tar` makes archives in POSIX's ustar format, lists them, and extracts files from them.
+The first argument may name the action without a `-`, and carry flags after it, as in `tar xvf a.tar`.
+
+: `c`, `-c`
+  Create an archive of each <path>, and of everything beneath it if it is a directory, a directory before its contents.
+  Names are stored as given; a name of 100 bytes or more is stored in a GNU long-name record before its header.
+  The archive itself is left out, with a warning, if it is among what is archived.
+: `t`, `-t`
+  List the name of each member of the archive.
+: `x`, `-x`
+  Extract each member of the archive, or, with <file>s, each member whose name is a <file> or lies beneath one.
+  A file that is in the way is removed first, and missing directories are made.
+  Each member's mode and modification time are restored, and its owner and group, since the C library gives every process user ID 0.
+  Long names in GNU long-name records and the `path` of pax extended headers are read; pax global headers are skipped.
+
+: `-f` <file>
+  Read or write the archive <file>; with none, or a <file> starting with `-`, standard input or standard output.
+: `-C` <dir>
+  Change to <dir> before archiving or extracting.
+: `-h`
+  Follow symbolic links when archiving, storing what they point to.
+: `-m`
+  Do not restore modification times.
+: `-p`
+  Accepted and ignored: modes are always restored.
+: `-v`
+  Write each name as it is archived or extracted.
+: `-J`, `-Z`, `-a`, `-j`, `-z`
+  Pass the archive through `xz`, `compress`, `lzma`, `bzip2` or `gzip` (see BUGS).
+
+`tar` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/tar`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/tar`.
+There is no native `tar`.
+POSIX's archiver is `pax`, which sbase does not have.
+
+# SEE ALSO
+
+namespace(6); sbase's page is `third_party/sbase/tar.1` in the repository
+
+# DIAGNOSTICS
+
+Messages go to standard error, after the name `tar` was run by.
+Most failures stop `tar` at once with exit status 1: an archive or member that cannot be opened, read or written, a directory that cannot be made, and an archive that is not one, as `malformed tar archive:` and the reason (`incorrect checksum`, `not ustar format`, and the like) or `unsupported tar-filetype` and the type.
+A <path> that cannot be found when archiving is reported, and `tar` goes on and exits 1.
+A time or owner that cannot be restored, and a file in the way that cannot be removed, are reported too, and `tar` goes on; they leave the exit status 0.
+No action, or an unknown flag, prints the usage message and exits 1.
+
+# BUGS
+
+`-v` works but is left out of the usage message, and makes `t` list nothing more than names.
+The usage message's first line is wider than 80 columns, and is split in two above.
+
+None of the compression programs exists on VectraOS, so `-J`, `-Z`, `-a`, `-j` and `-z` fail, reporting `execlp` and the program.
+
+A member's size is stored as a 32-bit number: a file of 4 GiB or more is archived with the wrong size, and the archive is unreadable from there, without a word.
+A symbolic link's target is cut to 99 bytes without a word.
+An archive `tar` makes ends without the two blocks of zeros POSIX ends one with, which other archivers may complain of.
+
+A file with several links is archived once for each, whole; `tar` never stores a hard link, and extracting one fails, since no VectraOS file server has hard links.
+A device is archived with the numbers of the device holding it rather than its own; extracting a device or a FIFO fails, as VectraOS's C library does not implement `mknod`.
+
+Member names are not checked: an absolute name, or one holding `..`, is extracted where it points, outside <dir> if it leads there.
+
+The C library finds no users database, so the owner and group names in each header are left empty.
+
+`tar` is untested on VectraOS.

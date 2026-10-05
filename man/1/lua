@@ -1,0 +1,77 @@
+page=lua sect=1 summary="Lua interpreter"
+    src=third_party/lua/src/lua.c,ports/lua/port.ndb
+    keys=lua,interpreter,script,language,repl,interactive
+
+# SYNOPSIS
+
+```usage
+lua [-EivW] [-e stat] [-l mod] [script [arg ...]]
+```
+
+# DESCRIPTION
+
+`lua` is the standalone interpreter of Lua 5.5, as Lua's own `src/lua.c` builds it, ported as `docs/adr/0015-lua.md` describes.
+It runs <script>, a file of Lua source or precompiled chunks, with the global table `arg` holding the <arg>s at 1 onwards, <script> at 0, and the interpreter and the options before it at negative indices; the <arg>s are passed to the chunk as its arguments too.
+A <script> of `-` is standard input, and `--` ends the options.
+With neither <script> nor `-e`, `-i` or `-v`, `lua` reads standard input: interactively when it is a terminal, as a file otherwise.
+It is `/boot/bin/lua`, one statically linked program, which the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) binds on `/bin` with the rest of `/boot/bin`.
+
+Before anything else it runs the environment variable `LUA_INIT_5_5`, or failing that `LUA_INIT`: as a chunk, or, if it begins with `@`, the file it names.
+Then it handles `-e`, `-l` and `-W` in the order given, then <script>, then, with `-i`, reads statements interactively.
+
+: `-e` <stat>
+  Run the Lua statements <stat>.
+: `-l` <mod>
+  Run `require` on module <mod> and assign the result to the global <mod>; the global's name stops at a `-`.
+  Given as <g>`=`<mod>, assign it to the global <g>.
+: `-i`
+  Read and run statements from standard input after <script>, printing the values of each expression; implies `-v`.
+  The prompts are `> ` and `>> `, or the values of `_PROMPT` and `_PROMPT2`.
+: `-v`
+  Print the version and copyright.
+: `-E`
+  Ignore the environment: `LUA_INIT`, `LUA_PATH` and `LUA_CPATH` and their versioned names.
+: `-W`
+  Turn warnings on; they are off by default.
+
+All ten of Lua's standard libraries are loaded: the base library, `package`, `coroutine`, `debug`, `io`, `math`, `os`, `string`, `table` and `utf8`.
+On VectraOS `require` finds Lua modules by `package.path`, which `LUA_PATH_5_5` or `LUA_PATH` sets (`;;` in it stands for the default); the default looks in `/usr/local/share/lua/5.5/`, `/usr/local/lib/lua/5.5/` and the current directory, of which VectraOS has only the last.
+Files, the environment, time and the clock, renaming and removing files, `os.tmpname` (in `/tmp`) and `os.exit` work as the C library gives them.
+What does not work is in BUGS.
+
+# EXAMPLES
+
+Lua's test runs as a service (see svc(6)) whose manifest, `tests/user/luatest.ndb`, is:
+
+```ndb
+service=luatest program=/boot/bin/lua console entropy
+arg=/boot/tests/luatest.lua
+arg=one
+arg="two words"
+ns=posix
+connect=nsd
+env=GREETING=hello
+env=HOME=/tmp
+```
+
+The script finds `/boot/tests/luatest.lua` in `arg[0]`, `one` and `two words` in `arg[1]` and `arg[2]`, and `hello` from `os.getenv`, and prints `luatest: Lua 5.5`.
+
+# SEE ALSO
+
+rc(1), svc(6), namespace(6); Lua's own page is `third_party/lua/doc/lua.1`, and its reference manual `third_party/lua/doc/manual.html`, in the repository
+
+# DIAGNOSTICS
+
+An error in a chunk is printed on standard error, `lua: ` and the message with a traceback, and `lua` exits 1; it exits 0 when everything ran, or with what the script passes to `os.exit`.
+A bad option prints `lua: unrecognized option '-x'`, or `lua: '-e' needs argument`, then the usage message, and exits 1.
+
+# BUGS
+
+There is no `/bin/sh`: `os.execute` with a command fails, and `io.popen` returns `nil` and an error, while `os.execute()` with no command still says that a shell is there.
+
+C modules cannot be loaded: everything is linked statically, without `dlopen`, so `package.loadlib` and `require` of a C module fail with `dynamic libraries not enabled; check your Lua installation`.
+The default `package.path` names directories VectraOS does not have.
+
+The interactive mode has no line editing or history, Lua's being built without `readline`.
+Interactive use on a terminal, and running `lua` from rc(1) outside the POSIX namespace, are untested on VectraOS, as is the `debug` library.
+`luac`, Lua's compiler, is not built.

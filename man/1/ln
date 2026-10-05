@@ -1,0 +1,53 @@
+page=ln sect=1 summary="make links to files"
+    src=third_party/sbase/ln.c
+    keys=link,symbolic,symlink,hard,name
+
+# SYNOPSIS
+
+```usage
+ln [-f] [-L | -P | -s] target [name]
+ln [-f] [-L | -P | -s] target ... dir
+```
+
+# DESCRIPTION
+
+`ln` makes <name> a link to <target>.
+With no <name> the link is made in the current directory, under <target>'s last element; when the last argument is a directory, a link to each <target> is made in it, under each one's last element.
+It is sbase's command, in `/boot/bin/posix`: the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) binds that directory before `/boot/bin` on `/bin`, so a POSIX program finds it there.
+
+A hard link is made unless `-s` is given.
+Before one, `ln` checks that <target> exists and that <name> is not already the same file.
+
+: `-f`
+  Remove an existing <name> first.
+: `-L`, `-P`
+  When <target> is a symbolic link, link to what it points to, or to the link itself.
+  `-L` is the default; the last of the two given counts.
+: `-s`
+  Make a symbolic link, whose contents are <target> as written; <target> need not exist.
+
+# EXAMPLES
+
+sbase's test (`tests/posix/sbasetest.c`) runs these in the POSIX namespace, and checks that each exits 0 and that `readlink` prints the link's target:
+
+```text
+ln -s /tmp/sb/f /tmp/sb/link
+readlink /tmp/sb/link
+```
+
+# SEE ALSO
+
+link(1), readlink(1), rm(1), link(5), symlink(5); sbase's page is `third_party/sbase/ln.1` in the repository
+
+# DIAGNOSTICS
+
+A link that fails is reported with the call that failed, as `ln: linkat a <- ./b: Operation not permitted` or `ln: symlinkat a <- ./b: ` and the error, and the next <target> is tried; the exit status is then 1.
+More than two arguments whose last is not a directory is `ln: x: not a directory`, and exits 1.
+A <target> that is already <name> is reported as `ln: a and ./b are the same file` unless `-f` is given, when it is left alone.
+
+# BUGS
+
+Only `-s` works on VectraOS.
+No file server has hard links, and the C library's `linkat` fails with `EPERM` without asking one (see link(5)), so `ln` without `-s` always fails, and `-L` and `-P` have nothing to choose between.
+
+Symbolic links are made only by servers with the posix extension: tmpfs(4) and fsd(4) have them.

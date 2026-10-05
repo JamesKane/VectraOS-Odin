@@ -1,0 +1,148 @@
+page=ed sect=1 summary="text editor"
+    src=third_party/sbase/ed.c
+    keys=editor,edit,text,line,regular,expression,substitute,posix
+
+# SYNOPSIS
+
+```usage
+ed [-s] [-p string] [file]
+```
+
+# DESCRIPTION
+
+`ed` is the line editor POSIX specifies.
+It keeps the text being edited in a buffer, a copy in a scratch file `ed.XXXXXX` in `$TMPDIR`, or `/tmp`, and reads commands from standard input, one to a line.
+With a <file>, it reads <file> into the buffer as `e` would, and remembers its name.
+Changes reach a file only when a `w` command writes them.
+
+: `-s`
+  Do not print the byte counts of `e`, `r` and `w`, nor the `!` after a shell command.
+: `-p` <string>
+  Print <string> as a prompt before each command; the prompt is off otherwise, and `P` turns it on and off.
+
+A command is an optional address list, a letter, and what the letter takes.
+Most commands may end with `p`, `l` or `n`, which print the current line afterward as the commands of those names do.
+`a`, `c` and `i` read text after the command, line by line, until a line that is `.` alone.
+
+Addresses are described in {Addresses|#addresses} and the commands in {Commands|#commands}.
+
+`ed` is sbase's, and found only in the POSIX namespace: `/boot/bin/posix/ed` is a hard link to `sbase-box`, which runs the command its name names, and `/lib/ns/posix` (a manifest's `ns=posix`, see namespace(6)) binds `/boot/bin/posix` before `/boot/bin` on `/bin`, so a POSIX program that runs `ed` finds it there.
+There is no native `ed`.
+
+# SEE ALSO
+
+sed(1), grep(1); sbase's page is `third_party/sbase/ed.1` in the repository
+
+# DIAGNOSTICS
+
+Every error prints `?` on standard output, and the command does nothing; `h` prints the reason, as `invalid address`, `no current filename`, `cannot open input file` or `warning: file modified`.
+An interrupt prints `?` too, and returns to reading commands; a hangup ends `ed`, after writing the buffer to `ed.hup` in the current directory, or in `$HOME` if that fails (but see BUGS).
+
+`ed` exits 1 if any error happened, unless it quit by `x` or `X`, and 0 otherwise.
+A bad flag, or more than one <file>, prints the usage message and exits 1.
+
+# BUGS
+
+The usage message says `[-p]` where `-p` takes a <string>.
+
+There is no `/bin/sh` on VectraOS, so `!`, `e !`, `r !` and `w !` cannot run their commands, which go to the C library's `system` and `popen`; `!` prints `!` whatever happened to its command.
+How each fails is untested on VectraOS.
+
+On a hangup the buffer is written to `ed.hup` only if it has no unwritten changes, the reverse of the intent, since sbase tests the wrong way round; a modified buffer is lost.
+
+`w !`<cmd> sets the remembered name to `!`.
+
+A substitution can pick only the first to ninth match: `s/a/b/12` is an error, and `s/a/b/0` replaces every match.
+
+An address list starting with `,` or `;` takes no address after it: `,5p` is an error, not lines 1 to 5.
+
+Untested on VectraOS.
+
+@node=addresses title="Addresses"
+
+The current line, `.`, is where the last command left off; most commands default to it.
+An address is one of these, optionally followed by any number of `+`<n>, `-`<n> or `^`<n>, each moving <n> lines, 1 if <n> is left out:
+
+: <n>
+  Line <n>; line 0 is before the first, and is allowed only where a command says.
+: `.`, `$`
+  The current line; the last line.
+: `+`<n>, `-`<n>, `^`<n>
+  <n> lines after, or before, the current line.
+: `/`<re>`/`, `?`<re>`?`
+  The next line, forward or backward from the current line and wrapping round, that matches the basic regular expression <re>; an empty <re> is the last one used.
+  Any character but blank and newline may delimit <re>.
+: `'`<c>
+  The line marked <c>, a lower-case letter, by `k`.
+
+Two addresses separated by `,` are the lines from the first to the second; separated by `;`, the same, but the current line is set to the first before the second is read.
+`,` alone is `1,$`, and `;` alone `.,$`.
+
+@node=commands title="Commands"
+
+The default addresses are shown in parentheses.
+
+: `(.)a`
+  Append text after the line; 0 puts it first.
+: `(.,.)c`
+  Change: delete the lines and read text to replace them.
+: `(.,.)d`
+  Delete the lines.
+: `e` <file>, `E` <file>
+  Edit <file>: replace the buffer with it and remember its name; without <file>, the remembered one.
+  `e` refuses once if the buffer has unwritten changes, saying `warning: file modified`; `E` does not.
+  `e !`<cmd> reads <cmd>'s output instead.
+: `f` <file>
+  Remember <file>'s name; without <file>, print the remembered name.
+: `(1,$)g/`<re>`/`<commands>, `(1,$)v/`<re>`/`<commands>
+  Mark every line that matches <re>, or does not, then run <commands> with each marked line as the current one.
+  <commands> may continue on more lines, each before the last ending with `\`; if it is empty it is `p`.
+  `g`, `G`, `v` and `V` are refused within it.
+: `(1,$)G/`<re>`/`, `(1,$)V/`<re>`/`
+  As `g` and `v`, but print each marked line and read commands for it from standard input until an empty line; `&` repeats the last command.
+: `h`
+  Print the reason for the last `?`.
+: `H`
+  Print the reason after every `?` from now on, or stop doing so.
+: `(.)i`
+  Insert text before the line.
+: `(.,.+1)j`
+  Join the lines into one.
+: `(.)k`<c>
+  Mark the line with the lower-case letter <c>.
+: `(.,.)l`
+  Print the lines unambiguously: a tab as `\t`, a backspace as `\b`, `\` as `\\`, `$` as `\$`, another unprintable byte as `\x` and its hexadecimal value, and `$` at each end of line.
+: `(.,.)m`<a>
+  Move the lines after line <a>; 0 puts them first.
+: `(.,.)n`
+  Print the lines, each after its number and a tab.
+: `(.,.)p`
+  Print the lines.
+: `P`
+  Turn the prompt on or off.
+: `q`, `Q`
+  Quit; `q` refuses once if the buffer has unwritten changes, `Q` does not.
+: `($)r` <file>
+  Read <file>, or the output of <cmd> for `r !`<cmd>, in after the line; 0 puts it first.
+: `(.,.)s/`<re>`/`<rhs>`/`, with `g` or <n> after
+  Substitute <rhs> for the first match of <re> in each line, every match with `g`, or the <n>th, 1 to 9, with <n>.
+  In <rhs>, `&` stands for the match and `\`<n> for its <n>th subexpression; an <rhs> of `%` alone is the last one used.
+  The last `/` may be left out, and then the line is printed.
+: `(.,.)t`<a>
+  Copy the lines after line <a>.
+: `u`
+  Undo the last command that changed the buffer.
+: `(1,$)w` <file>, `(1,$)W` <file>
+  Write the lines to <file>, or the remembered name, replacing it, or with `W` appending to it; `w !`<cmd> writes them to <cmd>'s standard input.
+: `(1,$)x` <file>, `(1,$)X` <file>
+  As `w` and `W`, then quit with exit status 0, whatever errors came before.
+: `(.)z`<n>
+  Print <n> lines from the line on, or `$LINES` less one, or 23.
+: `($)=`
+  Print the line's number.
+: `!`<cmd>
+  Run <cmd> by the shell, then print `!`; `%` in <cmd> is the remembered name, and `!` first the previous command.
+: `&`
+  Repeat the last command.
+: `(.+1)`
+  An address alone prints the line.

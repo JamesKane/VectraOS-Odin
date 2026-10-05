@@ -1,0 +1,49 @@
+page=mktemp sect=1 summary="make a temporary file or directory"
+    src=third_party/sbase/mktemp.c
+    keys=temporary,file,directory,unique,name,tmpdir
+
+# SYNOPSIS
+
+```usage
+mktemp [-dqtu] [-p directory] [template]
+```
+
+# DESCRIPTION
+
+`mktemp` makes a new, empty file, readable and writable by its owner only, whose name is <template> with its trailing `X`s replaced to make it unique, and prints the name.
+The default <template> is `tmp.XXXXXXXXXX`.
+It is sbase's command, in `/boot/bin/posix`: the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) binds that directory before `/boot/bin` on `/bin`, so a POSIX program finds it there.
+
+A <template> given without `-p` or `-t` is used as it is, relative to the current directory unless it begins with `/`.
+Otherwise the name is made in a directory: `$TMPDIR` if it is set, else the `-p` <directory>, else `/tmp`, which the POSIX namespace serves from tmpfs(4).
+
+: `-d`
+  Make a directory, searchable and writable by its owner only, instead of a file.
+: `-p` <directory>
+  Make the name in <directory>, unless `$TMPDIR` is set.
+: `-q`
+  Say nothing when the file or directory cannot be made.
+: `-t`
+  Make the name in the directory above; without `-p`, <template> must be a single name, with no `/`.
+: `-u`
+  Remove the file or directory again before printing its name.
+
+# SEE ALSO
+
+mkdir(1), rm(1), tmpfs(4); sbase's page is `third_party/sbase/mktemp.1` in the repository
+
+# DIAGNOSTICS
+
+When the file or directory cannot be made `mktemp` says so, as `mktemp: mkstemp /tmp/x: Invalid argument`, unless `-q` is given, and exits 1.
+With `-t` and no `-p`, a <template> holding `/` is `mktemp: template must not contain directory separators in -t mode`, and exits 1.
+Success exits 0.
+
+# BUGS
+
+The C library replaces only the last six `X`s, each with a letter, and needs at least six: the default template keeps four `X`s in the name it makes, and a <template> ending in fewer than six fails with `Invalid argument`.
+The letters come from the clock and the process's id, so names can be guessed; the file is made only if it does not yet exist, so a guess can make `mktemp` fail but not use another's file.
+
+`$TMPDIR` takes precedence over `-p`.
+`-u` makes the name unsafe to use, as it is free again for anyone.
+
+The C library's `mkstemp` is tested on VectraOS, through Lua's `os.tmpname`; `mktemp` itself and `-d` are untested on VectraOS.

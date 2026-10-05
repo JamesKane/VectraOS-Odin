@@ -21,6 +21,7 @@ The kernel makes the VMO and writes its header, and never reads the ring again; 
 What the kernel keeps is per end: a doorbell, and a side channel for handles, which an entry in shared memory cannot carry.
 
 `vx_ring_create` makes a ring as <params> asks: `sq_entries` and `cq_entries`, powers of two from 1 to 4096; `sqe_size` and `cqe_size`, multiples of 16 up to 256; and `client_arena` and `server_arena`, in bytes up to 1 GiB each, rounded up to pages.
+The whole ring, header, queues and both arenas, is one VMO, which is at most 256 MiB, so a layout past that is refused too.
 It writes three handles into <out>: `client` and `server`, the two ends, and `memory`, the VMO.
 The VMO's header is what `vx_ring_layout` makes of <params>, and its `size` is the VMO's; each side maps it with `as_map` and checks the header against the parameters its own protocol expects (`vx_ring_attach`), since whoever made the ring may be hostile.
 Each end's handle has READ, WRITE, WAIT, SIGNAL, DUPLICATE, TRANSFER and INSPECT; the VMO's has READ, WRITE, MAP, DUPLICATE, TRANSFER and INSPECT.
@@ -78,7 +79,7 @@ futex(2), port_bind(2), counter_read(2), as_map(2), channel_create(2)
 : `VX_ERR_INVALID`
   A queue length or entry size is not as above, or <params> or <out> is not readable or writable memory.
 : `VX_ERR_RANGE`
-  An arena is larger than 1 GiB.
+  An arena is larger than 1 GiB, or the whole layout larger than a VMO can be (256 MiB).
 : `VX_ERR_NO_MEMORY`
   There is no memory for the VMO or the ends, or no room in the caller's handle table.
 : `VX_ERR_BAD_STATE`

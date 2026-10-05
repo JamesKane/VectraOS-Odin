@@ -1,0 +1,39 @@
+page=cols sect=1 summary="print lines in columns"
+    src=third_party/sbase/cols.c
+    keys=columns,format,list,table
+
+# SYNOPSIS
+
+```usage
+cols [-c num] [file ...]
+```
+
+# DESCRIPTION
+
+`cols` reads every line of each <file>, or of standard input, and prints them in as many columns as fit the width, filled down each column first, as Plan 9's `mc` does.
+Each column is as wide as the longest line, plus one space.
+A <file> of `-` is standard input.
+
+The width is <num> with `-c`; otherwise the value of `COLUMNS`; otherwise the width of the terminal on standard output, when it is one; otherwise 65.
+
+: `-c` <num>
+  Fit the columns in <num> characters.
+
+A line's width is its number of UTF-8 characters, not of bytes; tabs and wide characters count as one.
+
+`cols` is sbase's, a hard link to `/boot/bin/posix/sbase-box`; there is no native one.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so a POSIX program finds it as `/bin/cols`.
+
+# SEE ALSO
+
+ls(1), fold(1), paste(1); sbase's page is `third_party/sbase/cols.1` in the repository
+
+# DIAGNOSTICS
+
+An unknown flag or a missing <num> prints `usage: cols [-c num] [file ...]` and exits 1, and a <num> or `COLUMNS` that is not a positive number is reported, as `cols: strtonum 0: too small`, and exits 1.
+A <file> that cannot be opened is reported, as `cols: fopen /x: No such file or directory`, and the rest are read; the exit status is then 1.
+
+# BUGS
+
+All of the input is held in memory before anything is printed.
+`cols` is not in POSIX, and is untested on VectraOS.

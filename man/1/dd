@@ -1,0 +1,73 @@
+page=dd sect=1 summary="convert and copy a file"
+    src=third_party/sbase/dd.c
+    keys=copy,convert,block,blocks,bytes,image,posix
+
+# SYNOPSIS
+
+```usage
+dd [operand ...]
+```
+
+# DESCRIPTION
+
+`dd` copies its input to its output in blocks, converting the data on the way if asked.
+It reads standard input and writes standard output unless told otherwise.
+Each <operand> is a word of the form <name>`=`<value>:
+
+: `if=`<file>
+  Read <file> instead of standard input.
+: `of=`<file>
+  Write <file> instead of standard output.
+  It is created if it does not exist, mode 0666 less the umask, and truncated unless `seek=` or `conv=notrunc` is given.
+: `ibs=`<expr>
+  Read blocks of <expr> bytes; the default is 512.
+: `obs=`<expr>
+  Write blocks of <expr> bytes; the default is 512.
+: `bs=`<expr>
+  Read and write blocks of <expr> bytes, overriding `ibs=` and `obs=`.
+  Unless `conv=` asks for `swab`, `lcase` or `ucase`, each block read is written as it came, so a short read gives a short write.
+: `skip=`<n>
+  Skip <n> input blocks before copying: by seeking, or by reading them when the input cannot seek.
+: `seek=`<n>
+  Skip <n> blocks of the output before writing, by seeking; the output is cut at that point unless `conv=notrunc` is given.
+: `count=`<n>
+  Copy at most <n> input blocks, whole or partial.
+: `conv=`<value>`,`...
+  Convert as each <value> says:
+  `lcase` and `ucase` map ASCII letters to lower or upper case;
+  `swab` swaps each pair of bytes;
+  `noerror` reports a read error and goes on;
+  `notrunc` leaves the output file's length alone;
+  `sync` pads each short input block to the input block size with zero bytes.
+
+A block size <expr> is a decimal number, optionally followed by `k` (times 1024) or `b` (times 512); several, joined by `x`, are multiplied.
+A size of zero is refused.
+
+When it ends, `dd` writes two lines on standard error: the number of whole and partial blocks read, as `3+1 records in`, and written, as `3+1 records out`.
+
+`dd` is sbase's, and found only in the POSIX namespace: `/boot/bin/posix/dd` is a hard link to `sbase-box`, which runs the command its name names, and `/lib/ns/posix` (a manifest's `ns=posix`, see namespace(6)) binds `/boot/bin/posix` before `/boot/bin` on `/bin`, so a POSIX program that runs `dd` finds it there.
+There is no native `dd`.
+
+# SEE ALSO
+
+cp(1), split(1), cat(1); sbase's page is `third_party/sbase/dd.1` in the repository
+
+# DIAGNOSTICS
+
+Messages go to standard error, prefixed `dd: `; one about a failed call ends with the system's reason, as `dd: open /nothing: No such file or directory`.
+An operand without `=` prints the usage message; an unknown operand is reported as `unknown operand 'name'` first.
+A bad size is `invalid block size expression '0'`, and a bad conversion `unknown conv flag 'x'`.
+
+`dd` exits 0 when the copy is done, and 1 on any error.
+A read error without `conv=noerror` ends it at once, exit 1, with no record counts.
+
+# BUGS
+
+`seek=` counts blocks of the input block size, not the output block size as POSIX says: with `ibs=` and `obs=` different, the output is skipped by the wrong amount.
+`seek=` on an output that cannot seek, such as a pipe, fails instead of reading past the blocks.
+
+POSIX's `cbs=` and its conversions `ascii`, `ebcdic`, `ibm`, `block` and `unblock` are missing, and `sync` pads with zero bytes only, never with spaces.
+
+With `conv=noerror` but not `sync`, a read that fails again and again is retried for ever, printing the record counts each time.
+
+Untested on VectraOS: the case conversions, `swab`, `skip=` and `seek=`, and copying to or from a device.

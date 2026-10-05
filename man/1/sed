@@ -1,0 +1,136 @@
+page=sed sect=1 summary="stream editor"
+    src=third_party/sbase/sed.c
+    keys=stream,editor,edit,substitute,replace,regular,expression,regexp,script,posix
+
+# SYNOPSIS
+
+```usage
+sed [-nrE] script [file ...]
+sed [-nrE] -e script [-e script] ... [-f scriptfile] ... [file ...]
+sed [-nrE] [-e script] ... -f scriptfile [-f scriptfile] ... [file ...]
+```
+
+# DESCRIPTION
+
+`sed` reads each <file> in order, or standard input when there is none or for a <file> of `-`, applies a script of editing commands to each line, and writes the result on standard output.
+The script is the first argument, or, when there is a `-e` or `-f`, each `-e` <script> and each `-f` <scriptfile>'s lines, in the order given.
+
+: `-n`
+  Write a line only when the script says to.
+  A script whose first line begins `#n` does the same.
+: `-E`, `-r`
+  Read regular expressions as POSIX's extended ones instead of its basic ones.
+
+For each line of input, `sed` puts the line, without its newline, in the pattern space, runs the commands that are addressed to it in order, then writes the pattern space and a newline unless `-n` was given.
+A second buffer, the hold space, keeps text from one line to the next.
+A <file> that cannot be opened is reported and the next one read.
+
+## Addresses
+
+A command may have no address, and is then run for every line; one, and is run for the lines it selects; or two separated by `,`, and is run for each range of lines from one that the first selects to the next that the second does, inclusive.
+When the second is a line number at or before the line that started the range, the range is that one line.
+A `!` after the address runs the command for the lines not selected instead.
+
+: <n>
+  Line <n>, counted across all the files.
+: `$`
+  The last line of the last file.
+: `/`<re>`/`, `\`<c><re><c>
+  The lines that <re> matches; <c> is any character but backslash or newline, and within <re> `\`<c> is a <c>.
+  An empty <re> is the last one used.
+
+## Commands
+
+Commands are separated by newlines or `;`.
+Blanks before a command and after its address are ignored, and `#` begins a comment.
+Each command below takes at most the number of addresses after it in parentheses.
+
+: `{` (2)
+  Run the commands up to the matching `}` for the lines selected.
+: `a` <text> (1)
+  Write <text> before the next line is read, or at the end.
+: `b` <label> (2)
+  Branch to the `:` <label>, or to the end of the script when there is none.
+: `c` <text> (2)
+  Delete the pattern space, and write <text>; with two addresses, at the end of the range.
+: `d` (2)
+  Delete the pattern space and start the next cycle.
+: `D` (2)
+  Delete the pattern space up to its first newline and start the next cycle without reading a new line; with no newline, as `d`.
+: `g`, `G` (2)
+  Replace the pattern space with the hold space, or add a newline and the hold space to it.
+: `h`, `H` (2)
+  Replace the hold space with the pattern space, or add a newline and the pattern space to it.
+: `i` <text> (1)
+  Write <text> now.
+: `l` (2)
+  Write the pattern space unambiguously: `\\`, `\a`, `\b`, `\f`, `\r`, `\t` and `\v` for those characters, other unprintable bytes in octal, and `$` at the end.
+: `n` (2)
+  Write the pattern space, unless `-n`, and replace it with the next line; at the end of input, quit.
+: `N` (2)
+  Add a newline and the next line to the pattern space; at the end of input, quit without writing the pattern space, as POSIX has it.
+: `p`, `P` (2)
+  Write the pattern space, or the pattern space up to its first newline.
+: `q` (1)
+  Write the pattern space, unless `-n`, and quit.
+: `r` <file> (1)
+  Write <file>'s contents before the next line is read; a <file> that cannot be read is empty.
+: `s/`<re>`/`<replacement>`/`<flags> (2)
+  Replace the first match of <re> in the pattern space with <replacement>.
+  Any character but backslash and newline may stand for `/`.
+  In <replacement>, `&` is the text matched, `\1` to `\9` the text the parenthesized subexpressions matched, `\n` a newline, and a backslash before a newline a newline.
+  <flags> are any of: a number <n>, replace the <n>th match; `g`, replace every match; `p`, write the pattern space if a replacement was made; `w` <file>, append it to <file> if one was.
+: `t` <label> (2)
+  Branch to <label>, or to the end, if a replacement has been made since the last line was read or the last `t`.
+: `w` <file> (2)
+  Append the pattern space to <file>.
+: `x` (2)
+  Exchange the pattern and hold spaces.
+: `y/`<set1>`/`<set2>`/` (2)
+  Replace each character in <set1> with the one at the same place in <set2>, which must be as long.
+: `:` <label> (0)
+  The place a `b` or `t` to <label> goes.
+: `=` (1)
+  Write the line number and a newline.
+
+<text> for `a`, `c` and `i` is the rest of the line; as POSIX writes it, the command is followed by `\` and a newline, and a line of the text ending in `\` is continued on the next.
+A label or a <file> name ends at the end of the line, or, as sbase allows, at a `;` or `}`.
+The files of `w` commands are created, or emptied, when the script is read, before any input is.
+
+`sed` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/sed`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/sed`.
+There is no native `sed`.
+
+# EXAMPLES
+
+As `tests/posix/sbasetest.c` runs it in the POSIX namespace:
+
+```text
+% echo hello world | sed s/world/there/
+hello there
+```
+
+# SEE ALSO
+
+ed(1), grep(1), tr(1), namespace(6); sbase's page is `third_party/sbase/sed.1` in the repository
+
+# DIAGNOSTICS
+
+A fault in the script is reported on standard error with the script's line number, as `sed: 1: bad sed function`, `unclosed regex`, `missing second delimiter`, `wrong number of addresses`, `bad label` or the like, and `sed` exits 1 having read no input; with no script, or an unknown flag, it prints its usage message and exits 1.
+A <file> that cannot be opened is reported as `sed: fopen` <file>`:` and the error, and the next is read.
+The exit status is 1 if any <file> could not be opened or the output written, otherwise 0.
+
+# BUGS
+
+There is no `-i` to edit a file in place, and `q` takes no exit status.
+
+A last line with no newline is written with one.
+A NUL byte in the input ends its line there.
+
+`l` never folds a long line.
+
+A script's first line beginning `#n` acts as `-n` even with more after it; POSIX asks for `#n` alone.
+
+`a`, `i` and `c` also take their text on the same line, as `1ifoo`, keeping any blanks before it, which GNU's `sed` drops.
+
+Untested on VectraOS beyond the example.

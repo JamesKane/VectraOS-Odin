@@ -1,0 +1,40 @@
+page=basename sect=1 summary="strip directory and suffix from a path"
+    src=third_party/sbase/basename.c
+    keys=path,name,suffix,strip,directory
+
+# SYNOPSIS
+
+```usage
+basename path [suffix]
+```
+
+# DESCRIPTION
+
+`basename` prints <path> with everything up to its last `/` removed, then a newline.
+Trailing `/`s are ignored first, so `/a/b/` gives `b`; a <path> of `/` alone gives `/`, and an empty <path> an empty line.
+If <suffix> is given, not empty, and ends what is left without being all of it, it is removed too: `basename /a/b.c .c` prints `b`, and `basename .c .c` prints `.c`.
+
+`basename` is sbase's, a hard link to `/boot/bin/posix/sbase-box`; there is no native one.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so a POSIX program finds it as `/bin/basename`.
+
+# EXAMPLES
+
+From the sbase test, `tests/posix/sbasetest.c`, which runs each command as a shell would:
+
+```text
+command: basename /a/b/c
+output:  c
+```
+
+# SEE ALSO
+
+dirname(1); sbase's page is `third_party/sbase/basename.1` in the repository
+
+# DIAGNOSTICS
+
+Fewer than one argument or more than two, or any flag, prints `usage: basename path [suffix]` and exits 1.
+It exits 1 if writing the result fails, and 0 otherwise.
+
+# BUGS
+
+An argument beginning with `-` is taken as a flag and refused, unless `--` comes before it.

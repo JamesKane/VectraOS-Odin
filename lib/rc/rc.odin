@@ -43,6 +43,7 @@
 package rc
 
 import "base:intrinsics"
+import "vx:signal"
 import "vx:str"
 
 FDS :: 10 // descriptors 0 to 9, as rc's >[n]
@@ -384,6 +385,50 @@ trap :: proc "contextless" (r: ^Rc, sig: Sig) {
 	}
 	intrinsics.volatile_store(&r.trap[sig], intrinsics.volatile_load(&r.trap[sig]) + 1)
 	intrinsics.volatile_store(&r.ntrap, intrinsics.volatile_load(&r.ntrap) + 1)
+}
+
+// 9front's words for each note rc has a function for, and the signal each
+// stands for (vx:signal), by which VectraOS's own notes are known.
+@(private="file")
+NOTE_WORDS := [Sig]string {
+	.Exit = "exit",
+	.Hup  = "hangup",
+	.Int  = "interrupt",
+	.Quit = "quit",
+	.Alrm = "alarm",
+	.Kill = "kill",
+	.Fpe  = "sys: fp: ",
+	.Term = "term",
+}
+
+@(private="file")
+NOTE_SIGNALS := [Sig]signal.Signal {
+	.Exit = 0,
+	.Hup  = signal.SIGHUP,
+	.Int  = signal.SIGINT,
+	.Quit = signal.SIGQUIT,
+	.Alrm = signal.SIGALRM,
+	.Kill = signal.SIGKILL,
+	.Fpe  = signal.SIGFPE,
+	.Term = signal.SIGTERM,
+}
+
+// The function a note runs, for trap; ok is false if rc has none for it.
+// 9front's words first ("interrupt", "sys: fp: ", "term"), then VectraOS's
+// notes as the signals they stand for (vx:signal): "sys: trap: arithmetic"
+// is sigfpe's, "posix: SIGTERM pid=12" sigterm's, "posix: SIGQUIT" (^\ at a
+// terminal) sigquit's.
+note_trap :: proc "contextless" (note: string) -> (sig: Sig, ok: bool) {
+	posix, _, is_signal := signal.note_signal(note)
+	for word, s in NOTE_WORDS {
+		if s == .Exit {
+			continue
+		}
+		if str.has_prefix(note, word) || (is_signal && posix == NOTE_SIGNALS[s]) {
+			return s, true
+		}
+	}
+	return
 }
 
 // Each function, for the host to export: its name and its body's text.

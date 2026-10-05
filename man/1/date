@@ -1,0 +1,44 @@
+page=date sect=1 summary="print or set the date and time"
+    src=third_party/sbase/date.c
+    keys=time,clock,date,format,strftime,utc
+
+# SYNOPSIS
+
+```usage
+date [-u] [-d time] [+format | mmddHHMM[[CC]yy]]
+```
+
+# DESCRIPTION
+
+`date` prints the date and time in the format `%a %b %e %H:%M:%S %Z %Y`: the day, month, day of the month, time, zone and year.
+An argument beginning `+` gives the format instead: the rest of it is `strftime`'s, in which `%Y`, `%m`, `%d`, `%H`, `%M`, `%S`, `%a`, `%b`, `%Z`, `%s` and the like are replaced and other characters printed as they are.
+
+An argument of digits sets the clock instead: <mm> the month, <dd> the day, <HH> the hour and <MM> the minute, then optionally <yy> the year (69 to 99 in the 1900s, 00 to 68 in the 2000s) or <CC><yy> the century and year.
+
+: `-u`
+  Print the time in UTC.
+: `-d` <time>
+  Print <time>, a number of seconds since 1970-01-01 00:00 UTC, instead of now.
+
+The time is the wall clock, the kernel's clock plus the offset a clock driver such as drv-rtc-cmos(3) sets (see clock(2)); before one has, or with none, it is in January 1970.
+With no `TZ` in the environment the time is printed in UTC, as there is no time zone database.
+
+`date` is sbase's, a hard link to `/boot/bin/posix/sbase-box`; there is no native one.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so a POSIX program finds it as `/bin/date`.
+
+# SEE ALSO
+
+cal(1), clock(2), drv-rtc-cmos(3); sbase's page is `third_party/sbase/date.1` in the repository
+
+# DIAGNOSTICS
+
+An unknown flag, a missing <time>, or more than one argument prints the usage message and exits 1.
+A malformed date to set is reported, as `date: invalid date format: 13`, and a <time> that is not a number as `date: strtonum x: invalid`; each exits 1.
+
+# BUGS
+
+Setting the date always fails on VectraOS, as `date: clock_settime: Function not implemented`: the C library does not implement `clock_settime`, though the kernel has clock_set(2).
+
+`-d` takes seconds, not the date string GNU's `date -d` does, and is not in POSIX.
+A formatted date longer than 1023 bytes is not printed: `strftime` fails, and what is left in the buffer is printed instead.
+`TZ` and `-u` are untested on VectraOS.

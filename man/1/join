@@ -1,0 +1,62 @@
+page=join sect=1 summary="relational database operator"
+    src=third_party/sbase/join.c
+    keys=join,fields,relational,database,merge,sorted,posix
+
+# SYNOPSIS
+
+```usage
+join [-1 n] [-2 n] [-o list] [-e string] [-a | -v fileno] [-t delim] file1 file2
+```
+
+# DESCRIPTION
+
+`join` reads <file1> and <file2>, each sorted by its join field, and for each pair of lines, one from each, whose join fields are equal prints one line: the join field, then the other fields of the line of <file1>, then those of <file2>, separated by spaces.
+A file of `-` is standard input.
+Fields are compared byte by byte, so the files must be sorted that way, as `sort` sorts with `LC_ALL=C`.
+
+The join field is the first of each line.
+Fields are separated by runs of blanks, and blanks starting a line are ignored, unless `-t` sets a separator.
+
+: `-1` <n>, `-2` <n>
+  Join on field <n> of <file1>, or of <file2>; fields are numbered from 1.
+: `-a` <fileno>
+  Print each line of file <fileno>, 1 or 2, that pairs with none, as it is, besides the joined lines; it may be given for both files.
+: `-v` <fileno>
+  Print only the lines of file <fileno> that pair with none, not the joined lines.
+: `-o` <list>
+  Print the fields <list> names, in its order, instead of the default.
+  <list> is separated by commas or blanks, and each item is `0`, the join field, or <n>`.`<m>, field <m> of file <n>.
+: `-e` <string>
+  With `-o`, print <string> for a field the line does not have.
+: `-t` <delim>
+  Separate fields by the string <delim>, in which a backslash escape such as `\t` stands for its character, and print it between output fields; every occurrence separates, so two in a row make an empty field.
+
+`join` is sbase's, and found only in the POSIX namespace: `/boot/bin/posix/join` is a hard link to `sbase-box`, which runs the command its name names, and `/lib/ns/posix` (a manifest's `ns=posix`, see namespace(6)) binds `/boot/bin/posix` before `/boot/bin` on `/bin`, so a POSIX program that runs `join` finds it there.
+There is no native `join`.
+
+# SEE ALSO
+
+sort(1), comm(1), cut(1), paste(1); sbase's page is `third_party/sbase/join.1` in the repository
+
+# DIAGNOSTICS
+
+A file that cannot be opened is reported on standard error, as `join: fopen /nothing: No such file or directory`, and `join` exits 1, as it does on a read error, on a bad `-o` item, as `join: 3.1: invalid format`, or on a bad field number, after `strtonum` and the reason.
+Arguments other than two files, a bad flag, or a <fileno> other than 1 or 2 print the usage message and exit 1.
+An error writing the output or closing a file makes the exit status 2.
+Otherwise `join` exits 0.
+
+# BUGS
+
+Two join fields of different lengths are compared over the longer one's length, so bytes past the end of the shorter, the separator and what follows it on its line or beyond the line's end, take part.
+The order can be wrong, and with a <delim> of more than one byte two different fields can compare equal.
+
+With `-t`, blanks starting a line are still skipped, where POSIX makes every character significant.
+
+Without `-o`, a joined line ends with a separator when the line of <file2> has no field but its join field, or its join field is its last.
+
+`-e` fills only fields missing from a line, not empty ones, and does nothing without `-o`.
+
+Most errors exit 1, where POSIX asks for more than 1 so that a script can tell them from the status of a successful join.
+That status is 0 whether lines were joined or not.
+
+Untested on VectraOS.

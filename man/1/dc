@@ -1,0 +1,97 @@
+page=dc sect=1 summary="arbitrary-precision desk calculator"
+    src=third_party/sbase/dc.c
+    keys=calculator,arithmetic,rpn,stack,precision,bignum
+
+# SYNOPSIS
+
+```usage
+dc [-i] [file ...]
+```
+
+# DESCRIPTION
+
+`dc` is a reverse-Polish calculator on decimal numbers of any size.
+It runs the commands in each <file> in turn, then those on standard input; a <file> of `-` is standard input.
+
+A number is pushed on the stack; it may have a fraction, and a leading `_` makes it negative.
+With an input base above 10, `A` to `F` are digits 10 to 15.
+The commands are single characters, and blanks between them are ignored:
+
+: `p`
+  Print the top of the stack, and a newline, leaving it there.
+: `n`
+  Pop the top and print it, with no newline.
+: `P`
+  Pop the top and print it with no newline: a string as it is, a number as described in BUGS.
+: `f`
+  Print the whole stack, top first, one value to a line.
+: `+` `-` `*` `/` `%` `^`
+  Pop two values and push their sum, difference, product, quotient, remainder or power; the second popped is the left operand.
+  The quotient has `scale` digits after the point; a power's exponent is taken as an integer.
+: `~`
+  Pop two values and push their quotient, then their remainder.
+: `v`
+  Pop a value and push its square root, to `scale` digits after the point.
+: `c`, `d`, `r`, `z`
+  Clear the stack; push a copy of the top; swap the top two; push the stack's depth.
+: `s`<x>, `l`<x>
+  Pop the top into register <x>, or push a copy of register <x>.
+: `S`<x>, `L`<x>
+  Push the top onto register <x>'s own stack, or pop that stack onto the main one.
+: `:`<x>, `;`<x>
+  Pop an index, then a value, and store the value at that index of array <x>; or pop an index and push the value stored there.
+: `i`, `o`, `k`
+  Pop the input base (2 to 16), the output base (2 or more) or the scale (0 or more).
+: `I`, `O`, `K`
+  Push the input base, the output base or the scale.
+: `[`<string>`]`
+  Push <string>; brackets inside it nest, or are escaped with `\`.
+: `x`
+  Pop the top and run it as commands if it is a string; a number is pushed back.
+: `>`<x>, `<`<x>, `=`<x>, `!>`<x>, `!<`<x>, `!=`<x>
+  Pop two values and run register <x> if the top is greater than the second, less, equal, not greater, not less, or not equal.
+: `?`
+  Read a line of standard input and push it as a string; `?x` runs it.
+: `q`
+  Leave the string being run and the one that ran it; at the outer level, exit.
+: `Q`
+  Pop <n> and leave <n> levels of strings being run.
+: `Z`, `X`
+  Pop a value and push its number of digits, or a string's length; or its number of fraction digits, 0 for a string.
+: `!`<command>
+  Run the rest of the line with `system`; see BUGS.
+: `#`
+  Ignore the rest of the line.
+
+The flag is:
+
+: `-i`
+  Allow register names of more than one character: `<`<n>`>` names register number <n>, and `"`<name>`"` any name.
+
+`dc` is sbase's, a hard link to `/boot/bin/posix/sbase-box`; there is no native one.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so a POSIX program finds it as `/bin/dc`, and bc(1) runs it.
+
+# SEE ALSO
+
+bc(1); sbase's page is `third_party/sbase/dc.1` in the repository
+
+# DIAGNOSTICS
+
+A command that fails, such as one on an empty stack, is reported on standard error, as `dc: stack empty`, and `dc` goes on with the next command.
+Dividing by 0 is reported as `dc: divide by 0`.
+An unknown flag prints `usage: dc [-i] [file ...]` and exits 1, and a <file> that cannot be opened is reported, as `dc: opening '/x': No such file or directory`, and exits 1.
+Otherwise the exit status is 0, whatever failed.
+
+# BUGS
+
+`!` cannot run anything on VectraOS: `system` needs `/bin/sh`, which there is not.
+
+`P` of a number does not print the bytes traditional `dc` does: it prints the integer part in base 100, each digit as a space and two decimal digits, so `65P` prints ` 65`, not `A`.
+
+Where POSIX gives a square root the scale of its operand when that is larger, `v` gives `scale` digits only.
+
+Standard input is always read after the <file>s, unless one of them quits.
+
+With `-i`, a register number above 255 wraps: `<300>` is the register `,`.
+
+sbase's own page has the comparisons backwards, and says `?` runs the line it reads; the source does as this page says.

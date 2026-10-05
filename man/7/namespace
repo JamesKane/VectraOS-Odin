@@ -1,0 +1,183 @@
+page=namespace sect=7 summary="per-process namespaces: names, mounts, binds and unions"
+    keys=namespace,name,space,mount,bind,unmount,union,srv,post,group,template,newns,rfork
+
+# DESCRIPTION
+
+Every resource on VectraOS is a file tree served by some process, and every process sees the trees it has been given, arranged under names of its own choosing.
+That arrangement is the process's namespace.
+It is Plan 9's idea, as The Use of Name Spaces in Plan 9 describes it, kept whole and moved out of the kernel: the kernel has no paths, no mount table and no name cache, and a process's names are resolved by `lib/vx-ns`, in the process, over the 9Px connections it holds (ADR-0009).
+
+A namespace is a table of mount points.
+At each one is a union: one or more directories, each from a file server, tried in order.
+`mount` puts a file server's tree on a name; `bind` puts a part of the namespace on another name; `unmount` takes either away.
+Nothing else makes a name: there is no `/dev` the kernel supplies, no root file system it mounts, and no name a process can reach that it was not given.
+
+Two processes may see the same names and different files, or the same files under different names.
+A test sees `fsd`'s home branch at `/tmp`; the console shell sees a RAM file system there.
+Neither is wrong: `/tmp` is what each was given.
+
+Names are not authority.
+A process can mount only a server it holds a handle to, so rearranging its own table gives it nothing it did not already have, and `bind` confines nothing.
+A restricted view is a connection attached at a restricted root, which the server enforces; see {Authority|#authority}.
+
+@node=names title="Names and how they are resolved"
+
+A name is an absolute path of UTF-8 components, as utf(6) defines them.
+It is cleaned before it is used, so `..` is taken away lexically and never climbs out of a bind, as in Plan 9.
+A process's names are absolute: a native program has no current directory (BUGS), and a POSIX program's is kept by its C library, which makes each relative name absolute before resolving it (see posix(7)).
+
+Resolution walks from the root's mount, a walk(5) of the names that remain at a time.
+A `Twalk` answers with one qid for each name walked, and vx-ns checks each against the table: a mount point is found by the identity of the directory it was made on, the connection and the qid path, not by the path it was made at.
+At a mount point, the walk goes on from the root of the mount's union with the names that remain.
+So a mount shows through every name that reaches its directory: after `bind /n/a /n/b` and a mount on `/n/a/m`, `/n/b/m` is the mount too, as in Plan 9.
+Crossing a mount costs no extra round trip.
+
+The path a mount or bind was made at is kept beside it, for ns(1).
+
+@node=mount title="Mount and bind"
+
+`mount` <srv> <old> [<aname>] attaches to a file server and puts the tree it serves on <old>.
+The <srv> is a post, `/srv/`<name>, that the namespace already has a connection to, or a 9P server over TCP, `tcp!`<host>`!`<port>; <aname> chooses one of the server's trees, as fsd(4)'s branches are chosen, and is passed in the attach(5).
+`bind` <new> <old> puts on <old> what <new> names now, the union there copied whole if it is one.
+`unmount` [<new>] <old> takes one member away, or the whole union.
+
+These are rc(1)'s builtins, with the same words as the lines of a namespace file, namespace(6), and as the lines ns(1) prints.
+A native program makes the same changes through vx-ns.
+
+A namespace holds at most 32 mount points, 8 members to a union and 16 servers.
+
+@node=unions title="Unions"
+
+A mount or bind onto a name that is already a mount point replaces what is there, or, with a flag, joins its union:
+
+: `-b`
+  The new directory goes before the members already there.
+: `-a`
+  It goes after them.
+: `-c`
+  Files created in the union are created in this member: the first member with `-c`, as 9front's `createdir` chooses.
+  A union of more than one member with none refuses a create.
+
+A walk into a union tries each member in order, and the first that has the name wins; a directory read lists every member's entries.
+That is how `/bin` is made: the POSIX template binds `/boot/bin/posix` before the boot image's `/boot/bin`, so a POSIX program finds sbase's `ls` first and a native program, with only `/boot/bin`, finds the native one (see posix(7)).
+A union's own directory stays its first member, so `ns` prints it as a bind of itself, as below.
+
+@node=srv title="/srv and posting"
+
+A file server reaches its clients through a post: a channel whose server end the server listens on and whose client end is kept under a name, `/srv/`<name>.
+In Plan 9 `/srv` is a directory any process may post in.
+Here the posts are made by svcd(8), from the `post=`, `claim=` and `connect=` keys of the service manifests (svc(6)), when it reads them at boot, and svcd keeps every client end.
+A post is a rendezvous: a client may connect before its server has started, and waits.
+svcd keeps a second handle to each server end too, so a client that connects while its server is restarting waits for it rather than failing.
+
+`/srv/`<name> is a name in a namespace file, not a file: `/srv` is not a tree, and `ls /srv` fails (BUGS).
+A process holds a connector to each post it was given, as a handle, and a mount of `/srv/`<name> is a connection through it; a process with no connector for a post cannot mount it, whatever its namespace file says.
+In a namespace group, the connectors are kept by nsd(4) for the group, so any member can mount what one member has mounted.
+
+The posts of a running system are its services': `/srv/cons`, `/srv/bootfs`, `/srv/proc`, `/srv/net`, `/srv/tmpfs`, `/srv/null`, `/srv/ptyd`, `/srv/sys`, `/srv/nsd`, `/srv/acpi`, the disks and network devices devmgr(8)'s drivers serve, and on an installed system `/srv/fsd`, `/srv/esp` and `/srv/dist`; see services(7).
+
+@node=making title="How a process gets its namespace"
+
+A process is given its namespace by whoever starts it, in its spawn message (svc(6)): mount and bind records, in order, with a connector for each server mounted, which its runtime replays at its first use of a name.
+A process whose spawn message has none has an empty namespace.
+
+svcd builds each service's from its manifest: `mount=` and `bind=` records, and `ns=`<name>, which names a namespace template, `/lib/ns/`<name> in the boot image, whose lines become records where it stands.
+Each service gets a namespace of its own, not shared with any other, and only the connectors its manifest names.
+
+The templates are in `/lib/ns`.
+There is one so far, `/lib/ns/posix`, the namespace a POSIX program expects: the boot image on `/`, the commands on `/bin`, a RAM file system on `/tmp`, the null devices and terminals on `/dev`, and `/proc`, `/net` and `/sys` (see posix(7)).
+A template is a script, not data, so it is namespace(6), not ndb(6).
+
+A program spawning a child gives it its own namespace, shared, as the next node describes.
+
+@node=groups title="Namespace groups and nsd"
+
+As Plan 9's `rfork` shares a namespace unless asked not to, a child joins its parent's namespace group, and a `bind` either makes is seen by both.
+So a script's `bind` reaches the shell that ran it, and a command run from the console shell sees the shell's mounts.
+
+A group is held by nsd(4), one for the node, as namespace(6) text and the connectors its mount lines name.
+nsd publishes the text in memory each member maps read-only, after a sequence number.
+Each member keeps its own table, made from the text; before it resolves a name it looks at the sequence, and if the text has changed it builds its table again.
+So resolving a name never asks nsd.
+A change is made on the member's own table first, then sent to nsd as the new text, with the sequence it was made from; if another member changed the group meanwhile, nsd refuses, and the member catches up and tries again.
+
+A process keeps a table of its own until it first spawns a child; that makes a group, with the process as its first member.
+A process that never spawns never talks to nsd, and a process without nsd's post (a manifest's `connect=nsd`) gives its children a copy, as records, instead.
+After a fork, the child has its own channel to the group and maps the text again.
+
+Connections are a member's own: each opens its own connection to each server, through a duplicate of the group's connector, since a ring has one producer (see rings(7)).
+An open file a child inherits is shared with it through its server, by share(5)'s tokens, since a fid belongs to one connection.
+
+@node=printing title="What ns prints"
+
+ns(1) prints its namespace as namespace(6) text: a `mount` or `bind` line for each member of each union, in the order the members were added, since a later one may need a path an earlier one made.
+The first member of a union has no flag; a later one has `-b` if it came before every member added so far and `-a` otherwise; a member that takes creates has `-c` too.
+`/proc/`<pid>`/ns`, which procfs(4) gets from nsd, is the same text for the group process <pid> is in.
+
+The text can be run again: rc(1) takes the same lines, so `ns` output rebuilds the namespace in another shell that holds the same connectors.
+
+@node=authority title="Authority"
+
+Because vx-ns runs inside the process, a process can ignore its table and speak 9Px itself, from any fid on any connection it holds, `..` included.
+Confinement therefore comes only from the connections: whoever builds a restricted namespace gives the child only the connections it may use, each attached at the root it may see, and the server keeps a client inside its attach root, answering `..` there with the root itself.
+A template that leaves out `/srv` and `/net` gives a process nothing it could mount from them, which is why there is no `RFNOMNT`.
+
+# EXAMPLES
+
+The namespace test's manifest, `tests/user/nstest.ndb`, its comment left out, and the namespace `nstest` prints with `ns`'s code, from the test's log.
+`/bin` is a union of the boot image's `/bin` and `/boot/bin`, and `/dev` one of the boot image's `/dev` and its `boot/svc` directory, attached by name:
+
+```ndb
+service=nstest program=/boot/bin/nstest console restart
+arg=first
+arg="second arg"
+mount=/ srv=bootfs
+bind=/bin new=/boot/bin flags=a
+mount=/dev srv=bootfs aname=boot/svc flags=a
+```
+
+```text
+mount /srv/bootfs /
+bind /bin /bin
+bind -a /boot/bin /bin
+bind /dev /dev
+mount -a /srv/bootfs /dev boot/svc
+```
+
+At the console, a bind and a mount, which every command run after them sees:
+
+```rc
+% bind -a /boot/bin /bin; ns | tail -1
+bind -a /boot/bin /bin
+% mount /srv/bootfs /n; ls /n; ns | tail -1
+adm  bin  boot  dev  dist  lib  n  net  proc  rc  srv  sys  tmp
+mount /srv/bootfs /n
+```
+
+# FILES
+
+: `/lib/ns/*`
+  The namespace templates.
+: `/srv/<name>`
+  A post, as mounts name it.
+: `/proc/<pid>/ns`
+  The namespace of the group process <pid> is in.
+
+# SEE ALSO
+
+ns(1), rc(1), nsd(4), procfs(4), namespace(6), svc(6), svcd(8), utf(6), walk(5), attach(5), share(5), services(7), posix(7), rings(7); ADR-0009, `docs/02-namespace-swarm.md` §2 and §7, and Plan 9's The Use of Name Spaces in Plan 9 (`sys/doc/names.ms` in 9front's tree)
+
+# BUGS
+
+`/srv` is not a file tree: posts are made only from manifests at boot, `ls /srv` fails, and a program cannot post a service at run time.
+
+Every spawn shares: there is no copied group (`rfork n` in rc, Plan 9's `RFNAMEG`) and no clean one but svcd's, so a script cannot keep its binds to itself.
+There is no `newns` command, and no program applies a template but svcd, which takes only its `mount /srv/`<name> and `bind` lines; nothing gives a template `$`<name> variables, so `posix.user` and the per-package namespaces of `docs/02-namespace-swarm.md` §2 and §7 do not exist yet.
+
+nsd is not restarted, and its groups would be lost if it were.
+A group's text is at most 16 KiB, a member replays the whole text after any change, and a group's connectors are never let go, so a group takes at most 8 servers over its life.
+nsd takes a member's word for which process it is, so `/proc/`<pid>`/ns` can be read, or claimed, by another process until there are capability tokens.
+
+Native programs have no current directory, so their names must be absolute; there is no `/env`, `/fd`, `/dev/cons` or `consctl`, and the console is a handle given at spawn (M6 step 6e brings `/env`).
+
+Each process dials its own TCP connection for a `tcp!` mount, and a forked child dials again (M6 step 6d shares one).

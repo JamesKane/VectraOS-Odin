@@ -1,0 +1,170 @@
+page=handles sect=7 summary="handles and authority"
+    keys=handle,handles,capability,capabilities,rights,authority,ambient,grant,grants,resource,iommu,dma,users,token
+
+# DESCRIPTION
+
+A program on VectraOS can do what its handles let it do, and nothing else.
+A handle names one kernel object, a channel, a task, some memory, and carries the rights its holder was given over it.
+The kernel keeps no user ids, finds no object by name, and has no call that reaches an object its caller was not given: what a task holds, someone handed it.
+
+Plan 9 made the namespace a process's view of the world, and VectraOS keeps it; under the namespace lies the handle table.
+Every mount is a connection to a server, and every connection is handles: a channel end and a ring.
+A file a process can open is one its namespace reaches, through connections it holds; a device it can touch is one whose registers it holds; a process it can kill is one whose task handle it holds, or one a server holding that handle kills for it.
+
+So the question this page answers, who may do what, is always answered the same way: by following a handle back through the tasks that passed it on, to the task that made its object or to the first task, to which the kernel gives what no one could make.
+
+@node=objects title="Objects and handles"
+
+The kernel's objects are these, each with the page that describes the calls on it:
+
+| Object | Is | Page |
+| Task | an address space and a table of handles: a process, less its threads | task(2) |
+| Thread | a thread of control in a task | thread(2) |
+| VMO | pages of memory: anonymous, a device's, or a pager's | vmo(2), as(2) |
+| Pager | a task that supplies a VMO's pages | pager(2) |
+| Port | a queue of packets, the one wait | port(2) |
+| Counter | a 64-bit value that only goes up | counter(2) |
+| Channel | a pair of ends carrying messages and handles | channel(2) |
+| Ring | a pair of ends sharing queues of entries, with doorbells | ring(2) |
+| Irq, IoRange | an interrupt, and x86's I/O ports | irq(2) |
+| DmaDomain, DmaMapping | what a device may reach by DMA, and one range of it | dma(2) |
+| Resource | the authority over device space, from which the others are minted | irq(2), vmo(2) |
+
+A handle is a 32-bit value: an index into its task's table and the slot's generation, bumped each time the slot is freed, so a handle kept after it was closed fails with `VX_ERR_BAD_HANDLE` rather than reaching what took the slot next.
+Slots are taken lowest first, so a program run twice sees the same handles.
+A table holds 255.
+
+An object lives while anything refers to it: a handle, a mapping, a message in flight.
+When the last reference goes it is destroyed, and its peer learns of it: closing a channel's or ring's end is seen at the other as `VX_ERR_PEER_CLOSED`, and ending a task closes everything it held.
+handle(2) describes the calls that duplicate and close handles.
+
+@node=rights title="Rights"
+
+Each handle carries rights, the bits `abi/vx/rights.def` names: `READ`, `WRITE`, `EXEC`, `MAP`, `DUPLICATE`, `TRANSFER`, `SIGNAL`, `WAIT`, `MANAGE`, `INSPECT`, `DEBUG` and `PAGER`.
+Every call checks the rights it needs on every handle it is given, and each call's page says which; a call refused for a right returns `VX_ERR_ACCESS`.
+
+Rights only ever shrink.
+`handle_dup` makes a second handle with the same rights or fewer, never more (handle(2)), and that is how a holder shares an object it must not let others change:
+
+- the boot image is given to bootfs(4) as a VMO with `READ` and `MAP`, never `WRITE`;
+- a counter given with `READ` and `WAIT` lets its holder watch it but not move it (counter(2));
+- a driver's DMA domain is a duplicate without `MANAGE`, so the driver maps memory for its device but cannot revoke what it mapped (dma(2));
+- a Resource with `PAGER` alone, as fsd(4) is given, makes pagers and nothing else (pager(2)).
+
+The rights on a task say what may be done to it: `INSPECT` to read its state, `MANAGE` to kill it, start its threads or post it notes, `DEBUG` to stop it and read and change its memory and registers (task(2), thread(2), exception(2)).
+A task's maker holds every right to it, so a parent may debug what it starts.
+
+@node=getting title="How a task gets handles"
+
+A handle reaches a task in one of two ways: in the spawn message the task starts with, or in a channel or ring message it reads.
+In both a handle moves only if it has `TRANSFER`, and it leaves the writer's table as it enters the reader's, with the rights it had (channel(2), ring(2)).
+
+A new task is made empty, filled from outside by its parent and started with one handle, its bootstrap channel, on which the first message is the spawn message (svc(6)#spawn).
+That message is ndb records and up to 64 handles, each named by a record: `self`, the task itself, first, then whatever the parent chose to give, such as `console`, `listen` or a mount's connector `ns.00`.
+vx-rt reads it before `vx_main` runs, and a program takes each handle by its name, once (`vx_spawn_take`).
+The kernel builds a spawn message for one task only, the first, svcd(8); every other task's comes from its parent, through `vx_spawn_elf` in `lib/vx-rt/spawn.c`.
+
+A fork copies the parent's table, each handle with its value and rights (task(2)).
+An exec closes every handle but the bootstrap channel it passes to the new program, which reads a new spawn message there.
+
+A connection to a file server is handles too.
+A connector, a duplicate of a post's client end, is a channel; a client makes a `channel_call` on it, and the server's reply carries a ring's end and the ring's memory, which the client maps (`lib/vx-9p/ring.c`).
+Mounting a server is holding that ring; a child given the mount is given the connector, and makes a connection of its own.
+namespace(7) and rings(7) describe what follows.
+
+@node=ambient title="No ambient authority"
+
+Authority on Plan 9 is mostly the namespace, but not all of it: `#` device names reach kernel devices from any process, and the host owner's identity reaches the rest.
+VectraOS has neither.
+
+- There is no open by name in the kernel: a path is walked by the program's own library, over connections the program holds.
+- There is no user the kernel checks; users are a file server's (see {users|#users}).
+- There is no global lookup of tasks: `task_info_of` and `task_kill_id` reach only a task's own descendants (task(2)), which is how procfs(4), holding svcd's task, lists every process.
+- There is no device a program can name: device registers, interrupts and DMA come only as objects minted from the Resource ({devices|#devices}).
+
+What a process cannot get, then, is whatever no one gave it.
+Taking authority away is closing a handle: a server cuts off a client by closing its end, and killing a task revokes everything the task held.
+
+@node=grants title="What svcd grants"
+
+The kernel gives svcd, the first task, everything it gives at all: the boot image, the ACPI tables, the root Resource, the command line and the bootloader's entropy (svcd(8)).
+svcd gives each service it starts what that service's manifest names, and nothing more (svc(6)):
+
+- a flag gives one thing: `console` a connector to `/srv/cons`, `bootimage` the boot image read-only, `tasks` svcd's own task and so every task (procfs alone), `resource` the root Resource (devmgr alone), `pager` the Resource with `PAGER` alone (fsd alone);
+- `post=` gives the server end of a post, `connect=` a connector to one, and `claim=` a post's server end to hand on, as devmgr(8) hands `/srv/disk0` to the driver it starts;
+- `mount=` and a namespace template's lines give a connector for each mount;
+- `ioport=`, `mmio=` and `irq=` give a driver its device, minted from the root Resource once and kept by svcd, so each restart of the driver gets duplicates of the same objects.
+
+A program started by another program gets what its starter chose to pass: rc(1) gives each command the connectors of its namespace, the console, and its standard input, output and error as channel ends.
+No start can be wider than the starter, since a task can pass only handles it holds; svcd, which holds everything, is the one exception, and it reads its grants from manifests in the boot image.
+
+@node=devices title="Devices: the Resource and the IOMMU"
+
+The root Resource is the authority over every device: physical memory that is not RAM, interrupts, I/O ports and DMA.
+A VMO over device registers, an Irq, an IoRange and a DMA domain are each made with a Resource handle that has `MANAGE` (vmo(2), irq(2), dma(2)).
+svcd holds the root Resource and gives it to devmgr(8) alone; each of them mints what a driver needs and gives the driver only that: its configuration space, its BARs, its MSIs and its DMA domain, or an ACPI device's `_CRS` resources exactly.
+A driver is never given the Resource, so it can reach no device but its own.
+
+DMA is where a driver could reach past its handles, since a device writes wherever it is told.
+On x86_64 the kernel drives VT-d and on aarch64 SMMUv3, and the IOMMU denies every device all memory until devmgr makes its domain; the device then reaches only the pages its driver mapped through the domain (dma(2)).
+devmgr keeps the domain and gives the driver a duplicate that can map but not revoke.
+When the driver exits, devmgr revokes every mapping, turns off the function's bus mastering and resets it before the pages go back, so a dead driver's device writes into nothing (devmgr(8)#restarts).
+
+Two system-wide acts need the root Resource itself: setting the wall clock (clock(2)) and turning the machine off (power(2)).
+devmgr alone makes either.
+
+@node=users title="Users"
+
+Users are fsd(4)'s, kept in its `/adm/users` file (users(6)), and checked by fsd against each file's owner, group and mode as Plan 9's file servers check them.
+A process's user is the `user=` record of its spawn message: a manifest's `user=` puts it there, a child inherits its parent's, and vx-ns names it in each `Tattach` it sends, the attach's `uname`.
+A name fsd does not know attaches as `none`, which has only the others' permissions; members of group 0, `adm`, may attach a branch permissively, write `/adm/ctl` and give files away.
+
+The kernel knows nothing of users.
+A user decides what fsd lets a connection do, not what handles a task may hold.
+
+# EXAMPLES
+
+devmgr's manifest, `boot/svc/devmgr.ndb`: the root Resource, the ACPI tables, the console, the command line, the boot image on `/`, and the server end of each post a driver may serve:
+
+```ndb
+service=devmgr program=/boot/bin/devmgr resource acpi console cmdline restart
+mount=/ srv=bootfs
+claim=ether0
+claim=disk0
+claim=disk1
+claim=disk2
+claim=disk3
+claim=acpi
+```
+
+The installed system's fsd, from `boot/svc/system.ndb`: a post to serve, a connector to its partition, its own entropy, and the right to make pagers:
+
+```ndb
+service=sys-fsd program=/boot/bin/fsd post=fsd console entropy pager
+    when=vx.system
+connect=disk0.system
+```
+
+# SEE ALSO
+
+handle(2), channel(2), ring(2), task(2), thread(2), dma(2), irq(2), vmo(2), pager(2), svc(6), users(6), svcd(8), devmgr(8), fsd(4), procfs(4), namespace(7), services(7), rings(7); `docs/01-kernel-ipc.md` §2, §3 and §7, `docs/02-namespace-swarm.md` §3.4 and §7, `docs/11-storage.md` §9 and ADR-0029 in the repository
+
+# BUGS
+
+Identity is advisory: a spawn message's `user=` is whatever the spawner wrote, and a client names whom it attaches as, so fsd's permissions stop mistakes, not a program that names another user.
+keyd, at M10, is to sign who a client is.
+Until M6 step 6e, POSIX programs see no owners: `getuid` and its kin answer 0.
+
+There are no capability tokens yet (`docs/02-namespace-swarm.md` §3.4, M10): anyone who can open `/proc/<pid>` can debug, signal and kill that process, procfs trusts the task and parent a registration names, and nsd(4) takes a caller's word for which task it is.
+
+ADR-0029's broad grants (the grant settings, svcd's records of what each package was granted, packages' `needs=`, `/lib/ns/posix.user`) come with packages at M7; svcd reads only the boot image's manifests, and a process's `status` names no grants.
+The design's `/proc/<pid>/caps`, a process's handles and their rights, is not there.
+
+Handles carry no badge, the value a server is to tell its clients apart by (`docs/01-kernel-ipc.md` §3); each client has a connection of its own instead.
+`handle_replace` is reserved; VMO leases, revocable shares of memory and leases lent for one call, come in M6 step 6e; an IoRange cannot be revoked.
+
+Some calls check rights by trying a handle as each kind of object in turn, so a missing right is reported as `VX_ERR_BAD_HANDLE`, not `VX_ERR_ACCESS` (port(2), counter(2)).
+`debug_write` is open to every task, not only to a holder of a debug capability (debug(2)).
+
+The wall clock and power off are gated on the root Resource, the coarsest right there is (ADR-0031).
+A function no IOMMU covers gets a pass-through domain, whose device reaches all of memory; VT-d remaps no interrupts, so a device's MSIs are not checked against their source (M6 step 6g).

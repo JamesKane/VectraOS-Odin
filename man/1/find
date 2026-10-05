@@ -1,0 +1,101 @@
+page=find sect=1 summary="find files by their names and attributes"
+    src=third_party/sbase/find.c
+    keys=search,files,directory,tree,walk,name,type,exec,posix
+
+# SYNOPSIS
+
+```usage
+find [-H | -L] path ... [expression ...]
+```
+
+# DESCRIPTION
+
+`find` walks the tree below each <path>, the <path> included, and evaluates the <expression> for each file it meets, with the file's name as the <path> it was reached by followed by the names below it.
+The <path>s are the arguments before the first that begins with `-`, or is `!` or `(`.
+With no <expression>, or one with no `-exec`, `-ok`, `-print` or `-print0`, each file for which the <expression> is true is printed, one name to a line.
+
+: `-H`
+  Follow symbolic links named as <path>s.
+: `-L`
+  Follow every symbolic link; a link that leads nowhere is taken as itself.
+
+An <expression> is primaries joined by operators.
+A primary that takes a number <n> takes `+`<n> for more than <n>, `-`<n> for fewer, and <n> for exactly <n>.
+The primaries are:
+
+: `-name` <pattern>
+  The last component of the name matches the shell pattern <pattern>, as `fnmatch` matches; a leading `.` is matched by a wildcard.
+: `-path` <pattern>
+  The whole name matches <pattern>; a `/` is matched by a wildcard.
+: `-type` <c>
+  The file is of type <c>: `b` block device, `c` character device, `d` directory, `l` symbolic link, `p` FIFO, `f` regular file or `s` socket.
+: `-perm` <mode>, `-perm -`<mode>
+  The file's permission bits are exactly <mode>, octal or symbolic as chmod(1) takes it; with `-`, at least the bits of <mode> are set.
+: `-links` <n>
+  The file has <n> links.
+: `-size` <n>, `-size` <n>`c`
+  The file's size, rounded up to 512-byte blocks, is <n> blocks; with `c`, it is <n> bytes.
+: `-atime` <n>, `-ctime` <n>, `-mtime` <n>
+  The file was last accessed, changed, or modified <n> whole days of 86400 seconds before `find` started.
+: `-newer` <file>
+  The file was modified later than <file>, to the second.
+: `-user` <name>, `-group` <name>
+  The file is owned by the user or group <name>, or by the number <name>.
+: `-nouser`, `-nogroup`
+  The file's owner, or group, has no name in the user database.
+: `-print`
+  Always true; print the name and a newline.
+: `-print0`
+  Always true; print the name and a NUL byte.
+: `-exec` <cmd> ... `;`
+  Run <cmd> with its arguments, an argument `{}` replaced by the name, and wait for it; true if it exits 0.
+: `-exec` <cmd> ... `{}` `+`
+  Always true; gather names, and run <cmd> with as many of them at the end of its arguments as fit, as often as needed, the last time when `find` finishes.
+  `{}` must be the argument just before `+`.
+  `find` exits 1 if any run of <cmd> fails.
+: `-ok` <cmd> ... `;`
+  As `-exec` with `;`, but first ask on standard error, as `cmd: name ? `, and run <cmd> only if the line read from standard input begins with `y` or `Y`.
+: `-prune`
+  Always true; do not descend into the file if it is a directory.
+: `-depth`
+  Always true; evaluate each directory's contents before the directory itself, for the whole walk.
+: `-xdev`
+  Always true; do not descend into directories on another file system than the <path> they are below.
+
+The operators, from the tightest binding to the loosest, are `(` <expression> `)`; `!` <expression>, true if <expression> is false; <expression> `-a` <expression>, true if both are, also written with no operator between them; and <expression> `-o` <expression>, true if either is.
+The second operand of `-a` and `-o` is evaluated only when the first does not decide.
+The shell's special characters among them, and `;`, must be quoted.
+
+`find` is sbase's, and found only in the POSIX namespace: `/boot/bin/posix/find` is a hard link to `sbase-box`, which runs the command its name names, and `/lib/ns/posix` (a manifest's `ns=posix`, see namespace(6)) binds `/boot/bin/posix` before `/boot/bin` on `/bin`, so a POSIX program that runs `find` finds it there.
+There is no native `find`.
+
+# EXAMPLES
+
+`tests/posix/sbasetest.c` runs `find /tmp/sb -type d -name sub` in the POSIX namespace, in a tree it has made with the files `/tmp/sb/f` and `/tmp/sb/h` and the directory `/tmp/sb/sub`, and checks that it prints `/tmp/sb/sub` and exits 0.
+
+# SEE ALSO
+
+ls(1), du(1), xargs(1), grep(1); sbase's page is `third_party/sbase/find.1` in the repository
+
+# DIAGNOSTICS
+
+Messages go to standard error, prefixed `find: `.
+A file that cannot be looked at, or a directory that cannot be read, is reported, as `find: failed to stat /nothing: No such file or directory`, and the walk goes on; so is a directory met again below itself, as `loop detected 'a' is 'b'`.
+A malformed <expression> ends `find` before the walk, as `unknown operand: -x`, `paths must precede expression: a`, `no argument for primary -name`, `no terminating ; or {} + for -exec primary`, `invalid type x for -type primary`, `bad number 'x'`, `unknown user 'x'` or `extra )`; so does `must specify a path`.
+
+`find` exits 0 when all went well and 1 otherwise.
+
+# BUGS
+
+`-ok` is true when <cmd> fails and false when it succeeds, the reverse of what POSIX says, since sbase tests the status the wrong way round.
+
+VectraOS has no user database in the POSIX namespace, no `/etc/passwd` or `/etc/group`, so `-user` and `-group` take numbers only, a name being `unknown user`, and `-nouser` and `-nogroup` are true for every file.
+
+The POSIX layer gives a file whose server answers Tgetattr (see getattr(5)), as most do, a device number of 0.
+So `-xdev` cannot tell where one file system meets another, and two directories on different servers whose qids have the same path look like one, which `find` reports as a loop and does not descend into.
+This is read from the code; untested on VectraOS.
+
+The times are compared in whole seconds, ignoring nanoseconds.
+`-exec` replaces only an argument that is exactly `{}`, not `{}` within one.
+
+Untested on VectraOS: every primary but `-type` and `-name`, the operators, `-H` and `-L`.

@@ -1,0 +1,37 @@
+page=hostname sect=1 summary="print or set the system's name"
+    src=third_party/sbase/hostname.c,ports/musl/vx/start.c
+    keys=host,name,nodename,system,uname,posix
+
+# SYNOPSIS
+
+```usage
+hostname [name]
+```
+
+# DESCRIPTION
+
+With no argument, `hostname` prints the system's host name and a newline.
+With a <name>, it asks for the host name to be set to <name>, which VectraOS refuses (see BUGS).
+
+The C library's `gethostname` returns the node name `uname` gives, and the POSIX layer's `uname` gives `vectra` on every machine, so `hostname` prints `vectra`.
+
+`hostname` is sbase's, and found only in the POSIX namespace: `/boot/bin/posix/hostname` is a hard link to `sbase-box`, which runs the command its name names, and `/lib/ns/posix` (a manifest's `ns=posix`, see namespace(6)) binds `/boot/bin/posix` before `/boot/bin` on `/bin`, so a POSIX program that runs `hostname` finds it there.
+There is no native `hostname`.
+
+# SEE ALSO
+
+uname(1); sbase's page is `third_party/sbase/hostname.1` in the repository
+
+# DIAGNOSTICS
+
+A failed call is reported on standard error, as `hostname: sethostname: Function not implemented`, and `hostname` exits 1.
+More than one argument, or a flag, prints the usage message and exits 1.
+Otherwise it exits 0.
+
+# BUGS
+
+Setting the name always fails: the POSIX layer does not implement the `sethostname` system call, and says so once on the debug console, as `vx-musl: system call 170 is not implemented` on x86_64 (161 on aarch64).
+
+The name is fixed, `vectra`, whatever the machine or its configuration.
+
+Untested on VectraOS.

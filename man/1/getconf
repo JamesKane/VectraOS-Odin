@@ -1,0 +1,45 @@
+page=getconf sect=1 summary="print system configuration values"
+    src=third_party/sbase/getconf.c,ports/sbase/generated/getconf.h
+    keys=sysconf,confstr,pathconf,limits,configuration,posix
+
+# SYNOPSIS
+
+```usage
+getconf [-v spec] var [path]
+```
+
+# DESCRIPTION
+
+`getconf` prints the value of the configuration variable <var>, and a newline.
+
+With no <path>, <var> is looked for first among the names `sysconf` takes, without their `_SC_` prefix, as `ARG_MAX` or `PAGESIZE`, and the value asked of the C library; then among those `confstr` takes, as `PATH`; then among the limits of `<limits.h>`: the `_POSIX_` minimums such as `_POSIX_PATH_MAX`, whose values were fixed when `getconf` was built.
+With a <path>, <var> is one of the names `pathconf` takes, as `NAME_MAX`, and the value is asked for <path>.
+A value the C library calls indeterminate is printed as `undefined`.
+
+The names are those in `ports/sbase/generated/getconf.h`, made from sbase's `scripts/getconf.sh` when sbase was vendored, and kept where musl's headers define them.
+
+: `-v` <spec>
+  Accepted and ignored: there is one programming environment.
+
+`getconf` is sbase's, and found only in the POSIX namespace: `/boot/bin/posix/getconf` is a hard link to `sbase-box`, which runs the command its name names, and `/lib/ns/posix` (a manifest's `ns=posix`, see namespace(6)) binds `/boot/bin/posix` before `/boot/bin` on `/bin`, so a POSIX program that runs `getconf` finds it there.
+There is no native `getconf`.
+
+# SEE ALSO
+
+uname(1); sbase's page is `third_party/sbase/getconf.1` in the repository
+
+# DIAGNOSTICS
+
+A <var> it does not know is reported on standard error, as `getconf: invalid variable: NOTHING`, with exit status 1.
+A failed call is reported with the system's reason, exit status 1.
+No <var>, more than two arguments, or a bad flag print the usage message and exit 1.
+Otherwise `getconf` exits 0.
+
+# BUGS
+
+`pathconf` in musl looks at no file: each value is the same for every <path>, which need not exist.
+
+`OPEN_MAX` and `CHILD_MAX` print `undefined`: the POSIX layer reports every resource limit as infinite.
+This is read from the code; untested on VectraOS.
+
+Untested on VectraOS.

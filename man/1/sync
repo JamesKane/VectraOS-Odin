@@ -1,0 +1,32 @@
+page=sync sect=1 summary="ask for file systems' data to be written out"
+    src=third_party/sbase/sync.c,ports/musl/vx/backend.c
+    keys=flush,disk,write,buffers
+
+# SYNOPSIS
+
+```usage
+sync
+```
+
+# DESCRIPTION
+
+`sync` calls the C library's `sync`, which POSIX defines as scheduling every file system's modified data to be written to its storage, and exits 0.
+It takes no flags and no operands.
+
+`sync` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/sync`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/sync`.
+There is no native `sync`.
+
+# SEE ALSO
+
+fsd(4), fsync(5); sbase's page is `third_party/sbase/sync.1` in the repository
+
+# DIAGNOSTICS
+
+A flag or an operand prints the usage message and exits 1.
+
+# BUGS
+
+VectraOS's C library does not implement the `sync` system call (`ports/musl/vx/backend.c` has no case for it), so `sync` writes nothing out and still exits 0.
+The first call in a process writes `vx-musl: system call` and its number `is not implemented` on the debug console.
+A POSIX program that needs a file on its storage calls `fsync` on that file, which the C library does implement.

@@ -1,0 +1,38 @@
+page=cmp sect=1 summary="compare two files"
+    src=third_party/sbase/cmp.c
+    keys=compare,difference,bytes,binary,equal
+
+# SYNOPSIS
+
+```usage
+cmp [-l | -s] file1 file2
+```
+
+# DESCRIPTION
+
+`cmp` reads <file1> and <file2> byte by byte.
+If they are the same it prints nothing; at the first byte that differs it prints the two names, and that byte's number and line number, both counted from 1, as `a b differ: byte 5, line 2`.
+If one file is a prefix of the other it says `cmp: EOF on` and the shorter's name, on standard error.
+A file named `-` is standard input.
+
+: `-l`
+  Print every byte that differs, each as its number in decimal and the two bytes in octal, instead of stopping at the first.
+: `-s`
+  Print nothing; only the exit status tells.
+
+`cmp` is sbase's, a hard link to `/boot/bin/posix/sbase-box`; there is no native one.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so a POSIX program finds it as `/bin/cmp`.
+
+# SEE ALSO
+
+comm(1), cksum(1); sbase's page is `third_party/sbase/cmp.1` in the repository
+
+# DIAGNOSTICS
+
+The exit status is 0 if the files are the same, 1 if they differ, and 2 on trouble: a file that cannot be opened (reported as `cmp: fopen /x: No such file or directory`, unless `-s`), a read or write error, or a usage error.
+Other than two files, an unknown flag, or `-l` with `-s` prints `usage: cmp [-l | -s] file1 file2` and exits 2.
+
+# BUGS
+
+`cmp - -` reads standard input as both files, so it compares alternate bytes.
+`cmp` is untested on VectraOS.

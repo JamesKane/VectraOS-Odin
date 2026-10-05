@@ -1,0 +1,70 @@
+page=expr sect=1 summary="evaluate arguments as an expression"
+    src=third_party/sbase/expr.c
+    keys=arithmetic,integer,compare,match,regular,expression,posix
+
+# SYNOPSIS
+
+```usage
+expr arg ...
+```
+
+# DESCRIPTION
+
+`expr` evaluates the expression its arguments make, prints the result and a newline, and exits by whether the result is null or zero.
+Each operator and operand is a separate argument, and the shell's special characters among them must be quoted.
+
+The operators, each between operands <a> and <b>, from the loosest binding to the tightest; those on one row bind equally and group from the left.
+Parentheses, `(` and `)`, group.
+
+| Operators | Value |
+| `|` | <a> if it is neither null nor zero, else <b> |
+| `&` | <a> if neither is null or zero, else 0 |
+| `=` `!=` `<` `<=` `>` `>=` | 1 if the comparison holds, else 0 |
+| `+` `-` | the sum or difference |
+| `*` `/` `%` | the product, quotient or remainder |
+| `:` | the match of a regular expression, below |
+
+A comparison is of numbers if both operands are decimal integers, and otherwise of strings, byte by byte.
+The arithmetic operators take decimal integers, optionally signed, that fit 64 bits; the quotient is truncated toward zero.
+
+`:` matches <a> against the basic regular expression <b>, as musl's `regcomp` compiles it, anchored at the start of <a> as if <b> began with `^`.
+If <b> holds a subexpression, `\(` ... `\)`, the value is the part of <a> the first one matched, or the null string when <a> does not match.
+Otherwise the value is the number of characters matched, counting a UTF-8 sequence as one, or 0.
+
+`expr` is sbase's, and found only in the POSIX namespace: `/boot/bin/posix/expr` is a hard link to `sbase-box`, which runs the command its name names, and `/lib/ns/posix` (a manifest's `ns=posix`, see namespace(6)) binds `/boot/bin/posix` before `/boot/bin` on `/bin`, so a POSIX program that runs `expr` finds it there.
+There is no native `expr`.
+
+# EXAMPLES
+
+`tests/posix/sbasetest.c` runs `expr 3 + 4` in the POSIX namespace and checks that it prints `7` and exits 0.
+
+# SEE ALSO
+
+test(1), bc(1), grep(1); sbase's page is `third_party/sbase/expr.1` in the repository
+
+# DIAGNOSTICS
+
+Messages go to standard error, prefixed `expr: `.
+`expr` has no usage message: with no arguments it says `syntax error: missing expression`.
+
+The exit status is:
+
+: 0
+  The result is neither null nor zero.
+: 1
+  The result is null or zero.
+: 2
+  The expression is malformed, as `syntax error: extra operator`, `syntax error: extra )` or `syntax error: missing expression or extra operator`; an arithmetic operand is not an integer, as `error: expected integer, got x`; or a divisor is zero, as `division by zero`.
+: 3
+  Any other error: a regular expression that does not compile, as `invalid regex: ` and the reason, memory exhausted, or a failed write.
+
+# BUGS
+
+A result that is an argument, not one computed, counts as null only when it is empty, so the string `0` counts as true: `expr 0` prints `0` and exits 0, and `expr 0 '|' 5` prints `0`, where POSIX has exit status 1 and `5`.
+The comparisons and `:` are not affected, since their values are computed.
+
+Arithmetic overflow is not detected.
+
+String comparison is by bytes, not by the locale's collating order as POSIX says.
+
+An argument spelled as an operator is always taken as one, so `expr` cannot compare or print the string `+` or `(`.

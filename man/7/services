@@ -1,0 +1,225 @@
+page=services sect=7 summary="how the system comes up and runs: the boot, svcd, devmgr and the services"
+    keys=boot,services,startup,init,limine,kernel,root,svcd,devmgr,manifest,driver,restart,console,user,srv,post
+
+# DESCRIPTION
+
+VectraOS is a small kernel and a set of ordinary processes.
+The kernel keeps memory, threads, handles, channels and interrupts, and nothing else: file systems, devices, the network, the console and the process table are each a service, a process that serves a file tree over 9Px or a class protocol on a post (see namespace(7)).
+Coming up is starting those processes, in an order that lets each find what it needs, and giving each only what it needs.
+
+Firmware starts Limine; Limine loads the kernel, its root task and the boot image; the kernel starts the root task, svcd(8); svcd starts every service its manifests describe, among them devmgr(8), which starts a driver for each device it finds.
+Each service's manifest says what it is given, and it has no authority its manifest does not give it: a driver gets its device, a file server its disk, and the console shell the trees it is to see.
+svcd starts again a service that exits when its manifest says so, and devmgr a driver, after making its device safe.
+
+There is no init script and no run level: the manifests are the whole description, read once, at boot.
+
+@node=boot title="Limine and the kernel"
+
+The machine's firmware, UEFI or BIOS, loads Limine (ADR-0002), whose configuration names the kernel and its modules: `svcd`, the root task; `ktest`, the kernel's own tests, run instead of svcd with `vx.root=ktest`; `bootfs.tar`, the boot image, every other program and file the system starts with; and on an install medium `store.tar`, the release's objects.
+On an installed system the configuration has an entry for each slot, and gives each file's hash, which Limine checks before it runs anything (slots(6)).
+
+The configuration also gives the kernel command line, whose words choose what comes up:
+
+: `vx.live`
+  An install medium, booted to install from.
+: `vx.system`
+  An installed system, which starts the disk's services; `vx.slot=`<x> says which slot booted.
+: `vx.skip=`<name>`,`...
+  Services svcd does not start, by name.
+: `vx.root=`<name>
+  The module the kernel starts as its root task, svcd without it.
+: `vx.kconsole`
+  The kernel keeps writing to the serial port after it has given the port to its driver.
+: <program>`.`<key>`=`<value>
+  An option for one driver, which devmgr passes on, as `drv-nvme.reset=50`.
+
+The kernel sets up memory, the CPUs, the interrupt controller, the timer and the IOMMU, deny-all from the start, so no device can reach memory until devmgr gives it a DMA domain.
+It then creates the root task, task 1, from the svcd module, and gives it, in its spawn message (see svc(6)), what it gives no one else: a handle to itself, the boot image and store image as read-only VMOs, the ACPI tables, the root Resource, which is authority over every device, the command line and the bootloader's entropy.
+Every other process gets what it has from svcd, or from a process svcd started.
+
+@node=svcd title="svcd and its manifests"
+
+svcd(8) reads the service manifests, `/boot/svc/*.ndb`, straight from the boot image, since bootfs(4), which serves that image as files, is one of the services it starts.
+A manifest is ndb records, svc(6): a `service=` record naming the program and its flags, then the records that belong to it, its arguments, environment, user, namespace and posts.
+A manifest with any error, or a key svc(6) does not define, is not used at all.
+
+svcd starts the services that name device registers or interrupts first, the console's UART driver, so the console is there for the rest; then the others, in the order of the manifests' file names and of the services in each.
+Order matters less than it seems, because each post is a rendezvous: svcd makes every post as it reads the manifests, so a client that connects before its server has started waits for it.
+So the console shell, started before tmpfs, mounts `/tmp` and finds it there when it first looks.
+
+A service is given, as handles in its spawn message, only what its manifest names: the server end of its post (`post=`), a connector to another's (`connect=`), a post's server end to hand on (`claim=`), its namespace's mounts and binds (`mount=`, `bind=`, `ns=`, see namespace(7)), the console, and, for the few that need them, the boot image, the ACPI tables, the root Resource (devmgr alone), the right to make pagers (fsd(4)), svcd's own task (procfs(4)) or a seed of entropy.
+Each runs in a session and note group of its own, as Plan 9's daemons do, so a note to one never reaches the rest of the system (see notes(7)).
+svcd registers each with procfs(4) before it runs, and those it started before procfs once procfs serves.
+
+A manifest's `when=`<word> starts its service only when the word is on the command line: `vx.live` for the installer on a medium, `vx.system` for an installed system's disk; `when=never` marks a manifest that is not a service.
+`arch=` limits one to an architecture: the console has a manifest for each.
+
+@node=order title="What starts"
+
+On every boot, in this order:
+
+| Service | Post | What it is |
+| uart | `/srv/cons` | the console: drv-uart-16550(3) or drv-uart-pl011(3) |
+| bootfs | `/srv/bootfs` | the boot image, read-only: bootfs(4) |
+| devmgr | | devices and drivers: devmgr(8) |
+| netd | `/srv/net` | TCP/IP over `/srv/ether0`: netd(4) |
+| nsd | `/srv/nsd` | namespace groups: nsd(4) |
+| nullfs | `/srv/null` | `null`, `zero`, `random`, `urandom`: nullfs(4) |
+| procfs | `/srv/proc` | the process table: procfs(4) |
+| ptyd | `/srv/ptyd` | pseudo-terminals: ptyd(4) |
+| rc | | the console shell: rc(1) |
+| sysfs | `/srv/sys` | the clock's files: sysfs(4) |
+| tmpfs | `/srv/tmpfs` | a file system in memory: tmpfs(4) |
+
+and with `vx.system`, from `boot/svc/system.ndb`, after sysfs and before tmpfs, since the manifests go by their files' names:
+
+| Service | Post | What it is |
+| sys-partd | `/srv/disk0.esp`, `/srv/disk0.system` | its partitions: partd(8) |
+| sys-fsd | `/srv/fsd` | the system volume: fsd(4) |
+| sys-dosfs | `/srv/esp` | the ESP: dosfs(4) |
+| sys-distd | `/srv/dist` | releases and slots: distd(8) |
+
+devmgr starts the drivers and bus-acpi(8) itself, as the next node says.
+The installed system's chain is posts end to end: the NVMe or virtio driver serves `/srv/disk0`, partd serves its partitions on posts of their own, fsd mounts the system volume from `disk0.system`, dosfs the ESP from `disk0.esp`, and distd mounts fsd's `store` and `adm` branches and the ESP (see storage(7) and updates(7)).
+
+@node=devmgr title="devmgr and the drivers"
+
+devmgr(8) holds the root Resource, and mints from it, for each driver, its device and nothing more: the PCI function's configuration space, its memory BARs, its MSIs and its DMA domain, through the IOMMU where there is one, or for an ACPI device the ports, memory and interrupts its `_CRS` lists.
+A driver never gets the authority to make another device's objects.
+
+It finds PCI functions through the ACPI tables' MCFG, and matches each against the driver manifests, `/boot/drv/*.ndb` (driver(6)): by vendor and device, or by class, as any NVMe controller.
+A match names the program and the post it serves, which must be one svcd gave devmgr a claim on; a numbered post, `disk#`, gives `disk0`, `disk1`, ... in the order the functions were found, whichever driver serves them.
+The drivers are drv-nvme(3), drv-virtio-blk(3) and drv-virtio-net(3).
+
+Once the PCI drivers are started, devmgr starts bus-acpi(8), which runs the firmware's AML with ACPICA and reports each present device's hardware ID and resources; a device a manifest matches by `hid=`, the PC's CMOS clock, gets its driver, drv-rtc-cmos(3), which tells devmgr the time, from which devmgr sets the kernel's wall clock (see time(7)).
+bus-acpi serves `/srv/acpi`, through which poweroff(8) turns the machine off.
+
+When a PCI driver exits, devmgr revokes its DMA domain's mappings, turns off the function's bus mastering and resets it, and only then lets the pages the device could have reached go, so a dying driver cannot leave its device writing to freed memory.
+It then starts the driver again, on the same domain and post, and the driver's clients, whose connections wait at the post, dial again and go on.
+
+@node=restarts title="Restarts"
+
+A manifest with `restart` is started again when it exits, for any reason, unless it has exited more than five times within ten seconds; then svcd says so and leaves it.
+A service that holds what cannot be rebuilt is not restarted: nsd, whose groups live only in it, tmpfs and ptyd.
+A restarted service keeps its post, since svcd holds both of its ends: clients waiting at it are answered by the new start.
+So killing the console's driver from the console shell loses nothing: svcd starts it again on the same post, and the shell goes on, as EXAMPLES shows.
+
+devmgr restarts drivers itself, up to five starts in all, as above.
+
+@node=users title="Users"
+
+A service runs as the user its manifest's `user=` names, and as `none` without one; the console shell has none, and so runs as `none`.
+The user is who the service's attaches name, so fsd(4) checks its requests as that user (see users(6)), and the user a spawn names no other is the spawner's own.
+On an installed system distd runs as `adm`, to write the boot slots.
+
+Identity is advisory: a manifest, or any program, can name anyone.
+It stops mistakes, not a program that lies, until keyd signs who a client is (M10).
+
+@node=console title="The console"
+
+The console is a service like any other: a UART driver that posts `/srv/cons` and serves Plan 9's cooked console, with echo, erase, kill-line and `^D`.
+A service whose manifest says `console` gets a connector to it, and its standard output and errors go there.
+Once the console is posted, svcd writes its own messages there, and the kernel stops writing to the serial port and keeps its messages in memory, unless `vx.kconsole` is on the command line.
+
+The console shell is rc(1), started by `boot/svc/shell.ndb` in a namespace of the boot image on `/`, `/boot/bin` after `/bin`, `/proc`, `/net`, `/sys` and `/tmp`, with nsd's post so the commands it runs share its namespace group.
+It is restarted when it exits.
+
+# EXAMPLES
+
+svcd's lines from the start of a boot on QEMU's x86_64, from the shell test's log, the other services' lines left out:
+
+```text
+[    0.303] svcd: hello from user space (task 1)
+svcd: started uart (task 2)
+svcd: started bootfs (task 3)
+svcd: started devmgr (task 4)
+svcd: started netd (task 5)
+svcd: started nsd (task 6)
+svcd: started nullfs (task 7)
+svcd: started procfs (task 8)
+svcd: started ptyd (task 10)
+svcd: started rc (task 12)
+svcd: started sysfs (task 14)
+svcd: started tmpfs (task 15)
+```
+
+The running services, and the console's driver killed, from the same log:
+
+```rc
+% ps
+id=1 pid=1 name=svcd state=waiting threads=1 mem=30416K sid=1
+id=3 pid=3 name=bootfs state=waiting threads=1 mem=31528K sid=3
+id=2 pid=2 name=uart state=running threads=1 mem=8784K sid=2
+id=4 pid=4 name=devmgr state=waiting threads=1 mem=5084K sid=4
+id=5 pid=5 name=netd state=waiting threads=1 mem=9996K sid=5
+id=6 pid=6 name=nsd state=waiting threads=1 mem=840K sid=6
+id=7 pid=7 name=nullfs state=waiting threads=1 mem=1764K sid=7
+id=8 pid=8 name=procfs state=running threads=1 mem=9900K sid=8
+id=10 pid=10 name=ptyd state=waiting threads=1 mem=3080K sid=10
+id=12 pid=12 name=rc state=waiting threads=1 mem=10936K sid=12
+id=14 pid=14 name=sysfs state=waiting threads=1 mem=1856K sid=14
+id=15 pid=15 name=tmpfs state=waiting threads=1 mem=2072K sid=15
+id=21 pid=21 name=ps state=waiting threads=1 mem=1956K sid=12
+% uartpid=2; echo kill > /proc/$uartpid/ctl
+```
+
+and what the console showed next, the new driver's line and svcd's before the old one's exit, then the next command typed after the prompt:
+
+```text
+drv-uart-16550: serving /srv/cons
+% svcd: started uart (task 23)
+svcd: uart exited: killed
+echo still here
+still here
+```
+
+devmgr's manifest, `boot/svc/devmgr.ndb`, its comment left out:
+
+```ndb
+service=devmgr program=/boot/bin/devmgr resource acpi console cmdline restart
+mount=/ srv=bootfs
+claim=ether0
+claim=disk0
+claim=disk1
+claim=disk2
+claim=disk3
+claim=acpi
+```
+
+# FILES
+
+: `/boot/svc/*.ndb`
+  The service manifests, in the boot image.
+: `/boot/drv/*.ndb`
+  The driver manifests.
+: `boot/limine.conf`
+  Limine's configuration in the repository, for a development image; an installed system's is made from its slot table (slots(6)).
+: `/srv/<name>`
+  The posts.
+
+# SEE ALSO
+
+svcd(8), devmgr(8), bus-acpi(8), partd(8), poweroff(8), install(8), distd(8), svc(6), driver(6), slots(6), users(6), bootfs(4), procfs(4), nsd(4), fsd(4), intro(3), namespace(7), notes(7), storage(7), updates(7), time(7); `docs/01-kernel-ipc.md` §7 and §10, `docs/04-bootstrap-toolchain.md` §5, ADR-0002, ADR-0011 and ADR-0029
+
+# BUGS
+
+svcd restarts a `restart` service whatever its exit string, success included, and never stops one: there is no orderly shutdown, and poweroff(8) asks no service to stop first.
+The restart policies of `docs/01-kernel-ipc.md` §7.4, `always`, `on-failure` and `never` with backoff, are not built; there is the one rule, five exits in ten seconds.
+Nothing orders services beyond the manifests and the posts' rendezvous: nothing waits for the wall clock to be set, or for a post to be served.
+
+svcd holds 32 services and 32 posts, `/srv` is not a file tree, and a program cannot post a service at run time.
+The package manifests of ADR-0029, with `needs=`, are not read; svcd reads only the boot image's.
+
+devmgr counts a driver's five starts over its whole life, a restarted devmgr would start a second set of drivers beside the first, and with no MCFG it starts no bus-acpi.
+There are no `bus-pci` or `bus-dt` processes, no device-tree machines, and no match keys for a driver's intent or trust (`docs/01-kernel-ipc.md` §7.2).
+The UART drivers are started at fixed addresses from svcd's manifest, not matched through ACPI.
+
+A restarted procfs has lost its table: svcd registers its services again, and every other process is gone from `/proc`.
+nsd, tmpfs and ptyd are not restarted, and bus-acpi is not restarted if it exits.
+
+Kernel messages after the console hand-off reach nowhere unless `vx.kconsole` keeps them on the serial port, so a fault in a service shows only as svcd reporting its exit string (6g brings a debug-log object).
+ACPI's events are not delivered: no power button, and no reboot or sleep (6g).
+
+Entropy is the bootloader's alone, seeded once, and a service gets it only if its manifest says `entropy`.
+
+The boot image's own manifests start no installer: install(8) is started by a test's manifest on a `vx.live` medium.

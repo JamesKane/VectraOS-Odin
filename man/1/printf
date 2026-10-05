@@ -1,0 +1,70 @@
+page=printf sect=1 summary="print formatted output"
+    src=third_party/sbase/printf.c,third_party/sbase/libutil/unescape.c
+    keys=format,print,printf,escape,number,posix
+
+# SYNOPSIS
+
+```usage
+printf format [arg ...]
+```
+
+# DESCRIPTION
+
+`printf` writes <format> on standard output, each conversion in it replaced by the next <arg> as C's `printf` would format it.
+It writes no newline of its own.
+When the arguments outlast <format>, <format> is used again, until all of them are; a conversion with no argument left is given the empty string, or 0.
+A <format> that converts nothing is written once.
+
+<format> may hold the escapes `\\`, `\a`, `\b`, `\e`, `\f`, `\n`, `\r`, `\t`, `\v`, `\"`, `\'`, `\`<ddd>, one to three octal digits, and `\x`<hh>, one or two hexadecimal digits.
+`\c` ends <format> there, and it is not used again.
+
+A conversion is `%`, then any of the flags `#`, `-`, `+`, space and `0`, then a width, then `.` and a precision; the width or precision may be `*`, taken from the next <arg>.
+`%%` is a `%`.
+The conversions are:
+
+: `%s`
+  The <arg> as it is.
+: `%b`
+  The <arg> with its escapes, as <format>'s, replaced; a `\c` in it ends all output.
+: `%c`
+  The first character of <arg>, UTF-8.
+: `%d`, `%i`, `%o`, `%u`, `%x`, `%X`
+  The <arg> as an integer: decimal, octal with a leading `0`, or hexadecimal with a leading `0x`.
+  An <arg> starting with `'` or `"` gives the code of the character after it.
+: `%a`, `%A`, `%e`, `%E`, `%f`, `%F`, `%g`, `%G`
+  The <arg> as a floating-point number.
+
+`printf` takes no flags: its first argument is always <format>, even when it begins with `-`.
+
+`printf` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/printf`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/printf`.
+There is no native `printf`.
+
+# EXAMPLES
+
+As `tests/posix/sbasetest.c` runs it in the POSIX namespace:
+
+```text
+% printf '%d %s %#x\n' 3 x 31
+3 x 0x1f
+```
+
+# SEE ALSO
+
+echo(1), seq(1), namespace(6); sbase's page is `third_party/sbase/printf.1` in the repository
+
+# DIAGNOSTICS
+
+Messages go to standard error, after the name `printf` was run by.
+An <arg> that is not wholly a number is reported as `printf: %d x: conversion error`, one too large as `out of range`; what could be read of it is printed, the rest of <format> is done, and the exit status is 1.
+`Invalid format specifier 'q'.`, `Missing format specifier.` for a `%` at the end, `invalid escape sequence` and a bad `*` width end `printf` with exit status 1.
+With no <format> it prints its usage message and exits 1.
+Otherwise it exits 0, or 1 if the output could not be written.
+
+# BUGS
+
+`--` is not taken as the end of the flags, as POSIX asks: `printf -- x` prints `--`.
+
+In `%b`, POSIX's octal escape is `\0` and up to three digits; `printf` reads `\0101` as `\010` then `1`.
+
+Untested on VectraOS beyond the example.

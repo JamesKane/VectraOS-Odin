@@ -1,0 +1,44 @@
+page=head sect=1 summary="print the first lines of files"
+    src=third_party/sbase/head.c
+    keys=first,lines,start,top,posix
+
+# SYNOPSIS
+
+```usage
+head [-num | -n num] [file ...]
+```
+
+# DESCRIPTION
+
+`head` prints the first 10 lines of each <file>, or of standard input if there is none; a <file> of `-` is standard input.
+A last line without a newline counts as a line, and is printed without one.
+With more than one <file>, each is headed by a line `==> file <==`, and every heading after the first by an empty line.
+
+: `-n` <num>, `-`<num>
+  Print the first <num> lines instead; 0 prints nothing.
+
+`head` stops reading a <file> when it has printed its lines, and closes it; it never seeks, so it works the same on a file, a pipe or a terminal.
+
+`head` is sbase's, and found only in the POSIX namespace: `/boot/bin/posix/head` is a hard link to `sbase-box`, which runs the command its name names, and `/lib/ns/posix` (a manifest's `ns=posix`, see namespace(6)) binds `/boot/bin/posix` before `/boot/bin` on `/bin`, so a POSIX program that runs `head` finds it there.
+There is no native `head`; tail(1) is native and sbase's both.
+
+# EXAMPLES
+
+`tests/posix/sbasetest.c` runs `head -n 2` in the POSIX namespace with the lines `1` to `4` on standard input, and checks that it prints `1` and `2` and exits 0.
+
+# SEE ALSO
+
+tail(1), sed(1); sbase's page is `third_party/sbase/head.1` in the repository
+
+# DIAGNOSTICS
+
+A <file> that cannot be opened is reported on standard error, as `head: fopen /nothing: No such file or directory`, and the next is read; `head` then exits 1.
+A read error ends `head` at once, as `head: getline file: ` and the reason, with exit status 1.
+A <num> that is not a number, or is negative, is reported as `head: strtonum -1: too small` or the like, exit status 1; a bad flag prints the usage message, exit status 1.
+Otherwise `head` exits 0.
+
+# BUGS
+
+`-`<num> is limited to 2147483647 lines; `-n` takes more.
+
+Untested on VectraOS: more than one <file>, and the `-`<num> form.

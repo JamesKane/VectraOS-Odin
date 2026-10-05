@@ -1,0 +1,80 @@
+page=xargs sect=1 summary="run a command with arguments from standard input"
+    src=third_party/sbase/xargs.c
+    keys=arguments,command,run,execute,batch,parallel,find
+
+# SYNOPSIS
+
+```usage
+xargs [-0prtx] [-E eofstr] [-n num] [-P maxprocs] [-s num] [cmd [arg ...]]
+```
+
+# DESCRIPTION
+
+`xargs` reads arguments from standard input and runs <cmd>, with the <arg>s first, then as many of the arguments read as fit, again and again until the input is used up.
+Without <cmd> it runs `/bin/echo`.
+With no input it runs nothing.
+
+Arguments are separated by spaces, tabs and newlines.
+A `'` or `"` quotes up to the next of the same, newlines inside dropped; a `\` takes the next character as it is.
+
+A command line holds at most the C library's `ARG_MAX` less 4096 bytes, and 9999 arguments.
+<cmd> is found through `$PATH`.
+
+: `-0`
+  Separate arguments by NUL bytes alone, and do no quoting.
+: `-E` <eofstr>
+  Take an argument equal to <eofstr> as the end of the input.
+: `-I` <replstr>
+  Run <cmd> once for each line read, replacing each <replstr> in the <arg>s by the line.
+  A line's blanks are kept, but not its leading ones.
+  Implies `-x` and `-n 1`.
+: `-n` <num>
+  Use at most <num> arguments read for each command.
+: `-P` <maxprocs>
+  Run up to <maxprocs> commands at once.
+: `-p`
+  Ask before each command: write it to standard error, then read an answer from `/dev/tty`; a line starting `y` or `Y` runs it.
+: `-r`
+  Do not run <cmd> when there is no input; as `xargs` never does, this changes nothing.
+: `-s` <num>
+  Make each command line at most <num> bytes.
+: `-t`
+  Write each command to standard error before running it.
+: `-x`
+  Stop if an argument does not fit the command line.
+
+`xargs` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/xargs`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/xargs`.
+There is no native `xargs`.
+
+# EXAMPLES
+
+sbase's test (`tests/posix/sbasetest.c`) runs `xargs -n 1 echo` with `a b c` on standard input, and gets:
+
+```text
+a
+b
+c
+```
+
+# SEE ALSO
+
+find(1), echo(1); sbase's page is `third_party/sbase/xargs.1` in the repository
+
+# DIAGNOSTICS
+
+The exit status is 0 if every command exited 0, and 123 if any did not.
+`xargs` stops at once with 124 when a command exits 255, 125 when one is killed by a signal, 126 when one could not be run, and 127 when it could not be found; for these two the child says `xargs: execvp` <cmd>`:` and the error.
+Its own errors exit 1: `unterminated single quote`, `unterminated double quote`, `backslash at EOF`, `insufficient argument space`, a bad number, and the usage message.
+
+# BUGS
+
+The usage message leaves out `-I`.
+
+POSIX runs <cmd> once when there is no input and no `-r`; `xargs` does not.
+
+`-I`'s arguments are kept under 255 bytes: a <replstr> that would make one longer is left as it is, and an <arg> of 255 bytes or more is cut to 254.
+
+The POSIX namespace has no `/dev/tty`, so `-p` cannot ask, and runs each command without asking; this is untested on VectraOS.
+
+Only `xargs -n 1 echo` has been run on VectraOS; the rest is untested here.

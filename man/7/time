@@ -1,0 +1,170 @@
+page=time sect=7 summary="time and waiting: the clock, deadlines, futexes, ports and the scheduler"
+    keys=time,clock,monotonic,utc,wall,rtc,deadline,timeout,sleep,wait,futex,port,scheduler,sched,leeway
+
+# DESCRIPTION
+
+The system has one clock.
+It is monotonic, counts nanoseconds, and nothing changes it; every timestamp the kernel gives and every deadline it takes is a time on it, a `vx_instant`.
+The wall clock, the time of day in UTC, is not a second clock but an offset added to this one.
+
+Waiting is as simple.
+There is no sleep call and no timer object: a call that waits takes a deadline, the time on the clock at which it gives up, and a program that wants only to pass time waits for something that will not come, until its deadline.
+Everything that takes long, a message, an interrupt, a child's end, a doorbell, is waited for in one place, a port, and threads that share memory wait on a futex.
+
+This page describes the clocks, how deadlines work, the two ways to wait, the scheduler as it is now, and what POSIX's time calls become.
+
+@node=clocks title="The clocks"
+
+The monotonic clock is made from the CPU's cycle counter, the TSC on x86_64 and the virtual counter on aarch64, as the count times 10^9 over the counter's frequency, which the kernel calibrates at boot (clock(2)).
+It counts from the counter's zero, about when the machine was reset.
+`vx_clock_read` returns it.
+User code may read the counter itself, without entering the kernel, with `vx_cycles`; `/sys/clock/info`, from sysfs(4), and `vx_clock_info_read` give the frequency to convert it, so a program that times itself with `rdtsc` or `cntvct_el0` never calibrates or guesses.
+
+The wall clock is the monotonic clock plus the kernel's `utc_offset`, which `vx_clock_utc` adds for a caller: UTC in nanoseconds since 1970.
+The offset is 0 until something sets it, so until then UTC counts from the counter's zero and dates read as 1970.
+
+It is set once, at boot, from the machine's real-time clock (ADR-0031).
+On a PC, bus-acpi(8) reports the CMOS clock, `PNP0B00`; devmgr(8) starts drv-rtc-cmos(3) for it, which reads the clock and tells devmgr the time and when it read it; devmgr, which holds the root Resource the call needs, sets the offset with `clock_set` and says so on the console.
+The change is one step; the monotonic clock does not move.
+
+`/sys/clock/now` shows both clocks, and the C library's realtime clocks, file times in fsd(4) and tmpfs(4), and date(1) all read the wall clock through the same offset.
+
+@node=deadlines title="Deadlines and timeouts"
+
+A call that waits takes an absolute deadline on the monotonic clock, never an interval:
+
+- `port_wait`, for a packet (port(2));
+- `futex_wait`, for a word to change (futex(2));
+- `channel_call`, for a reply (channel(2)).
+
+`VX_INFINITE` is the deadline that never comes, and a deadline already past makes the call a poll.
+When the deadline passes first the call returns `VX_ERR_TIMED_OUT`.
+Every wait also ends early for a note, with `VX_ERR_INTERRUPTED`, and when the task is being killed, with `VX_ERR_KILLED` (notes(7)).
+
+A deadline is absolute so that a wait cut short by a note and made again keeps the time it was first given, and a program that waits in several steps, a loop, a retry, a call that blocks twice, keeps one limit for all of them.
+A program reads the clock once and adds its interval: `vx_clock_read() + 5'000'000'000` is five seconds from now.
+
+`port_wait` also takes a <leeway>, how late it may be woken, so that one timer interrupt can end several waits; a wait is never woken early.
+
+A few calls take an interval instead, because they wait on another's behalf: a pager's deadline is how long a thread that touches a missing page waits for it (pager(2)), and `thread_suspend` gives up on a thread that has not stopped within a second (thread(2)).
+
+The system's own timeouts are the servers' choices.
+A connection to a file server is made with a five-second deadline on its `channel_call` (`lib/vx-9p/ring.c`); procfs(4) gives each call it makes to save a crash directory five seconds, since the process that faulted may be the one it waits on.
+A 9P request itself has no deadline (see BUGS).
+
+@node=futexes title="Futexes"
+
+A futex is a 32-bit word in memory that threads wait on: the building block of locks and condition variables (futex(2)).
+`futex_wait` blocks while the word holds the value the caller expects, until a `futex_wake` or its deadline; the word is checked and the thread queued under one lock, so a wake after the check is never missed, and a word changed before it returns at once.
+`futex_wake` wakes as many waiters as asked, the most recent first.
+
+A futex is keyed by the word's physical address, so the same word mapped into two tasks through a shared VMO is one futex.
+The C library's locks, and its sleeps, wait on futexes.
+
+@node=ports title="Ports: waiting on several things"
+
+A port is a queue of packets, and a thread that waits for anything but a lock waits on a port, with one call, `port_wait`, however many things it waits for (port(2)).
+Each source is bound to the port with `port_bind`, naming a trigger and a key of the program's choosing; when the trigger holds, the port gets one packet with that key, and the binding is gone.
+
+| Source | Fires when |
+| channel end | a message is queued, or the other end has gone |
+| ring end | its doorbell reaches a value, or the other end has gone |
+| counter | it reaches a value |
+| task | it has ended |
+| Irq | its interrupt has fired |
+| DmaDomain | its device has faulted more than a number of times |
+
+and exceptions and a pager's requests reach ports bound by `exception_bind` and `pager_create`.
+
+A binding is one-shot, and fires at once if its trigger already holds when it is made, so nothing is lost between looking at a source and binding it.
+A program's loop is therefore: bind each source, wait, handle each packet, and bind its source again.
+`port_post` puts a packet of the program's own on the port, for a thread to wake another.
+Several threads may wait on one port; each packet wakes one of them.
+
+A counter is a timeline that only goes up (counter(2)): a producer raises it as work completes, and a waiter binds it with the value it waits for.
+A ring's doorbells are counters, so waiting for a ring is waiting on a port too (rings(7)).
+
+@node=sched title="The scheduler"
+
+The scheduler is the first one the design sketches, and simple (`kernel/sched/sched.c`).
+Every CPU serves one shared queue of ready threads, round robin, and runs a thread for at most 10 ms while others wait.
+Each CPU keeps the threads that blocked on it with a deadline in a queue of its own, earliest first, and arms its timer for the first of them or the end of the running slice, whichever comes sooner; a CPU with nothing to run sleeps with no timer armed unless a sleeper needs one, and a thread made ready elsewhere reaches it as an interrupt.
+
+Every thread runs as `interactive`, the intent channel messages carry as `sender_intent`; the calls that are to make scheduling contexts and reserve cores are reserved, and return `VX_ERR_UNSUPPORTED` (sched(2)).
+
+@node=posix title="POSIX's time calls"
+
+The C library (`ports/musl/vx/start.c`) makes POSIX's time calls from these:
+
+| Call | Becomes |
+| `clock_gettime`, `CLOCK_MONOTONIC` and the rest | the monotonic clock |
+| `clock_gettime`, `CLOCK_REALTIME` and `CLOCK_TAI` | the wall clock |
+| `gettimeofday`, `time` | the wall clock, through `clock_gettime` |
+| `clock_getres` | 1 ns, for every clock |
+| `nanosleep`, `clock_nanosleep` | a `futex_wait` with a deadline |
+| `poll`, `select`, `ppoll`, `pselect` | a `port_wait` with a deadline |
+| `futex`, under the C library's locks | `futex_wait` and `futex_wake` |
+| `sched_yield` | nothing |
+
+A sleep or a poll that a signal cuts short, and that is made again for `SA_RESTART`, keeps its first deadline.
+A sleep to an absolute time of day is turned into a deadline on the monotonic clock when the call is made.
+
+sleep(1) is a `nanosleep`; date(1) reads the wall clock.
+
+# EXAMPLES
+
+The wall clock's test, `tests/user/rtctest.rc`, run by rc(1) in the POSIX namespace under QEMU with its clock started at 2030-01-02T03:04:05.
+Since nothing orders a service after the clock is set, it waits for the year to stop being 1970:
+
+```rc
+tries=0
+while(~ `{date -u +%Y} 1970 && ! ~ $tries 300) {
+  sleep 0.1
+  tries=`{expr $tries + 1}
+}
+echo rtctest: date `{date -u '+%Y-%m-%d %H'}
+touch /tmp/stamped
+echo rtctest: file `{ls -l /tmp/stamped}
+```
+
+On the console, the driver and devmgr setting the clock, then the test:
+
+```text
+drv-rtc-cmos: the clock says 1893553446 s since 1970
+devmgr: the wall clock is 2030-01-02 03:04:06 UTC, from /boot/bin/drv-rtc-cmos
+svcd: started rtctest (task 15)
+rtctest: date 2030-01-02 03
+rtctest: file -rw-r--r-- 1 0 0 0 Jan 02 03:04 /tmp/stamped
+```
+
+# FILES
+
+: `/sys/clock/info`
+  The cycle counter the clock is made from, and its frequency.
+: `/sys/clock/now`
+  The monotonic clock and the wall clock, in nanoseconds.
+
+# SEE ALSO
+
+clock(2), futex(2), port(2), counter(2), channel(2), sched(2), thread(2), pager(2), sysfs(4), drv-rtc-cmos(3), devmgr(8), date(1), sleep(1), notes(7), rings(7), posix(7); `docs/01-kernel-ipc.md` §4.4, §4.6 and §8, and ADR-0031 in the repository
+
+# BUGS
+
+The wall clock is x86_64's alone: QEMU's aarch64 tables list no real-time clock and there is no PL031 driver, so on aarch64 dates read as 1970.
+It is set once, in one step, never slewed, never kept by NTP and never written back to the real-time clock; a sleep already armed against a time of day keeps its old deadline when the clock is set.
+Nothing orders a service after the clock is set, so one that starts first stamps times that read as 1970, which is why the test above waits.
+
+`clock_read` always enters the kernel: the shared page the design reads the clock from without a call does not exist yet, nor does the counters' (counter(2)).
+The monotonic clock counts from the counter's reset, not from the kernel's boot.
+
+A 9P request has no deadline and cannot be cancelled: a read a server holds, such as ping(8)'s with no reply, waits until it is answered.
+`Tflush` comes with the pipelined 9P client in M6 step 6d.
+
+A thread that dies holding a lock built on a futex leaves its waiters asleep; robust futexes come in M6 step 6d, with threads in the C library, whose `clone`, and so `pthread_create`, fails until then.
+`port_cancel` is reserved: a binding cannot be withdrawn before it fires except by destroying its source.
+
+None of the design's scheduling exists (`docs/01-kernel-ipc.md` §8): no intents but `interactive`, no budgets, no realtime admission, no donation of a caller's time through `channel_call`, no core reservations and no placement on cores of different kinds.
+Scheduling contexts come in M6 step 6d.
+
+The C library has no `alarm`, `setitimer`, POSIX timers, `times` or `clock_settime`: each fails with `ENOSYS`, after a line on the debug console, so nothing ever sends `SIGALRM`, time(1) prints no true figures, and date(1) cannot set the date.
+Its CPU-time clocks are the monotonic clock, and `sched_yield` yields nothing.

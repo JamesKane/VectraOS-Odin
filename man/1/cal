@@ -1,0 +1,59 @@
+page=cal sect=1 summary="print a calendar"
+    src=third_party/sbase/cal.c
+    keys=calendar,month,year,date,week
+
+# SYNOPSIS
+
+```usage
+cal [-1 | -3 | -y | -n num] [-s | -m | -f num] [-c num] [[month] year]
+```
+
+# DESCRIPTION
+
+`cal` prints a calendar of this month; with <year> alone, of all of <year>; with <month> (1 to 12) and <year>, of that month.
+A <year> is written in full: `cal 26` is a year of the first century.
+Months before September 1752 are Julian, and September 1752 loses the eleven days the change to the Gregorian calendar took.
+
+Each month is a title, a line of day names, and six lines of weeks, whether it has six weeks or not.
+Months are printed side by side, three to a row.
+When standard output is a terminal today's date is shown in reverse video.
+
+: `-1`
+  Print one month.
+: `-3`
+  Print three months: last month, this month and next.
+: `-y`
+  Print the twelve months of the year, January to December.
+: `-n` <num>
+  Print <num> months, starting at the month given or this one.
+: `-s`, `-m`
+  Start weeks on Sunday, the default, or on Monday.
+: `-f` <num>
+  Start weeks on day <num>, 0 for Sunday to 6 for Saturday.
+: `-c` <num>
+  Print <num> months to a row instead of 3.
+
+`cal` is sbase's, a hard link to `/boot/bin/posix/sbase-box`; there is no native one.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so a POSIX program finds it as `/bin/cal`.
+
+# SEE ALSO
+
+date(1); sbase's page is `third_party/sbase/cal.1` in the repository
+
+# DIAGNOSTICS
+
+An unknown flag, a missing <num>, or more than two arguments prints the usage message and exits 1.
+A <num>, <month> or <year> out of range is reported, as `cal: strtonum 13: too large`, and it exits 1.
+It exits 0 otherwise, or 1 if the output could not be written.
+
+# BUGS
+
+`-c 0` never ends: it prints empty lines forever.
+
+This month and today come from the wall clock, in UTC as there is no time zone database; with no clock driver the date is in January 1970.
+
+A <month> given with `-3` or `-y` is where the months start, not the middle of three or ignored: `cal -3 5 2026` prints May to July, and `cal -y 5 2026` May 2026 to April 2027.
+With `-1`, `-3` or `-n` and a <year> alone, the months start at this month of <year>.
+
+The day names and month names are English only.
+`cal` is untested on VectraOS.

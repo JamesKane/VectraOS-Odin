@@ -1,0 +1,99 @@
+page=test sect=1 summary="evaluate an expression"
+    src=third_party/sbase/test.c
+    keys=condition,expression,compare,file,exists,bracket
+
+# SYNOPSIS
+
+```usage
+test [expr]
+[ [expr] ]
+```
+
+# DESCRIPTION
+
+`test` evaluates the expression its arguments make, and exits 0 if it is true and 1 if it is false.
+It writes nothing.
+Run as `[`, it takes `]` as its last argument, and the expression is the arguments before it.
+
+The expression is read as POSIX reads one of at most four arguments, by how many there are:
+
+: no argument
+  False.
+: one argument
+  True if it is not empty.
+: two arguments
+  `!` and a string, true if the string is empty; or a unary primary and its operand.
+: three arguments
+  A string, a binary primary and a string; or `!` and a two-argument expression, negated.
+: four arguments
+  `!` and a three-argument expression, negated.
+
+The unary primaries test a file, or a string:
+
+: `-e` <file>
+  <file> exists.
+: `-f` <file>, `-d` <file>
+  <file> is a regular file, or a directory.
+: `-b` <file>, `-c` <file>, `-p` <file>, `-S` <file>
+  <file> is a block device, a character device, a FIFO, or a socket.
+: `-h` <file>, `-L` <file>
+  <file> is a symbolic link.
+: `-s` <file>
+  <file> is not empty.
+: `-r` <file>, `-w` <file>, `-x` <file>
+  <file> may be read, written, or executed (but see BUGS).
+: `-u` <file>, `-g` <file>, `-k` <file>
+  <file> has its set-user-ID, set-group-ID, or sticky bit set.
+: `-t` <fd>
+  File descriptor <fd> is a terminal.
+: `-n` <string>, `-z` <string>
+  <string> is not empty, or is empty.
+
+Every file primary but `-h` and `-L` follows symbolic links, and is false for a <file> that does not exist.
+The binary primaries are:
+
+: <s1> `=` <s2>, <s1> `!=` <s2>
+  The strings are the same, or differ.
+: <n1> `-eq` <n2>, `-ne`, `-gt`, `-ge`, `-lt`, `-le`
+  The integers compare equal, not equal, greater, greater or equal, less, or less or equal.
+  An integer is decimal digits, with an optional sign, of any length.
+: <f1> `-ef` <f2>
+  The files are the same file.
+: <f1> `-nt` <f2>, <f1> `-ot` <f2>
+  <f1> was modified later, or earlier, than <f2>; false if either does not exist.
+
+`test` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/test`, a hard link to it, and as `/boot/bin/posix/[`, another.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find them as `/bin/test` and `/bin/[`.
+There is no native `test`.
+
+# EXAMPLES
+
+As `tests/user/rctest.rc` runs it, in rc in the POSIX namespace:
+
+```text
+% test -d /tmp && echo yes
+yes
+% test -f /tmp || echo no
+no
+```
+
+# SEE ALSO
+
+rc(1), expr(1); sbase's page is `third_party/sbase/test.1` in the repository
+
+# DIAGNOSTICS
+
+A malformed expression is reported on standard error after the name `test` was run by, as `bad unary test`, `bad binary test`, `too many arguments` (for more than four), `expected integer operands`, or, run as `[`, `no matching ]`; each exits 2.
+An <fd> that is not a number is reported as `strtonum` <fd>`:` and why, and exits 2.
+There is no usage message.
+
+# BUGS
+
+`-a`, `-o` and parentheses, which POSIX marks obsolescent, are not supported: an expression is four arguments at most.
+
+`-r`, `-w` and `-x` are true of any <file> that exists: VectraOS's C library checks that a file is there and leaves its permissions for the server to refuse when it is opened.
+The first such test in a process also writes `vx-musl: system call` and a number `is not implemented` on the debug console, as the C library tries `faccessat2` first.
+
+`-nt` is false when <f2> does not exist and `-ot` when <f1> does not, where POSIX makes them true.
+
+`-s` takes the size as an `int`, so it is false for a file whose size is a multiple of 4 GiB.

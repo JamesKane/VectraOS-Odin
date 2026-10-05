@@ -1,0 +1,77 @@
+page=tr sect=1 summary="translate, delete or squeeze characters"
+    src=third_party/sbase/tr.c,third_party/sbase/libutil/unescape.c
+    keys=translate,characters,case,delete,squeeze,upper,lower
+
+# SYNOPSIS
+
+```usage
+tr [-cCds] set1 [set2]
+```
+
+# DESCRIPTION
+
+`tr` copies standard input to standard output, changing characters as it goes.
+Characters are UTF-8 runes, not bytes.
+
+With two sets and no flags, each character in <set1> is replaced by the character at the same position in <set2>.
+If <set2> is shorter, its last character stands for the rest.
+
+: `-c`, `-C`
+  Use the complement of <set1>: every character not in it.
+  When translating, each such character becomes the last character of <set2>.
+: `-d`
+  Delete the characters in <set1>.
+  Only <set1> is given.
+: `-s`
+  Squeeze: replace a run of one repeated character by a single one.
+  With <set1> alone, the runs squeezed are of characters in <set1>; with two sets, `tr` translates and squeezes runs of characters in <set2>.
+
+Without `-d` or `-s` both sets are required.
+`-d` and `-s` together are refused.
+
+A set is a string of these, which may be mixed:
+
+: <c>
+  The character itself.
+: `\`<c>
+  An escape: `\\`, `\'`, `\"`, `\a`, `\b`, `\e` or `\E` (escape), `\f`, `\n`, `\r`, `\t`, `\v`, `\` and one to three octal digits, or `\x` and one or two hexadecimal digits.
+  Any other is an error.
+: <c>`-`<d>
+  The characters from <c> to <d>, which must not come before <c>.
+: `[:`<class>`:]`
+  A character class: `alnum`, `alpha`, `blank`, `cntrl`, `digit`, `graph`, `lower`, `print`, `punct`, `space`, `upper` or `xdigit`.
+  A character of <set1> matched by a class is replaced by the last character of <set2>.
+  In <set2> only `[:lower:]` and `[:upper:]` are allowed, and they map case: `tr '[:lower:]' '[:upper:]'` capitalises.
+: `[=`<c>`=]`
+  The character <c> alone.
+: `[`<c>`*`<n>`]`
+  <c> repeated <n> times; <n> is octal if it starts with `0`, and an <n> of `0` or none means the length of <set1>.
+
+`tr` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/tr`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/tr`.
+There is no native `tr`.
+
+# EXAMPLES
+
+sbase's test (`tests/posix/sbasetest.c`) runs `tr a-z A-Z` with `hello` on standard input, and gets `HELLO`.
+
+# SEE ALSO
+
+sed(1); sbase's page is `third_party/sbase/tr.1` in the repository
+
+# DIAGNOSTICS
+
+A malformed set is reported as `tr: Invalid character class.` or `tr: invalid escape sequence` and the escape; a <set2> that is empty, or holds a class other than `lower` and `upper`, as `tr: cannot map to an empty set.` or `tr: can only map to 'lower' and 'upper' class.`.
+These, a read or write error, and the usage message exit 1.
+
+# BUGS
+
+A NUL cannot be in a set: `\0` ends the set there.
+
+`-d` with `-s`, which POSIX allows, is refused.
+`-c` does not reach `-s` with <set1> alone: `tr -cs` <set1> squeezes the characters in <set1>, not those outside it.
+
+`[=`<c>`=]` is no more than <c>: there are no equivalence classes.
+`[`<c>`*`<n>`]` is taken in <set1> too, where POSIX does not allow it.
+
+Only `tr a-z A-Z` has been run on VectraOS; the rest is untested here.

@@ -1,0 +1,73 @@
+page=bc sect=1 summary="arbitrary-precision arithmetic language"
+    src=third_party/sbase/bc.y,ports/sbase/generated/bc.c,third_party/sbase/bc.library
+    keys=calculator,arithmetic,precision,math,language,bignum
+
+# SYNOPSIS
+
+```usage
+bc [-p dc][-cdls]
+```
+
+# DESCRIPTION
+
+`bc` is a calculator language with C's syntax, on decimal numbers of any size.
+It reads the math library if `-l` is given, each <file> named after the flags in turn, then standard input; it compiles what it reads to dc(1)'s commands, and has `dc` run them.
+`bc` forks: the child compiles, and the process `bc` was started as becomes `dc`, reading the child's output through a pipe.
+
+An expression on a line of its own is printed; an assignment is not.
+The names of variables, arrays (`a[i]`) and functions are single lower-case letters.
+The language has `+ - * / % ^`, the assignments `= += -= *= /= %= ^=`, `++` and `--`, the comparisons `== != < <= > >=` in conditions, `if`, `while`, `for`, `break`, `return`, `quit`, `define` and `auto`, and `sqrt(`<x>`)`, `length(`<x>`)`, `scale(`<x>`)`, `scale`, `ibase` and `obase`.
+`print` and a string in double quotes print text; comments are between `/*` and `*/`.
+
+: `-l`
+  First read the math library, `/boot/share/misc/bc.library`, which defines `e(x)`, `l(x)`, `s(x)`, `c(x)`, `a(x)` and `j(n,x)`: the exponential, natural logarithm, sine, cosine, arctangent and Bessel function.
+: `-c`
+  Compile only: print the `dc` commands, and run nothing.
+: `-p` <dc>
+  Run <dc> instead of `dc`, found by `PATH`.
+: `-s`
+  Extended mode: an expression on its own is not printed, names may be longer than one letter, and `dc` is run with `-i` to take them.
+: `-d`
+  Accepted; it would turn on the parser's tracing, which this build does not have.
+
+`bc` is sbase's, a hard link to `/boot/bin/posix/sbase-box`; there is no native one.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so a POSIX program finds it, and the `dc` it runs, there.
+
+# EXAMPLES
+
+From the sbase test, `tests/posix/sbasetest.c`, which runs each command as a shell would:
+
+```text
+input:   2^10
+command: bc
+output:  1024
+```
+
+# FILES
+
+: `/boot/share/misc/bc.library`
+  The math library `-l` reads.
+
+# SEE ALSO
+
+dc(1); sbase's page is `third_party/sbase/bc.1` in the repository
+
+# DIAGNOSTICS
+
+An error in the program is reported with the file's name and the line, as `bc: <stdin>:2: invalid keyword`, and compiling goes on with the next line.
+An unknown flag prints `usage: bc [-p dc][-cdls]` and exits 1.
+A <file> that cannot be opened is reported, as `bc: /x: No such file or directory`, and compiling stops.
+With `-c` the exit status is 1 if any error was reported.
+
+# BUGS
+
+Without `-c` the exit status is `dc`'s, which is 0 whatever errors `bc` reported: the compiling child's status is lost.
+If `dc` cannot be run, the message saying so is written to file descriptor 3 rather than standard error, and the exit status is 2.
+
+The usage message leaves out the <file> arguments `bc` takes.
+
+`a -= b`, `a /= b`, `a %= b` and `a ^= b` compute `b - a`, `b / a`, `b % a` and `b ^ a`: the operands are pushed in the wrong order, so `a=10; a-=3` makes `a` -7.
+With `-s`, a name longer than 7 letters is corrupted, as it is copied into a 2-byte field meant for one letter.
+Both were seen in a build on the development host; neither is tested on VectraOS.
+
+Names are lower-case ASCII only, and input must be ASCII.

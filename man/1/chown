@@ -1,0 +1,44 @@
+page=chown sect=1 summary="change the owner and group of files"
+    src=third_party/sbase/chown.c
+    keys=owner,user,group,uid,gid,permissions
+
+# SYNOPSIS
+
+```usage
+chown [-h] [-R [-H | -L | -P]] owner[:[group]] file ...
+chown [-h] [-R [-H | -L | -P]] :group file ...
+```
+
+# DESCRIPTION
+
+`chown` sets the owner of each <file> to <owner>, and its group to <group> when one is given after a `:`.
+With `:`<group> alone only the group is changed.
+<owner> and <group> are names or numbers: a name is looked up in `/etc/passwd` or `/etc/group`, and what is not found there must be a number.
+
+: `-h`
+  Change a symbolic link named as a <file> itself, not what it points to.
+: `-R`, `-r`
+  Change directories' contents too, recursively.
+: `-H`, `-L`, `-P`
+  With `-R`: follow symbolic links named as a <file> only; follow every symbolic link; or follow none, the default.
+
+`chown` is sbase's, a hard link to `/boot/bin/posix/sbase-box`; there is no native one.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so a POSIX program finds it as `/bin/chown`.
+
+# SEE ALSO
+
+chgrp(1), chmod(1), users(6); sbase's page is `third_party/sbase/chown.1` in the repository
+
+# DIAGNOSTICS
+
+Fewer than two arguments, an unknown flag, or neither an <owner> nor a <group> prints the usage message and exits 1.
+A name that is not known and not a number is reported, as `chown: strtonum bob: invalid`, and it exits 1.
+A <file> that cannot be changed is reported, as `chown: chown /x: Operation not permitted`, and the rest are done; the exit status is then 1.
+
+# BUGS
+
+There is no `/etc/passwd` or `/etc/group`: VectraOS keeps its users and groups in fsd(4)'s `adm/users` file (see users(6)), which the C library does not read.
+Worse, by a reading of the C library, the failed open of either file leaves `errno` set, which `chown` takes as the lookup failing, so even a numeric <owner> or <group> is likely refused, as `chown: getpwnam 0: No such file or directory`.
+This is untested on VectraOS.
+
+Whether a file server lets the owner be changed is its own affair; tmpfs(4) and fsd(4) are untested with `chown`.

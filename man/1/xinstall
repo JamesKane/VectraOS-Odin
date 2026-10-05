@@ -1,0 +1,63 @@
+page=xinstall sect=1 summary="copy files and set their attributes"
+    src=third_party/sbase/xinstall.c,third_party/sbase/libutil/enmasse.c
+    keys=install,copy,mode,owner,group,directory,make
+
+# SYNOPSIS
+
+```usage
+xinstall [-g group] [-o owner] [-m mode] -d dir ...
+xinstall [-g group] [-o owner] [-m mode] [-D] -t dest source ...
+xinstall [-g group] [-o owner] [-m mode] [-D] source ... dest
+```
+
+# DESCRIPTION
+
+`xinstall` is sbase's `install`, which copies files and sets their mode, owner and group, as a makefile's `install` target uses it.
+sbase names it `install` when it installs itself; here it keeps the name of its source, `xinstall`, because VectraOS's own `install` is the system's installer, install(8), which a POSIX program running `install` finds instead.
+Its usage message is sbase's, one line with the three forms above in parentheses, separated by `|`.
+
+With one <source> and a <dest> that is not a directory, <source> is copied to <dest>.
+Otherwise each <source> is copied into the directory <dest> under its last element's name.
+A copy is made in place: <dest> is truncated and written, or removed first if it cannot be opened.
+Each copy is given mode 0755, the user's id and group, unless the flags say otherwise.
+
+: `-d`
+  Make each <dir>, and its missing parents, instead of copying; each directory made is given the mode, owner and group.
+: `-D`
+  Make the missing parents of <dest>, mode 0755; with `-t`, or with more than one <source>, make <dest> itself too.
+: `-t` <dest>
+  Copy each <source> into the directory <dest>.
+: `-m` <mode>
+  Give the copies <mode>, octal or symbolic as chmod(1) takes it; a symbolic <mode> changes 0755.
+: `-o` <owner>
+  Give the copies <owner>, a user's name or number.
+: `-g` <group>
+  Give the copies <group>, a group's name or number.
+: `-c`, `-s`
+  Accepted and ignored, for the sake of other `install`s.
+
+`xinstall` is built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/xinstall`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/xinstall`.
+
+# SEE ALSO
+
+install(8), cp(1), chmod(1), chown(1), mkdir(1); sbase's page, which calls it `install`, is `third_party/sbase/xinstall.1` in the repository
+
+# DIAGNOSTICS
+
+Errors are reported prefixed `xinstall:` with what failed, such as `open` <source>`:`, `creat` <dest>`:`, `fchown` <dest>`:`, `mkdir` <dir>`:`, `stat` <dest>`:` and the error, or <dest>`: not a directory`.
+Each exits 1, and a copy that fails part way is removed first.
+A <source> and <dest> that are one file are reported as `same file` and passed over.
+The usage message exits 1 too.
+
+# BUGS
+
+A makefile that runs `install` gets install(8), not this; it must be told to use `xinstall`.
+
+Every copy's owner and group are set, to the user's own if no flag says otherwise, and a failure to set them fails the copy.
+On VectraOS the C library's user and group ids are always 0, and whether a file server allows them to be set is untested.
+`-o` and `-g` look a name up in `/etc/passwd` or `/etc/group`, which the POSIX namespace has none of, and a failed lookup is an error even before a number is tried: both are expected to fail, names and numbers alike.
+
+A failure to set a directory's owner under `-d` is reported as `lchmod`.
+
+`xinstall` is untested on VectraOS.

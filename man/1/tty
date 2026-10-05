@@ -1,0 +1,31 @@
+page=tty sect=1 summary="print the name of the terminal"
+    src=third_party/sbase/tty.c
+    keys=terminal,name,pts,isatty
+
+# SYNOPSIS
+
+```usage
+tty
+```
+
+# DESCRIPTION
+
+`tty` prints the name of the terminal on its standard input, or `not a tty` if standard input is not one.
+
+`tty` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/tty`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/tty`.
+There is no native `tty`.
+
+# SEE ALSO
+
+ptyd(4); sbase's page is `third_party/sbase/tty.1` in the repository
+
+# DIAGNOSTICS
+
+The exit status is 0 for a terminal and 1 for anything else.
+An argument prints the usage message, and a write error its message; both exit 2.
+
+# BUGS
+
+The C library finds the terminal's name by reading the link `/proc/self/fd/0`, which procfs(4) does not serve, so `tty` is expected to print `not a tty` and exit 1 even on a terminal.
+This is untested on VectraOS.

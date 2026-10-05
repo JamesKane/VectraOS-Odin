@@ -1,0 +1,49 @@
+page=kill sect=1 summary="send a signal to processes"
+    src=third_party/sbase/kill.c
+    keys=signal,terminate,process,pid,note,sigterm,sigkill
+
+# SYNOPSIS
+
+```usage
+kill [-s signame | -num | -signame] pid ...
+kill -l [num]
+```
+
+# DESCRIPTION
+
+`kill` sends a signal, `TERM` unless told otherwise, to each <pid>.
+It is sbase's command, in `/boot/bin/posix`: the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) binds that directory before `/boot/bin` on `/bin`, so a POSIX program finds it there.
+
+A signal is a note (see procfs(4)#notes): the C library writes `posix: SIGTERM pid=12`, naming the signal and the sender, to `/proc/<pid>/note`.
+A <pid> of `0` is the sender's own note group, and a <pid> below `-1` the note group whose leader is its absolute value, each written to `notepg`.
+A <pid> of `-1` is every process in `/proc` but the first and the sender.
+A negative <pid> must come after `--`, or after `-s` and its name, so that it is not taken for a signal.
+Signal `0` sends nothing and only checks that the process is there.
+
+: `-s` <signame>, `-`<signame>
+  Send the signal named, without its `SIG`, in either case: `0`, `ABRT`, `ALRM`, `BUS`, `CHLD`, `CONT`, `FPE`, `HUP`, `ILL`, `INT`, `KILL`, `PIPE`, `QUIT`, `SEGV`, `STOP`, `TERM`, `TRAP`, `TSTP`, `TTIN`, `TTOU`, `USR1`, `USR2` or `URG`.
+: `-`<num>
+  Send the signal numbered <num>, which must be one of those named.
+: `-l`
+  List the names above, one to a line.
+  With <num>, print the name of signal <num>; a <num> above 128, an exit status, is first reduced to the signal that ended the process.
+
+# SEE ALSO
+
+procfs(4), ps(1), sleep(1); sbase's page is `third_party/sbase/kill.1` in the repository
+
+# DIAGNOSTICS
+
+A <pid> that cannot be signalled is reported, as `kill: kill 12: No such process`, and the next is tried; the exit status is then 1.
+An unknown signal is `kill: FOO: bad signal name` or `kill: 99: bad signal number`, and a <pid> that is not a number `kill: strtonum abc: invalid`; each exits 1 at once, as a usage error does.
+
+# BUGS
+
+`SIGTERM`, with its prefix, is not a name `kill` knows.
+Only the 23 signals listed have names, and a number must be one of them.
+
+`kill -l` lists `0` first, as if it were a signal's name.
+
+A <pid> of `-1` reaches native services as well as POSIX programs, everything in `/proc` but svcd and the sender.
+
+Signal `0` to a note group checks only that its leader is there.

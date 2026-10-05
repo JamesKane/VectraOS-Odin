@@ -1,0 +1,38 @@
+page=dirname sect=1 summary="strip the last component from a path"
+    src=third_party/sbase/dirname.c
+    keys=directory,path,parent,component,posix
+
+# SYNOPSIS
+
+```usage
+dirname path
+```
+
+# DESCRIPTION
+
+`dirname` prints <path> with its last component and the slashes before it removed, then a newline: the directory that holds what <path> names.
+Trailing slashes are ignored.
+A <path> with no slash, or the empty string, gives `.`; a <path> of slashes alone gives `/`.
+Only the string is looked at, never the file system.
+
+`dirname` takes no flags; `--` ends them, for a <path> that begins with `-`.
+
+`dirname` is sbase's, and found only in the POSIX namespace: `/boot/bin/posix/dirname` is a hard link to `sbase-box`, which runs the command its name names, and `/lib/ns/posix` (a manifest's `ns=posix`, see namespace(6)) binds `/boot/bin/posix` before `/boot/bin` on `/bin`, so a POSIX program that runs `dirname` finds it there.
+There is no native `dirname`.
+
+# EXAMPLES
+
+`tests/posix/sbasetest.c` runs `dirname /a/b/c` in the POSIX namespace and checks that it prints `/a/b` and exits 0.
+
+# SEE ALSO
+
+basename(1); sbase's page is `third_party/sbase/dirname.1` in the repository
+
+# DIAGNOSTICS
+
+With no <path>, more than one, or a flag, `dirname` prints `usage: dirname path` on standard error and exits 1.
+It exits 1 if its output cannot be written, and 0 otherwise.
+
+# BUGS
+
+Untested on VectraOS beyond the example.

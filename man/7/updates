@@ -1,0 +1,151 @@
+page=updates sect=7 summary="installing and updating the system"
+    keys=install,update,upgrade,release,rollback,slot,store,limine,distd,snapshot
+
+# DESCRIPTION
+
+The base system is one tree, never a set of packages.
+A release is built whole from one commit, and its tree is named by a hash: two builds of the same commit give the same name.
+Nothing on a running system changes the tree; an update replaces it whole, so there is no partial state and nothing to resolve.
+
+Three things do the work, each one job:
+
+- the content store (see store(6)) keeps trees as objects named by their BLAKE2b hashes, so a file two releases share is stored once, and every byte read from a tree can be checked against the tree's name;
+- the boot slots on the EFI system partition (see slots(6)) each hold one release's kernel and boot image, so booting picks a release, and the release before stays bootable;
+- the system volume's snapshots (see storage(7)) keep what a release does not contain, the machine's configuration in `/cfg`, so a rollback can take that back too.
+
+install(8) puts the first release on a disk from an install medium.
+distd(8) serves the store as `/dist`, checks releases in it, and applies one to a slot or rolls back to the slot before; both take effect at the next boot.
+Nothing updates by itself: every change is a command an administrator writes.
+
+@node=release title="Releases and the store"
+
+A release is a record and the trees it names.
+The record, release(6), is ndb text: the release's number, which only grows, its name, channel and commit, and for each architecture the hash of its `base` tree.
+`./build release` builds both architectures, puts each base tree into `out/release/store` with vxstore(8), and writes the record beside it, `out/release/release.ndb`; `./build release --verify` builds again and compares the trees' hashes with a record's.
+
+In the store, a file is cut into blocks of 64 KiB, each named by its hash; the file is named by the root of a hash tree over its blocks, with its size, and stored as an index of the block hashes; a directory is ndb text listing its entries' names, modes and hashes, named by the hash of that text.
+So the name of the root directory names every byte of the tree, and a reader can check any one block against it without reading the rest of the file.
+Only names, contents, links and whether a file is executable go into a tree: no owners and no times, which is what lets two builds agree.
+
+On an installed system the store is the system volume's `store` branch: objects under `b2/`, records under `records/`.
+distd reads every record there, at its start and when `ctl` says `rescan`, and serves each release of its own architecture as `/dist/releases/`<n>, its base tree read-only at `/dist/releases/`<n>`/tree`.
+Every directory is checked against its hash before it is used, every index against the file's, and every block against the index before a byte of it is returned; a read that does not match fails with an I/O error and is said on the console.
+The volume's own block hashes catch failing media; these catch a store that has been changed.
+
+@node=install title="Installing"
+
+An install medium is a disk or CD image whose Limine loads, beside the kernel and the boot image, one more module, `store.tar`: a release's record and every object of its base tree.
+Its command line has `vx.live`, so svcd(8) starts the services marked `when=vx.live`, and gives the one whose manifest says `storeimage` the store image.
+Since the firmware reads the medium, the installer needs a driver only for the disk it writes to.
+
+install(8) is that service.
+It checks the whole tree in the image against its record, then, with `-y`, erases the disk its manifest connects it to and writes:
+
+- a GUID partition table: an EFI system partition, FAT32, 512 MiB unless `-e` says otherwise, and the system volume over the rest;
+- slot `a` on the ESP: the release's kernel, the root task's modules and boot image under `\EFI\vectra\a`, Limine at the firmware's fallback path, the slot table, and Limine's configuration, made from the table, naming each file with its BLAKE2b hash, which Limine checks before it loads it;
+- the system volume, with its branches `store`, `cfg`, `home` and `adm`, the users `adm`, `none` and `vectra`, and the release's objects and record copied into `store`.
+
+Without `-y` it checks the medium and the disk, says what it would erase, and writes nothing.
+The installed slot's command line has `vx.system` in place of `vx.live`, so the next boot from the disk starts the installed system's services: partd(8), fsd(4), dosfs(4) on the ESP, and distd.
+
+@node=slots title="Slots and Limine"
+
+The ESP has three slots, `\EFI\vectra\a`, `b` and `c`, each one release's `kernel.elf`, `svcd`, `ktest` and `bootfs.tar`.
+The slot table, `\EFI\vectra\slots.ndb`, says which release each slot holds, with each file's hash, which slot boots, and which booted before it.
+Limine's configuration, `\boot\limine\limine.conf`, is made from the table alone, each time the table is written: an entry for each slot in use, the slot that boots as the default, and `vx.slot=`<x> on each entry's command line, so distd knows which slot it booted from.
+
+There is one Limine, at the firmware's fallback path, and no UEFI boot entry: choosing the slot that boots is rewriting the configuration.
+The menu lists every slot, so a release that does not come up is left by choosing another slot at boot.
+
+The system booted from a slot runs from that slot's boot image, served by bootfs(4); the release's tree in the store is the same files, checked, but it is what updates copy from, not what the system runs.
+
+@node=apply title="Applying and rolling back"
+
+`apply` <n>, written to `/dist/ctl`, stages release <n>:
+
+- its whole tree is checked, every object present and matching its hash;
+- `/cfg` is snapshotted as `cfg@apply-`<n>, through the `adm` branch's `ctl` (see fsd(4));
+- the release's four boot files are written to a slot that is not the one running, each checked as it is read from the store, then read back from the ESP and compared with its hash;
+- the table is rewritten with that slot booting and the running slot as the previous, and Limine's configuration made again from it.
+
+`rollback` makes the previous slot boot again, and the slot being left the previous.
+If the slot being left is the one running, it also rolls `/cfg` back to the snapshot its release's `apply` took, so `/cfg` is as it was before that release was applied.
+A rollback of a branch keeps what it leaves as a snapshot, so a `/cfg` changed under the newer release is not lost (see storage(7)).
+Neither command reboots.
+
+Each file on the ESP is written whole under a new name and renamed over the old, the table first.
+Only an administrator, a member of group 0 in `/adm/users` (see users(6)), may write `/dist/ctl`.
+
+`/dist/status` says how many releases distd found and, booted from a slot, `current=`, the release running, `slot=`, its slot, and `boot=`, the release the next boot is.
+
+@node=admin title="What an administrator does"
+
+To update, today:
+
+- put the new release's objects and record into the store, by copying them into the `store` branch from a medium, merging its `b2/` directories into the store's and its record into `records/`;
+- write `rescan` to `/dist/ctl`, and see the release counted in `/dist/status`;
+- write `apply` <n>, and reboot;
+- if the new release comes up wrong, choose the previous slot in Limine's menu, or, from the new release, write `rollback` and reboot.
+
+The commands are written by a process running as an administrator with `/dist`, and for the copy the `store` branch, in its namespace; the slots test does it from a service whose manifest gives it both.
+
+# EXAMPLES
+
+The slots test, `tests/user/slottest.rc`, run as `adm` with `/dist`, the `store` branch on `/n` and a medium holding release 2 on `/m`, copies release 2 in and applies it on the first boot:
+
+```rc
+% prefixes=`{ls /m/b2}
+% mkdir -p /n/b2/$prefixes
+% for(d in $prefixes) cp /m/b2/$d/* /n/b2/$d/
+% cp /m/records/2.ndb /n/records/
+% echo rescan >/dist/ctl
+% echo apply 2 >/dist/ctl
+```
+
+and on the boot of release 2 that follows, rolls back:
+
+```rc
+% echo rollback >/dist/ctl
+```
+
+What the install, distd and the test say over the four boots, on x86_64:
+
+```text
+install: release 1 on the medium, checked: 3989 objects, 208 MiB of files
+install: erasing /srv/disk0
+install: slot a written; the ESP is FAT32 "VECTRA"
+install: done: 1265 objects in the store, release 1 in slot a
+distd: 1 releases for x86_64; serving /srv/dist
+slottest: stage 0, release 1, slot a
+distd: release 2 staged: the next boot is its slot's
+distd: 2 releases for x86_64; serving /srv/dist
+slottest: stage 1, release 2, slot b
+distd: rolled back: the next boot is release 1's slot
+distd: 2 releases for x86_64; serving /srv/dist
+slottest: stage 2, release 1, slot a
+```
+
+# SEE ALSO
+
+install(8), distd(8), vxstore(8), store(6), release(6), slots(6), fsd(4), dosfs(4), bootfs(4), storage(7); `docs/06-install-update.md` and ADR-0014 in the repository
+
+# BUGS
+
+`docs/06-install-update.md` plans much more than is built.
+
+Releases are unsigned, and nothing checks a record: there are no root, release or heads keys, no `prev` chain, and no refusal of a downgrade; signatures come with M10.
+There is no `fetch`: objects reach the store by hand, not from the swarm or the LAN (M10), mirrors (M11) or the public network (M12), and there is no `/dist/policy`, `check`, `unstage` or `sysupdate`.
+
+A release goes straight into the default slot: there is no trial boot with UEFI's `BootNext`, no commit once the release is healthy, and no automatic return to the old release, all M12's, as are keys sealed to the boot chain and Secure Boot.
+Limine's menu waits no time (`timeout: 0`), so leaving a bad release means pressing a key early in the boot.
+FAT's rename is two steps, so a power cut in the few writes between them can leave the ESP with no table or no configuration, and there is no `install --repair` to mend it.
+
+`/home` is not snapshotted before an update, and nothing keeps or drops snapshots by policy; there is no `gc`, so a dropped release's objects stay in the store, and with no slot free `apply` writes over one that holds a release, dropping it, and while it writes, Limine's entry for that slot names the old files' hashes.
+Only the `base` set exists: `devel`, `desktop` and `ai`, and packages with their dependencies, catalogues and publisher keys, come from M7 on.
+
+`install` asks nothing: the target disk is its manifest's, and the first user is always `vectra`; questions come with M7.
+It takes only disks of 512-byte sectors, copies objects itself rather than through distd, and makes no UEFI boot entry.
+No `./build` command makes an install medium for people: only test scenarios marked `installer` do, each from its own image, with a record of its own rather than `./build release`'s, and no manifest in the boot image runs `install`.
+
+The running base is the slot's boot image, not the tree in the store: until the boot image shrinks to what reaches the system volume, a release's files are stored twice, in the tree and in its `bootfs.tar`.
+distd serves at most 16 releases, of its own architecture only, and cannot read a file past about 130 MiB or a directory of more than some hundreds of entries.

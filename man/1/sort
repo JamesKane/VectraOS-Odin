@@ -1,0 +1,81 @@
+page=sort sect=1 summary="sort and merge files"
+    src=third_party/sbase/sort.c,third_party/sbase/libutil/linecmp.c
+    keys=order,collate,merge,keys,fields,unique
+
+# SYNOPSIS
+
+```usage
+sort [-Cbcdfimnru] [-o outfile] [-t delim] [-k def]... [file ...]
+```
+
+# DESCRIPTION
+
+`sort` reads every line of each <file>, or of standard input with none, and writes them all, sorted, on standard output; a <file> of `-` is standard input.
+Lines are compared by their bytes, unless a flag says otherwise; there is no locale.
+The whole input is held in memory.
+
+: `-b`
+  Ignore blanks at the start and end of each key field; it applies to the keys given after it by `-k`.
+: `-d`
+  Compare only blanks and letters and digits.
+: `-f`
+  Compare lower-case letters as upper-case.
+: `-i`
+  Ignore characters that are not printable.
+: `-n`
+  Compare the start of each key as a number, as C's `strtod` reads it.
+: `-r`
+  Reverse the order.
+: `-k` <def>
+  Sort by a key, <def> written as `field[.char][flags][,field[.char][flags]]`: the key starts at character <char>, 1 by default, of field <field>, and ends at the second position, or at the end of the line.
+  Fields count from 1, and are separated by runs of blanks, or by <delim> with `-t`; <flags> are any of `b`, `d`, `f`, `i`, `n` and `r`, for that key alone.
+  Several `-k` give keys compared in turn; lines equal by every key are compared whole.
+: `-t` <delim>
+  Separate fields by <delim>, which may be more than one character and may hold escapes such as `\t`.
+: `-u`
+  Write only the first of lines that compare equal; with `-c` or `-C`, equal lines are out of order.
+: `-o` <outfile>
+  Write to <outfile>, which may be one of the inputs, instead of standard output.
+: `-c`
+  Check instead of sorting: report the first line out of order and exit 1, or exit 0 if there is none.
+: `-C`
+  As `-c`, but report nothing.
+: `-m`
+  Accepted: the inputs are sorted together whole, which merges them too.
+
+`sort` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/sort`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/sort`.
+There is no native `sort`.
+
+# EXAMPLES
+
+As `tests/user/rctest.rc` runs it, in rc in the POSIX namespace:
+
+```text
+% printf 'c\nb\na\n' | sort
+a
+b
+c
+```
+
+# SEE ALSO
+
+uniq(1), comm(1), join(1); sbase's page is `third_party/sbase/sort.1` in the repository
+
+# DIAGNOSTICS
+
+Messages go to standard error, after the name `sort` was run by.
+With `-c`, a line out of order is reported as `sort: disorder` <file>`:` and the line.
+A <file> that cannot be opened is reported as `fopen` <file>`:` and the error, and `sort` stops; a bad `-k` <def> is reported as `invalid key definition` or the like.
+Both exit 2, as does an unknown flag, which prints the usage message, and an output or input that could not be closed.
+An empty <delim> (`empty delimiter`) and an <outfile> that cannot be opened exit 1.
+Otherwise the exit status is 0, or 1 for disorder found by `-c` or `-C`.
+
+# BUGS
+
+The flags `-d`, `-f`, `-i`, `-n` and `-r` apply only to the `-k` keys given after them: in `sort -k 2 -n` the `-n` is lost.
+They are added to a key's own flags, where POSIX has a key's own flags replace them.
+
+With `-c` or `-C`, an empty input is an error: `sort` reports `getline:` and exits 1.
+
+The sort is not stable, which POSIX does not ask for; without `-u`, lines equal by every key are compared whole, so the output is the same each time.

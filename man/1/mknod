@@ -1,0 +1,32 @@
+page=mknod sect=1 summary="make a special file"
+    src=third_party/sbase/mknod.c
+    keys=device,special,block,character,fifo,major,minor
+
+# SYNOPSIS
+
+```usage
+mknod [-m mode] name b|c|u major minor
+mknod [-m mode] name p
+```
+
+# DESCRIPTION
+
+`mknod` makes the special file <name>: a block device (`b`) or a character device (`c`, or `u`, the same) numbered <major> and <minor>, or a named pipe (`p`), with the mode `0666` less the file mode creation mask.
+It is sbase's command, in `/boot/bin/posix`: the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) binds that directory before `/boot/bin` on `/bin`, so a POSIX program finds it there.
+
+: `-m` <mode>
+  Make it with <mode>, octal or symbolic as chmod(1) takes it.
+
+# SEE ALSO
+
+mkfifo(1), devmgr(8); sbase's page is `third_party/sbase/mknod.1` in the repository
+
+# DIAGNOSTICS
+
+A failure is reported, as `mknod: mknod x: ` and the error, and exits 1, as does a type other than the four, `mknod: invalid type 'x'`, and the wrong number of arguments.
+Success exits 0.
+
+# BUGS
+
+VectraOS has no device numbers and no special files: devices are files served under `/dev` (see devmgr(8)).
+The C library does not implement the `mknod` call, so `mknod` always fails, with `Function not implemented`, and the kernel log gets a line, the first time, saying that the call is not implemented.

@@ -1,0 +1,34 @@
+page=yes sect=1 summary="print a string repeatedly"
+    src=third_party/sbase/yes.c
+    keys=repeat,affirmative,loop,string
+
+# SYNOPSIS
+
+```usage
+yes [string]
+```
+
+# DESCRIPTION
+
+`yes` prints <string>, or `y` if there is none, on a line of its own, again and again, until it is killed.
+Words after <string> are ignored.
+In a pipe it ends when the reader has gone, killed by the `SIGPIPE` its next write raises.
+
+`yes` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/yes`, a hard link to it.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/yes`.
+There is no native `yes`.
+
+# SEE ALSO
+
+xargs(1); sbase's page is `third_party/sbase/yes.1` in the repository
+
+# DIAGNOSTICS
+
+A flag prints the usage message and exits 1.
+`yes` never exits by itself.
+
+# BUGS
+
+Write errors are ignored: with `SIGPIPE` ignored or caught, `yes` goes on forever after its reader has gone.
+
+`yes` is untested on VectraOS.
