@@ -39,6 +39,11 @@ import "vx:ndb"
 // expects are met, as a power cut would cut it: the next boot is the same
 // image's, with the second disk as that one left it. alone asks upstream's parallel
 // runner to run the scenario by itself; this runner runs one at a time.
+// release makes the scenario a release-level gate (upstream ea39ca9): `./build
+// test` with no names leaves it out, and it runs when named (`./build test
+// m6/install`), to regression-test what it covers or at a release; it is no
+// milestone's gate. scenario_flag reads these bare words, alone and release
+// both.
 
 Expect_Kind :: enum {
 	Contains, // expect=: part of a line
@@ -89,6 +94,22 @@ Scenario :: struct {
 substitute_arch :: proc(pattern: string, a: ^Arch) -> string {
 	s, _ := strings.replace(pattern, "$arch", a.name, 1, context.temp_allocator)
 	return s
+}
+
+// Whether a scenario's scenario= record has the bare word flag (alone,
+// release). False if the file cannot be read, which load_scenario reports
+// when the scenario runs.
+scenario_flag :: proc(name, flag: string) -> bool {
+	f, ok := read_ndb(fmt.tprintf("tests/qemu/%s.ndb", name))
+	if !ok {
+		return false
+	}
+	for rec in f.records {
+		if ndb.has(rec, "scenario") {
+			return ndb.has(rec, flag)
+		}
+	}
+	return false
 }
 
 load_scenario :: proc(name: string, a: ^Arch) -> (sc: Scenario, ok: bool) {

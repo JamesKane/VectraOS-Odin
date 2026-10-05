@@ -5,8 +5,12 @@
 # release 2 boots from slot b; /cfg is changed, and the slots rolled back. 4:
 # release 1 boots from slot a again, /cfg as before release 2
 # (tests/user/slottest.ndb, .rc).
+#
+# A release gate (release): some 17 minutes on aarch64 under TCG, so it runs
+# when named, `./build test slots`, when a change risks slots, distd's apply
+# and rollback, or install (decided 2026-10-05).
 
-scenario=slots timeout=900 alone installer media cmdline=vx.skip=rc with=slottest disk=256 blank
+scenario=slots timeout=900 alone release installer media cmdline=vx.skip=rc with=slottest disk=256 blank
 expect="install: done: "
 reboot
 expect="distd: release 2 staged"

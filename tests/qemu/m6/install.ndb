@@ -5,8 +5,13 @@
 # that disk alone (reboot): Limine from the ESP checks the slot's hashes, the
 # installed system starts its disk's services (vx.system), and
 # installtest.rc reads the release back (tests/user/installtest.ndb, .rc).
+#
+# A release gate (release): it runs when named, `./build test install`, to
+# regression-test installs, not in `./build test`'s every scenario nor as a
+# milestone's gate (decided 2026-10-05). 600 s: aarch64, under TCG, copies
+# the whole store (some 226 MiB) in about 300.
 
-scenario=install timeout=300 alone installer cmdline=vx.skip=rc with=installtest disk=256 blank
+scenario=install timeout=600 alone release installer cmdline=vx.skip=rc with=installtest disk=256 blank
 expect="install: release 1 on the medium, checked: "
 expect="install: slot a written"
 expect="install: done: "

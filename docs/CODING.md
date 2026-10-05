@@ -128,12 +128,19 @@ Which scenarios a change can affect:
 - **A page in `man/`, or a program's usage message:** `./build man --check`
   (the manual's pass alone, in milliseconds), and `m6/man`.
 
+Release gates are scenarios whose `scenario=` record says `release`
+(`m6/install`, `m6/slots`: minutes each, some 17 for slots on aarch64 under
+TCG). They are no milestone's gate: `./build test` with no names leaves them
+out, and they run when named, at a release or when a change risks what they
+cover: install, the ESP's slots, distd's apply and rollback, Limine's
+configuration. Run them in the background.
+
 At a milestone's close, the full matrix, every scenario of the newest
-`tests/qemu/mN/` on both architectures (some are for one architecture only,
-and `u9fs` needs Linux user namespaces):
+`tests/qemu/mN/` on both architectures but the release gates (some are for
+one architecture only, and `u9fs` needs Linux user namespaces):
 
 ```sh
-ls tests/qemu/m6/*.ndb | xargs -n1 basename | sed 's/\.ndb$//; s#^#m6/#' | xargs ./build test simd
+grep -L '^scenario=.* release' tests/qemu/m6/*.ndb | xargs -n1 basename | sed 's/\.ndb$//; s#^#m6/#' | xargs ./build test simd
 ```
 
 (In zsh, don't put the scenario names in one unquoted variable: it does not

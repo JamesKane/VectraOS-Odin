@@ -181,13 +181,14 @@ cmd_test :: proc(arches: []^Arch, mode: Mode, names: []string) -> bool {
 	if len(names) == 0 {
 		all := make([dynamic]string, context.temp_allocator)
 		// The top level only: tests/qemu/m2 and the like are run by name.
+		// Every scenario but the release gates, which run when named.
 		files, err := os.read_directory_by_path("tests/qemu", -1, context.temp_allocator)
 		if err != nil {
 			fmt.eprintfln("build: cannot read tests/qemu: %v", err)
 			return false
 		}
 		for f in files {
-			if f.type == .Regular && strings.has_suffix(f.name, ".ndb") {
+			if f.type == .Regular && strings.has_suffix(f.name, ".ndb") && !scenario_flag(filepath.stem(f.name), "release") {
 				append(&all, filepath.stem(f.name))
 			}
 		}
