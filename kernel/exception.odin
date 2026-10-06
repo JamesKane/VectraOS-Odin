@@ -540,6 +540,25 @@ thread_xstate :: proc "contextless" (h: vx.Handle, id: u64, op: vx.Thread_State_
 	return copy_to_user(buf, raw_data(area), n)
 }
 
+// .Get_Sched: a thread's scheduling (ADR-0016), with INSPECT on its task;
+// thread 0, the caller's own.
+@(private="file", require_results)
+thread_sched_get :: proc "contextless" (h: vx.Handle, id: u64, buf: Uva) -> vx.Status {
+	if id == 0 {
+		info := sched_info(this_cpu().current)
+		return copy_out(buf, &info)
+	}
+	t := handle_get_as(current_task(), h, Task, {.Inspect}) or_return
+	target := task_thread(t, id)
+	object_release(&t.obj)
+	if target == nil {
+		return .Err_Not_Found
+	}
+	info := sched_info(target)
+	object_release(&target.obj)
+	return copy_out(buf, &info)
+}
+
 // How many bytes each operation reads or writes.
 @(private="file")
 state_size :: proc "contextless" (op: vx.Thread_State_Op) -> u64 {
@@ -562,6 +581,8 @@ state_size :: proc "contextless" (op: vx.Thread_State_Op) -> u64 {
 		return size_of(vx.Cpu_Info)
 	case .Get_Note_Stack, .Set_Note_Stack:
 		return size_of(vx.Note_Stack)
+	case .Get_Sched:
+		return size_of(vx.Sched_Info)
 	}
 	return 0
 }
@@ -590,6 +611,8 @@ sys_thread_state :: proc "contextless" (h: vx.Handle, id, op_arg: u64, buf: Uva,
 		return id != 0 ? .Err_Invalid : thread_watch(h, op, buf)
 	case .Get_Note_Stack, .Set_Note_Stack:
 		return id != 0 ? .Err_Invalid : thread_note_stack(h, op, buf)
+	case .Get_Sched:
+		return thread_sched_get(h, id, buf)
 	case .Get_Tls, .Set_Tls:
 		if id == 0 {
 			return thread_tls_self(h, op, buf)

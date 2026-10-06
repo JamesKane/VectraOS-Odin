@@ -195,6 +195,8 @@ A fault's `access` is `read`, `write` or `exec`; a watchpoint's is the kind it w
   All of the thread's FP/SIMD state, binary, as thread(2)'s `VX_STATE_GET_XSTATE` gives it: on x86_64 XSAVE's standard image, AVX and AVX-512 included; read at any offset, written whole at offset 0.
 : `threads/<tid>/ctl`
   `step`, `resume` (lets the thread go from its event), `freeze` or `thaw`, for this thread.
+: `threads/<tid>/sched`
+  The thread's scheduling, one record (sched(2), M6 step 6d6c): its `intent`; `context=yes` if it is bound to a scheduling context, with a realtime one's `period` and `budget` in nanoseconds, the budget `left` this period, and the periods it was `exhausted` in; the context's `reserved` CPUs, a mask, and how many (`cores`); and the CPU it is bound to (`core`), if any; and, while it serves a `channel_call` on the caller's scheduling (6d6c2), the caller's task and thread (`lent_task`, `lent_thread`), whose intent and context the rest then are.
 
 A thread's registers can be read only while it holds still: stopped at an event, or frozen.
 

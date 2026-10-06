@@ -100,6 +100,7 @@ PROGRAMS := []Program {
 	// The debugger's thread test's fixture (upstream's 6d6a), the same way:
 	// its threads are musl's pthreads, through the shim's vx_thread_spawn.
 	{name = "dbgthreads", source = "tests/user/dbgthreads.c", place = .Tests, kind = .C},
+	{name = "schedtest", dir = "tests/user/schedtest", place = .Tests},
 }
 
 program_path :: proc(a: ^Arch, mode: Mode, name: string) -> string {

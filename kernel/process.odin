@@ -135,6 +135,9 @@ thread_reap :: proc "contextless" (th: ^Thread) {
 	spin_unlock(&t.lock)
 	kstack_free(th.kstack)
 	th.kstack = 0
+	if x := sched_unbind_dead(th); x != nil { // its scheduling context, let go (ADR-0016)
+		object_release(&x.obj)
+	}
 	if th.last_of_task {
 		task_teardown(t)
 	}
@@ -217,6 +220,9 @@ task_destroy :: proc "contextless" (t: ^Task) {
 thread_destroy :: proc "contextless" (th: ^Thread) {
 	if th.kstack != 0 {
 		kstack_free(th.kstack) // never started
+	}
+	if x := sched_unbind_dead(th); x != nil { // bound but never run, or bound after it ended
+		object_drop(&x.obj)
 	}
 	t := th.task
 	pool_free(&thread_pool, th)

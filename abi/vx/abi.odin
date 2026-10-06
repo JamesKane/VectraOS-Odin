@@ -70,8 +70,8 @@ Trigger :: enum u32 {
 	Dma_Fault, // a DmaDomain's device faulted (more than threshold in all); value: the count
 }
 
-// The intents a thread declares. Until scheduling contexts land, every thread
-// is .Interactive.
+// The intents a thread declares, each a band of the scheduler, highest
+// first (ADR-0016, upstream's ADR-0038). A thread starts as .Interactive.
 Intent :: enum u32 {
 	Realtime = 1,
 	Interactive_Frame,
@@ -79,6 +79,61 @@ Intent :: enum u32 {
 	Throughput,
 	Background,
 }
+
+// Scheduling contexts (ADR-0016, upstream's ADR-0038).
+// sched_ctx_create(&params, &handle) makes one, a realtime one admitted or
+// .Err_Refused; sched_ctx_bind(ctx, thread, core) binds a thread to it (ctx
+// none: unbinds; thread none: the caller; core -1, or a CPU of its
+// reservation); sched_ctx_configure(ctx, &params) changes it (ctx none: the
+// caller's own intent, never realtime); and sched_reserve(ctx, count, cls,
+// domain, flags, &set) reserves whole CPUs for it, all or .Err_Refused, or
+// with 0 gives them back.
+Sched_Params :: struct {
+	intent:         Intent,
+	flags:          u32, // 0
+	period, budget: Duration, // realtime's: budget in each period (1 ms to 10 s; 100 µs to the period)
+}
+
+#assert(size_of(Sched_Params) == 24)
+
+Core_Set :: struct { // sched_reserve's grant
+	mask:            u64, // CPU indices
+	count, reserved: u32,
+}
+
+#assert(size_of(Core_Set) == 16)
+
+// sched_reserve's cls: any CPU, one of a tier (0 the fastest, upstream's
+// ADR-0024), or one of a capacity at least (not yet: .Err_Refused); its
+// domain: any.
+CORE_ANY :: u32(0)
+DOMAIN_ANY :: u32(0)
+
+core_tier :: #force_inline proc "contextless" (n: u32) -> u32 {
+	return 0x100 | n
+}
+
+core_min_capacity :: #force_inline proc "contextless" (c: u32) -> u32 {
+	return 0x2000 | c
+}
+
+Reserve_Flag :: enum u32 {
+	No_Smt_Siblings,
+	Same_Llc,
+}
+Reserve_Flags :: bit_set[Reserve_Flag; u32]
+
+Sched_Info :: struct { // thread_state(.Get_Sched): /proc/N/threads/T/sched
+	intent:                 Intent, // the thread's: its context's, or its own
+	core:                   i32, // the reserved CPU it is bound to, or -1
+	bound, reserved_count:  u32,
+	period, budget, left:   Duration, // its context's; left, of the budget this period
+	exhausted:              u64, // periods its context ran out of budget in
+	reserved:               u64, // the CPUs its context reserved
+	lent_task, lent_thread: u64, // the channel_call caller it runs for, on its scheduling; or 0
+}
+
+#assert(size_of(Sched_Info) == 72)
 
 // Every channel message starts with this header. The kernel writes
 // sender_intent; the rest is the protocol's.
@@ -571,7 +626,8 @@ ERRMAX :: 128
 //     in-task handler there unless its stack pointer is on it already; size
 //     0 for none, else at least NOTE_STACK_MIN bytes inside user memory
 //     (.Err_Range). A new thread has none; fork's thread and exec's have
-//     none.
+//     none. .Get_Sched, at any time, with INSPECT on the task (thread 0:
+//     the caller's own), its scheduling, a Sched_Info (ADR-0038).
 // thread_suspend(task, thread), thread_resume(task, thread): counted, with
 //     the DEBUG right; with thread 0, every thread of the task. A suspended
 //     thread stops before it next returns to user mode; thread_suspend
@@ -688,6 +744,7 @@ Thread_State_Op :: enum u32 {
 	Get_Cpu,
 	Get_Note_Stack, // ADR-0036
 	Set_Note_Stack,
+	Get_Sched, // ADR-0038: a Sched_Info, at any time
 }
 
 // thread_state's .Get_Note_Stack and .Set_Note_Stack (ADR-0036): the stack a

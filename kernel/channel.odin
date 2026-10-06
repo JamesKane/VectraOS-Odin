@@ -17,7 +17,11 @@ import vx "abi:vx"
 // channel_call writes a request and waits on its own end for the reply whose
 // txid matches; the kernel picks the txid, and the reply goes straight to the
 // waiting caller instead of the queue. A call that ends without its reply
-// takes back a request the server has not read yet.
+// takes back a request the server has not read yet. The caller lends the
+// server its scheduling meanwhile (upstream's 01 §4.5, M6 step 6d6c2,
+// sched.odin): the port waiter its request wakes, then the thread that reads
+// it, runs with its intent and on its context's budget until the reply,
+// which switches back to it.
 //
 // Both ends share one lock. Objects that leave the kernel's hands (a
 // message's handles, a dying end's bindings) are released after it is
@@ -168,7 +172,7 @@ channel_deliver :: proc "contextless" (to: ^Channel, m: ^Channel_Msg) -> vx.Stat
 			}
 			link^ = w.next
 			w.reply = m
-			_ = thread_wake_token(w.thread, w, .Ok)
+			_ = thread_wake_reply(w.thread, w, .Ok) // its loan back, and run in the replier's place
 			return .Ok
 		}
 	}
@@ -186,7 +190,7 @@ channel_deliver :: proc "contextless" (to: ^Channel, m: ^Channel_Msg) -> vx.Stat
 // On success the message belongs to the channel; on failure to the caller.
 @(require_results)
 channel_write :: proc "contextless" (c: ^Channel, m: ^Channel_Msg) -> vx.Status {
-	msg_header(m).sender_intent = .Interactive
+	msg_header(m).sender_intent = sched_thread_intent(this_cpu().current)
 	spin_lock(&c.pair.lock)
 	defer spin_unlock(&c.pair.lock)
 	peer := channel_peer(c)
@@ -210,7 +214,8 @@ channel_read :: proc "contextless" (c: ^Channel, cap_bytes, count_cap: u32) -> (
 	_ = fifo_pop(&c.queue)
 	c.count -= 1
 	c.bytes -= u64(m.len)
-	if m.call != nil {
+	if m.call != nil { // the reader serves the call: the caller's scheduling is lent to it
+		sched_lend(m.call.thread, this_cpu().current)
 		m.call.read = true
 		m.call = nil
 	}
@@ -235,9 +240,11 @@ channel_call :: proc "contextless" (c: ^Channel, request: ^Channel_Msg, deadline
 	c.next_txid = CALL_TXID | c.next_txid & SIDE_TXID | (c.next_txid + 1) &~ (CALL_TXID | SIDE_TXID)
 	h := msg_header(request)
 	h.txid = w.txid
-	h.sender_intent = .Interactive
+	h.sender_intent = sched_thread_intent(t)
 	request.call = &w
+	sched_lending(t) // the server's port waiter it wakes runs on t's scheduling
 	st = channel_deliver(peer, request)
+	sched_lending(nil)
 	if st == .Ok {
 		sent = true
 		t.wait_token = &w
@@ -283,6 +290,7 @@ channel_call :: proc "contextless" (c: ^Channel, request: ^Channel_Msg, deadline
 		spin_unlock(&c.pair.lock)
 		break
 	}
+	sched_unlend(t) // the call is over, answered or not
 	if w.reply != nil {
 		return w.reply, sent, .Ok
 	}

@@ -77,6 +77,7 @@ The request is <wr_len> bytes at <wr_bytes> and <wr_count> handles at <wr_handle
 The kernel picks the request's <txid>, a fresh value with the top bit set, and writes it in the header in place of the caller's.
 The server replies by writing a message with the same <txid> to its end; the reply's body goes to <rd_bytes>, its handles to <rd_handles>, and its size to <actual>.
 <ch> needs `VX_RIGHT_READ` and `VX_RIGHT_WRITE`.
+While it waits, the caller lends its scheduling, its intent and its scheduling context's budget, to the server (sched(2), M6 step 6d6c2): to the thread its request wakes from a port wait, then to the thread that reads it, which keeps the loan until the reply, and until it next blocks after it; a thread runs on a loan only if it is above its own. Each switches straight to the other: the woken server runs on the caller's CPU, the answered caller on the replier's.
 
 A call that ends without its reply, by its <deadline>, an interrupt or a kill, takes back its request if the server has not read it yet: the server never sees it, and its handles are closed.
 An interrupted call whose request the server has read goes on waiting, until the reply or <deadline>, so no answer is lost; the interrupt is delivered when it returns.
@@ -153,6 +154,6 @@ A reply that comes after its call has given up, past its deadline or killed, fin
 
 The design says the handles leave the writer's table whether or not the write succeeds; the kernel keeps them when it refuses the message before building it.
 
-Every message's <sender_intent> is `VX_INTENT_INTERACTIVE` until scheduling contexts come; with them, `vx_channel_call` is to switch straight to a waiting server on the caller's scheduling context, and to lend handles for the length of a call (01 §4.5).
-Neither is there yet.
+Handles cannot yet be lent for the length of a call (01 §4.5, M6 step 6e).
+A server thread that is neither waiting on a port nor reading when a call comes runs at its own intent until it reads the request: below a busy higher band, it may wait long.
 Queues are not yet charged to the writer's budget.

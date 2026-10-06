@@ -1,0 +1,3 @@
+# tests/user/schedtest.ndb: schedtest (tests/qemu/sched.ndb).
+
+service=schedtest program=/boot/bin/schedtest console

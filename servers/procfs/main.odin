@@ -433,6 +433,7 @@ Thread_File :: enum u32 {
 	Fpregs,
 	Xregs,
 	Ctl,
+	Sched,
 }
 
 @(private="file")
@@ -472,6 +473,7 @@ THREAD_FILES := [Thread_File]File_Entry {
 	.Fpregs   = {"fpregs", 0o664},
 	.Xregs    = {"xregs", 0o664},
 	.Ctl      = {"ctl", 0o222},
+	.Sched    = {"sched", 0o444},
 }
 
 Node_Bits :: bit_field u64 {
@@ -779,6 +781,8 @@ thread_read :: proc "contextless" (p: ^Proc, tid: u32, f: Thread_File, offset: u
 		n = thread_status_text(p, tid, text[:])
 	case .Regs_Ndb:
 		n = regs_ndb_text(p, tid, text[:])
+	case .Sched:
+		n = sched_text(p, tid, text[:])
 	case .Regs:
 		r: vx.Regs
 		rt.thread_state(p.task, tid, .Get_Regs, &r) or_return // running: its registers will not hold still
