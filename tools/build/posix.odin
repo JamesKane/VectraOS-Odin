@@ -52,8 +52,9 @@ POSIX_LD_FLAGS :: []string{"-static", "-nostdlib", "--build-id=sha1", "-z", "max
 // The back end: an Odin package, with its assembly in arch/ARCH.
 BACKEND_PKG :: "ports/musl/vx"
 
-// It uses vx:rt, without vx:rt's _start: crt1.S is the entry.
-BACKEND_ODIN_FLAGS :: []string{"-define:VX_RT_START=false"}
+// It uses vx:rt, without vx:rt's _start: crt1.S is the entry. It has no
+// thread-local storage of its own yet.
+BACKEND_ODIN_FLAGS :: []string{"-define:VX_RT_START=false", "-no-thread-local"}
 
 Posix_Ports :: struct {
 	musl, compiler_rt, lua, sbase: Port,

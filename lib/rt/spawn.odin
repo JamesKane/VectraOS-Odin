@@ -19,41 +19,13 @@ import "vx:str"
 // other input: an image that would map outside the lower half, map a page
 // both writable and executable, or reach past its own end is refused.
 
-@(private="file")
-Elf_Header :: struct {
-	ident:                                                [16]u8,
-	type, machine:                                        u16,
-	version:                                              u32,
-	entry, phoff, shoff:                                  u64,
-	flags:                                                u32,
-	ehsize, phentsize, phnum, shentsize, shnum, shstrndx: u16,
-}
-#assert(size_of(Elf_Header) == 64)
-
-// A segment's permissions: PF_X is bit 0, PF_W bit 1, PF_R bit 2.
-@(private="file")
-Elf_Pf :: enum u32 {
-	X,
-	W,
-	R,
-}
-
-@(private="file")
-Elf_Phdr :: struct {
-	type:                                       u32,
-	flags:                                      bit_set[Elf_Pf;u32],
-	offset, vaddr, paddr, filesz, memsz, align: u64,
-}
-#assert(size_of(Elf_Phdr) == 56)
-
+// The ELF types are elf.odin's.
 @(private="file")
 ELFCLASS64 :: 2
 @(private="file")
 ELFDATA2LSB :: 1
 @(private="file")
 ET_EXEC :: 2
-@(private="file")
-PT_LOAD :: 1
 
 when ODIN_ARCH == .amd64 {
 	@(private="file")

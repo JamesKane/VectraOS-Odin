@@ -33,6 +33,23 @@ vx_fp_probe_get:
     fmov x0, d7
     ret
 
+// vx_thread_finish(word: ^u32, wake: u64, exit: u64) -> !: a thread's last
+// steps, in registers alone, as the thread that waits on word may unmap this
+// thread's stack as soon as it reads 0: the word cleared (a release),
+// futex_wake(word, 1) (system call wake), thread_exit() (system call exit).
+// The numbers come from the caller, which has the ABI's table.
+    .globl vx_thread_finish
+    .type vx_thread_finish, %function
+vx_thread_finish:
+    mov x9, x2                 // exit's number
+    stlr wzr, [x0]
+    mov x8, x1
+    mov x1, #1
+    svc #0                     // futex_wake(word, 1)
+    mov x8, x9
+    svc #0                     // thread_exit()
+    brk #0
+
 // vx_cycles() -> u64: the cycle counter the clock is made from, which user
 // code may always read.
     .globl vx_cycles

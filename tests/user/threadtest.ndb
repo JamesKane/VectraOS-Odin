@@ -1,0 +1,3 @@
+# tests/user/threadtest.ndb: vx-rt's threads (tests/qemu/threads.ndb).
+
+service=threadtest program=/boot/bin/threadtest console

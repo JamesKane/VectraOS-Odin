@@ -18,7 +18,6 @@ IR_ODIN_FLAGS :: []string {
 	"-disable-init-fini",
 	"-disable-non-constant-globals", // their initialisers would need the startup code -disable-init-fini drops
 	"-no-rtti",
-	"-no-thread-local",
 	"-reloc-mode:static",
 	"-debug",
 	"-vet",
@@ -33,6 +32,11 @@ IR_ODIN_FLAGS :: []string {
 	"-no-threaded-checker",
 	"-thread-count:1",
 }
+
+// The kernel's alone: it has no thread-local storage. A program's
+// @(thread_local) variables are its PT_TLS segment, of which vx:rt gives
+// each thread its own copy (lib/rt/thread.odin, upstream's M6 step 6d1).
+KERNEL_ODIN_FLAGS :: []string{"-no-thread-local"}
 
 // The Odin runtime's module of the C library's memory functions (procs.odin:
 // memset, memcpy and memmove as byte loops, and bzero, which nothing calls).
@@ -131,7 +135,7 @@ build_kernel :: proc(a: ^Arch, mode: Mode) -> (elf: string, ok: bool) {
 	out := fmt.tprintf("%s/kernel", out_dir(a, mode))
 	elf = fmt.tprintf("%s/kernel.elf", out_dir(a, mode))
 	fmt.eprintfln("  KERN  %s %s", a.name, MODES[mode].name)
-	objs := compile_ir(a, mode, "kernel", fmt.tprintf("kernel/arch/%s", a.name), out, a.kernel_odin_flags, a.kernel_llc_flags) or_return
+	objs := compile_ir(a, mode, "kernel", fmt.tprintf("kernel/arch/%s", a.name), out, concat(KERNEL_ODIN_FLAGS, a.kernel_odin_flags), a.kernel_llc_flags) or_return
 
 	// Link twice: first with an empty symbol map, to learn the addresses, then
 	// with the real one, which panic backtraces read. The map is last in

@@ -12,6 +12,7 @@ PHDRS {
     text   PT_LOAD FLAGS(5);
     data   PT_LOAD FLAGS(6);
     note   PT_NOTE FLAGS(4);
+    tls    PT_TLS FLAGS(4);
 }
 
 SECTIONS {
@@ -23,6 +24,11 @@ SECTIONS {
     .text : { *(.text .text.*) } :text
 
     . = ALIGN(CONSTANT(MAXPAGESIZE));
+    /* Thread-local storage (upstream's M6 step 6d1): the image vx:rt gives
+       each thread a copy of, initialised (.tdata), then zeroed (.tbss), as
+       PT_TLS describes it (lib/rt/thread.odin). */
+    .tdata : { *(.tdata .tdata.*) } :data :tls
+    .tbss : { *(.tbss .tbss.*) } :data :tls
     .data : {
         *(.data .data.*)
         *(.got .got.plt)   /* Odin's globals may be reached through the GOT */

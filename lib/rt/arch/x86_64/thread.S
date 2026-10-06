@@ -84,6 +84,23 @@ vx_wrpkru:
     wrpkru
     ret
 
+// vx_thread_finish(word: ^u32, wake: u64, exit: u64) -> !: a thread's last
+// steps, in registers alone, as the thread that waits on word may unmap this
+// thread's stack as soon as it reads 0: the word cleared, futex_wake(word, 1)
+// (system call wake), thread_exit() (system call exit). The numbers come from
+// the caller, which has the ABI's table.
+    .globl vx_thread_finish
+    .type vx_thread_finish, @function
+vx_thread_finish:
+    movl %edx, %r8d            // exit's number, kept: syscall takes rcx and r11
+    movl $0, (%rdi)
+    movl %esi, %eax
+    movl $1, %esi
+    syscall                    // futex_wake(word, 1)
+    movl %r8d, %eax
+    syscall                    // thread_exit()
+    ud2
+
 // vx_cycles() -> u64: the cycle counter the clock is made from, which user
 // code may always read.
     .globl vx_cycles

@@ -80,12 +80,14 @@ stderr_put :: proc "contextless" (s: string) {
 	case console_connector() != vx.HANDLE_NONE:
 		console_print(s)
 	case:
-		print(s)
+		put_locked(s) // print's way, under the lock eprint holds
 	}
 }
 
 // Prints an error, as print prints: to stderr, or without one, to the console.
 eprint :: proc "contextless" (args: ..Print_Arg) {
+	mutex_lock(&stdio_lock)
+	defer mutex_unlock(&stdio_lock)
 	for a in args {
 		switch v in a {
 		case string:
@@ -168,8 +170,15 @@ read_all :: proc "contextless" (buf: []u8) -> (n: int, st: vx.Status) {
 // exits does. What it printed goes out first, and its pipes close, so a
 // reader sees the end of its input before the exit is seen. Every thread
 // ends: the program, not just this one.
+//
+// It holds stdio_lock to the end, so no other thread prints over the last
+// lines (upstream's M6 step 6d1); but a note handler that ends the program
+// (.Dflt) may run on a thread that holds it already, interrupted inside a
+// print, so it waits for it only a while (UPSTREAM-FINDINGS).
 exits :: proc "contextless" (msg: string) -> ! {
-	flush()
+	_ = mutex_lock_until(&stdio_lock, clock_read() + 100_000_000)
+	console_flush()
+	stdout_flush()
 	stderr_flush()
 	if stdio.output != 0 {
 		_ = handle_close(stdio.output)

@@ -85,6 +85,26 @@ The register operations work on a thread stopped at an exception port, or, for a
 Registers set are checked: a thread may be given any user-mode state and never a privileged one, so a program counter or stack pointer outside user space is refused, and flags a user may not set are dropped.
 FP/SIMD registers set with `SET_FPREGS` are made safe to load the same way; `SET_XSTATE` refuses what it cannot load instead.
 
+## Threads in vx-rt
+
+A native program makes its threads with vx-rt rather than these calls directly (M6 step 6d1):
+
+```c
+vx_status vx_thread_spawn(vx_thread *t, void (*fn)(void *), void *arg,
+                          uint64_t stack_size);
+void vx_thread_join(vx_thread *t);
+bool vx_thread_stack(uint64_t *lo, uint64_t *hi);
+void vx_mutex_lock(vx_mutex *m);
+void vx_mutex_unlock(vx_mutex *m);
+```
+
+`vx_thread_spawn` runs <fn>(<arg>) on a new thread of the program's own task, with a stack of <stack_size> bytes (0 for 256 KiB) and its own copy of the program's `thread_local` storage: the image's `PT_TLS` segment, its initialised part copied and the rest zeroed, at its alignment, with the thread pointer set as the ELF ABI has it before <fn> runs.
+The stack, the storage and vx-rt's record of the thread are one VMO, below which the unmapped page `as_map` leaves is the stack's guard.
+`vx_thread_join` waits for <fn> to return, then lets the thread's memory go.
+`vx_thread_stack` gives the calling thread's stack, [<lo>, <hi>), the first thread's included (the mapping its stack pointer is in); false on a thread made with `vx_thread_create` alone, which has no record.
+The first thread's `thread_local` storage is set up at start-up, before `vx_main`.
+`vx_mutex` is a lock on a futex word, not recursive; vx-rt's printing holds one, so lines from different threads do not mix.
+
 ## Rights
 
 `vx_thread_create` needs `VX_RIGHT_MANAGE` on <task>, and `vx_thread_start` `VX_RIGHT_MANAGE` on <thread> and `VX_RIGHT_TRANSFER` on <handle>.
@@ -168,5 +188,7 @@ Every call returns `VX_ERR_BAD_HANDLE` for a handle that is not open or of the w
 
 When `vx_thread_start` fails after taking <handle>, the handle is closed in the thread's task: the caller has lost it.
 <handle> is taken before <entry> and <sp> are checked, so even a bad address loses it.
+
+A 9P connection is one thread's at a time: two threads of a program reading files through vx-ns at once may mix their replies, until 6d4's pipelined client.
 
 The design queues notes per task (ADR-0010); the kernel queues them per thread, so a note to thread 0 goes to one thread chosen when it is posted.

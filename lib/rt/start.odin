@@ -69,6 +69,9 @@ foreign _ {
 @(export=RT_START, link_name="_start")
 start :: proc "c" (bootstrap: vx.Handle, arg2: u64) -> ! {
 	read_spawn(bootstrap)
+	when ODIN_OS == .Freestanding { // not a host test's: it has no __ehdr_start
+		thread_main_init() // its TLS, before anything may use a @(thread_local)
+	}
 	stdio_init()
 	context = runtime.default_context()
 	exit_status := vx_main()
