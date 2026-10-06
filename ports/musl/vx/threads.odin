@@ -32,6 +32,11 @@ Be_Thread :: struct {
 	mask:          linux.Sig_Set, // its blocked signals: a new thread starts with its creator's
 	restarting:    bool, // its call is being made again after a signal, its deadline kept
 	call_deadline: vx.Instant, // its sleep's or poll's (start.odin, poll.odin)
+	alt_base:      u64, // sigaltstack's; alt_size 0: none
+	alt_size:      u64,
+	slot:          u32, // in be_threads, plus 1; 0: not there
+	handlers_ran:  u32, // signal.odin's: the handlers run on it,
+	eintr_ran:     u32, // and those of them not SA_RESTART
 }
 
 @(private="file")
@@ -89,6 +94,7 @@ be_set_tid_address :: proc "contextless" (ctid: ^u32) -> int {
 	if !be_tls {
 		be_tl = be_early
 		be_tls = true
+		be_register(be_only_thread_id(), &be_tl)
 	}
 	be_tl.ctid, be_tl.tid = ctid, posix_pid()
 	return int(be_tl.tid)
@@ -130,6 +136,7 @@ clone_entry :: proc "c" (unused: vx.Handle, at: u64) -> ! {
 		ctid = c.ctid,
 		mask = c.mask,
 	}
+	be_register(u32(c.tid &~ TID_THREAD), &be_tl)
 	code := c.fn(c.arg)
 	_ = vx_syscall(int(linux.Sys.exit), int(code), 0, 0, 0, 0, 0)
 	intrinsics.trap()
@@ -185,6 +192,7 @@ be_thread_exit :: proc "contextless" (code: int) -> ! {
 		proc_exit(code)
 	}
 	me := be_me()
+	be_unregister(me)
 	ctid := me.ctid
 	if me.depth != 0 {
 		me.depth = 0
@@ -213,6 +221,7 @@ be_unmapself :: proc "c" (base: rawptr, size: uint) -> ! {
 		proc_exit(0)
 	}
 	me := be_me()
+	be_unregister(me)
 	ctid := me.ctid
 	if me.depth != 0 {
 		me.depth = 0
@@ -248,4 +257,159 @@ be_thread_kill :: proc "contextless" (tid: i64, sig: int) -> int {
 	}
 	st := rt.thread_interrupt(rt.self, u32(tid &~ TID_THREAD), string(buf[:n]))
 	return st == .Err_Not_Found ? fail(.ESRCH) : errno_of(st)
+}
+
+// --- The process's threads (upstream's M6 step 6d2b) ---
+//
+// Each live thread by its kernel id, for a signal from another process that
+// the thread whose note it came in blocks: be_forward passes it to one that
+// does not. A reader counts itself in before it looks at a thread's record,
+// which be_unregister waits out, so the record (in that thread's TLS) is not
+// gone from under it.
+
+BE_THREADS :: 256 // past these, a thread is not offered signals
+
+Be_Slot :: struct {
+	id:      u32, // its kernel thread id; 0: free
+	readers: u32, // be_forwards looking at t
+	t:       ^Be_Thread,
+}
+
+be_threads: [BE_THREADS]Be_Slot
+
+be_register :: proc "contextless" (id: u32, t: ^Be_Thread) {
+	for &s, i in be_threads {
+		if _, ok := intrinsics.atomic_compare_exchange_strong(&s.id, 0, id); ok {
+			intrinsics.atomic_store(&s.t, t)
+			t.slot = u32(i) + 1
+			return
+		}
+	}
+}
+
+@(private="file")
+be_unregister :: proc "contextless" (t: ^Be_Thread) {
+	if t.slot == 0 {
+		return
+	}
+	s := &be_threads[t.slot - 1]
+	intrinsics.atomic_store(&s.t, nil)
+	for intrinsics.atomic_load(&s.readers) != 0 {
+		intrinsics.cpu_relax() // a reader with t in hand: done in a few instructions
+	}
+	intrinsics.atomic_store(&s.id, 0)
+	t.slot = 0
+}
+
+// The calling thread, as the kernel numbers it: the first of the task's when
+// it is the only one (start-up, a forked child).
+be_only_thread_id :: proc "contextless" () -> u32 {
+	ti: vx.Thread_Info
+	return rt.thread_state(rt.self, 0, .Next_Thread, &ti) == .Ok ? ti.id : 0
+}
+
+// The process's signal sig, which this thread blocks, posted to a thread
+// that does not, marked as its own; false if none does (or none would take
+// the note), and it stays the process's, pending.
+be_forward :: proc "contextless" (sig: int, text: string) -> bool {
+	buf: [note.ERRMAX]u8
+	if len(text) + len(BE_DIRECTED) > len(buf) {
+		return false
+	}
+	n := copy(buf[:], text)
+	n += copy(buf[n:], BE_DIRECTED)
+	me := be_me()
+	for &s in be_threads {
+		id := intrinsics.atomic_load(&s.id)
+		if id == 0 {
+			continue
+		}
+		intrinsics.atomic_add(&s.readers, 1)
+		t := intrinsics.atomic_load(&s.t)
+		takes := t != nil && t != me && sig not_in transmute(linux.Sig_Set)intrinsics.atomic_load_explicit((^u64)(&t.mask), .Relaxed)
+		intrinsics.atomic_sub(&s.readers, 1)
+		if takes && rt.thread_interrupt(rt.self, id, string(buf[:n])) == .Ok {
+			return true
+		}
+	}
+	return false
+}
+
+// --- The alternate signal stack (upstream's M6 step 6d2b) ---
+
+foreign _ {
+	// arch/*/context.S: fn(a0, a1, a2) on the stack whose top is top; back
+	// on this one after.
+	be_on_stack :: proc "c" (top: u64, fn: uintptr, a0: int, a1, a2: rawptr) ---
+}
+
+// Whether the thread runs on its alternate stack now.
+be_on_alt :: proc "contextless" (t: ^Be_Thread) -> bool {
+	here: u8
+	sp := u64(uintptr(&here))
+	return t.alt_size != 0 && sp > t.alt_base && sp <= t.alt_base + t.alt_size
+}
+
+// sigaltstack's flags for the thread's alternate stack, on it or not.
+be_alt_flags :: proc "contextless" (t: ^Be_Thread, on: bool) -> i32 {
+	if t.alt_size == 0 {
+		return linux.SS_DISABLE
+	}
+	return on ? linux.SS_ONSTACK : 0
+}
+
+// sigaltstack: the stack is the thread's note stack too (ADR-0036), where
+// the kernel diverts it for a note or a fault, so an overflow's SIGSEGV has
+// room.
+be_altstack :: proc "contextless" (ss, old: ^linux.Stack) -> int {
+	me := be_me()
+	on := be_on_alt(me)
+	if old != nil {
+		old^ = {
+			sp    = uintptr(me.alt_base),
+			size  = uint(me.alt_size),
+			flags = be_alt_flags(me, on),
+		}
+	}
+	if ss == nil {
+		return 0
+	}
+	if on {
+		return fail(.EPERM)
+	}
+	if ss.flags & ~i32(linux.SS_DISABLE) != 0 {
+		return fail(.EINVAL) // SS_AUTODISARM: not yet
+	}
+	ns: vx.Note_Stack
+	if ss.flags & linux.SS_DISABLE == 0 {
+		if ss.size < linux.MINSIGSTKSZ {
+			return fail(.ENOMEM)
+		}
+		ns = {
+			base = u64(ss.sp),
+			size = u64(ss.size),
+		}
+	}
+	if rt.thread_state(rt.self, 0, .Set_Note_Stack, &ns) != .Ok {
+		return fail(.EINVAL)
+	}
+	me.alt_base, me.alt_size = ns.base, ns.size
+	return 0
+}
+
+// After fork: the child's one thread numbered anew, its alternate stack set
+// again (copied with its memory; the kernel's new thread has none).
+be_after_fork :: proc "contextless" () {
+	intrinsics.atomic_store(&be_live, 1) // the thread that forked, alone
+	be_threads = {}
+	me := be_me()
+	me.slot = 0
+	be_register(be_only_thread_id(), me)
+	if me.alt_size != 0 {
+		ns := vx.Note_Stack {
+			base = me.alt_base,
+			size = me.alt_size,
+		}
+		_ = rt.thread_state(rt.self, 0, .Set_Note_Stack, &ns)
+	}
 }

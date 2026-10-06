@@ -566,6 +566,12 @@ ERRMAX :: 128
 //     says how many the hardware has in count. .Next_Thread, at any time,
 //     describes the live thread with the next id after `thread` (0: the
 //     first) in a Thread_Info; .Err_Not_Found after the last.
+//     .Get_Note_Stack and .Set_Note_Stack, with thread 0, the caller's note
+//     stack, a Note_Stack (ADR-0036): the kernel diverts the thread to its
+//     in-task handler there unless its stack pointer is on it already; size
+//     0 for none, else at least NOTE_STACK_MIN bytes inside user memory
+//     (.Err_Range). A new thread has none; fork's thread and exec's have
+//     none.
 // thread_suspend(task, thread), thread_resume(task, thread): counted, with
 //     the DEBUG right; with thread 0, every thread of the task. A suspended
 //     thread stops before it next returns to user mode; thread_suspend
@@ -680,7 +686,16 @@ Thread_State_Op :: enum u32 {
 	Get_Xstate, // ADR-0035
 	Set_Xstate,
 	Get_Cpu,
+	Get_Note_Stack, // ADR-0036
+	Set_Note_Stack,
 }
+
+// thread_state's .Get_Note_Stack and .Set_Note_Stack (ADR-0036): the stack a
+// thread's in-task handler runs on, [base, base + size); size 0: none.
+Note_Stack :: struct {
+	base, size: u64,
+}
+NOTE_STACK_MIN :: 2048 // as POSIX's MINSIGSTKSZ on x86_64
 
 // .Get_Xstate's most: the kernel's limit, a page (Cpu_Info.xstate_size says
 // how much of it a thread's state takes).

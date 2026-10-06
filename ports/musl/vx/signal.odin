@@ -37,8 +37,11 @@ import "vx:str"
 // notes to /proc, as 9front's APE does: note for a process, notepg for a
 // group.
 //
-// Not yet: an alternate signal stack, and the registers in a handler's
-// ucontext.
+// A handler's ucontext carries the registers and FP/SIMD state a fault or
+// a note interrupted, and the thread goes on with what the handler leaves
+// there; sigaltstack is the thread's note stack (ADR-0036), and an
+// SA_ONSTACK handler runs on it. A process's signal that the thread it came
+// to blocks is passed to one that does not (threads.odin's be_forward).
 
 SIG_MAX :: linux.NSIG_MAX
 
@@ -62,8 +65,6 @@ actions: [SIG_MAX + 1]Action
 sig_pending: linux.Sig_Set
 @(private="file")
 sender_of: [SIG_MAX + 1]i64 // who sent each pending one
-sig_handlers_ran: u32 // how many handlers have run
-sig_eintr_ran: u32 // how many of them were not SA_RESTART (a call they interrupt ends)
 // Changed by sig_note for each signal that comes while the back end runs: a
 // sleep waits on it, so one that comes just before the sleep ends it too.
 sig_seq: u32
@@ -128,10 +129,103 @@ Handler :: #type proc "c" (sig: i32)
 @(private="file")
 Info_Handler :: #type proc "c" (sig: i32, info: ^linux.Siginfo, uc: rawptr)
 
+// --- A handler's context (upstream's M6 step 6d2b) ---
+//
+// What a handler's ucontext carries, and takes back: the registers of the
+// program's code a fault or a note diverted the thread from, with the
+// FP/SIMD state vx_note_entry saved (in its image, which is Linux's: x86_64's
+// FXSAVE leads XSAVE's, aarch64's is fpsimd_context's registers). A signal
+// delivered as a call returns has none: its ucontext's registers are zero.
+@(private="file")
+Sig_Context :: struct {
+	e:  ^vx.Exception,
+	fp: rawptr, // vx_note_entry's save area
+}
+
+@(private="file")
+sig_uc_fill :: proc "contextless" (uc: ^linux.Ucontext, c: ^Sig_Context) {
+	r := &c.e.regs
+	when ODIN_ARCH == .amd64 {
+		g := &uc.mcontext.gregs
+		g[linux.REG_R8], g[linux.REG_R9], g[linux.REG_R10], g[linux.REG_R11] = i64(r.r8), i64(r.r9), i64(r.r10), i64(r.r11)
+		g[linux.REG_R12], g[linux.REG_R13], g[linux.REG_R14], g[linux.REG_R15] = i64(r.r12), i64(r.r13), i64(r.r14), i64(r.r15)
+		g[linux.REG_RDI], g[linux.REG_RSI], g[linux.REG_RBP], g[linux.REG_RBX] = i64(r.rdi), i64(r.rsi), i64(r.rbp), i64(r.rbx)
+		g[linux.REG_RDX], g[linux.REG_RAX], g[linux.REG_RCX], g[linux.REG_RSP] = i64(r.rdx), i64(r.rax), i64(r.rcx), i64(r.rsp)
+		g[linux.REG_RIP], g[linux.REG_EFL] = i64(r.rip), i64(r.rflags)
+		if c.e.kind == .Page_Fault || c.e.kind == .Protection_Key {
+			// #PF, with its error code as Linux gives it: user, write, fetch, key.
+			err := i64(4)
+			if c.e.code == 1 {
+				err |= 2
+			}
+			if c.e.code == 2 {
+				err |= 16
+			}
+			if c.e.kind == .Protection_Key {
+				err |= 32
+			}
+			g[linux.REG_TRAPNO], g[linux.REG_ERR], g[linux.REG_CR2] = 14, err, i64(c.e.address)
+		}
+		uc.mcontext.fpregs = c.fp
+	} else {
+		m := &uc.mcontext
+		m.regs = r.x
+		m.sp, m.pc, m.pstate, m.fault_address = r.sp, r.pc, r.pstate, c.e.address
+		f := (^vx.Fpregs)(c.fp)
+		fs := (^linux.Fpsimd_Context)(&m.reserved) // then a zero header: the end
+		fs.head = {
+			magic = linux.FPSIMD_MAGIC,
+			size  = size_of(linux.Fpsimd_Context),
+		}
+		fs.fpsr, fs.fpcr = u32(f.fpsr), u32(f.fpcr)
+		fs.vregs = f.v
+	}
+}
+
+// What the handler changed, for the thread to go on with.
+@(private="file")
+sig_uc_take :: proc "contextless" (uc: ^linux.Ucontext, c: ^Sig_Context) {
+	r := &c.e.regs
+	when ODIN_ARCH == .amd64 {
+		g := &uc.mcontext.gregs
+		r.r8, r.r9, r.r10, r.r11 = u64(g[linux.REG_R8]), u64(g[linux.REG_R9]), u64(g[linux.REG_R10]), u64(g[linux.REG_R11])
+		r.r12, r.r13, r.r14, r.r15 = u64(g[linux.REG_R12]), u64(g[linux.REG_R13]), u64(g[linux.REG_R14]), u64(g[linux.REG_R15])
+		r.rdi, r.rsi, r.rbp, r.rbx = u64(g[linux.REG_RDI]), u64(g[linux.REG_RSI]), u64(g[linux.REG_RBP]), u64(g[linux.REG_RBX])
+		r.rdx, r.rax, r.rcx, r.rsp = u64(g[linux.REG_RDX]), u64(g[linux.REG_RAX]), u64(g[linux.REG_RCX]), u64(g[linux.REG_RSP])
+		r.rip, r.rflags = u64(g[linux.REG_RIP]), u64(g[linux.REG_EFL])
+		// fpregs points at the save area itself: changes there are already made.
+	} else {
+		m := &uc.mcontext
+		r.x = m.regs
+		r.sp, r.pc, r.pstate = m.sp, m.pc, m.pstate
+		f := (^vx.Fpregs)(c.fp)
+		fs := (^linux.Fpsimd_Context)(&m.reserved)
+		if fs.head.magic == linux.FPSIMD_MAGIC {
+			f.fpsr, f.fpcr = u64(fs.fpsr), u64(fs.fpcr)
+			f.v = fs.vregs
+		}
+	}
+}
+
+// A handler called: on the alternate stack for SA_ONSTACK, unless the thread
+// is on it already (the kernel diverted it there, or a handler runs there).
+@(private="file")
+sig_call :: proc "contextless" (flags: linux.Sa_Flags, h: uintptr, sig: int, info: ^linux.Siginfo, uc: ^linux.Ucontext) {
+	me := be_me()
+	switch {
+	case .Onstack in flags && me.alt_size != 0 && !be_on_alt(me):
+		be_on_stack(me.alt_base + me.alt_size, h, sig, info, uc)
+	case .Siginfo in flags:
+		(Info_Handler)(rawptr(h))(i32(sig), info, uc)
+	case:
+		(Handler)(rawptr(h))(i32(sig))
+	}
+}
+
 // Carries out sig's disposition. Returns whether a call it interrupted
 // returns EINTR: a handler ran that is not SA_RESTART.
 @(private="file")
-sig_act :: proc "contextless" (sig: int, code: i32, sender: i64, address: u64, e: ^vx.Exception, fault: string) -> bool {
+sig_act :: proc "contextless" (sig: int, code: i32, sender: i64, address: u64, e: ^vx.Exception, fault: string, ctx: ^Sig_Context) -> bool {
 	h := actions[sig].handler
 	flags := actions[sig].flags
 	if h == linux.SIG_IGN {
@@ -162,9 +256,9 @@ sig_act :: proc "contextless" (sig: int, code: i32, sender: i64, address: u64, e
 	if .Resethand in flags {
 		actions[sig] = {}
 	}
-	sig_handlers_ran += 1
+	be_me().handlers_ran += 1
 	if .Restart not_in flags {
-		sig_eintr_ran += 1
+		be_me().eintr_ran += 1
 	}
 	// The handler is the program's own code, even when the back end delivers
 	// it (sigsuspend, ppoll, a fault in a call): a signal during it is
@@ -188,17 +282,31 @@ sig_act :: proc "contextless" (sig: int, code: i32, sender: i64, address: u64, e
 		uc: linux.Ucontext
 		mask := old
 		copy(uc.sigmask[:], memory.ptr_to_bytes(&mask))
-		(Info_Handler)(rawptr(h))(i32(sig), &info, &uc)
+		me := be_me()
+		uc.stack = {
+			sp    = uintptr(me.alt_base),
+			size  = uint(me.alt_size),
+			flags = be_alt_flags(me, be_on_alt(me)),
+		}
+		if ctx != nil {
+			sig_uc_fill(&uc, ctx)
+		}
+		sig_call(flags, h, sig, &info, &uc)
+		if ctx != nil {
+			sig_uc_take(&uc, ctx)
+		}
 	} else {
-		(Handler)(rawptr(h))(i32(sig))
+		sig_call(flags, h, sig, nil, nil)
 	}
 	be_me().sig_depth = depth
 	be_me().mask = old
 	return .Restart not_in flags
 }
 
-// Delivers every pending signal that is not blocked, lowest first.
-sig_deliver_pending :: proc "contextless" () -> (eintr: bool) {
+// Delivers every pending signal that is not blocked, lowest first; ctx, if
+// the thread was diverted from the program's code, the handlers' registers.
+@(private="file")
+sig_deliver_in :: proc "contextless" (ctx: ^Sig_Context) -> (eintr: bool) {
 	me := be_me()
 	for {
 		ready := (pending_load() + me.pending) - me.mask
@@ -212,8 +320,12 @@ sig_deliver_pending :: proc "contextless" () -> (eintr: bool) {
 			pending_remove({sig})
 		}
 		who := sender_of[sig]
-		eintr = sig_act(sig, who != 0 ? linux.SI_USER : linux.SI_KERNEL, who, 0, nil, "") || eintr
+		eintr = sig_act(sig, who != 0 ? linux.SI_USER : linux.SI_KERNEL, who, 0, nil, "", ctx) || eintr
 	}
+}
+
+sig_deliver_pending :: proc "contextless" () -> bool {
+	return sig_deliver_in(nil)
 }
 
 @(private="file")
@@ -242,14 +354,19 @@ sig_raise_self :: proc "contextless" (sig: int) {
 
 // The note handler: a note from another process, or a fault.
 @(private="file")
-sig_note :: proc "contextless" (e: ^vx.Exception, text: string) -> rt.Noted {
+sig_note :: proc "contextless" (e: ^vx.Exception, text: string, fp: rawptr) -> rt.Noted {
+	ctx := Sig_Context{e, fp}
 	if e.kind == .Interrupt {
-		// be_thread_kill's mark: this thread's alone. Without it, the process's.
+		// be_thread_kill's mark: this thread's alone. Without it, the process's:
+		// taken here, or by a thread that does not block it (be_forward).
 		directed := str.has_suffix(text, BE_DIRECTED) && len(text) > len(BE_DIRECTED)
 		s, sender, ok := signal.note_signal(directed ? text[:len(text) - len(BE_DIRECTED)] : text)
 		sig := int(s)
 		if !ok || sig < 1 || sig > SIG_MAX {
 			return .Dflt // no signal: the note ends the process
+		}
+		if !directed && sig in be_me().mask && be_forward(sig, text) {
+			return .Cont
 		}
 		sender_of[sig] = sender
 		if directed {
@@ -258,7 +375,7 @@ sig_note :: proc "contextless" (e: ^vx.Exception, text: string) -> rt.Noted {
 			pending_add(sig)
 		}
 		if be_me().sig_depth == 0 {
-			_ = sig_deliver_pending() // in the program's own code
+			_ = sig_deliver_in(&ctx) // in the program's own code
 		} else if sig not_in be_me().mask {
 			// In the back end, maybe just before it waits: the kernel had
 			// this note interrupt nothing (it came in user mode), so the wait
@@ -294,7 +411,7 @@ sig_note :: proc "contextless" (e: ^vx.Exception, text: string) -> rt.Noted {
 	if sig in be_me().mask || actions[sig].handler == linux.SIG_IGN {
 		sig_terminate(sig, e, text)
 	}
-	_ = sig_act(sig, code, 0, e.address, e, text) // then the instruction again, unless the handler jumped away
+	_ = sig_act(sig, code, 0, e.address, e, text, &ctx) // then the instruction again, unless the handler jumped away
 	return .Cont
 }
 
@@ -377,12 +494,12 @@ sig_procmask :: proc "contextless" (how: int, set: rawptr, old: ^linux.Sig_Set) 
 sig_suspend :: proc "contextless" (mask: linux.Sig_Set) -> int {
 	was := be_me().mask
 	be_me().mask = mask - UNBLOCKABLE
-	ran := sig_handlers_ran
+	ran := be_me().handlers_ran
 	for {
 		seq := intrinsics.atomic_load(&sig_seq) // before the check: a signal after it changes sig_seq
 		if (pending_load() + be_me().pending) - be_me().mask != {} {
 			_ = sig_deliver_pending()
-			if sig_handlers_ran != ran {
+			if be_me().handlers_ran != ran {
 				break
 			}
 			continue

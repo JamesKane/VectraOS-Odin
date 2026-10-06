@@ -5,7 +5,7 @@
 // working directory, errno, time, thread-local storage, setjmp, atexit, and
 // its exit status.
 
-#define _XOPEN_SOURCE 700 // POSIX, under -std=c23
+#define _GNU_SOURCE // POSIX under -std=c23, and a ucontext's register names (REG_RIP and kin)
 
 #include <dirent.h>
 #include <errno.h>
@@ -88,7 +88,6 @@ static double seconds(const struct timespec *t) { return (double)t->tv_sec + (do
 
 // ctest run by ctest: argv[1] says what to check, argv[2] is the parent's
 // pid, and the exit status says what it found.
-extern char **environ; // POSIX's, which <unistd.h> declares only for _GNU_SOURCE
 
 static volatile sig_atomic_t signals[65]; // how many of each signal a handler saw
 static volatile pid_t last_sender;
@@ -1356,6 +1355,182 @@ static void *t_forker(void *arg) {
   return (void *)(intptr_t)ok;
 }
 
+// --- Signal stacks and contexts (M6 step 6d2b) ---
+
+static sigjmp_buf t_overflow_jump;
+static char *t_alt;
+static _Atomic bool t_handler_on_alt;
+static _Atomic uintptr_t t_overflow_addr;
+
+static void t_on_overflow(int sig, siginfo_t *info, void *uc) {
+  (void)sig, (void)uc;
+  char here;
+  t_handler_on_alt = &here > t_alt && &here < t_alt + SIGSTKSZ;
+  t_overflow_addr = (uintptr_t)info->si_addr;
+  siglongjmp(t_overflow_jump, 1);
+}
+
+static _Atomic int t_depth_limit = 1 << 30; // far past any stack: the fault comes first
+
+// NOLINTNEXTLINE(misc-no-recursion): running off the stack is the point
+[[gnu::noinline]] static int t_recurse(int n) {
+  volatile char pad[1024];
+  pad[0] = (char)n;
+  return n < t_depth_limit ? t_recurse(n + 1) + pad[0] : pad[0];
+}
+
+// On a small stack, without end: the fault on its guard has only the
+// alternate stack to run on.
+static void *t_overflower(void *arg) {
+  (void)arg;
+  t_alt = malloc(SIGSTKSZ);
+  stack_t ss = {.ss_sp = t_alt, .ss_size = SIGSTKSZ}, old = {}, small = {.ss_sp = t_alt, .ss_size = 64};
+  bool ok = sigaltstack(&small, nullptr) == -1 && errno == ENOMEM; // under MINSIGSTKSZ
+  ok = ok && sigaltstack(&ss, &old) == 0 && (old.ss_flags & SS_DISABLE);
+  if (sigsetjmp(t_overflow_jump, 1) == 0) t_recurse(0);
+  stack_t now = {};
+  ok = ok && sigaltstack(nullptr, &now) == 0 && now.ss_sp == t_alt && !(now.ss_flags & SS_ONSTACK);
+  stack_t off = {.ss_flags = SS_DISABLE};
+  ok = ok && sigaltstack(&off, nullptr) == 0;
+  free(t_alt);
+  return (void *)(intptr_t)ok;
+}
+
+static long t_good = 0x5eed;
+static _Atomic uintptr_t t_ctx_fault, t_ctx_reg;
+static _Atomic bool t_ctx_fp;
+
+// The load's pointer register, read and pointed at t_good: the load is made
+// again, and works.
+static void t_on_bad_load(int sig, siginfo_t *info, void *ucv) {
+  (void)sig;
+  ucontext_t *uc = ucv;
+#ifdef __x86_64__
+  t_ctx_reg = (uintptr_t)uc->uc_mcontext.gregs[REG_RDI];
+  t_ctx_fault = (uintptr_t)uc->uc_mcontext.gregs[REG_CR2];
+  t_ctx_fp = uc->uc_mcontext.fpregs && uc->uc_mcontext.fpregs->mxcsr != 0;
+  uc->uc_mcontext.gregs[REG_RDI] = (greg_t)&t_good;
+#else
+  t_ctx_reg = (uintptr_t)uc->uc_mcontext.regs[9];
+  t_ctx_fault = (uintptr_t)uc->uc_mcontext.fault_address;
+  t_ctx_fp = ((const struct _aarch64_ctx *)uc->uc_mcontext.__reserved)->magic == FPSIMD_MAGIC;
+  uc->uc_mcontext.regs[9] = (unsigned long)&t_good;
+#endif
+  (void)info;
+}
+
+static long t_load(const long *p) {
+  long v;
+#ifdef __x86_64__
+  __asm__ volatile("movq (%%rdi), %0" : "=r"(v) : "D"(p) : "memory");
+#else
+  register const long *x9 __asm__("x9") = p;
+  __asm__ volatile("ldr %0, [x9]" : "=r"(v) : "r"(x9) : "memory");
+#endif
+  return v;
+}
+
+static _Atomic pthread_t t_usr2_on;
+static _Atomic bool t_usr2_ready;
+
+static void t_on_usr2(int sig) {
+  (void)sig;
+  t_usr2_on = pthread_self();
+}
+
+// A long sleep that only the signal, passed on to this thread, cuts short.
+static bool t_woken_early(void) {
+  struct timespec a, b;
+  clock_gettime(CLOCK_MONOTONIC, &a);
+  int r = nanosleep(&(struct timespec){.tv_sec = 5}, nullptr);
+  clock_gettime(CLOCK_MONOTONIC, &b);
+  return r == -1 && errno == EINTR && b.tv_sec - a.tv_sec < 4;
+}
+
+static _Atomic bool t_taker_early;
+
+static void *t_usr2_taker(void *arg) {
+  (void)arg;
+  t_usr2_ready = true;
+  t_taker_early = t_woken_early();
+  return nullptr;
+}
+
+// The mirror: it blocks the signal and stays, the first thread does not.
+static _Atomic bool t_blocker_done;
+
+static void *t_usr2_blocker(void *arg) {
+  (void)arg;
+  sigset_t block;
+  sigemptyset(&block);
+  sigaddset(&block, SIGUSR2);
+  pthread_sigmask(SIG_BLOCK, &block, nullptr);
+  t_usr2_ready = true;
+  while (!t_blocker_done) nanosleep(&(struct timespec){.tv_nsec = 1'000'000}, nullptr);
+  return nullptr;
+}
+
+static void t_usr2_from_child(void) {
+  pid_t pid = fork();
+  if (pid == 0) _exit(kill(getppid(), SIGUSR2) == 0 ? 0 : 1);
+  int status = 0;
+  CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
+static void test_signal_contexts(void) {
+  // The registers a fault came with, changed by the handler.
+  struct sigaction sa = {.sa_sigaction = t_on_bad_load, .sa_flags = SA_SIGINFO}, was;
+  sigaction(SIGSEGV, &sa, &was);
+  const long *bad = (const long *)(uintptr_t)0x10;
+  CHECK(t_load(bad) == 0x5eed);
+  CHECK(t_ctx_reg == 0x10 && t_ctx_fault == 0x10 && t_ctx_fp);
+  sigaction(SIGSEGV, &was, nullptr);
+
+  // A stack overflow caught on the alternate stack.
+  struct sigaction ov = {.sa_sigaction = t_on_overflow, .sa_flags = SA_SIGINFO | SA_ONSTACK};
+  sigaction(SIGSEGV, &ov, &was);
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, 64ul * 1024);
+  pthread_t o;
+  void *ok = nullptr;
+  CHECK(pthread_create(&o, &attr, t_overflower, nullptr) == 0 && pthread_join(o, &ok) == 0 && ok);
+  CHECK(t_handler_on_alt && t_overflow_addr != 0);
+  sigaction(SIGSEGV, &was, nullptr);
+
+  // A signal from another process that this thread blocks: the thread that
+  // does not takes it.
+  signal(SIGUSR2, t_on_usr2);
+  sigset_t block, old;
+  sigemptyset(&block);
+  sigaddset(&block, SIGUSR2);
+  pthread_t g;
+  CHECK(pthread_create(&g, nullptr, t_usr2_taker, nullptr) == 0); // first: it would start with the mask
+  while (!t_usr2_ready) nanosleep(&(struct timespec){.tv_nsec = 1'000'000}, nullptr);
+  pthread_sigmask(SIG_BLOCK, &block, &old);
+  t_usr2_from_child();
+  CHECK(pthread_join(g, nullptr) == 0 && pthread_equal(t_usr2_on, g) && t_taker_early);
+  t_usr2_on = 0;
+  pthread_sigmask(SIG_SETMASK, &old, nullptr); // nothing left pending here
+  CHECK(!t_usr2_on);
+  // And the other way round: whichever thread the kernel gives the note to,
+  // one of the two cases has it passed on.
+  t_usr2_ready = false;
+  CHECK(pthread_create(&g, nullptr, t_usr2_blocker, nullptr) == 0);
+  while (!t_usr2_ready) nanosleep(&(struct timespec){.tv_nsec = 1'000'000}, nullptr);
+  pid_t pid = fork(); // the sender waits a little, for this thread to be asleep
+  if (pid == 0) {
+    nanosleep(&(struct timespec){.tv_nsec = 100'000'000}, nullptr);
+    _exit(kill(getppid(), SIGUSR2) == 0 ? 0 : 1);
+  }
+  bool early = t_woken_early();
+  int status = 0;
+  CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  t_blocker_done = true;
+  CHECK(pthread_join(g, nullptr) == 0 && pthread_equal(t_usr2_on, pthread_self()) && early);
+  signal(SIGUSR2, SIG_DFL);
+}
+
 static void test_threads(void) {
   pthread_t t[4];
   t_mine = 1000;
@@ -1522,6 +1697,7 @@ int main(int argc, char **argv) {
   test_sockets_waiting();
 
   test_threads();
+  test_signal_contexts();
 
   atexit(at_exit);
   fprintf(stderr, "ctest: to stderr\n");

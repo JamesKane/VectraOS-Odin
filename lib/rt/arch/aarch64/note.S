@@ -32,6 +32,8 @@ vx_note_entry:
     mrs x10, fpsr
     add x11, sp, #512
     stp x9, x10, [x11]
+    mov x0, x19
+    mov x1, sp              // the saved state, a vx.Fpregs: the handler's fp
     bl vx_note_dispatch
     ldp q0, q1, [sp, #0]
     ldp q2, q3, [sp, #32]

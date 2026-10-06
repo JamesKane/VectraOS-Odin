@@ -257,6 +257,7 @@ common_checks :: proc(out: ^[dynamic]Check) {
 		{"SIG_BLOCK", linux.SIG_BLOCK},
 		{"SIG_UNBLOCK", linux.SIG_UNBLOCK},
 		{"SIG_SETMASK", linux.SIG_SETMASK},
+		{"SS_ONSTACK", linux.SS_ONSTACK},
 		{"SS_DISABLE", linux.SS_DISABLE},
 		{"CLONE_VM", linux.CLONE_VM},
 		{"CLONE_THREAD", linux.CLONE_THREAD},
@@ -329,6 +330,22 @@ arch_checks :: proc(out: ^[dynamic]Check, a: Arch) {
 		stat_checks(out, linux.Stat_Amd64)
 		check(out, "sizeof(ucontext_t)", size_of(linux.Ucontext_Amd64))
 		check(out, "offsetof(ucontext_t, uc_sigmask)", offset_of(linux.Ucontext_Amd64, sigmask))
+		check(out, "offsetof(ucontext_t, uc_mcontext.fpregs)", offset_of(linux.Ucontext_Amd64, mcontext) + offset_of(linux.Mcontext_Amd64, fpregs))
+		check(out, "MINSIGSTKSZ", 2048)
+		regs := [?]struct {
+			name:  string,
+			value: int,
+		} {
+			{"REG_R8", linux.REG_R8}, {"REG_R9", linux.REG_R9}, {"REG_R10", linux.REG_R10}, {"REG_R11", linux.REG_R11},
+			{"REG_R12", linux.REG_R12}, {"REG_R13", linux.REG_R13}, {"REG_R14", linux.REG_R14}, {"REG_R15", linux.REG_R15},
+			{"REG_RDI", linux.REG_RDI}, {"REG_RSI", linux.REG_RSI}, {"REG_RBP", linux.REG_RBP}, {"REG_RBX", linux.REG_RBX},
+			{"REG_RDX", linux.REG_RDX}, {"REG_RAX", linux.REG_RAX}, {"REG_RCX", linux.REG_RCX}, {"REG_RSP", linux.REG_RSP},
+			{"REG_RIP", linux.REG_RIP}, {"REG_EFL", linux.REG_EFL}, {"REG_ERR", linux.REG_ERR}, {"REG_TRAPNO", linux.REG_TRAPNO},
+			{"REG_CR2", linux.REG_CR2},
+		}
+		for r in regs {
+			check(out, r.name, r.value)
+		}
 		check(out, "O_DIRECTORY", 1 << uint(linux.O_DIRECTORY_AMD64))
 		check(out, "O_NOFOLLOW", 1 << uint(linux.O_NOFOLLOW_AMD64))
 		for f in reflect.enum_fields_zipped(linux.Sys_Amd64) {
@@ -338,6 +355,13 @@ arch_checks :: proc(out: ^[dynamic]Check, a: Arch) {
 		stat_checks(out, linux.Stat_Arm64)
 		check(out, "sizeof(ucontext_t)", size_of(linux.Ucontext_Arm64))
 		check(out, "offsetof(ucontext_t, uc_sigmask)", offset_of(linux.Ucontext_Arm64, sigmask))
+		check(out, "offsetof(ucontext_t, uc_mcontext.__reserved)", offset_of(linux.Ucontext_Arm64, mcontext) + offset_of(linux.Mcontext_Arm64, reserved))
+		check(out, "offsetof(ucontext_t, uc_mcontext.fault_address)", offset_of(linux.Ucontext_Arm64, mcontext) + offset_of(linux.Mcontext_Arm64, fault_address))
+		check(out, "sizeof(struct fpsimd_context)", size_of(linux.Fpsimd_Context))
+		check(out, "offsetof(struct fpsimd_context, fpsr)", offset_of(linux.Fpsimd_Context, fpsr))
+		check(out, "offsetof(struct fpsimd_context, vregs)", offset_of(linux.Fpsimd_Context, vregs))
+		check(out, "FPSIMD_MAGIC", linux.FPSIMD_MAGIC)
+		check(out, "MINSIGSTKSZ", 6144)
 		check(out, "O_DIRECTORY", 1 << uint(linux.O_DIRECTORY_ARM64))
 		check(out, "O_NOFOLLOW", 1 << uint(linux.O_NOFOLLOW_ARM64))
 		for f in reflect.enum_fields_zipped(linux.Sys_Arm64) {

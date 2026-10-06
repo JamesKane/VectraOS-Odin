@@ -95,8 +95,13 @@ pthreads are musl's own, on kernel threads of the process's task: the back end's
 The first thread's id is the process's; another's is its kernel thread id with bit 30 set.
 The back end is one lock, held through each call (recursive, as the back end calls musl), and let go where a call waits: a pipe, a sleep, a futex, `sigsuspend`.
 The mask is each thread's own, and a new thread starts with its creator's.
-`pthread_kill` posts a note to the one thread, whose handler runs there; a signal from another process goes to the thread the kernel gives the note to.
+`pthread_kill` posts a note to the one thread, whose handler runs there.
 `fork` in a thread makes a child of that thread alone.
+A signal from another process that the thread it came to blocks is passed to a thread that does not; with none, it waits, the process's, for the first to unblock it.
+`nanosleep` and `clock_nanosleep` end with `EINTR` once a handler has run, `SA_RESTART` or not, as on Linux.
+
+`sigaltstack` sets the thread's note stack (ADR-0036), where the kernel puts a fault or a note when the thread is not on it already, so a `SIGSEGV` from a stack overflow reaches an `SA_ONSTACK` handler.
+A handler with `SA_SIGINFO` has the interrupted registers in its `ucontext`, with the FP/SIMD state (`fpregs` on x86_64, an `fpsimd_context` on aarch64), and the thread goes on with what the handler leaves there; a signal delivered as a call returns has zeroed registers.
 
 @node=terminals title="Terminals"
 
@@ -161,7 +166,6 @@ intro(1), lua(1), make(1), namespace(6), svc(6), procfs(4), ptyd(4), netd(4), tm
 # BUGS
 
 Threads take turns at the back end: a 9P call, a file read among them, holds its lock until the server answers (M6 step 6d4).
-A signal from another process that its thread blocks waits for that thread, though another may not block it (M6 step 6d2b).
 
 There is no `/bin/sh`, and `exec` runs only ELF programs, so `system`, `popen`, `make`'s recipes, Lua's `os.execute` and `io.popen`, `env`, cron, and `ed`'s and `dc`'s `!` fail.
 
@@ -175,7 +179,9 @@ Not implemented: `link` and `linkat` (`EPERM`), `mknod`, `chroot`, `flock`, `get
 `getrlimit` answers infinity for every limit.
 The CPU-time clocks are the monotonic clock.
 
-Signals have no alternate stack, no registers in a handler's `ucontext` (M6 step 6d2b), and no `sigqueue` or real-time queueing.
+Signals have no `sigqueue` or real-time queueing, and `sigaltstack` no `SS_AUTODISARM`.
+A handler without `SA_ONSTACK` may run on the alternate stack, where the kernel put the note, if the thread has one.
+`execve` in a process with more than one thread fails: the kernel's exec wants the caller alone, and nothing ends the others first.
 A signal does not interrupt a 9P call in progress, such as a file read or the console's; its handler runs when the call is done (with the client's `Tflush`, M6 step 6d), though ptyd ends the reads it holds.
 Job control is partial: no `SIGTTIN` or `SIGTTOU`, no controlling terminal kept for a session, and anyone who can write a terminal's `ctl` can set its foreground group.
 

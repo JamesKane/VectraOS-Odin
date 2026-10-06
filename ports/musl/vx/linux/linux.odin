@@ -464,6 +464,7 @@ SIG_IGN :: uintptr(1)
 SIG_BLOCK :: 0
 SIG_UNBLOCK :: 1
 SIG_SETMASK :: 2
+SS_ONSTACK :: 1
 SS_DISABLE :: 2
 
 // clone's flags, as musl's pthread_create passes them to __clone.
@@ -713,13 +714,44 @@ Sigfault :: struct {
 }
 #assert(offset_of(Siginfo, fields) + offset_of(Sigfault, pkey) == 32) // musl's si_pkey
 
-// ucontext_t: only its signal mask is filled in (with the mask a handler
-// interrupted); the registers wait (upstream's signal.c says so).
+// ucontext_t: the signal mask a handler interrupted, its alternate stack, and
+// the registers a fault or a note interrupted (upstream's M6 step 6d2b).
+// x86_64's mcontext_t: gregs, indexed by REG_*, and fpregs, which points at
+// the FP/SIMD state (FXSAVE's image leads it, as _fpstate).
+Mcontext_Amd64 :: struct {
+	gregs:  [23]i64,
+	fpregs: rawptr,
+	_:      [8]u64, // __reserved1
+}
+#assert(size_of(Mcontext_Amd64) == 256)
+
+REG_R8 :: 0
+REG_R9 :: 1
+REG_R10 :: 2
+REG_R11 :: 3
+REG_R12 :: 4
+REG_R13 :: 5
+REG_R14 :: 6
+REG_R15 :: 7
+REG_RDI :: 8
+REG_RSI :: 9
+REG_RBP :: 10
+REG_RBX :: 11
+REG_RDX :: 12
+REG_RAX :: 13
+REG_RCX :: 14
+REG_RSP :: 15
+REG_RIP :: 16
+REG_EFL :: 17
+REG_ERR :: 19
+REG_TRAPNO :: 20
+REG_CR2 :: 22
+
 Ucontext_Amd64 :: struct {
-	flags:   u64,
-	link:    uintptr,
-	stack:   Stack,
-	mcontext: [256]u8, // gregs, fpregs, __reserved1
+	flags:    u64,
+	link:     uintptr,
+	stack:    Stack,
+	mcontext: Mcontext_Amd64,
 	sigmask: [128]u8,
 	_:       [64]u64, // __fpregs_mem
 }
@@ -730,8 +762,22 @@ Mcontext_Arm64 :: struct #align (16) {
 	fault_address:  u64,
 	regs:           [31]u64,
 	sp, pc, pstate: u64,
-	_:              [4096 + 8]u8, // __reserved, 16-byte aligned
+	_:              u64,
+	reserved:       [4096]u8, // __reserved, 16-byte aligned: an fpsimd_context, then a zero header
 }
+#assert(offset_of(Mcontext_Arm64, reserved) == 288)
+
+// __reserved's first record: the FP/SIMD registers.
+Aarch64_Ctx :: struct {
+	magic, size: u32,
+}
+Fpsimd_Context :: struct #align (16) {
+	head:       Aarch64_Ctx,
+	fpsr, fpcr: u32,
+	vregs:      [32][16]u8,
+}
+#assert(size_of(Fpsimd_Context) == 528)
+FPSIMD_MAGIC :: 0x46508001
 
 Ucontext_Arm64 :: struct {
 	flags:    u64,
@@ -866,10 +912,12 @@ when ODIN_ARCH == .amd64 {
 	Sys :: Sys_Amd64
 	Stat :: Stat_Amd64
 	Ucontext :: Ucontext_Amd64
+	MINSIGSTKSZ :: 2048
 	MACHINE :: "x86_64"
 } else {
 	Sys :: Sys_Arm64
 	Stat :: Stat_Arm64
 	Ucontext :: Ucontext_Arm64
+	MINSIGSTKSZ :: 6144
 	MACHINE :: "aarch64"
 }

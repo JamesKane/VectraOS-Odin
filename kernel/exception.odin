@@ -40,6 +40,13 @@ Note :: [dynamic; vx.ERRMAX]u8
 exception_divert :: proc "contextless" (f: ^Trap_Frame, e: ^vx.Exception) -> bool {
 	handler := intrinsics.atomic_load_explicit(&current_task().exc_handler, .Relaxed)
 	sp := regs_sp(&e.regs)
+	// Its note stack, if it has one and is not on it already (a handler that
+	// faults nests below itself there): a fault on an overflowed stack still
+	// finds room (ADR-0036).
+	th := this_cpu().current
+	if lo, hi := th.note_stack, th.note_stack + Uva(th.note_stack_size); th.note_stack_size != 0 && !(sp > lo && sp <= hi) {
+		sp = hi
+	}
 	if handler == 0 || sp < RED_ZONE + size_of(vx.Exception) + 64 || sp > USER_TOP {
 		return false
 	}
@@ -392,6 +399,31 @@ thread_tls_self :: proc "contextless" (h: vx.Handle, op: vx.Thread_State_Op, buf
 	return .Ok
 }
 
+// .Get_Note_Stack and .Set_Note_Stack: the caller's own (ADR-0036), with a
+// handle to its own task (any rights).
+@(private="file", require_results)
+thread_note_stack :: proc "contextless" (h: vx.Handle, op: vx.Thread_State_Op, buf: Uva) -> vx.Status {
+	t := handle_get_as(current_task(), h, Task, {}) or_return
+	own := t == current_task()
+	object_release(&t.obj)
+	if !own {
+		return .Err_Invalid
+	}
+	me := this_cpu().current
+	ns := vx.Note_Stack{base = u64(me.note_stack), size = me.note_stack_size}
+	if op == .Get_Note_Stack {
+		return copy_out(buf, &ns)
+	}
+	copy_in(&ns, buf) or_return
+	if ns.size == 0 {
+		ns.base = 0 // none: handlers run on the thread's own stack
+	} else if end, o := intrinsics.overflow_add(ns.base, ns.size); ns.size < vx.NOTE_STACK_MIN || o || end > u64(USER_TOP) {
+		return .Err_Range
+	}
+	me.note_stack, me.note_stack_size = Uva(ns.base), ns.size // only this thread changes them
+	return .Ok
+}
+
 // The task's watchpoints: .Get_Watch and .Set_Watch. A set is checked whole:
 // each slot off, or an aligned user address of 1, 2, 4 or 8 bytes, within
 // the hardware's count.
@@ -528,6 +560,8 @@ state_size :: proc "contextless" (op: vx.Thread_State_Op) -> u64 {
 		return u64(arch_xstate_size())
 	case .Get_Cpu:
 		return size_of(vx.Cpu_Info)
+	case .Get_Note_Stack, .Set_Note_Stack:
+		return size_of(vx.Note_Stack)
 	}
 	return 0
 }
@@ -554,6 +588,8 @@ sys_thread_state :: proc "contextless" (h: vx.Handle, id, op_arg: u64, buf: Uva,
 		return thread_next(h, id, buf)
 	case .Get_Watch, .Set_Watch:
 		return id != 0 ? .Err_Invalid : thread_watch(h, op, buf)
+	case .Get_Note_Stack, .Set_Note_Stack:
+		return id != 0 ? .Err_Invalid : thread_note_stack(h, op, buf)
 	case .Get_Tls, .Set_Tls:
 		if id == 0 {
 			return thread_tls_self(h, op, buf)

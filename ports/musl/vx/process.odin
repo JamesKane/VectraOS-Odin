@@ -1,6 +1,5 @@
 package backend
 
-import "base:intrinsics"
 import vx "abi:vx"
 import "linux"
 import "vx:drbg"
@@ -721,7 +720,7 @@ fork_child :: proc "contextless" () -> int {
 	id := task_id
 	drbg.mix(&entropy, memory.ptr_to_bytes(&id), false)
 	fd_after_fork()
-	intrinsics.atomic_store(&be_live, 1) // the thread that forked, alone
+	be_after_fork() // the thread that forked, alone, numbered anew
 	clear(&wait_kept) // the parent's children's records are the parent's
 	sig_forget_pending(fork_pending) // the parent's, copied with its memory; not those sent to the child since
 	if proc_mounted {

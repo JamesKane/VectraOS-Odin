@@ -1544,7 +1544,7 @@ test_in_task :: proc "contextless" () {
 
 noted: [dynamic; vx.ERRMAX]u8 // the note note_handler took
 
-note_handler :: proc "contextless" (e: ^vx.Exception, note: string) -> rt.Noted {
+note_handler :: proc "contextless" (e: ^vx.Exception, note: string, fp: rawptr) -> rt.Noted {
 	clear(&noted)
 	_ = append(&noted, note)
 	rt.fp_probe_put(0, FP_CTL_DEFAULT) // the entry gives back the thread's own
@@ -1795,6 +1795,96 @@ test_pager :: proc "contextless" () {
 		}
 	}
 	rt.close_all(late.vmo, quick, pager, src, port)
+}
+
+// --- Note stacks (ADR-0036) ---
+
+foreign _ {
+	vx_push_at :: proc "c" (sp: u64) -> ! --- // arch/*/overflow.S: the stack pointer moved there, then a push
+}
+
+Note_Stack_Mem :: struct #align (16) {
+	bytes: [16384]u8,
+}
+
+note_stack_mem: Note_Stack_Mem
+note_handler_at, note_fault_at, note_rest_sp: u64
+note_finished, note_get: bool
+note_small: vx.Status
+
+note_finish :: proc "c" () -> ! {
+	intrinsics.atomic_store(&note_finished, true)
+	rt.thread_exit()
+}
+
+// Where it ran, and the thread sent on to note_finish on a stack that works.
+note_stack_handler :: proc "c" (e: ^vx.Exception) -> ! {
+	here: u8
+	intrinsics.volatile_store(&here, 0)
+	intrinsics.atomic_store(&note_handler_at, u64(uintptr(&here)))
+	intrinsics.atomic_store(&note_fault_at, e.address)
+	when ODIN_ARCH == .amd64 {
+		e.regs.rip = u64(uintptr(rawptr(note_finish)))
+		e.regs.rsp = intrinsics.atomic_load(&note_rest_sp) - 8 // as a call leaves it
+	} else {
+		e.regs.pc = u64(uintptr(rawptr(note_finish)))
+		e.regs.sp = intrinsics.atomic_load(&note_rest_sp)
+	}
+	rt.rights_set(e.rights)
+	_ = rt.exception_resume(rt.self, 0, .Continue, &e.regs)
+	for {}
+}
+
+// Its stack pointer moved to memory nothing maps, then a push: the fault has
+// nowhere on that stack to go, and goes to the note stack.
+note_overflow :: proc "c" (unused: vx.Handle, bad: u64) -> ! {
+	base := u64(uintptr(&note_stack_mem))
+	small := vx.Note_Stack {
+		base = base,
+		size = vx.NOTE_STACK_MIN - 16,
+	}
+	ns := vx.Note_Stack {
+		base = base,
+		size = size_of(note_stack_mem),
+	}
+	intrinsics.atomic_store(&note_small, rt.thread_state(rt.self, 0, .Set_Note_Stack, &small))
+	_ = rt.thread_state(rt.self, 0, .Set_Note_Stack, &ns)
+	got: vx.Note_Stack
+	intrinsics.atomic_store(&note_get, rt.thread_state(rt.self, 0, .Get_Note_Stack, &got) == .Ok && got == ns)
+	vx_push_at(bad)
+}
+
+test_note_stack :: proc "contextless" () {
+	probe, st := rt.vmo_create(4096)
+	bad: u64
+	mst: vx.Status
+	if st == .Ok {
+		bad, mst = rt.as_map(rt.self, probe, 0, 4096, {.Write})
+	}
+	check(st == .Ok && mst == .Ok)
+	check(rt.as_unmap(rt.self, bad, 4096) == .Ok) // nothing there now
+	_ = rt.handle_close(probe)
+	intrinsics.atomic_store(&note_rest_sp, new_stack())
+	check(rt.exception_bind(rt.self, vx.HANDLE_NONE, u64(uintptr(rawptr(note_stack_handler))), {.In_Task}) == .Ok)
+	th, tst := rt.thread_create(rt.self)
+	check(tst == .Ok && rt.thread_start(th, u64(uintptr(rawptr(note_overflow))), new_stack(), 0, bad + 4096) == .Ok)
+	for i := 0; i < 1000 && !intrinsics.atomic_load(&note_finished); i += 1 {
+		_ = rt.futex_wait(&never, 0, after_ms(1))
+	}
+	check(intrinsics.atomic_load(&note_finished))
+	at := intrinsics.atomic_load(&note_handler_at)
+	base := u64(uintptr(&note_stack_mem))
+	check(at >= base && at < base + size_of(note_stack_mem)) // on the note stack
+	check(intrinsics.atomic_load(&note_fault_at) &~ 4095 == bad)
+	check(intrinsics.atomic_load(&note_get) && intrinsics.atomic_load(&note_small) == .Err_Range)
+	big := vx.Note_Stack {
+		base = max(u64) - 4096,
+		size = 8192,
+	} // past user memory
+	check(rt.thread_state(rt.self, 0, .Set_Note_Stack, &big) == .Err_Range)
+	check(rt.thread_state(rt.self, 1, .Get_Note_Stack, &big) == .Err_Invalid) // the caller's only
+	_ = rt.handle_close(th)
+	check(rt.exception_bind(rt.self, vx.HANDLE_NONE, 0, {.In_Task}) == .Ok)
 }
 
 test_vmo_clone :: proc "contextless" () {
@@ -2614,6 +2704,7 @@ vx_main :: proc() -> int {
 	test_copy_race()
 	test_exception_port()
 	test_in_task()
+	test_note_stack()
 	test_vmo_clone()
 	test_debugger()
 	test_tls()

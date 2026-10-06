@@ -156,7 +156,7 @@ wait_text :: proc "contextless" (buf: []u8) -> []u8 {
 
 notes_seen: u32
 
-on_note :: proc "contextless" (e: ^vx.Exception, note: string) -> rt.Noted {
+on_note :: proc "contextless" (e: ^vx.Exception, note: string, fp: rawptr) -> rt.Noted {
 	if !str.contains(note, "group") && !str.contains(note, "poke") {
 		return .Dflt
 	}

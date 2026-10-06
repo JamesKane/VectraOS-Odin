@@ -28,6 +28,7 @@ vx_note_entry:
     movl $-1, %edx
     xsave64 (%rsp)
     movq %rbx, %rdi
+    movq %rsp, %rsi        // the saved state, the handler's fp
     call vx_note_dispatch
     movl $-1, %eax
     movl $-1, %edx

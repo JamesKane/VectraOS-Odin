@@ -15,3 +15,4 @@
 | [0011](0011-monocypher.md) | Monocypher 4.0.3, vendored unchanged, behind a thin Odin layer | accepted |
 | [0012](0012-acpica.md) | ACPICA 20260930, its core vendored unchanged, with an OS layer in Odin, for `bus-acpi` | accepted |
 | [0013](0013-extended-state-and-protection-keys.md) | Extended register state and protection keys, as upstream's ADR-0035 | accepted |
+| [0014](0014-note-stacks.md) | Note stacks, as upstream's ADR-0036 | proposed |

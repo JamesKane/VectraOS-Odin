@@ -142,6 +142,10 @@ Thread :: struct {
 	// next runs (user_switch); a new thread's first (ADR-0035).
 	rights:            u64,
 	user_held:         bool, // stopped at an exception: tls is its own, saved, for a debugger (exception_stop)
+	// Where its in-task handler runs, if set (.Set_Note_Stack, ADR-0036): only
+	// the thread itself changes them.
+	note_stack:        Uva,
+	note_stack_size:   u64,
 	// thread_interrupt's notes not yet delivered, oldest first: each is its
 	// own exception (Plan 9 queued notes the same way).
 	interrupt_pending: bool, // notes waiting, read without the lock

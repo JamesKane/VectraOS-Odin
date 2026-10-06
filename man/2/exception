@@ -39,6 +39,7 @@ An exception is described by a `vx_exception`: its <kind>, a <code> and an <addr
 : `VX_EXCEPTION_IN_TASK`
   <key> is the address of a handler in the task, and <port> is ignored; 0 unbinds.
   The kernel puts the `vx_exception` on the faulting thread's own stack, 16-aligned, below the 128 bytes under its stack pointer, and starts the thread at `handler(exception)`.
+  A thread with a note stack (thread(2)) whose stack pointer is not on it gets it at the top of the note stack instead (ADR-0036).
   A handler never returns: it resumes the thread with `vx_exception_resume` and thread 0.
   If the stack cannot take the exception, the fault goes on to the exception port.
 : `VX_EXCEPTION_FIRST_CHANCE`

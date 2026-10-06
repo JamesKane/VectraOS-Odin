@@ -36,11 +36,12 @@ A native program asks for its notes with vx-rt's `vx_notify` (`lib/vx-rt/note.c`
 It binds the task's in-task exception handler (exception(2)), and from then on each note is handed to the program's function with the `vx_exception` it came in:
 
 ```c
-typedef vx_noted vx_note_handler(vx_exception *e, vx_str note);
+typedef vx_noted vx_note_handler(vx_exception *e, vx_str note, void *fp);
 ```
 
 The function answers `VX_NCONT`, to go on where the thread was diverted, with the registers in the exception, perhaps changed; or `VX_NDFLT`, to end the program with the note as its exit string.
-It runs on the thread's own stack, below where the thread was; its floating-point registers are saved around it.
+It runs on the thread's own stack, below where the thread was, or on the thread's note stack if it has one (thread(2), ADR-0036).
+Its floating-point registers are saved around it, and <fp> is where: x86_64's XSAVE image, aarch64's `vx_fpregs`; what the function changes there the thread goes on with.
 `vx_notify(nullptr)` goes back to ending at the first note.
 
 A program that has not called `vx_notify` has no handler, and the kernel ends it at its first note, with the note as its exit string, as a Plan 9 process that has not called `notify` is killed.
@@ -184,7 +185,7 @@ The console driver drops `^C` (drv-uart-16550(3)), so at the console it interrup
 The design queues notes per task; the kernel queues them per thread, so a note to any thread goes to the one chosen when it is posted.
 A full exception port, as a debugger that does not read its events leaves, kills the task instead of stopping it (exception(2)).
 
-Signals lack an alternate signal stack, the registers in a handler's `ucontext`, `sigqueue` and real-time queueing; per-thread masks and `sigaltstack` come with threads in M6 step 6d.
+Signals lack `sigqueue` and real-time queueing.
 Nothing posts `alarm`: the C library has no `alarm`, `setitimer` or timers (time(7)).
 
 Anyone who can open `/proc/<pid>` can post it a note, or a note to its group, until capability tokens (M10).

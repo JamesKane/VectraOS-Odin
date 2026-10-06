@@ -21,16 +21,18 @@ import vx "abi:vx"
 // the trap's words.
 //
 // The handler runs on the thread's own stack, below where it was diverted
-// from. FP/SIMD registers, which the kernel does not put in an Exception,
-// are saved by vx_note_entry (arch/*/note.S) before any Odin runs, and
-// loaded again after.
+// from, or on its note stack (ADR-0036). FP/SIMD registers, which the kernel
+// does not put in an Exception, are saved by vx_note_entry (arch/*/note.S)
+// before any Odin runs, and loaded again after; the handler is given them as
+// fp, in the architecture's image (x86_64's XSAVE standard format, aarch64's
+// vx.Fpregs), and what it changes there is what the thread goes on with.
 
 Noted :: enum u32 {
 	Cont, // go on where the thread was
 	Dflt, // end the program with the note
 }
 
-Note_Handler :: #type proc "contextless" (e: ^vx.Exception, note: string) -> Noted
+Note_Handler :: #type proc "contextless" (e: ^vx.Exception, note: string, fp: rawptr) -> Noted
 
 foreign _ {
 	vx_note_entry :: proc "c" () --- // note.S, the in-task handler: an address only
@@ -78,7 +80,7 @@ note_crash :: proc "contextless" (e: ^vx.Exception) -> ! {
 // What vx_note_entry calls, with the Exception the kernel put on the stack.
 // Returns to go on.
 @(export, link_name="vx_note_dispatch")
-note_dispatch :: proc "c" (e: ^vx.Exception) {
+note_dispatch :: proc "c" (e: ^vx.Exception, fp: rawptr) {
 	text: [vx.ERRMAX]u8
 	note: string
 	if e.kind == .Interrupt {
@@ -86,7 +88,7 @@ note_dispatch :: proc "c" (e: ^vx.Exception) {
 	} else {
 		note = vx.trap_note(e.kind, e.code, e.address, regs_pc(&e.regs)^, &text)
 	}
-	if h := note_fn; h != nil && h(e, note) == .Cont {
+	if h := note_fn; h != nil && h(e, note, fp) == .Cont {
 		return
 	}
 	if e.kind != .Interrupt {

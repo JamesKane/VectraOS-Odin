@@ -48,6 +48,26 @@ __vx_fork_resume:
     movl $1, %eax
     jmpq *0(%rdi)
 
+// be_on_stack(top, fn, a0, a1, a2): fn(a0, a1, a2) on the stack whose top is
+// top (16-aligned here), and back on this one after: a signal handler on its
+// alternate stack (threads.odin, signal.odin).
+    .globl be_on_stack
+    .type be_on_stack, @function
+be_on_stack:
+    endbr64
+    pushq %rbp
+    movq %rsp, %rbp
+    movq %rsi, %rax
+    andq $-16, %rdi
+    movq %rdi, %rsp
+    movq %rdx, %rdi
+    movq %rcx, %rsi
+    movq %r8, %rdx
+    call *%rax
+    movq %rbp, %rsp
+    popq %rbp
+    ret
+
 // be_unmap_finish(self, base, size, ctid, unmap, wake, exit) -> !: a
 // detached thread's end (threads.odin's __unmapself), in registers alone, as
 // its stack goes with the first call: as_unmap(self, base, size) (system

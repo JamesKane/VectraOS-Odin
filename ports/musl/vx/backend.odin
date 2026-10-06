@@ -285,13 +285,8 @@ dispatch :: proc "contextless" (n, a1, a2, a3, a4, a5, a6: int) -> int {
 		return 0
 	case .rt_sigsuspend:
 		return sig_suspend(sigset_word(ptr(a1)))
-	case .sigaltstack: // accepted, and not used: handlers run on the thread's stack
-		if a2 != 0 {
-			(^linux.Stack)(ptr(a2))^ = {
-				flags = linux.SS_DISABLE,
-			}
-		}
-		return 0
+	case .sigaltstack:
+		return be_altstack((^linux.Stack)(ptr(a1)), (^linux.Stack)(ptr(a2)))
 	case .prlimit64:
 		return proc_prlimit((^linux.Rlimit)(ptr(a4)))
 
@@ -356,14 +351,15 @@ dispatch :: proc "contextless" (n, a1, a2, a3, a4, a5, a6: int) -> int {
 	return unimplemented(n)
 }
 
-// Whether a call waits for descriptors (poll, select: a handler that runs
-// ends them with EINTR), or only for a signal (sigsuspend, pause).
+// Whether a call waits for descriptors or a time (poll, select, the sleeps: a
+// handler that runs on the thread ends them with EINTR), or only for a
+// signal (sigsuspend, pause).
 @(private="file")
 call_kind :: proc "contextless" (n, a1, a2: int) -> (waits, pauses: bool) {
 	#partial switch linux.Sys(n) {
 	case .ppoll:
 		return true, a1 == 0 && a2 == 0
-	case .pselect6:
+	case .pselect6, .nanosleep, .clock_nanosleep:
 		return true, false
 	case .rt_sigsuspend:
 		return false, true
@@ -382,11 +378,12 @@ call_kind :: proc "contextless" (n, a1, a2: int) -> (waits, pauses: bool) {
 // Every call musl makes. A signal that arrives during one is delivered as it
 // returns (signal.odin). A call that a signal interrupted is made again
 // unless a handler that wants EINTR ran: SA_RESTART, an ignored signal, and
-// a blocked one (the kernel ends a wait for any note) do not end it. poll
-// and select end with EINTR once any handler has run, as Linux's do;
-// sigsuspend and pause always do. Each time, a sleep's or poll's deadline is
-// the first's. The call holds the back end's lock (threads.odin) throughout,
-// but where it waits; SYS_exit ends the thread holding nothing.
+// a blocked one (the kernel ends a wait for any note) do not end it. poll,
+// select and the sleeps end with EINTR once any handler has run on the
+// thread, as Linux's do (signal(7)); sigsuspend and pause always do. Each
+// time, a sleep's or poll's deadline is the first's. The call holds the back
+// end's lock (threads.odin) throughout, but where it waits; SYS_exit ends
+// the thread holding nothing.
 @(export, link_name="__vx_syscall")
 vx_syscall :: proc "c" (n, a1, a2, a3, a4, a5, a6: int) -> int {
 	if linux.Sys(n) == .exit {
@@ -397,13 +394,13 @@ vx_syscall :: proc "c" (n, a1, a2, a3, a4, a5, a6: int) -> int {
 	waits, pauses := call_kind(n, a1, a2)
 	// The depth stays up until the call is done, made again or not: a signal
 	// that comes between is pending, not run before the choice is made.
-	ran, cut := sig_handlers_ran, sig_eintr_ran
+	ran, cut := be_me().handlers_ran, be_me().eintr_ran
 	outer := be_me().sig_depth == 0
 	be_me().sig_depth += 1
 	r := dispatch(n, a1, a2, a3, a4, a5, a6)
 	for outer {
 		sig_run_pending()
-		eintr := sig_eintr_ran != cut || (waits && sig_handlers_ran != ran)
+		eintr := be_me().eintr_ran != cut || (waits && be_me().handlers_ran != ran)
 		if r != fail(.EINTR) || eintr || pauses {
 			break
 		}

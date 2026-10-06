@@ -1062,7 +1062,7 @@ wait_builtin :: proc "contextless" (argv: ^rc.Word, argc: int) -> bool {
 // Notes, to rc's functions for them (rc's notifyf): what rc has a name for
 // (rc.note_trap), sigint and the rest; any other, as the system does by
 // default.
-on_note :: proc "contextless" (e: ^vx.Exception, note: string) -> rt.Noted {
+on_note :: proc "contextless" (e: ^vx.Exception, note: string, fp: rawptr) -> rt.Noted {
 	sig, ok := rc.note_trap(note)
 	if !ok {
 		return .Dflt
