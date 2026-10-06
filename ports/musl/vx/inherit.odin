@@ -268,11 +268,12 @@ fd_after_fork :: proc "contextless" () {
 	namespace_after_fork()
 	for &o in ofds {
 		o.closed_bound, o.read_bound = false, false
-		if o.ra != nil {
-			ra_free(&o) // its connection's ring was not copied
+		if o.ra != nil { // their connections' rings were not copied
+			ra_forget(o.ra)
+			o.ra = nil
 		}
 		if o.wb != nil {
-			ra_drop(o.wb)
+			ra_forget(o.wb)
 		}
 		o.wb = nil
 		o.sock.connecting = false // the parent's to finish
@@ -292,4 +293,5 @@ fd_after_fork :: proc "contextless" () {
 		o.dirs_len, o.dirs_at, o.dir_next = 0, 0, 0
 		n^ = {} // its fid is o's now
 	}
+	ra_pools_forget()
 }

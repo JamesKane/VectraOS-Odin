@@ -39,6 +39,8 @@ DIR_BUFFER :: 8192 // 9P directory entries read at once
 PIPE_BUFFER :: 8192 // a reader's message, in a page of its own
 // One Rread's data, or one Twrite's, on a read-ahead's connection.
 RA_MAX :: rt.MSIZE - p9.IOHDRSZ
+// A read-ahead's read: its reply's room, reserved while it waits.
+RA_READ :: 4096
 // The most one read or write asks a server for.
 IO_MAX :: 1 << 20
 
@@ -50,11 +52,12 @@ Ofd_Kind :: enum u8 {
 	File,
 }
 
-// A call kept outstanding on a connection of its own (poll.odin): a read,
-// for a terminal, the console or a socket; for a socket, also an open of its
-// listen file (accept) or a write (connect's ctl message, or data written
-// behind). A server holds a whole connection while it holds a call, so each
-// gets its own; once a description has one, its reads go through it.
+// A call kept outstanding (poll.odin), so poll can hear when it is answered
+// (upstream 01 §9): a read, for a terminal, the console or a socket; for a
+// socket, also an open of its listen file (accept) or a write (connect's ctl
+// message, or data written behind). It goes on a connection the read-aheads
+// share (upstream's M6 step 6d4d1, poll.odin's pool); once a description has
+// one, its reads go through it.
 Ra_Op :: enum u8 {
 	Read,
 	Open,
@@ -62,7 +65,11 @@ Ra_Op :: enum u8 {
 }
 
 Readahead :: struct {
-	k:       rt.Conn, // its connection; never moved: it lives in pages of its own
+	k:       ^rt.Conn, // its connection: the pool's, shared
+	pool:    u32, // which, plus 1
+	big:     bool, // it may carry a whole message (a datagram's read, a write behind): one to a connection
+	count:   u32, // its reads' most
+	key:     u64, // its owner's on fd_port: a reply that comes posts it
 	fid:     p9.Fid,
 	root:    p9.Fid, // a socket's: the attach on this connection (netd's /net)
 	op:      Ra_Op,

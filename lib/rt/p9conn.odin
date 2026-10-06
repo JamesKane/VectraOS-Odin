@@ -181,6 +181,12 @@ Slot :: struct {
 	reserve:   u64, // its share of the server's arena
 	reply_len: int, // the reply's length, once Done,
 	status:    vx.Status, // or why there is none
+	// p9_send's call (upstream's M6 step 6d4d1): its reply waits for
+	// p9_receive, and its caller's port gets notify_key when it comes.
+	async:      bool,
+	sent:       p9.Type, // its type, for its reply's
+	notify:     vx.Handle,
+	notify_key: u64,
 }
 #assert(offset_of(Slot, x) == 0)
 
@@ -203,7 +209,6 @@ Conn :: struct {
 	end:             vx.Handle,
 	port:            vx.Handle,
 	dead:            bool,
-	sent:            p9.Type, // the type of the call p9_send sent, for its reply's
 	timeout:         vx.Duration, // a call not answered in that long is flushed (0: none)
 	// When a wait is interrupted (a note): whether the caller wants the call
 	// flushed, and .Err_Interrupted. Without it the call goes on (upstream
@@ -218,7 +223,6 @@ Conn :: struct {
 	replies:         u32, // a futex: changes with each reply taken, and as a leader stops
 	arena:           Chunks, // the client's
 	slots:           [DEPTH]Slot,
-	async:           ^Slot, // p9_send's call, until p9_receive takes its reply
 }
 
 // The most of the server's arena a reply to this request can take.
@@ -323,6 +327,7 @@ slot_take :: proc "contextless" (k: ^Conn, version, flush: bool) -> ^Slot {
 					resp = s.buf[:],
 					tag  = tag,
 				}
+				s.async, s.notify = false, vx.HANDLE_NONE
 			}
 			mutex_unlock(&k.lock)
 			return got ? s : nil
@@ -381,8 +386,14 @@ deliver :: proc "contextless" (k: ^Conn, c: ^vx.Cqe) -> bool {
 	s.reply_len, s.status = int(c.result), .Ok
 	state_set(s, .Done)
 	intrinsics.atomic_add(&k.replies, 1)
+	notify := s.async ? s.notify : vx.HANDLE_NONE
+	key := s.notify_key
 	mutex_unlock(&k.lock)
 	_, _ = futex_wake(&k.replies, max(u32))
+	if notify != vx.HANDLE_NONE { // p9_send's caller: its reply is here
+		pk := vx.Packet{key = key}
+		_ = port_post(notify, &pk)
+	}
 	return true
 }
 
@@ -487,6 +498,12 @@ wait :: proc "contextless" (k: ^Conn, s: ^Slot, any: u32, deadline: vx.Instant, 
 				kill(k)
 			}
 			bump(&k.replies) // the next to wait leads: every waiter looks again
+			for &a in k.slots { // and p9_send's callers, to arm their own ports
+				if a.async && a.notify != vx.HANDLE_NONE && state_of(&a) == .Sent {
+					pk := vx.Packet{key = a.notify_key}
+					_ = port_post(a.notify, &pk)
+				}
+			}
 			mutex_unlock(&k.lock)
 			if st != .Ok {
 				return st
@@ -712,60 +729,95 @@ p9_disconnect :: proc "contextless" (k: ^Conn) {
 	}
 }
 
-// --- One call at a time, its reply taken later ---
+// --- Calls whose replies are taken later ---
 //
 // For a reader that waits on many things at once (poll's read-ahead, in the
 // musl back end): send a request, then look for its reply, arming a port of
-// the caller's to hear when one may have come. One such call at a time on a
-// connection, which its owner alone uses meanwhile.
+// the caller's to hear when one may have come. A connection carries several
+// such calls beside its ordinary ones (upstream's M6 step 6d4d1). Whoever
+// leads at the time hands a reply to its slot and posts the caller's packet;
+// with no leader, the caller's look reads the queue itself; a leader that
+// stops posts every waiting caller's packet, so each looks again and arms its
+// port on the doorbell.
 
-// Sends t, giving it a tag.
+// Sends t, giving it a tag; its reply is taken by p9_receive with that tag.
+// port gets `key` when the reply may have come (HANDLE_NONE: no packet).
 @(require_results)
-p9_send :: proc "contextless" (k: ^Conn, t: ^p9.Msg) -> vx.Status {
-	if k.async != nil {
-		return .Err_Bad_State
-	}
+p9_send :: proc "contextless" (k: ^Conn, t: ^p9.Msg, port: vx.Handle, key: u64) -> vx.Status {
 	s := slot_take(k, false, false)
 	if s == nil {
 		return .Err_Peer_Closed
 	}
 	t.tag = s.x.tag
 	n := p9.encode(t, s.buf[:])
+	s.async, s.notify, s.notify_key, s.sent = true, port, key, t.type
 	st := n != 0 ? put(k, s, n, vx.INFINITE) : .Err_Too_Small
 	if st != .Ok {
+		s.async = false
 		slot_give(k, s)
-		return st
 	}
-	k.sent = t.type
-	k.async = s
-	return .Ok
+	return st
 }
 
-// The reply to the call p9_send sent with tag: .Ok, with r decoded (its data
-// in the slot's buffer, until the connection's next call); .Err_Should_Wait
-// if it has not come; the error an Rerror names; or .Err_Peer_Closed.
-@(require_results)
-p9_receive :: proc "contextless" (k: ^Conn, tag: u16, r: ^p9.Msg) -> vx.Status {
-	s := k.async
-	if s == nil || s.x.tag != tag {
-		return .Err_Peer_Closed
+// The slot of the call sent with tag, if it is one p9_send sent.
+@(private="file")
+async_slot :: proc "contextless" (k: ^Conn, tag: u16) -> ^Slot {
+	for &s in k.slots {
+		state := state_of(&s)
+		if s.async && s.x.tag == tag && (state == .Sent || state == .Done) {
+			return &s
+		}
 	}
-	for { // what has come, handed out: no one else leads on this connection
+	return nil
+}
+
+// Reads what has come, if no one leads: the caller's look.
+@(private="file")
+take_completions :: proc "contextless" (k: ^Conn) {
+	mutex_lock(&k.lock)
+	lead := !k.leading && !k.dead
+	if lead {
+		k.leading = true
+	}
+	mutex_unlock(&k.lock)
+	if !lead {
+		return
+	}
+	broken := false
+	for !broken {
 		c: vx.Cqe
 		st := ring.consume(&k.ring, memory.ptr_to_bytes(&c))
 		if st == .Err_Should_Wait {
 			break
 		}
-		if st != .Ok || !deliver(k, &c) {
-			kill_locked(k)
-			break
-		}
+		broken = st != .Ok || !deliver(k, &c)
+	}
+	mutex_lock(&k.lock)
+	k.leading = false
+	if broken {
+		kill(k)
+	}
+	bump(&k.replies) // a thread waiting to lead may now
+	mutex_unlock(&k.lock)
+}
+
+// The reply to the call p9_send sent with tag: .Ok, with r decoded (its data
+// in the slot's buffer, until the slot's next call); .Err_Should_Wait if it
+// has not come; the error an Rerror (or Rlerror) names; or .Err_Peer_Closed.
+@(require_results)
+p9_receive :: proc "contextless" (k: ^Conn, tag: u16, r: ^p9.Msg) -> vx.Status {
+	s := async_slot(k, tag)
+	if s == nil {
+		return .Err_Peer_Closed
+	}
+	if state_of(s) != .Done {
+		take_completions(k)
 	}
 	if state_of(s) != .Done {
 		return .Err_Should_Wait
 	}
-	k.async = nil
-	n, rst := s.reply_len, s.status
+	n, rst, sent := s.reply_len, s.status, s.sent
+	s.async = false
 	slot_give(k, s) // its buffer keeps the reply until the slot's next call
 	rst or_return
 	// Anything but its reply (or its error) means the server is confused,
@@ -774,11 +826,29 @@ p9_receive :: proc "contextless" (k: ^Conn, tag: u16, r: ^p9.Msg) -> vx.Status {
 	if ok && r.type == .Rerror {
 		return p9.error_status(r.ename)
 	}
-	if !ok || u8(r.type) != u8(k.sent) + 1 {
+	if ok && r.type == .Rlerror {
+		return p9.errno_status(r.ecode)
+	}
+	if !ok || u8(r.type) != u8(sent) + 1 {
 		kill_locked(k)
 		return .Err_Peer_Closed
 	}
 	return .Ok
+}
+
+// Lets go of the call p9_send sent with tag, answered or not: Tflush if it
+// has not been, and its slot back once the server has let it go.
+p9_cancel :: proc "contextless" (k: ^Conn, tag: u16) {
+	s := async_slot(k, tag)
+	if s == nil {
+		return
+	}
+	s.notify = vx.HANDLE_NONE // no packet for a caller that has gone
+	if state_of(s) != .Done {
+		_, _ = flush(k, s, .Err_Interrupted)
+	}
+	s.async = false
+	slot_give(k, s)
 }
 
 // Arms port to get `key` once a reply may have come. False when one may

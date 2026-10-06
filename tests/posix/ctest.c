@@ -612,6 +612,48 @@ static short poll_one(int fd, short events, int ms) {
   return poll(&p, 1, ms) == 1 ? p.revents : 0;
 }
 
+// Ten connections at once, each with a read kept outstanding (poll's), more
+// than a pooled connection to netd carries (6d4d1): each gets its own bytes.
+static void test_sockets_many(void) {
+  constexpr int N = 10;
+  int l = socket(AF_INET, SOCK_STREAM, 0);
+  struct sockaddr_in any = loopback(0);
+  CHECK(l >= 0 && bind(l, (struct sockaddr *)&any, sizeof any) == 0 && listen(l, N) == 0);
+  if (l < 0) return;
+  struct sockaddr_in to = loopback(port_of(l));
+  int c[N], a[N];
+  bool made = true;
+  for (int i = 0; i < N && made; i++) {
+    c[i] = socket(AF_INET, SOCK_STREAM, 0);
+    made = c[i] >= 0 && connect(c[i], (struct sockaddr *)&to, sizeof to) == 0;
+    a[i] = made ? accept(l, nullptr, nullptr) : -1;
+    made = made && a[i] >= 0;
+  }
+  CHECK(made);
+  if (!made) return;
+  struct pollfd p[N];
+  for (int i = 0; i < N; i++) p[i] = (struct pollfd){.fd = a[i], .events = POLLIN};
+  CHECK(poll(p, N, 0) == 0); // every read outstanding, none answered
+  for (int i = N - 1; i >= 0; i--) {
+    char b = (char)('a' + i);
+    CHECK(send(c[i], &b, 1, 0) == 1);
+  }
+  int ready = 0;
+  for (int tries = 0; tries < 50 && ready < N; tries++) {
+    ready = poll(p, N, 100);
+    for (int i = 0; i < N; i++) p[i].revents = 0;
+  }
+  CHECK(poll(p, N, 1000) == N);
+  bool each = true;
+  for (int i = 0; i < N; i++) {
+    char b = 0;
+    each = each && read(a[i], &b, 1) == 1 && b == (char)('a' + i);
+  }
+  CHECK(each);
+  for (int i = 0; i < N; i++) close(c[i]), close(a[i]);
+  close(l);
+}
+
 static void test_sockets_waiting(void) {
   int l = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
   struct sockaddr_in any = loopback(0);
@@ -1880,6 +1922,7 @@ int main(int argc, char **argv) {
   test_utf8();
   test_sockets();
   test_sockets_waiting();
+  test_sockets_many();
 
   test_threads();
   test_signal_contexts();

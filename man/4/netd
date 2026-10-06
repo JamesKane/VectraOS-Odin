@@ -215,7 +215,7 @@ Only echo replies reach an ICMP conversation: an ICMP error, such as port unreac
 
 Conversations are numbered from one table of 32 shared by the three protocols, not one per protocol as in Plan 9, so `/net/udp` may hold `3` and `7`.
 Each process that mounts a `tcp!` path dials its own connection, which then waits 10 seconds in `Time_wait`, so a fast script can use up the 32.
-Each socket that a POSIX program polls or reads takes one of `netd`'s 64 ring connections (two, writing without waiting).
+A POSIX program's sockets share its ring connections to `netd`, six sockets' reads to one, and a socket writing without waiting one of those six places; so a program with many sockets takes one of the 64 for every six.
 
 TCP has no SACK and no timestamps, drops segments that arrive out of order (the peer's fast retransmit fills the hole), and keeps `Time_wait` 10 seconds.
 A connection cannot choose its local port: `connect` always goes from a free one, so a socket's `bind` port is used only by `listen`.

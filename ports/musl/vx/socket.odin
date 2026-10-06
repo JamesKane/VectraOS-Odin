@@ -93,22 +93,17 @@ sock_rel :: proc "contextless" (o: ^Ofd, name: string, buf: ^Path_Buf) -> string
 	return str.to_string(&b)
 }
 
-// A read-ahead connected to the server the socket's data file is on (netd),
-// attached at its root.
+// A read-ahead on the pool's connection to the server the socket's data
+// file is on (netd), attached at its root; key its owner's on fd_port; big
+// for a datagram's read or a write behind.
 @(private="file")
-sock_side :: proc "contextless" (o: ^Ofd) -> ^Readahead {
-	connector := conn_connector(o.f.c)
-	if connector == vx.HANDLE_NONE {
-		return nil
-	}
-	ra := ra_new()
+sock_side :: proc "contextless" (o: ^Ofd, key: u64, big: bool) -> ^Readahead {
+	ra := ra_new(conn_connector(o.f.c), big, key)
 	if ra == nil {
 		return nil
 	}
-	st := rt.p9_connect(connector, &ra.k)
-	if st == .Ok {
-		ra.root, st = p9.client_attach(&ra.k.c, "")
-	}
+	st: vx.Status
+	ra.root, st = p9.client_attach(&ra.k.c, "")
 	if st != .Ok {
 		ra_drop(ra)
 		return nil
@@ -131,7 +126,7 @@ sock_side_file :: proc "contextless" (o: ^Ofd, ra: ^Readahead, name: string, mod
 
 // poll.odin's read-ahead for a socket: a read of N/data kept outstanding.
 sock_ra_start :: proc "contextless" (o: ^Ofd) -> bool {
-	ra := sock_side(o)
+	ra := sock_side(o, fd_key(o), o.sock.type == linux.SOCK_DGRAM)
 	if ra == nil {
 		return false
 	}
@@ -164,7 +159,7 @@ sock_listener :: proc "contextless" (o: ^Ofd) -> ^Readahead {
 		ra_free(o)
 	}
 	if o.ra == nil {
-		ra := sock_side(o)
+		ra := sock_side(o, fd_key(o), false)
 		if ra == nil {
 			return nil
 		}
@@ -645,7 +640,7 @@ sock_connect_tcp :: proc "contextless" (o: ^Ofd, msg: []u8) -> int {
 	if o.ra != nil {
 		ra_free(o) // a read kept outstanding before connecting
 	}
-	ra := sock_side(o)
+	ra := sock_side(o, fd_key(o), false)
 	if ra == nil {
 		return fail(.ENOBUFS)
 	}
@@ -728,7 +723,7 @@ sock_send_stream :: proc "contextless" (o: ^Ofd, buf: []u8, flags: linux.Msg_Fla
 		return len(buf)
 	}
 	if o.wb == nil {
-		wb := sock_side(o)
+		wb := sock_side(o, wb_key(o), true)
 		if wb != nil && sock_side_file(o, wb, "data", p9.OWRITE) != .Ok {
 			ra_drop(wb)
 			wb = nil
@@ -893,7 +888,7 @@ sock_answered :: proc "contextless" (ra: ^Readahead, key: u64, arm: bool) -> boo
 		if !arm || ra.armed {
 			return false
 		}
-		ra.armed = rt.p9_arm(&ra.k, fd_port, key)
+		ra.armed = rt.p9_arm(ra.k, fd_port, key)
 		if ra.armed {
 			return false
 		}

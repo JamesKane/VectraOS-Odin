@@ -120,7 +120,8 @@ A program whose standard input and output are the console, a handle its spawn me
 The BSD socket calls are files in `/net`, as APE has them.
 `socket` opens `/net/tcp/clone` or `/net/udp/clone` and then the conversation's `data` file, which the descriptor holds; `bind` and `listen` write `announce` to its `ctl`, `connect` writes `connect`, `accept` opens `listen`, and `getsockname` and `getpeername` read `local` and `remote`.
 A UDP socket reads and writes after netd's header, so `sendto` and `recvfrom` carry addresses.
-A socket waits as a terminal does, with a read kept outstanding on a connection of its own, so `poll`, `select`, `O_NONBLOCK` and `EINTR` work on it.
+A socket waits as a terminal does, with a read kept outstanding, so `poll`, `select`, `O_NONBLOCK` and `EINTR` work on it.
+Those reads share a pool of connections to each server, apart from the namespace's, six to a connection (one of them a datagram's read or a write behind); each asks for at most 4096 bytes, a datagram's for a whole message (M6 step 6d4d1).
 A `fork` or `exec` opens the conversation's `data` again by its path.
 
 @node=commands title="The commands"

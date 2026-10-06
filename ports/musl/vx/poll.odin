@@ -15,7 +15,7 @@ import "vx:rt"
 //   a pipe's writer          always, unless its reader has gone (POLLERR)
 //   a terminal, the console  written always; read once a read kept
 //                            outstanding has its reply (the read-ahead, on a
-//                            connection of its own; its doorbell on fd_port)
+//                            pooled connection; its doorbell on fd_port)
 //   a socket                 as a terminal, read; listening, read once an
 //                            open of its listen file kept outstanding has its
 //                            reply; connecting, written once connect's ctl
@@ -24,18 +24,144 @@ import "vx:rt"
 // A wait is one port_wait on fd_port, until something armed fires, the
 // deadline passes, or a signal comes.
 
-// --- Read-ahead ---
+// --- The read-aheads' connections (upstream's M6 step 6d4d1) ---
+//
+// Apart from the namespace's, so the reads a server holds for long never
+// starve its other calls: a pool for each server, RA_USERS read-aheads to a
+// connection, one of them big (a datagram's read or a write behind, a whole
+// message each), so their calls and replies always fit its arenas. A
+// connection is made when the pool has none with room, and goes with its
+// last read-ahead.
 
-ra_new :: proc "contextless" () -> ^Readahead {
-	return map_pages(Readahead)
+@(private="file")
+RA_POOL :: 16
+@(private="file")
+RA_USERS :: 6
+
+@(private="file")
+Ra_Pool :: struct {
+	connector: vx.Handle, // whose server; borrowed (the namespace's, or the console's)
+	k:         ^rt.Conn, // in pages of its own; nil: free
+	users:     u32,
+	big:       bool,
 }
 
-// Lets go of a read-ahead: its connection, and with it its fids and any call
-// still outstanding.
-ra_drop :: proc "contextless" (ra: ^Readahead) {
-	if ra.k.end != vx.HANDLE_NONE {
-		rt.p9_disconnect(&ra.k)
+@(private="file")
+ra_pools: [RA_POOL]Ra_Pool
+
+// A connection to the server behind connector with room for one more
+// read-ahead (big, or not), and its index; nil if none can be made.
+@(private="file")
+ra_pool_take :: proc "contextless" (connector: vx.Handle, big: bool) -> (^rt.Conn, u32) {
+	free := -1
+	for &p, i in ra_pools {
+		if p.k == nil {
+			if free < 0 {
+				free = i
+			}
+			continue
+		}
+		if p.connector != connector || p.k.dead || p.users == RA_USERS || (big && p.big) {
+			continue
+		}
+		p.users += 1
+		p.big = p.big || big
+		return p.k, u32(i)
 	}
+	if free < 0 {
+		return nil, 0
+	}
+	k := map_pages(rt.Conn)
+	if k == nil {
+		return nil, 0
+	}
+	if rt.p9_connect(connector, k) != .Ok {
+		unmap_pages(k)
+		return nil, 0
+	}
+	ra_pools[free] = {
+		connector = connector,
+		k         = k,
+		users     = 1,
+		big       = big,
+	}
+	return k, u32(free)
+}
+
+@(private="file")
+ra_pool_close :: proc "contextless" (p: ^Ra_Pool) {
+	rt.p9_disconnect(p.k)
+	unmap_pages(p.k)
+	p^ = {}
+}
+
+@(private="file")
+ra_pool_give :: proc "contextless" (pool: u32, big: bool) {
+	p := &ra_pools[pool]
+	if big {
+		p.big = false
+	}
+	if p.users > 0 {
+		p.users -= 1
+	}
+	if p.users == 0 {
+		ra_pool_close(p)
+	}
+}
+
+// After a fork: the connections' rings were not copied; let go of the rest.
+ra_pools_forget :: proc "contextless" () {
+	for &p in ra_pools {
+		if p.k != nil {
+			ra_pool_close(&p)
+		}
+	}
+}
+
+// --- Read-ahead ---
+
+// A read-ahead on the pool's connection to connector's server: big, or not;
+// key is its owner's on fd_port.
+ra_new :: proc "contextless" (connector: vx.Handle, big: bool, key: u64) -> ^Readahead {
+	if connector == vx.HANDLE_NONE {
+		return nil
+	}
+	ra := map_pages(Readahead)
+	if ra == nil {
+		return nil
+	}
+	pool: u32
+	ra.k, pool = ra_pool_take(connector, big)
+	if ra.k == nil {
+		unmap_pages(ra)
+		return nil
+	}
+	ra.pool, ra.big, ra.key = pool + 1, big, key
+	ra.count = big ? RA_MAX : RA_READ
+	return ra
+}
+
+// Lets go of a read-ahead: its call still outstanding (flushed), its fids,
+// its place on the pool's connection.
+ra_drop :: proc "contextless" (ra: ^Readahead) {
+	if ra.pending {
+		rt.p9_cancel(ra.k, ra.tag)
+	}
+	if ra.fid != 0 {
+		_ = p9.client_clunk(&ra.k.c, ra.fid)
+	}
+	if ra.root != 0 {
+		_ = p9.client_clunk(&ra.k.c, ra.root)
+	}
+	if ra.pool != 0 {
+		ra_pool_give(ra.pool - 1, ra.big)
+	}
+	unmap_pages(ra)
+}
+
+// A forked child's: the connection is not there to talk to
+// (ra_pools_forget).
+ra_forget :: proc "contextless" (ra: ^Readahead) {
 	unmap_pages(ra)
 }
 
@@ -45,28 +171,29 @@ ra_free :: proc "contextless" (o: ^Ofd) {
 	ra_drop(ra)
 }
 
-// A connection of the read-ahead's own, and a fid on it: for a terminal, the
-// same open file, joined by token (posix); for the console, its cons file.
+// A read-ahead on the pool's connection, and a fid on it: for a terminal,
+// the same open file, joined by token (posix); for the console, its cons
+// file.
 @(private="file")
 ra_start :: proc "contextless" (o: ^Ofd) -> bool {
 	if o.sock.type != 0 {
 		return sock_ra_start(o)
 	}
-	ra := ra_new()
+	tty := o.kind == .File
+	connector := tty ? conn_connector(o.f.c) : rt.console_connector()
+	ra := ra_new(connector, false, fd_key(o))
 	if ra == nil {
 		return false
 	}
-	tty := o.kind == .File
-	connector := tty ? conn_connector(o.f.c) : rt.console_connector()
-	st := connector != vx.HANDLE_NONE ? rt.p9_connect(connector, &ra.k) : vx.Status.Err_Not_Found
+	st := vx.Status.Ok
 	c := &ra.k.c
-	if st == .Ok && tty {
+	if tty {
 		token: [p9.TOKEN_SIZE]u8
 		token, st = p9.client_share(o.f.c, o.f.fid, 1)
 		if st == .Ok {
 			ra.fid, st = p9.client_join(c, token)
 		}
-	} else if st == .Ok {
+	} else {
 		root: p9.Fid
 		root, st = p9.client_attach(c, "")
 		if st == .Ok {
@@ -89,7 +216,7 @@ ra_start :: proc "contextless" (o: ^Ofd) -> bool {
 // ra_poll takes its reply. A call that cannot be sent is answered at once,
 // with why.
 ra_send :: proc "contextless" (ra: ^Readahead, t: ^p9.Msg) {
-	st := rt.p9_send(&ra.k, t)
+	st := rt.p9_send(ra.k, t, fd_port, ra.key)
 	ra.ready = st != .Ok
 	ra.pending = st == .Ok
 	ra.status = st
@@ -123,7 +250,7 @@ ra_poll :: proc "contextless" (ra: ^Readahead, tty: bool) -> bool {
 			type   = .Tread,
 			fid    = ra.fid,
 			offset = tty ? p9.OFFSET_CURRENT : 0,
-			count  = RA_MAX,
+			count  = ra.count,
 		}
 		ra_send(ra, &t)
 		if ra.ready {
@@ -131,7 +258,7 @@ ra_poll :: proc "contextless" (ra: ^Readahead, tty: bool) -> bool {
 		}
 	}
 	r: p9.Msg
-	st := rt.p9_receive(&ra.k, ra.tag, &r)
+	st := rt.p9_receive(ra.k, ra.tag, &r)
 	if st == .Err_Should_Wait {
 		return false
 	}
@@ -166,7 +293,7 @@ ra_wait_until :: proc "contextless" (ra: ^Readahead, key: u64, tty, block: bool,
 			return fail(.EAGAIN)
 		}
 		if !ra.armed {
-			ra.armed = rt.p9_arm(&ra.k, fd_port, key)
+			ra.armed = rt.p9_arm(ra.k, fd_port, key)
 		}
 		if !ra.armed {
 			continue // a reply may be there already
@@ -205,7 +332,7 @@ fd_quiet_reads :: proc "contextless" () {
 @(private="file")
 ra_arm :: proc "contextless" (o: ^Ofd) {
 	if !o.ra.armed {
-		o.ra.armed = rt.p9_arm(&o.ra.k, fd_port, fd_key(o))
+		o.ra.armed = rt.p9_arm(o.ra.k, fd_port, fd_key(o))
 	}
 }
 
