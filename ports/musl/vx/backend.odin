@@ -17,8 +17,9 @@
 // would: a count or value, or a negated errno.
 //
 // It shares a link with C: every procedure is "contextless" or "c", with no
-// Odin runtime, allocator, thread-locals or init; build makes every symbol
-// local but __vx_syscall, __vx_start, posix_spawn and the cancellation
+// Odin runtime, allocator or init, and one thread-local record, in musl's
+// TLS (threads.odin); build makes every symbol local but __vx_syscall,
+// __vx_start, posix_spawn, __clone, __unmapself and the cancellation
 // point's (arch/*/syscall_cp.S). musl's thread pointer is musl's.
 package backend
 
@@ -233,10 +234,16 @@ dispatch :: proc "contextless" (n, a1, a2, a3, a4, a5, a6: int) -> int {
 		return 0
 
 	// The process
-	case .exit, .exit_group:
+	case .exit: // the thread; the process, if it was the last
+		be_thread_exit(a1)
+	case .exit_group:
 		proc_exit(a1)
-	case .getpid, .gettid, .set_tid_address: // one thread, whose id is the process's
+	case .getpid:
 		return int(posix_pid())
+	case .gettid:
+		return be_gettid()
+	case .set_tid_address: // musl's last step setting up the first thread (its TLS is there now), and _Fork's
+		return be_set_tid_address((^u32)(ptr(a1)))
 	case .getppid:
 		return posix_getppid()
 	case .getpgid:
@@ -251,7 +258,7 @@ dispatch :: proc "contextless" (n, a1, a2, a3, a4, a5, a6: int) -> int {
 		return posix_wait4(i64(i32(a1)), (^i32)(ptr(a2)), transmute(linux.Wait_Options)i32(a3), (^linux.Rusage)(ptr(a4)))
 	case .execve:
 		return proc_execve(cstring(ptr(a1)), ([^]cstring)(ptr(a2)), ([^]cstring)(ptr(a3)))
-	case .clone: // musl's _Fork and vfork, where there is no SYS_fork; threads wait
+	case .clone: // musl's _Fork and vfork, where there is no SYS_fork; threads come through __clone
 		return a1 == linux.SIGCHLD && a2 == 0 ? proc_fork() : fail(.ENOSYS)
 	case .pipe2:
 		return fd_pipe2((^[2]i32)(ptr(a1)), oflags(a2))
@@ -263,10 +270,10 @@ dispatch :: proc "contextless" (n, a1, a2, a3, a4, a5, a6: int) -> int {
 		return proc_getrandom(bytes(a1, a2))
 
 	// Signals
-	case .tkill: // one thread: the process
-		return sig_kill(posix_pid(), int(i32(a2)))
+	case .tkill:
+		return be_thread_kill(i64(i32(a1)), int(i32(a2)))
 	case .tgkill:
-		return sig_kill(posix_pid(), int(i32(a3)))
+		return i64(i32(a1)) == posix_pid() ? be_thread_kill(i64(i32(a2)), int(i32(a3))) : fail(.ESRCH)
 	case .kill:
 		return sig_kill(i64(i32(a1)), int(i32(a2)))
 	case .rt_sigaction:
@@ -299,7 +306,7 @@ dispatch :: proc "contextless" (n, a1, a2, a3, a4, a5, a6: int) -> int {
 		return time_sleep(int(i32(a1)), int(i32(a2)), (^linux.Timespec)(ptr(a3)), (^linux.Timespec)(ptr(a4)))
 	case .ppoll: // and pause(), where there is no SYS_pause
 		if a1 == 0 && a2 == 0 && a3 == 0 {
-			return sig_suspend(a4 != 0 ? sigset_word(ptr(a4)) : sig_mask)
+			return sig_suspend(a4 != 0 ? sigset_word(ptr(a4)) : be_me().mask)
 		}
 		return poll_masked(pollfds(a1, a2), (^linux.Timespec)(ptr(a3)), ptr(a4))
 	case .pselect6:
@@ -378,15 +385,21 @@ call_kind :: proc "contextless" (n, a1, a2: int) -> (waits, pauses: bool) {
 // a blocked one (the kernel ends a wait for any note) do not end it. poll
 // and select end with EINTR once any handler has run, as Linux's do;
 // sigsuspend and pause always do. Each time, a sleep's or poll's deadline is
-// the first's.
+// the first's. The call holds the back end's lock (threads.odin) throughout,
+// but where it waits; SYS_exit ends the thread holding nothing.
 @(export, link_name="__vx_syscall")
 vx_syscall :: proc "c" (n, a1, a2, a3, a4, a5, a6: int) -> int {
+	if linux.Sys(n) == .exit {
+		be_thread_exit(a1) // never returns: holds nothing
+	}
+	be_enter()
+	defer be_leave()
 	waits, pauses := call_kind(n, a1, a2)
 	// The depth stays up until the call is done, made again or not: a signal
 	// that comes between is pending, not run before the choice is made.
 	ran, cut := sig_handlers_ran, sig_eintr_ran
-	outer := sig_depth == 0
-	sig_depth += 1
+	outer := be_me().sig_depth == 0
+	be_me().sig_depth += 1
 	r := dispatch(n, a1, a2, a3, a4, a5, a6)
 	for outer {
 		sig_run_pending()
@@ -394,11 +407,11 @@ vx_syscall :: proc "c" (n, a1, a2, a3, a4, a5, a6: int) -> int {
 		if r != fail(.EINTR) || eintr || pauses {
 			break
 		}
-		sig_restarting = true
+		be_me().restarting = true
 		r = dispatch(n, a1, a2, a3, a4, a5, a6)
-		sig_restarting = false
+		be_me().restarting = false
 	}
-	sig_depth -= 1
+	be_me().sig_depth -= 1
 	if outer {
 		sig_run_pending() // one that came after the choice: on the way out
 	}

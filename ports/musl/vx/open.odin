@@ -284,7 +284,10 @@ fd_lock :: proc "contextless" (o: ^Ofd, cmd: int, l: ^linux.Flock) -> int {
 		if cmd == linux.F_SETLK {
 			return fail(.EAGAIN)
 		}
-		if rt.futex_wait(&never_changes, 0, rt.clock_read() + LOCK_RETRY) == .Err_Interrupted {
+		held := be_wait_begin()
+		w := rt.futex_wait(&never_changes, 0, rt.clock_read() + LOCK_RETRY)
+		be_wait_end(held)
+		if w == .Err_Interrupted {
 			return fail(.EINTR)
 		}
 	}

@@ -42,7 +42,9 @@ pipe_write :: proc "contextless" (o: ^Ofd, p: []u8) -> int {
 			if .Nonblock in o.flags {
 				return done > 0 ? done : fail(.EAGAIN)
 			}
+			held := be_wait_begin()
 			_ = rt.futex_wait(&never, 0, rt.clock_read() + (tries < 10 ? 100_000 : 1_000_000))
+			be_wait_end(held)
 		}
 		if st == .Err_Peer_Closed && done == 0 {
 			sig_raise_self(linux.SIGPIPE) // the reader has gone

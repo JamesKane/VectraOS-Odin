@@ -10,6 +10,7 @@ import "vx:ns"
 import "vx:p9"
 import "vx:rt"
 import "vx:signal"
+import "vx:str"
 
 // POSIX signals (upstream docs/01 §9).
 //
@@ -51,17 +52,18 @@ Action :: struct {
 @(private="file")
 actions: [SIG_MAX + 1]Action
 
-sig_mask: linux.Sig_Set
+// A thread's mask, its depth inside __vx_syscall (delivery waits for its
+// return), the signals aimed at it alone and its call's deadline are its
+// own (threads.odin's Be_Thread, be_me()); a new thread's mask is its
+// creator's.
+//
 // Pending: atomic, as a note handler may set a bit between the load and the
 // store of a change made in the program's code.
 sig_pending: linux.Sig_Set
 @(private="file")
 sender_of: [SIG_MAX + 1]i64 // who sent each pending one
-sig_depth: int // inside __vx_syscall: delivery waits for its return
 sig_handlers_ran: u32 // how many handlers have run
 sig_eintr_ran: u32 // how many of them were not SA_RESTART (a call they interrupt ends)
-sig_restarting: bool // the call is being made again after a signal (its deadline kept)
-sig_call_deadline: vx.Instant // a sleep's or poll's
 // Changed by sig_note for each signal that comes while the back end runs: a
 // sleep waits on it, so one that comes just before the sleep ends it too.
 sig_seq: u32
@@ -152,10 +154,10 @@ sig_act :: proc "contextless" (sig: int, code: i32, sender: i64, address: u64, e
 		}
 		sig_terminate(sig, e, fault)
 	}
-	old := sig_mask
-	sig_mask += actions[sig].mask - UNBLOCKABLE
+	old := be_me().mask
+	be_me().mask += actions[sig].mask - UNBLOCKABLE
 	if .Nodefer not_in flags {
-		sig_mask += {sig}
+		be_me().mask += {sig}
 	}
 	if .Resethand in flags {
 		actions[sig] = {}
@@ -168,8 +170,8 @@ sig_act :: proc "contextless" (sig: int, code: i32, sender: i64, address: u64, e
 	// it (sigsuspend, ppoll, a fault in a call): a signal during it is
 	// delivered at once, and a siglongjmp out of it leaves the back end as it
 	// is in the program's code.
-	depth := sig_depth
-	sig_depth = 0
+	depth := be_me().sig_depth
+	be_me().sig_depth = 0
 	if .Siginfo in flags {
 		info := linux.Siginfo {
 			signo = i32(sig),
@@ -190,20 +192,25 @@ sig_act :: proc "contextless" (sig: int, code: i32, sender: i64, address: u64, e
 	} else {
 		(Handler)(rawptr(h))(i32(sig))
 	}
-	sig_depth = depth
-	sig_mask = old
+	be_me().sig_depth = depth
+	be_me().mask = old
 	return .Restart not_in flags
 }
 
 // Delivers every pending signal that is not blocked, lowest first.
 sig_deliver_pending :: proc "contextless" () -> (eintr: bool) {
+	me := be_me()
 	for {
-		ready := pending_load() - sig_mask
+		ready := (pending_load() + me.pending) - me.mask
 		if ready == {} {
 			return
 		}
 		sig := lowest(ready)
-		pending_remove({sig})
+		if sig in me.pending { // the thread's own first (pthread_kill), then the process's
+			me.pending -= {sig}
+		} else {
+			pending_remove({sig})
+		}
 		who := sender_of[sig]
 		eintr = sig_act(sig, who != 0 ? linux.SI_USER : linux.SI_KERNEL, who, 0, nil, "") || eintr
 	}
@@ -217,15 +224,15 @@ lowest :: proc "contextless" (s: linux.Sig_Set) -> int {
 // From __vx_syscall, the pending signals not blocked, delivered as from the
 // program's code; a sleep's or poll's deadline kept from a handler's own.
 sig_run_pending :: proc "contextless" () {
-	if pending_load() - sig_mask == {} {
+	if (pending_load() + be_me().pending) - be_me().mask == {} {
 		return
 	}
-	depth := sig_depth
-	kept := sig_call_deadline
-	sig_depth = 0
+	depth := be_me().sig_depth
+	kept := be_me().call_deadline
+	be_me().sig_depth = 0
 	_ = sig_deliver_pending()
-	sig_depth = depth
-	sig_call_deadline = kept
+	be_me().sig_depth = depth
+	be_me().call_deadline = kept
 }
 
 sig_raise_self :: proc "contextless" (sig: int) {
@@ -237,16 +244,22 @@ sig_raise_self :: proc "contextless" (sig: int) {
 @(private="file")
 sig_note :: proc "contextless" (e: ^vx.Exception, text: string) -> rt.Noted {
 	if e.kind == .Interrupt {
-		s, sender, ok := signal.note_signal(text)
+		// be_thread_kill's mark: this thread's alone. Without it, the process's.
+		directed := str.has_suffix(text, BE_DIRECTED) && len(text) > len(BE_DIRECTED)
+		s, sender, ok := signal.note_signal(directed ? text[:len(text) - len(BE_DIRECTED)] : text)
 		sig := int(s)
 		if !ok || sig < 1 || sig > SIG_MAX {
 			return .Dflt // no signal: the note ends the process
 		}
-		pending_add(sig)
 		sender_of[sig] = sender
-		if sig_depth == 0 {
+		if directed {
+			be_me().pending += {sig}
+		} else {
+			pending_add(sig)
+		}
+		if be_me().sig_depth == 0 {
 			_ = sig_deliver_pending() // in the program's own code
-		} else if sig not_in sig_mask {
+		} else if sig not_in be_me().mask {
 			// In the back end, maybe just before it waits: the kernel had
 			// this note interrupt nothing (it came in user mode), so the wait
 			// is woken here, whichever it is: fd_port's (fd_wait), or
@@ -278,7 +291,7 @@ sig_note :: proc "contextless" (e: ^vx.Exception, text: string) -> rt.Noted {
 		code = linux.SEGV_PKUERR
 	}
 	// A fault that is blocked or ignored would only happen again: its default.
-	if sig in sig_mask || actions[sig].handler == linux.SIG_IGN {
+	if sig in be_me().mask || actions[sig].handler == linux.SIG_IGN {
 		sig_terminate(sig, e, text)
 	}
 	_ = sig_act(sig, code, 0, e.address, e, text) // then the instruction again, unless the handler jumped away
@@ -295,7 +308,7 @@ sig_init :: proc "contextless" () {
 			for sig in transmute(linux.Sig_Set)ignored - UNBLOCKABLE {
 				actions[sig].handler = linux.SIG_IGN
 			}
-			sig_mask = transmute(linux.Sig_Set)mask - UNBLOCKABLE
+			be_me().mask = transmute(linux.Sig_Set)mask - UNBLOCKABLE
 		}
 	}
 	_ = rt.notify(sig_note)
@@ -336,20 +349,20 @@ sig_action :: proc "contextless" (sig: int, act, old: ^linux.K_Sigaction) -> int
 
 // The pending signals now unblocked are delivered as the call returns.
 sig_procmask :: proc "contextless" (how: int, set: rawptr, old: ^linux.Sig_Set) -> int {
-	was := sig_mask
+	was := be_me().mask
 	if set != nil {
 		s := sigset_word(set)
 		switch how {
 		case linux.SIG_BLOCK:
-			sig_mask += s
+			be_me().mask += s
 		case linux.SIG_UNBLOCK:
-			sig_mask -= s
+			be_me().mask -= s
 		case linux.SIG_SETMASK:
-			sig_mask = s
+			be_me().mask = s
 		case:
 			return fail(.EINVAL)
 		}
-		sig_mask -= UNBLOCKABLE
+		be_me().mask -= UNBLOCKABLE
 	}
 	if old != nil {
 		intrinsics.unaligned_store(old, was)
@@ -362,21 +375,23 @@ sig_procmask :: proc "contextless" (how: int, set: rawptr, old: ^linux.Sig_Set) 
 // ends the wait: a signal that is ignored, by its disposition or by default,
 // leaves it waiting.
 sig_suspend :: proc "contextless" (mask: linux.Sig_Set) -> int {
-	was := sig_mask
-	sig_mask = mask - UNBLOCKABLE
+	was := be_me().mask
+	be_me().mask = mask - UNBLOCKABLE
 	ran := sig_handlers_ran
 	for {
 		seq := intrinsics.atomic_load(&sig_seq) // before the check: a signal after it changes sig_seq
-		if pending_load() - sig_mask != {} {
+		if (pending_load() + be_me().pending) - be_me().mask != {} {
 			_ = sig_deliver_pending()
 			if sig_handlers_ran != ran {
 				break
 			}
 			continue
 		}
+		held := be_wait_begin()
 		_ = rt.futex_wait(&sig_seq, seq, vx.INFINITE) // an interrupt, or sig_note, ends it
+		be_wait_end(held)
 	}
-	sig_mask = was
+	be_me().mask = was
 	return fail(.EINTR)
 }
 
@@ -397,7 +412,7 @@ sig_records :: proc "contextless" (w: ^ndb.Writer, ctx: ^Spawn_Ctx) {
 		}
 	}
 	ndb.put_u64(w, "signals", transmute(u64)(ignored - ctx.sig_default))
-	ndb.put_u64(w, "mask", transmute(u64)(ctx.has_mask ? ctx.sig_mask : sig_mask))
+	ndb.put_u64(w, "mask", transmute(u64)(ctx.has_mask ? ctx.blocked : be_me().mask))
 	_ = ndb.end(w)
 }
 

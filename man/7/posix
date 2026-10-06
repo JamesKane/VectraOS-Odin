@@ -89,6 +89,15 @@ A handler never runs inside the back end, which may be in the middle of a ring s
 A stopping signal stops the process through its `ctl`, and `SIGKILL`, `SIGSTOP` and `SIGCONT` from another process procfs carries out itself.
 `SIGCHLD` is a note procfs posts to a parent when a child ends, stops or goes on.
 
+@node=threads title="Threads"
+
+pthreads are musl's own, on kernel threads of the process's task: the back end's `__clone` starts one with musl's thread pointer, and its end clears and wakes the word musl joins on.
+The first thread's id is the process's; another's is its kernel thread id with bit 30 set.
+The back end is one lock, held through each call (recursive, as the back end calls musl), and let go where a call waits: a pipe, a sleep, a futex, `sigsuspend`.
+The mask is each thread's own, and a new thread starts with its creator's.
+`pthread_kill` posts a note to the one thread, whose handler runs there; a signal from another process goes to the thread the kernel gives the note to.
+`fork` in a thread makes a child of that thread alone.
+
 @node=terminals title="Terminals"
 
 ptyd(4) serves `/dev/ptmx` and `/dev/pts/`<n>: opening `ptmx` makes a terminal, and the program on it reads and writes its slave.
@@ -151,7 +160,8 @@ intro(1), lua(1), make(1), namespace(6), svc(6), procfs(4), ptyd(4), netd(4), tm
 
 # BUGS
 
-There are no threads: `clone` is `ENOSYS`, so `pthread_create` fails, and the back end does not lock (M6 step 6d).
+Threads take turns at the back end: a 9P call, a file read among them, holds its lock until the server answers (M6 step 6d4).
+A signal from another process that its thread blocks waits for that thread, though another may not block it (M6 step 6d2b).
 
 There is no `/bin/sh`, and `exec` runs only ELF programs, so `system`, `popen`, `make`'s recipes, Lua's `os.execute` and `io.popen`, `env`, cron, and `ed`'s and `dc`'s `!` fail.
 
@@ -165,7 +175,7 @@ Not implemented: `link` and `linkat` (`EPERM`), `mknod`, `chroot`, `flock`, `get
 `getrlimit` answers infinity for every limit.
 The CPU-time clocks are the monotonic clock.
 
-Signals have no alternate stack, no registers in a handler's `ucontext` (M6 step 6d), and no `sigqueue` or real-time queueing.
+Signals have no alternate stack, no registers in a handler's `ucontext` (M6 step 6d2b), and no `sigqueue` or real-time queueing.
 A signal does not interrupt a 9P call in progress, such as a file read or the console's; its handler runs when the call is done (with the client's `Tflush`, M6 step 6d), though ptyd ends the reads it holds.
 Job control is partial: no `SIGTTIN` or `SIGTTOU`, no controlling terminal kept for a session, and anyone who can write a terminal's `ctl` can set its foreground group.
 

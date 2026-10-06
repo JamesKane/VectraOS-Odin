@@ -253,7 +253,7 @@ time_sleep :: proc "contextless" (clock: int, flags: int, req: ^linux.Timespec, 
 		return fail(.EINVAL)
 	}
 	absolute := flags & linux.TIMER_ABSTIME != 0
-	if !sig_restarting {
+	if !be_me().restarting {
 		d, e := time_deadline(req, absolute)
 		if e < 0 {
 			return e
@@ -261,15 +261,17 @@ time_sleep :: proc "contextless" (clock: int, flags: int, req: ^linux.Timespec, 
 		if absolute && time_is_utc(clock) && d != vx.INFINITE {
 			d -= rt.clock_utc() - i64(rt.clock_read()) // a time of day: on the monotonic clock
 		}
-		sig_call_deadline = d
+		be_me().call_deadline = d
 	}
-	for rt.clock_read() < sig_call_deadline {
+	for rt.clock_read() < be_me().call_deadline {
 		seq := intrinsics.atomic_load(&sig_seq)
-		st := rt.futex_wait(&sig_seq, seq, sig_call_deadline)
+		held := be_wait_begin()
+		st := rt.futex_wait(&sig_seq, seq, be_me().call_deadline)
+		be_wait_end(held)
 		if st != .Err_Interrupted && st != .Err_Bad_State {
 			continue // the deadline, or nothing
 		}
-		left := max(sig_call_deadline - rt.clock_read(), 0)
+		left := max(be_me().call_deadline - rt.clock_read(), 0)
 		if rem != nil && !absolute {
 			rem^ = {left / NS_PER_SEC, left % NS_PER_SEC}
 		}
@@ -289,7 +291,9 @@ time_futex :: proc "contextless" (word: ^u32, op: int, value: u32, timeout: ^lin
 				return e
 			}
 		}
+		held := be_wait_begin() // a pthread mutex's or condition's: its waker is another thread
 		st := rt.futex_wait(word, value, deadline)
+		be_wait_end(held)
 		return st == .Err_Bad_State ? fail(.EAGAIN) : errno_of(st) // the word had changed
 	case linux.FUTEX_WAKE:
 		n, st := rt.futex_wake(word, value)

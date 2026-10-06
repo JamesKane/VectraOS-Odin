@@ -466,6 +466,13 @@ SIG_UNBLOCK :: 1
 SIG_SETMASK :: 2
 SS_DISABLE :: 2
 
+// clone's flags, as musl's pthread_create passes them to __clone.
+CLONE_VM :: 0x100
+CLONE_THREAD :: 0x10000
+CLONE_SETTLS :: 0x80000
+CLONE_PARENT_SETTID :: 0x100000
+CLONE_CHILD_CLEARTID :: 0x200000
+
 Sa_Flag :: enum u64 {
 	Nocldstop = 0,
 	Nocldwait = 1,

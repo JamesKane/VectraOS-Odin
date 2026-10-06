@@ -28,6 +28,7 @@ HEADERS :: `#define _GNU_SOURCE
 #include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
+#include <sched.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stddef.h>
@@ -257,6 +258,11 @@ common_checks :: proc(out: ^[dynamic]Check) {
 		{"SIG_UNBLOCK", linux.SIG_UNBLOCK},
 		{"SIG_SETMASK", linux.SIG_SETMASK},
 		{"SS_DISABLE", linux.SS_DISABLE},
+		{"CLONE_VM", linux.CLONE_VM},
+		{"CLONE_THREAD", linux.CLONE_THREAD},
+		{"CLONE_SETTLS", linux.CLONE_SETTLS},
+		{"CLONE_PARENT_SETTID", linux.CLONE_PARENT_SETTID},
+		{"CLONE_CHILD_CLEARTID", linux.CLONE_CHILD_CLEARTID},
 		{"SI_USER", linux.SI_USER},
 		{"SI_KERNEL", linux.SI_KERNEL},
 		{"SEGV_MAPERR", linux.SEGV_MAPERR},

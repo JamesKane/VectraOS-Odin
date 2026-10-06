@@ -1,5 +1,6 @@
 package backend
 
+import "base:intrinsics"
 import vx "abi:vx"
 import "linux"
 import "vx:drbg"
@@ -359,10 +360,10 @@ Spawn_Ctx :: struct {
 	pid:         i64,
 	error:       int,
 	// The signals the child keeps: what is ignored stays ignored (but those
-	// in sig_default), and the mask is this one's (or sig_mask, if
+	// in sig_default), and the mask is this one's (or blocked, if
 	// has_mask), as POSIX has it for exec and posix_spawn.
 	sig_default: linux.Sig_Set,
-	sig_mask:    linux.Sig_Set,
+	blocked:     linux.Sig_Set,
 	has_mask:    bool,
 }
 
@@ -632,12 +633,12 @@ posix_spawn :: proc "c" (pid: ^i32, path: cstring, fa: ^linux.Spawn_File_Actions
 		ctx.sig_default = sigset_word(&attr.def)
 	}
 	if flags & linux.POSIX_SPAWN_SETSIGMASK != 0 {
-		ctx.sig_mask, ctx.has_mask = sigset_word(&attr.mask), true
+		ctx.blocked, ctx.has_mask = sigset_word(&attr.mask), true
 	}
 	// Not through __vx_syscall: a signal now would run its handler in the
 	// middle of the back end's work. It waits, as in a call, until the child
 	// is made.
-	sig_depth += 1
+	be_me().sig_depth += 1
 	saved: [dynamic; ns.MAX_PATH]u8
 	_ = append(&saved, cwd())
 	r := spawn_actions(fa, &spawn_table)
@@ -651,8 +652,8 @@ posix_spawn :: proc "c" (pid: ^i32, path: cstring, fa: ^linux.Spawn_File_Actions
 		s = {}
 	}
 	set_cwd(string(saved[:]))
-	sig_depth -= 1
-	if sig_depth == 0 {
+	be_me().sig_depth -= 1
+	if be_me().sig_depth == 0 {
 		_ = sig_deliver_pending()
 	}
 	if r < 0 {
@@ -720,6 +721,7 @@ fork_child :: proc "contextless" () -> int {
 	id := task_id
 	drbg.mix(&entropy, memory.ptr_to_bytes(&id), false)
 	fd_after_fork()
+	intrinsics.atomic_store(&be_live, 1) // the thread that forked, alone
 	clear(&wait_kept) // the parent's children's records are the parent's
 	sig_forget_pending(fork_pending) // the parent's, copied with its memory; not those sent to the child since
 	if proc_mounted {

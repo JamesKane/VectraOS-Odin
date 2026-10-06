@@ -54,3 +54,27 @@ __vx_fork_resume:
     ldp d14, d15, [x0, #152]
     mov x0, #1
     ret
+
+// be_unmap_finish(self, base, size, ctid, unmap, wake, exit) -> !: a
+// detached thread's end (threads.odin's __unmapself), in registers alone, as
+// its stack goes with the first call: as_unmap(self, base, size) (system
+// call unmap), then, if ctid is not nil, *ctid cleared and futex_wake(ctid,
+// 1) (wake), then thread_exit() (exit). The numbers come from the caller.
+    .globl be_unmap_finish
+    .type be_unmap_finish, %function
+be_unmap_finish:
+    bti c
+    mov x9, x3                 // ctid
+    mov x10, x5                // wake's number
+    mov x11, x6                // exit's number
+    mov x8, x4
+    svc #0                     // as_unmap(self, base, size): the stack is gone from here
+    cbz x9, 1f
+    stlr wzr, [x9]
+    mov x0, x9
+    mov x1, #1
+    mov x8, x10
+    svc #0                     // futex_wake(ctid, 1)
+1:  mov x8, x11
+    svc #0                     // thread_exit()
+    brk #0

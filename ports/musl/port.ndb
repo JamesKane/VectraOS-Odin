@@ -25,8 +25,10 @@
 # vfork, and the signal restorers. It also lists src/process/posix_spawn.c,
 # whose child is a clone that calls execve: the back end supplies
 # posix_spawn, building the child from the program's file as VectraOS does
-# (musl's posix_spawnp, which calls it, stays). Every path listed must be in
-# the set.
+# (musl's posix_spawnp, which calls it, stays); and musl's generic clone.c
+# and __unmapself.c, since the back end supplies __clone and __unmapself,
+# pthread_create's thread and a detached thread's end (upstream's M6 step
+# 6d2a). Every path listed must be in the set.
 # nossp= are the files the Makefile builds with -fno-stack-protector
 # (NOSSP_OBJS), by name.
 #
@@ -36,10 +38,10 @@
 port=musl src=third_party/musl
     cflags="-std=c99 -nostdinc -ffreestanding -fexcess-precision=standard -frounding-math -fno-strict-aliasing -Wa,--noexecstack -D_XOPEN_SOURCE=700 -O2 -fno-align-functions -pipe -fno-omit-frame-pointer -fno-unwind-tables -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections -w -Wno-pointer-to-int-cast -Werror=implicit-function-declaration -Werror=implicit-int -Werror=pointer-sign -Werror=pointer-arith -Werror=int-conversion -Werror=incompatible-pointer-types -Qunused-arguments -Waddress -Warray-bounds -Wchar-subscripts -Wduplicate-decl-specifier -Winit-self -Wreturn-type -Wsequence-point -Wstrict-aliasing -Wunused-function -Wunused-label -Wunused-variable"
     nossp="__libc_start_main __init_tls __stack_chk_fail __set_thread_area memset memcpy"
-    backend.exports="__vx_syscall __vx_start __syscall_cp_asm __cp_begin __cp_end __cp_cancel posix_spawn"
+    backend.exports="__vx_syscall __vx_start __syscall_cp_asm __cp_begin __cp_end __cp_cancel posix_spawn __clone __unmapself"
 
 target=x86_64 arch=x86_64
-    exclude="src/thread/x86_64/clone.s src/thread/x86_64/syscall_cp.s src/thread/x86_64/__unmapself.s src/thread/x86_64/__set_thread_area.s src/process/x86_64/vfork.s src/signal/x86_64/restore.s src/process/posix_spawn.c"
+    exclude="src/thread/clone.c src/thread/__unmapself.c src/thread/x86_64/clone.s src/thread/x86_64/syscall_cp.s src/thread/x86_64/__unmapself.s src/thread/x86_64/__set_thread_area.s src/process/x86_64/vfork.s src/signal/x86_64/restore.s src/process/posix_spawn.c"
 
 target=aarch64 arch=aarch64
-    exclude="src/thread/aarch64/clone.s src/thread/aarch64/syscall_cp.s src/thread/aarch64/__unmapself.s src/process/aarch64/vfork.s src/signal/aarch64/restore.s src/process/posix_spawn.c"
+    exclude="src/thread/clone.c src/thread/__unmapself.c src/thread/aarch64/clone.s src/thread/aarch64/syscall_cp.s src/thread/aarch64/__unmapself.s src/process/aarch64/vfork.s src/signal/aarch64/restore.s src/process/posix_spawn.c"

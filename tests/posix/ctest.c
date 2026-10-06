@@ -84,8 +84,6 @@ static void jump_back(int value) { longjmp(jump, value); }
 
 static int by_int(const void *a, const void *b) { return *(const int *)a - *(const int *)b; }
 
-static void *never_runs(void *arg) { return arg; }
-
 static double seconds(const struct timespec *t) { return (double)t->tv_sec + (double)t->tv_nsec / 1e9; }
 
 // ctest run by ctest: argv[1] says what to check, argv[2] is the parent's
@@ -1284,6 +1282,126 @@ static void test_poll(void) {
   close(m);
 }
 
+// --- Threads (M6 step 6d2a) ---
+
+static pthread_mutex_t t_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t t_cond = PTHREAD_COND_INITIALIZER;
+static long t_count;
+static int t_turn;
+static thread_local int t_mine = 7;
+static _Atomic pthread_t t_selves[4];
+static _Atomic bool t_detached_ran;
+static _Atomic pthread_t t_signalled; // whose handler ran
+static thread_local bool t_got;       // on this thread
+static _Atomic bool t_waiting;
+
+// Its own thread_local copy, a shared count under a mutex, its own identity.
+static void *t_counter(void *arg) {
+  long i = (long)arg;
+  bool fresh = t_mine == 7;
+  t_mine = (int)i;
+  for (int k = 0; k < 20000; k++) {
+    pthread_mutex_lock(&t_lock);
+    t_count++;
+    pthread_mutex_unlock(&t_lock);
+  }
+  t_selves[i] = pthread_self();
+  return (void *)(intptr_t)(fresh && t_mine == i ? i * 10 : -1);
+}
+
+// A condition handed back and forth.
+static void *t_ponger(void *arg) {
+  (void)arg;
+  pthread_mutex_lock(&t_lock);
+  while (t_turn != 1) pthread_cond_wait(&t_cond, &t_lock);
+  t_turn = 2;
+  pthread_cond_broadcast(&t_cond);
+  pthread_mutex_unlock(&t_lock);
+  return nullptr;
+}
+
+static void *t_detached(void *arg) {
+  (void)arg;
+  t_detached_ran = true;
+  return nullptr; // its stack goes as it ends (musl's __unmapself)
+}
+
+static void t_on_xcpu(int sig) {
+  (void)sig;
+  t_got = true;
+  t_signalled = pthread_self();
+}
+
+// Waits in a sleep for a signal aimed at it.
+static void *t_target(void *arg) {
+  (void)arg;
+  t_waiting = true;
+  for (int i = 0; i < 2000 && !t_got; i++) nanosleep(&(struct timespec){.tv_nsec = 1'000'000}, nullptr);
+  return nullptr;
+}
+
+// fork from a thread that is not the first: the child is that thread alone,
+// and can make threads of its own.
+static void *t_forker(void *arg) {
+  (void)arg;
+  pid_t pid = fork();
+  if (pid == 0) {
+    pthread_t c;
+    void *r = nullptr;
+    bool ok = pthread_create(&c, nullptr, t_detached, nullptr) == 0 && pthread_join(c, &r) == 0;
+    _exit(ok ? 3 : 4);
+  }
+  int status = 0;
+  bool ok = pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 3;
+  return (void *)(intptr_t)ok;
+}
+
+static void test_threads(void) {
+  pthread_t t[4];
+  t_mine = 1000;
+  for (long i = 0; i < 4; i++) CHECK(pthread_create(&t[i], nullptr, t_counter, (void *)i) == 0);
+  for (long i = 0; i < 4; i++) {
+    void *r = nullptr;
+    CHECK(pthread_join(t[i], &r) == 0 && (intptr_t)r == i * 10);
+  }
+  CHECK(t_count == 4L * 20000 && t_mine == 1000); // whole, and the first thread's own copy untouched
+  CHECK(pthread_equal(t_selves[0], t[0]) && !pthread_equal(t_selves[0], t_selves[1]) &&
+        !pthread_equal(t_selves[0], pthread_self()));
+
+  pthread_t p;
+  CHECK(pthread_create(&p, nullptr, t_ponger, nullptr) == 0);
+  pthread_mutex_lock(&t_lock);
+  t_turn = 1;
+  pthread_cond_broadcast(&t_cond);
+  while (t_turn != 2) pthread_cond_wait(&t_cond, &t_lock);
+  pthread_mutex_unlock(&t_lock);
+  CHECK(pthread_join(p, nullptr) == 0);
+
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+  pthread_t d;
+  CHECK(pthread_create(&d, &attr, t_detached, nullptr) == 0);
+  for (int i = 0; i < 1000 && !t_detached_ran; i++)
+    nanosleep(&(struct timespec){.tv_nsec = 1'000'000}, nullptr);
+  CHECK(t_detached_ran);
+
+  pthread_t f;
+  void *forked = nullptr;
+  CHECK(pthread_create(&f, nullptr, t_forker, nullptr) == 0 && pthread_join(f, &forked) == 0 && forked);
+
+  // pthread_kill: the handler runs on the thread it was aimed at (SIGXCPU,
+  // which nothing else here sends).
+  signal(SIGXCPU, t_on_xcpu);
+  pthread_t g;
+  CHECK(pthread_create(&g, nullptr, t_target, nullptr) == 0);
+  while (!t_waiting) nanosleep(&(struct timespec){.tv_nsec = 1'000'000}, nullptr);
+  CHECK(pthread_kill(g, SIGXCPU) == 0);
+  CHECK(pthread_join(g, nullptr) == 0);
+  CHECK(pthread_equal(t_signalled, g) && !t_got);
+  signal(SIGXCPU, SIG_DFL);
+}
+
 int main(int argc, char **argv) {
   where_am_i();
   if (argc >= 3 && strcmp(argv[1], "one") != 0) return child_main(argv);
@@ -1403,9 +1521,7 @@ int main(int argc, char **argv) {
   test_sockets();
   test_sockets_waiting();
 
-  // No threads yet: pthread_create fails, and says so (docs/milestones.md).
-  pthread_t thread;
-  CHECK(pthread_create(&thread, nullptr, never_runs, nullptr) != 0);
+  test_threads();
 
   atexit(at_exit);
   fprintf(stderr, "ctest: to stderr\n");

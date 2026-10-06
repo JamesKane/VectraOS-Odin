@@ -48,4 +48,30 @@ __vx_fork_resume:
     movl $1, %eax
     jmpq *0(%rdi)
 
+// be_unmap_finish(self, base, size, ctid, unmap, wake, exit) -> !: a
+// detached thread's end (threads.odin's __unmapself), in registers alone, as
+// its stack goes with the first call: as_unmap(self, base, size) (system
+// call unmap), then, if ctid is not nil, *ctid cleared and futex_wake(ctid,
+// 1) (wake), then thread_exit() (exit). The numbers come from the caller.
+    .globl be_unmap_finish
+    .type be_unmap_finish, @function
+be_unmap_finish:
+    endbr64
+    movq 8(%rsp), %r12         // exit's number, the seventh argument
+    movq %rcx, %r13            // ctid
+    movq %r9, %r14             // wake's number
+    movl %r8d, %eax
+    xorl %r10d, %r10d
+    syscall                    // as_unmap(self, base, size): the stack is gone from here
+    testq %r13, %r13
+    jz 1f
+    movl $0, (%r13)
+    movq %r13, %rdi
+    movl $1, %esi
+    movl %r14d, %eax
+    syscall                    // futex_wake(ctid, 1)
+1:  movl %r12d, %eax
+    syscall                    // thread_exit()
+    ud2
+
     .section .note.GNU-stack, "", @progbits

@@ -43,7 +43,7 @@ dispatch_amd64 :: proc "contextless" (n, a1, a2, a3, a4, a5, a6: int) -> (r: int
 	case .lchown:
 		return fd_chown(-1, linux.AT_FDCWD, s(a1), true, u32(a2), u32(a3), false), true
 	case .pause:
-		return sig_suspend(sig_mask), true
+		return sig_suspend(be_me().mask), true
 	case .poll:
 		return sys_poll(([^]linux.Pollfd)(p(a1))[:max(a2, 0)], int(i32(a3))), true
 	case .select:

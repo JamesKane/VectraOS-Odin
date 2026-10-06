@@ -52,9 +52,10 @@ POSIX_LD_FLAGS :: []string{"-static", "-nostdlib", "--build-id=sha1", "-z", "max
 // The back end: an Odin package, with its assembly in arch/ARCH.
 BACKEND_PKG :: "ports/musl/vx"
 
-// It uses vx:rt, without vx:rt's _start: crt1.S is the entry. It has no
-// thread-local storage of its own yet.
-BACKEND_ODIN_FLAGS :: []string{"-define:VX_RT_START=false", "-no-thread-local"}
+// It uses vx:rt, without vx:rt's _start: crt1.S is the entry. Its
+// @(thread_local) record is in musl's TLS, which musl lays out from the same
+// PT_TLS segment (ADR-0007's amendment).
+BACKEND_ODIN_FLAGS :: []string{"-define:VX_RT_START=false"}
 
 Posix_Ports :: struct {
 	musl, compiler_rt, lua, sbase: Port,

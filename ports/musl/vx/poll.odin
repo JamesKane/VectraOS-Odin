@@ -317,18 +317,18 @@ fd_poll :: proc "contextless" (fds: []linux.Pollfd, deadline: vx.Instant) -> int
 // for a timeout that is not one.
 @(private="file")
 poll_deadline :: proc "contextless" (ts: ^linux.Timespec) -> (vx.Instant, int) {
-	if sig_restarting {
-		return sig_call_deadline, 0
+	if be_me().restarting {
+		return be_me().call_deadline, 0
 	}
-	sig_call_deadline = vx.INFINITE
+	be_me().call_deadline = vx.INFINITE
 	if ts != nil {
 		d, e := time_deadline(ts, false)
 		if e < 0 {
 			return 0, e
 		}
-		sig_call_deadline = d
+		be_me().call_deadline = d
 	}
-	return sig_call_deadline, 0
+	return be_me().call_deadline, 0
 }
 
 // ppoll and pselect6's mask: in place for the wait, and for the handlers a
@@ -341,13 +341,13 @@ poll_masked :: proc "contextless" (fds: []linux.Pollfd, ts: ^linux.Timespec, mas
 	if mask == nil {
 		return fd_poll(fds, deadline)
 	}
-	was := sig_mask
-	sig_mask = sigset_word(mask) - UNBLOCKABLE
-	r := pending_load() - sig_mask != {} ? fail(.EINTR) : fd_poll(fds, deadline)
+	was := be_me().mask
+	be_me().mask = sigset_word(mask) - UNBLOCKABLE
+	r := (pending_load() + be_me().pending) - be_me().mask != {} ? fail(.EINTR) : fd_poll(fds, deadline)
 	if r == fail(.EINTR) {
 		_ = sig_deliver_pending()
 	}
-	sig_mask = was
+	be_me().mask = was
 	return r
 }
 

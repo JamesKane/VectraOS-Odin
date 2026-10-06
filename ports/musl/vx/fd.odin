@@ -197,7 +197,9 @@ noted :: proc "contextless" (packets: []vx.Packet) {
 // 0, -ETIMEDOUT, or -EINTR (a signal: the caller's call ends).
 fd_wait :: proc "contextless" (deadline: vx.Instant) -> int {
 	pk: [16]vx.Packet
+	held := be_wait_begin() // another thread may write the pipe this one waits on
 	n, st := rt.port_wait(fd_port, deadline, 0, pk[:])
+	be_wait_end(held)
 	#partial switch st {
 	case .Err_Interrupted:
 		return fail(.EINTR)
