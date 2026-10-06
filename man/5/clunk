@@ -32,5 +32,4 @@ attach(5), walk(5), open(5), remove(5), version(5)
 
 # BUGS
 
-`ORCLOSE` is not carried out: the server never removes a file at its clunk.
-procfs(4), netd(4) and the console refuse an open with it, and bootfs(4), isofs(4), distd(8) and a read-only dosfs(4) count it as writing and refuse it as they refuse any write; fsd(4), tmpfs(4) and a writable dosfs(4) open the file as if the bit were clear.
+A file opened with `ORCLOSE` is removed at its fid's clunk, or its open file's last (see open(5)), whether or not the removal is allowed by then: the permission was checked at the open, as Plan 9 has it; a removal that fails is not reported.

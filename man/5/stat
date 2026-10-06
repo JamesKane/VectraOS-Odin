@@ -56,9 +56,12 @@ In 9P2000 `Twstat` changes some of a file's entry: its name, by anyone with writ
 A field the client leaves alone holds a don't-touch value, an empty string or all ones, and an entry all of don't-touch values asks that the file be committed to stable storage.
 The changes happen together or not at all.
 
-VectraOS maps none of this.
-Every VectraOS server refuses every `Twstat`, before its file server sees it, and vx-9p's client never sends one.
-What `Twstat` does is done with the `posix` and `xattr` extensions' messages instead: `Tsetattr` (see getattr(5)) for the mode, the owner, the group, the length and the times, `Trenameat` for a name, in any directory of the connection, which `Twstat` cannot do, and `Tfsync` (see fsync(5)) for the commit.
+Every VectraOS server does it (M6 step 6d4c1), with the file server's setattr and rename:
+- a new name renames the file in its own directory (not an attach root), failing if the name is taken;
+- the length, the mode's permission bits (`DMDIR` as it is) and the mtime and atime are set;
+- the type, dev, qid and muid may not change (`bad message`), nor the uid or the gid, but to what it is (`permission denied`); `DMAPPEND` and `DMEXCL` are set only at create (`operation not supported`);
+- the rename goes first, and back again if the rest fails.
+vx-9p's client sends `Twstat` to a server without the `posix` and `xattr` extensions (9front, `u9fs`); to one with them it sends their messages, which do more: `Tsetattr` (see getattr(5)) for the owner, the group and nanosecond times too, `Trenameat` (see link(5)) for a name in any directory, and `Tfsync` (see fsync(5)) for the commit.
 
 # SEE ALSO
 
@@ -72,9 +75,16 @@ A VectraOS server answers with these:
   A `Tstat`'s <fid> is not in use.
 : `message too large for msize`
   The entry is longer than 1024 bytes.
+: `bad message`
+  A `Twstat` that would change the type, dev, qid or muid, or a directory's `DMDIR` or length.
+: `permission denied`
+  A `Twstat` of the uid or the gid, of an attach root's name, or one the file server cannot do (no setattr or rename).
+: `file already exists`
+  A `Twstat`'s new name is taken.
 : `operation not supported`
-  Every `Twstat`.
+  A `Twstat` of `DMAPPEND` or `DMEXCL`.
 
 # BUGS
 
-Since VectraOS sends only `Tsetattr` and `Trenameat`, which 9front and `u9fs` lack, and refuses the `Twstat` they send, renaming a file and changing its mode or length fail both ways between VectraOS and Plan 9's servers and clients.
+Through the POSIX layer an owner, a group or a time to the nanosecond cannot be set on a 9P2000 server; `Twstat` has times in seconds and names for owners.
+u9fs cannot rename a file in its root directory (it answers `whoops: can't happen in u9fs`).

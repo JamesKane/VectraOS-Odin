@@ -83,5 +83,5 @@ Other arguments print the usage message, which spells the parameters in capitals
 An <addr>`:`<port> it cannot read makes it exit with status 2 and no message; the port is not checked, so a port that is not a number is port 0.
 Only IPv4 is served.
 
-`Twstat` is refused, so nothing can be renamed or have its mode changed, and `ORCLOSE` is refused.
+Its file server has no `setattr` or `rename`, so a `Twstat` that changes anything is refused with `permission denied`: nothing can be renamed or have its mode changed. `ORCLOSE` removes the host's file at the clunk.
 The table of numbered files only grows, for as long as the server runs, and a file removed and made again gets its old number.

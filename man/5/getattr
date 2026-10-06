@@ -101,4 +101,4 @@ intro(5), stat(5), version(5), error(5); the extension is `docs/proto/posix.md` 
 
 <request_mask> is ignored, the times have no nanoseconds though fsd(4) keeps them, the change time is the modification time, and <nlink> is 1 or 2 whatever the file.
 
-`Twstat` is refused by every server and never sent by the client, so permissions and lengths cannot be changed between VectraOS and a 9P2000 system such as 9front or `u9fs`, in either direction.
+To a server without the `xattr` extension the client sends what it can of a `Tsetattr` as `Twstat` (see stat(5)): the mode's permission bits, the length and times given in seconds; an owner, a group or a time "now" it cannot (`operation not supported`), so the musl back end gives "now" as its own clock's time.

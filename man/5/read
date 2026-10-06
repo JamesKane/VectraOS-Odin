@@ -63,4 +63,4 @@ A VectraOS server answers with these:
 
 vx-9p's client has no `Tflush`, so a read or write a server holds, such as a `listen` or a `ping` that is never answered, waits until it is answered; a note does not end it.
 
-`DMAPPEND` is not kept, so no file appends at an explicit <offset> as Plan 9's append-only files do; only the `posix` extension's `OAPPEND` appends.
+A write to an append-only file (`DMAPPEND`, its qid's `QTAPPEND`) goes to its end whatever its <offset>, as Plan 9's does.

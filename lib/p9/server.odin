@@ -25,8 +25,17 @@ package p9
 // with no call yet, through the clone hook), answers Err_Should_Wait; serve
 // then returns .Defer, without a reply, and the transport holds the
 // request and serves it again when the file server's device has done
-// something (upstream's ring transport does this). Everything else completes
-// as it arrives, so Tflush has nothing to cancel.
+// something (lib/p9ring does this), dropping it if a Tflush names it.
+// Everything else completes as it arrives, so a Tflush finds nothing else to
+// cancel.
+//
+// This file also does, for every file server (upstream's M6 step 6d4c1):
+// ORCLOSE, the file removed as its last fid goes (a file server without
+// remove refuses it); DMAPPEND, a write at the end whatever its offset (a
+// file whose qid says QTAPPEND); and Twstat, mapped onto the file server's
+// setattr and rename. DMEXCL is the file server's, which counts its opens;
+// one that cannot keep DMAPPEND or DMEXCL in a mode refuses a create that
+// asks.
 //
 // With the posix extension, open files and locks are the server's, shared
 // by all its connections (Shared, below), and with xattr, Tgetattr and
@@ -122,6 +131,7 @@ HOLD_TIME :: i64(10_000_000_000) // ns
 
 Open_File :: struct {
 	used, append, shared: bool,
+	orclose:              bool, // opened with ORCLOSE: removed when its last fid goes
 	mode:                 Open_Mode,
 	node:                 Node,
 	offset:               u64,
@@ -156,6 +166,7 @@ Fid_Entry :: struct {
 	qid:        Qid,
 	dir_offset: u64, // a directory read continues only from here
 	dir_index:  u32, // the next entry to read
+	orclose:    bool, // opened with ORCLOSE, and no open file shares it: removed as it is clunked
 }
 
 // One connection's state. Zeroed with fs, max_msize and supported set, it is
@@ -268,6 +279,13 @@ unlock :: proc "contextless" (sh: ^Shared, conn: ^Server, proc_id: u32, any_proc
 
 @(private="file")
 fid_drop :: proc "contextless" (s: ^Server, f: ^Fid_Entry) {
+	remove := f.orclose
+	if o := f.file; o != nil && s.shared != nil {
+		remove = remove || (o.orclose && o.fids == 1) // its last fid
+	}
+	if remove && s.fs.remove != nil {
+		_ = s.fs.remove(s.fs.ctx, f.node) // ORCLOSE; it may already be gone
+	}
 	if s.fs.clunk != nil {
 		s.fs.clunk(s.fs.ctx, f.node, f.open)
 	}
@@ -436,7 +454,11 @@ read_dir :: proc "contextless" (s: ^Server, f: ^Fid_Entry, offset: u64, out: []u
 write :: proc "contextless" (s: ^Server, f: ^Fid_Entry, t: ^Msg) -> (count: u32, e: vx.Status) {
 	o := s.shared != nil ? f.file : nil
 	offset := t.offset
-	if offset == OFFSET_CURRENT {
+	if .Append in f.qid.type { // DMAPPEND: at the end, whatever the offset
+		st: Stat
+		s.fs.stat(s.fs.ctx, f.node, &st) or_return
+		offset = st.length
+	} else if offset == OFFSET_CURRENT {
 		if o == nil {
 			return 0, .Err_Invalid
 		}
@@ -838,6 +860,101 @@ serve_dref :: proc "contextless" (s: ^Server, t: ^Msg, r: ^Msg) -> vx.Status {
 	return .Ok
 }
 
+// Twstat (stat(5)): the entry's fields that are not "don't touch" (all
+// ones, or an empty string) are changed, all of them or none:
+//   - name: a rename in the file's own directory (not of an attach root);
+//   - length, mode (its permission bits; DMDIR as it is), mtime and atime:
+//     the file server's setattr;
+//   - type, dev, qid and muid may not change, nor uid (no chown in 9P);
+//     gid only to what it is; DMAPPEND and DMEXCL only at create.
+// The rename goes first, and back if setattr then fails. Nothing to change
+// asks the file to be written out (fsync), as 9P has it.
+@(private="file", require_results)
+serve_wstat :: proc "contextless" (s: ^Server, f: ^Fid_Entry, t: ^Msg) -> vx.Status {
+	w, cur: Stat
+	if stat_decode(t.stat, &w) != .Ok {
+		return .Err_Invalid
+	}
+	s.fs.stat(s.fs.ctx, f.node, &cur) or_return
+	old_buf: [256]u8 // the name, kept: the file server's strings last until its next call
+	if len(cur.name) >= len(old_buf) {
+		return .Err_Range
+	}
+	old := string(old_buf[:copy(old_buf[:], cur.name)])
+	same_gid := len(w.gid) == 0 || w.gid == cur.gid
+	same_uid := len(w.uid) == 0 || w.uid == cur.uid
+	untouched := stat_untouched()
+	keep_qid := w.qid == untouched.qid || w.qid == cur.qid
+	if (w.type != max(u16) && w.type != cur.type) || (w.dev != max(u32) && w.dev != cur.dev) || !keep_qid || len(w.muid) > 0 {
+		return .Err_Invalid
+	}
+	if !same_uid || !same_gid {
+		return .Err_Access
+	}
+	a: Setattr
+	if w.mode != max(u32) {
+		if (w.mode ~ cur.mode) & DMDIR != 0 {
+			return .Err_Invalid
+		}
+		if (w.mode ~ cur.mode) & (DMAPPEND | DMEXCL | DMSYMLINK | DMDEVICE) != 0 {
+			return .Err_Unsupported
+		}
+		a.valid += {.Mode}
+		a.mode = w.mode & 0o777
+	}
+	if w.length != max(u64) {
+		dir := cur.mode & DMDIR != 0
+		if dir && w.length != cur.length {
+			return .Err_Invalid
+		}
+		if !dir {
+			a.valid += {.Size}
+			a.size = w.length
+		}
+	}
+	if w.mtime != max(u32) {
+		a.valid += {.Mtime, .Mtime_Set}
+		a.mtime_sec = u64(w.mtime)
+	}
+	if w.atime != max(u32) {
+		a.valid += {.Atime, .Atime_Set}
+		a.atime_sec = u64(w.atime)
+	}
+	rename := len(w.name) > 0 && w.name != old
+	if !rename && a.valid == {} {
+		return s.fs.fsync != nil ? s.fs.fsync(s.fs.ctx, f.node) : .Ok
+	}
+	if (a.valid != {} && s.fs.setattr == nil) || (rename && s.fs.rename == nil) {
+		return .Err_Access
+	}
+	dir: Node
+	if rename {
+		if f.node == f.root {
+			return .Err_Access
+		}
+		if !new_name_ok(w.name) {
+			return .Err_Invalid
+		}
+		dir = s.fs.parent(s.fs.ctx, f.node) or_return
+		if there, we := s.fs.walk(s.fs.ctx, dir, w.name); we == .Ok { // 9P's rename replaces nothing
+			if s.fs.clunk != nil {
+				s.fs.clunk(s.fs.ctx, there, false)
+			}
+			return .Err_Exists
+		}
+		s.fs.rename(s.fs.ctx, dir, old, dir, w.name) or_return
+	}
+	if a.valid != {} {
+		if e := s.fs.setattr(s.fs.ctx, f.node, &a); e != .Ok {
+			if rename {
+				_ = s.fs.rename(s.fs.ctx, dir, w.name, dir, old) // none of it, then
+			}
+			return e
+		}
+	}
+	return .Ok
+}
+
 // Handles one request (one whole message) and writes the reply into resp.
 // Returns the reply's length with .Reply; otherwise the length is 0.
 @(require_results)
@@ -936,6 +1053,10 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 				e = .Err_Bad_State
 				break
 			}
+			if t.mode.rclose && s.fs.remove == nil {
+				e = .Err_Access // nothing here is removed
+				break
+			}
 			if t.type == .Tcreate {
 				node: Node
 				if .Dir not_in f.qid.type || !good_name(t.name) || t.name == ".." {
@@ -977,6 +1098,11 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 			}
 			f.open = true
 			f.mode = plain_mode(t.mode)
+			if t.mode.rclose && f.file != nil {
+				f.file.orclose = true // the open file's, which forks share
+			} else {
+				f.orclose = t.mode.rclose
+			}
 			r.qid = f.qid
 			r.iounit = s.msize - IOHDRSZ
 		case .Tread:
@@ -1037,6 +1163,10 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 			}
 			if t.type == .Tremove {
 				e = s.fs.remove != nil ? s.fs.remove(s.fs.ctx, f.node) : .Err_Access
+				f.orclose = false // removed already, or not to be
+				if f.file != nil && s.shared != nil {
+					f.file.orclose = false
+				}
 			}
 			fid_drop(s, f) // a remove clunks the fid whether or not it worked
 		case .Tstat:
@@ -1051,7 +1181,11 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 				r.stat = s.stat[:n]
 			}
 		case .Twstat:
-			e = .Err_Unsupported // renames and chmod: Trenameat and Tsetattr
+			if f = fid_find(s, t.fid); f == nil {
+				e = .Err_Bad_Handle
+			} else {
+				e = serve_wstat(s, f, &t)
+			}
 		case .Tgetattr, .Tsetattr, .Trenameat, .Tsymlink, .Treadlink, .Tfsync, .Tlink, .Tlock, .Tgetlock, .Tshare, .Tjoin, .Tseek, .Tdesc:
 			e = serve_posix(s, &t, &r)
 		case .Tmap:

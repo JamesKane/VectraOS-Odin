@@ -251,7 +251,27 @@ fd_renameat :: proc "contextless" (olddirfd: int, old: string, newdirfd: int, ne
 		_ = p9.client_clunk(c1, f1)
 		return e2
 	}
-	r := c1 == c2 ? ext_errno(p9.client_renameat(c1, f1, n1, f2, n2)) : fail(.EXDEV) // within one server only
+	// The directories, as fd_parent left them in the buffers before the names.
+	d1 := string(b1[:uintptr(raw_data(n1)) - uintptr(&b1[0])])
+	d2 := string(b2[:uintptr(raw_data(n2)) - uintptr(&b2[0])])
+	posix := c1 == c2 && .Posix in c1.extensions
+	r: int
+	switch {
+	case c1 != c2 || (!posix && d1 != d2):
+		r = fail(.EXDEV) // within one server only; a 9P2000 server's (Twstat) within a directory only
+	case posix:
+		r = ext_errno(p9.client_renameat(c1, f1, n1, f2, n2))
+	case:
+		// Twstat does not replace what is there, as POSIX's rename does: what
+		// is there goes first (not atomically, on such a server).
+		st := p9.client_rename_wstat(c1, f1, n1, n2)
+		if st == .Err_Exists {
+			if there, we := p9.client_walk(c1, f1, n2); we == .Ok && p9.client_remove(c1, there) == .Ok {
+				st = p9.client_rename_wstat(c1, f1, n1, n2)
+			}
+		}
+		r = ext_errno(st)
+	}
 	_ = p9.client_clunk(c1, f1)
 	_ = p9.client_clunk(c2, f2)
 	return r
@@ -364,6 +384,18 @@ fd_utimens :: proc "contextless" (dirfd: int, path: string, has_path: bool, time
 	}
 	if a.valid == {} {
 		return 0
+	}
+	// "Now", as this side's clock has it: a server without the xattr
+	// extension is told the time itself (Twstat has no "now").
+	now: linux.Timespec
+	_ = time_get(linux.CLOCK_REALTIME, &now)
+	if .Atime in a.valid && .Atime_Set not_in a.valid {
+		a.atime_sec, a.atime_nsec = u64(now.sec), u64(now.nsec)
+		a.valid += {.Atime_Set}
+	}
+	if .Mtime in a.valid && .Mtime_Set not_in a.valid {
+		a.mtime_sec, a.mtime_nsec = u64(now.sec), u64(now.nsec)
+		a.valid += {.Mtime_Set}
 	}
 	return fd_setattr(has_path ? -1 : dirfd, dirfd, path, has_path, flags & linux.AT_SYMLINK_NOFOLLOW == 0, a)
 }

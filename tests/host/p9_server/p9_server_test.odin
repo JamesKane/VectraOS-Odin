@@ -401,7 +401,8 @@ test_hostile_client :: proc(t: ^testing.T) {
 	junk := [16]u8{16, 0, 0, 0, 120, 1, 0, 1, 2, 3, 0, 0, 0, 0, 0, 0}
 	_, junk_res := p9.serve(&server, junk[:], h.resp[:])
 	testing.expect_value(t, junk_res, p9.Serve_Result.Hang_Up)
-	testing.expect_value(t, raw(h, {type = .Twstat, tag = 1, fid = 1, stat = junk[:4]}), vx.Status.Err_Unsupported)
+	// A Twstat whose entry is not one: refused (6d4c1 maps a good one onto setattr and rename).
+	testing.expect_value(t, raw(h, {type = .Twstat, tag = 1, fid = 1, stat = junk[:4]}), vx.Status.Err_Invalid)
 }
 
 // A read or write the file system cannot do yet is deferred, without a reply,

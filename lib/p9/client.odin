@@ -323,6 +323,44 @@ client_stat :: proc "contextless" (c: ^Client, fid: Fid, out: ^Stat, keep: ^Stat
 	return stat_decode(keep.bytes[:n], out)
 }
 
+// A stat entry that changes nothing: every field "don't touch" (all ones, or
+// empty), for Twstat to change only what the caller then sets.
+stat_untouched :: proc "contextless" () -> Stat {
+	return {
+		type = max(u16),
+		dev = max(u32),
+		qid = {type = transmute(Qid_Type)u8(0xff), version = max(u32), path = max(u64)},
+		mode = max(u32),
+		atime = max(u32),
+		mtime = max(u32),
+		length = max(u64),
+	}
+}
+
+// Twstat: what w's fields say, all or none (stat_untouched for the rest).
+@(require_results)
+client_wstat :: proc "contextless" (c: ^Client, fid: Fid, w: ^Stat) -> vx.Status {
+	entry: [512]u8
+	n := stat_encode(w, entry[:])
+	if n == 0 {
+		return .Err_Too_Small
+	}
+	t := Msg{type = .Twstat, fid = fid, stat = entry[:n]}
+	return call(c, &t)
+}
+
+// Renames dir's entry oldname to newname in the same directory, by Twstat:
+// a 9P2000 server's rename. Unlike POSIX's, it fails if newname is there.
+@(require_results)
+client_rename_wstat :: proc "contextless" (c: ^Client, dir: Fid, oldname, newname: string) -> vx.Status {
+	fid := client_walk(c, dir, oldname) or_return
+	w := stat_untouched()
+	w.name = newname
+	e := client_wstat(c, fid, &w)
+	_ = client_clunk(c, fid)
+	return e
+}
+
 @(require_results)
 client_remove :: proc "contextless" (c: ^Client, fid: Fid) -> vx.Status {
 	t := Msg{type = .Tremove, fid = fid}
@@ -368,13 +406,35 @@ client_getattr :: proc "contextless" (c: ^Client, fid: Fid) -> (attr: Attr, e: v
 	return rc.r.attr, .Ok
 }
 
+// Without the xattr extension, as Twstat (a 9P2000 server: 9front, u9fs):
+// the mode's permission bits, the size, and times given; an owner, a group
+// or a time "now" is .Err_Unsupported there (the caller gives the time).
 @(require_results)
 client_setattr :: proc "contextless" (c: ^Client, fid: Fid, a: Setattr) -> vx.Status {
-	if .Xattr not_in c.extensions {
+	if .Xattr in c.extensions {
+		t := Msg{type = .Tsetattr, fid = fid, setattr = a}
+		return call(c, &t)
+	}
+	CAN :: Setattr_Mask{.Mode, .Size, .Atime, .Atime_Set, .Mtime, .Mtime_Set}
+	if a.valid - CAN != {} || (.Atime in a.valid && .Atime_Set not_in a.valid) || (.Mtime in a.valid && .Mtime_Set not_in a.valid) {
 		return .Err_Unsupported
 	}
-	t := Msg{type = .Tsetattr, fid = fid, setattr = a}
-	return call(c, &t)
+	w := stat_untouched()
+	if .Mode in a.valid {
+		cur: Stat
+		client_stat(c, fid, &cur) or_return // its type bits stay
+		w.mode = (cur.mode &~ 0o777) | (a.mode & 0o777)
+	}
+	if .Size in a.valid {
+		w.length = a.size
+	}
+	if .Atime_Set in a.valid {
+		w.atime = u32(a.atime_sec)
+	}
+	if .Mtime_Set in a.valid {
+		w.mtime = u32(a.mtime_sec)
+	}
+	return client_wstat(c, fid, &w)
 }
 
 // Renames olddir's entry oldname to newname in newdir, both on this

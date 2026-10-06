@@ -395,7 +395,13 @@ fs_parent :: proc "contextless" (ctx: rawptr, n: p9.Node) -> (parent: p9.Node, s
 	if st == .Ok && fs.is_orphan(&f) {
 		st = .Err_Not_Found
 	}
-	if st == .Ok {
+	if st == .Ok && !fs.is_dir(&f) { // a file's (Twstat's rename): its key names its directory
+		if f.nkey > 9 {
+			p, st = fs.file_by_qid(&vol, tree_of(node), fs.kget64(f.key[1:]))
+		} else {
+			st = .Err_Not_Found
+		}
+	} else if st == .Ok {
 		p, st = fs.walk(&vol, tree_of(node), &f, "..")
 	}
 	if st != .Ok {
@@ -435,8 +441,10 @@ fs_stat :: proc "contextless" (ctx: rawptr, n: p9.Node, out: ^p9.Stat) -> (st: v
 	d := &stat_file.d
 	dir := d.mode & fs.DMDIR != 0
 	root := stat_file.nkey == 9 && !fs.is_orphan(&stat_file)
+	qtype := dir ? p9.QTDIR : p9.QTFILE
+	qtype += transmute(p9.Qid_Type)u8(d.mode >> 24) & (p9.QTAPPEND + p9.QTEXCL) // the mode's top byte is the qid type
 	out^ = {
-		qid    = {type = dir ? p9.QTDIR : {}, version = d.qid_vers, path = u64(node)},
+		qid    = {type = qtype, version = d.qid_vers, path = u64(node)},
 		mode   = d.mode,
 		atime  = u32(d.atime / 1_000_000_000),
 		mtime  = u32(d.mtime / 1_000_000_000),
@@ -494,6 +502,11 @@ fs_open :: proc "contextless" (ctx: rawptr, n: p9.Node, mode: p9.Open_Mode) -> (
 	}
 	if halted && writes {
 		return .Err_Bad_State
+	}
+	if f.d.mode & fs.DMEXCL != 0 && !mode.join {
+		if now_open := open_slot(node, false); now_open != nil && now_open.count != 0 {
+			return .Err_Access // DMEXCL: open already (Plan 9's "exclusive use file already open")
+		}
 	}
 	o := open_slot(node, true)
 	if o == nil {
@@ -730,7 +743,8 @@ fs_create :: proc "contextless" (ctx: rawptr, d: p9.Node, name: string, perm: u3
 	}
 	// Plan 9's: no more of the directory's bits, and in its group.
 	bits := isdir ? perm & (df.d.mode & 0o777) : perm & (~u32(0o666) | (df.d.mode & 0o666))
-	f := fs.create(&vol, tree_of(dir), &df, name, (isdir ? fs.DMDIR : 0) | (bits & 0o777), uid_of(dir), df.d.gid, now_ns()) or_return
+	kept := isdir ? fs.DMDIR : perm & (p9.DMAPPEND | p9.DMEXCL) // append-only, exclusive: a file's
+	f := fs.create(&vol, tree_of(dir), &df, name, kept | (bits & 0o777), uid_of(dir), df.d.gid, now_ns()) or_return
 	changed()
 	out := node_in(dir, &f)
 	if o := open_slot(out, true); o != nil { // create opens it

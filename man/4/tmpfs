@@ -71,8 +71,6 @@ It holds 1022 files, directories and links besides the root, 128 MiB of mappings
 
 It is not restarted, and keeps nothing: a `tmpfs` that exits loses every file.
 
-`DMEXCL` and `DMAPPEND` are dropped from a create's permissions without an error, so exclusive-use and append-only files silently do not work.
-
 Permissions are not enforced, and owners are not kept.
 
 Errors are 9P's nearest words, not POSIX's: `offset out of range` for a long name, `out of memory` for a full file system.

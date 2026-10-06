@@ -22,7 +22,7 @@ As every 9Px message does, they fail with an `Rerror` and its string, not 9P2000
 ## Renameat
 
 The `renameat` request moves the entry <oldname> of the directory <olddirfid> refers to into the directory <newdirfid> refers to, as <newname>.
-It is the only way to rename a file in 9Px: every VectraOS server refuses `Twstat` (see stat(5)), and 9P2000.L's `Trename` does not exist in 9Px.
+It moves a file between directories, which `Twstat` (see stat(5)) cannot, and replaces what is at <newname>, as POSIX's `rename` does; 9P2000.L's `Trename` does not exist in 9Px.
 Neither fid need be open, and they may be the same.
 
 Both fids must be in use on the connection, or the answer is `unknown fid`.
@@ -54,6 +54,6 @@ intro(5), walk(5), stat(5), version(5), tmpfs(4), fsd(4), dosfs(4); the extensio
 
 There are no hard links.
 
-`Twstat` is refused by every server and never sent by the client, which renames only with `Trenameat`, so renames fail between VectraOS and a 9P2000 system such as 9front or `u9fs`, in either direction.
+To a 9P2000 server (9front, `u9fs`) the musl back end renames with `Twstat`: within a directory only (`EXDEV` across directories), and, since `Twstat` replaces nothing, by removing what is at the new name first, which is not atomic.
 
 A file cannot be moved between two servers, or between two of fsd(4)'s branches, by a rename; the client must copy it.

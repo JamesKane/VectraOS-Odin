@@ -31,6 +31,8 @@ import vx "abi:vx"
 QTDIR :: 0x80
 QTSYMLINK :: 0x02
 DMDIR :: 0x8000_0000
+DMAPPEND :: 0x4000_0000 // Plan 9's: its qid type has 0x40 (QTAPPEND)
+DMEXCL :: 0x2000_0000 // and 0x20 (QTEXCL)
 DMSYMLINK :: 0x0200_0000
 
 NAMEMAX :: KEYMAX - 9
@@ -440,17 +442,11 @@ create :: proc "contextless" (v: ^Vol, t: ^Tree, dir: ^File, name: string, mode,
 	if st != .Err_Not_Found {
 		return {}, st
 	}
-	qtype := u8(0)
-	if mode & DMDIR != 0 {
-		qtype = QTDIR
-	}
-	if mode & DMSYMLINK != 0 {
-		qtype = QTSYMLINK
-	}
+	kept := mode & (DMDIR | DMAPPEND | DMEXCL | DMSYMLINK | 0o7777)
 	f.d = Dir {
 		qid_path = v.nextqid,
-		qid_type = qtype,
-		mode     = mode & (DMDIR | DMSYMLINK | 0o7777),
+		qid_type = u8(kept >> 24), // the type bits, as Plan 9 has them: QTDIR, QTAPPEND, QTEXCL, QTSYMLINK
+		mode     = kept,
 		atime    = now,
 		mtime    = now,
 		ctime    = now,
@@ -723,7 +719,7 @@ setattr :: proc "contextless" (v: ^Vol, t: ^Tree, f: ^File, a: Attr, now: i64) -
 		f.d.length = a.length
 	}
 	if .Mode in a.valid {
-		f.d.mode = (f.d.mode & (DMDIR | DMSYMLINK)) | (a.mode & 0o7777)
+		f.d.mode = (f.d.mode & (DMDIR | DMAPPEND | DMEXCL | DMSYMLINK)) | (a.mode & 0o7777)
 	}
 	if .Uid in a.valid {
 		f.d.uid = a.uid

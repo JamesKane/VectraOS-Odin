@@ -205,8 +205,10 @@ fs_stat :: proc "contextless" (ctx: rawptr, id: p9.Node, out: ^p9.Stat) -> vx.St
 	if n == nil {
 		return .Err_Not_Found
 	}
+	qtype := n.dir ? p9.QTDIR : p9.QTFILE
+	qtype += transmute(p9.Qid_Type)u8(n.mode >> 24) & (p9.QTAPPEND + p9.QTEXCL)
 	out^ = {
-		qid    = {type = n.dir ? p9.QTDIR : p9.QTFILE, version = n.version, path = u64(id)},
+		qid    = {type = qtype, version = n.version, path = u64(id)},
 		mode   = (n.dir ? p9.DMDIR : 0) | (n.link ? p9.DMSYMLINK : 0) | n.mode,
 		atime  = n.atime,
 		mtime  = n.mtime,
@@ -227,6 +229,9 @@ fs_open :: proc "contextless" (ctx: rawptr, id: p9.Node, mode: p9.Open_Mode) -> 
 	}
 	if n.dir && (p9.writes(mode) || mode.trunc) {
 		return .Err_Access
+	}
+	if n.mode & p9.DMEXCL != 0 && n.opens != 0 && !mode.join {
+		return .Err_Access // open already
 	}
 	if mode.trunc {
 		n.size = 0
@@ -329,7 +334,7 @@ fs_create :: proc "contextless" (ctx: rawptr, dir: p9.Node, name: string, perm: 
 		dir    = is_dir,
 		gen    = n.gen,
 		parent = ds,
-		mode   = perm & 0o777,
+		mode   = perm & (0o777 | (is_dir ? 0 : p9.DMAPPEND | p9.DMEXCL)), // a file's DMAPPEND, DMEXCL
 		mtime  = now_seconds(),
 		opens  = 1, // create opens it
 	}
@@ -376,7 +381,7 @@ fs_setattr :: proc "contextless" (ctx: rawptr, id: p9.Node, a: ^p9.Setattr) -> v
 		n.version += 1
 	}
 	if .Mode in a.valid {
-		n.mode = a.mode & 0o7777
+		n.mode = (n.mode & (p9.DMAPPEND | p9.DMEXCL)) | (a.mode & 0o7777)
 	}
 	now := now_seconds()
 	if .Atime in a.valid {

@@ -3,7 +3,9 @@
 # (third_party/u9fs, ADR-0006). QEMU gives each connection to 10.0.2.101!564
 # a u9fs, chrooted in a user namespace into a fresh copy of the fixtures (and
 # the etc/ its user lookups read). The shell mounts it; children dial it
-# again; a file is created, written, read back, and found on the host.
+# again; a file is created, written, read back, copied into a directory, renamed there and its mode
+# changed by sbase's mv and chmod (u9fs renames nothing in its root) (Twstat: u9fs speaks 9P2000, M6 step
+# 6d4c1), and found on the host.
 
 scenario=u9fs timeout=40
 expect="netd: 10.0.2.15/24 from dhcp, gateway 10.0.2.2"
@@ -21,12 +23,27 @@ prompt="% "
 send="cat /n/u9fs/out.txt"
 line="written through u9fs"
 prompt="% "
+send="/boot/bin/posix/mkdir /n/u9fs/sub"
+prompt="% "
+send="/boot/bin/posix/cp /n/u9fs/out.txt /n/u9fs/sub/out.txt"
+prompt="% "
+send="/boot/bin/posix/mv /n/u9fs/sub/out.txt /n/u9fs/sub/moved.txt"
+prompt="% "
+send="/boot/bin/posix/chmod 600 /n/u9fs/sub/moved.txt"
+prompt="% "
+send="/boot/bin/posix/ls -l /n/u9fs/sub/moved.txt"
+expect="-rw------- "
+prompt="% "
+send="cat /n/u9fs/sub/moved.txt"
+line="written through u9fs"
+prompt="% "
 send="cat /n/u9fs/nothing"
 expect="cat: /n/u9fs/nothing: "
 prompt="% "
 send="echo done"
 line="done"
 host=u9fs/out.txt text="written through u9fs"
+host=u9fs/sub/moved.txt text="written through u9fs"
 fail="vx: panic"
 fail="FAILED"
 fail=") killed: "

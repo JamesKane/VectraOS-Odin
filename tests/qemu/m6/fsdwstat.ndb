@@ -1,0 +1,13 @@
+# tests/qemu/fsdwstat.ndb: what vx-9p's server does for every file server
+# (M6 step 6d4c1): Twstat, ORCLOSE, DMAPPEND and DMEXCL, against fsd and
+# tmpfs (tests/user/wstattest.c), on the fsd scenarios' volume.
+
+scenario=fsdwstat timeout=60 cmdline=vx.skip=rc with=wstattest,fsdvol disk=64 volume=tests/fsd/home
+expect="fsd: serving /srv/fsd"
+expect="wstattest: 48 checks, 0 failed"
+line="svcd: wstattest exited"
+fail="vx: panic"
+fail="wstattest: FAILED"
+fail="svcd: wstattest exited: "
+fail="fsd: FAILED"
+fail=") killed: "

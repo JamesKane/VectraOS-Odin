@@ -1,0 +1,9 @@
+# tests/user/wstattest.ndb: wstattest with fsd's home branch on /tmp and
+# tmpfs on /n/mem (tests/qemu/fsdwstat.ndb), as vectra, whose home it is.
+
+service=wstattest program=/boot/bin/wstattest console
+user=vectra
+ns=posix
+mount=/tmp srv=fsd aname=home flags=c
+mount=/n/mem srv=tmpfs flags=c
+connect=nsd

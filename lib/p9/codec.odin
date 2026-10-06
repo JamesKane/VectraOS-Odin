@@ -50,9 +50,13 @@ QTEXCL :: Qid_Type{.Excl}
 QTAUTH :: Qid_Type{.Auth}
 QTFILE :: Qid_Type{}
 
-// A stat's mode: a directory; and 9P2000.u's link and device (a terminal, to
-// the musl back end). Beside the permission bits, so plain u32s.
+// A stat's mode: a directory, an append-only file (writes go to its end,
+// whatever their offset), an exclusive-use one (open by one at a time); and
+// 9P2000.u's link and device (a terminal, to the musl back end). Beside the
+// permission bits, so plain u32s.
 DMDIR :: u32(0x8000_0000)
+DMAPPEND :: u32(0x4000_0000)
+DMEXCL :: u32(0x2000_0000)
 DMSYMLINK :: u32(0x0200_0000)
 DMDEVICE :: u32(0x0080_0000)
 
@@ -871,6 +875,7 @@ ERRORS_HEARD := [?]Error_Text {
 	{.Err_Access, "is a directory"},
 	{.Err_Access, "operation not permitted"},
 	{.Err_Bad_Handle, "fid unknown or out of range"},
+	{.Err_Access, "exclusive use file already open"},
 	{.Err_No_Space, "no space left on device"},
 }
 

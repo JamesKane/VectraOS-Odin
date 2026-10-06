@@ -17,7 +17,7 @@ size[4] Rcreate tag[2] qid[13] iounit[4]
 
 `Topen` asks the server to check permissions and prepare <fid> for reading and writing with read(5)'s messages.
 The low two bits of <mode> say how: 0 `OREAD` for reading, 1 `OWRITE` for writing, 2 `ORDWR` for both and 3 `OEXEC` for execution, each checked against the file's permissions.
-`OTRUNC` (`0x10`) truncates the file as well, which needs write permission; `ORCLOSE` (`0x40`) asks that the file be removed when the fid is clunked, which VectraOS's servers do not do (see BUGS).
+`OTRUNC` (`0x10`) truncates the file as well, which needs write permission; `ORCLOSE` (`0x40`) asks that the file be removed when the fid is clunked, or when the connection ends; with the `posix` extension, when the last fid of its open file goes, so a fork's copies keep it until all are closed (M6 step 6d4c1). It needs a server that removes files: one without removal refuses the open with `permission denied`.
 9Px adds `OAPPEND` (`0x80`) for the `posix` extension: the fid's open file appends, as below.
 The bit `0x20` is the framework's own, never a client's, and is taken out of every mode a client sends; any other bit goes to the file server unchecked.
 These messages are 9P2000's, types 112 to 115, unchanged on the wire, and need no extension.
@@ -73,9 +73,6 @@ A VectraOS server answers with these:
 
 # BUGS
 
-`ORCLOSE` is not done: no server removes the file at the clunk.
-tmpfs(4), fsd(4), nullfs(4), ptyd(4) and a writable dosfs(4) open the file as if the bit were not there; the others refuse the open with `permission denied`.
-
-`DMEXCL` and `DMAPPEND` in a `Tcreate`'s <perm> are dropped without an error, so exclusive-use and append-only files cannot be made, and no open is refused for exclusive use.
+`DMEXCL` and `DMAPPEND` in a `Tcreate`'s <perm> are kept by fsd(4) and tmpfs(4), and refused by dosfs(4), which has nowhere to keep them; a second open of an exclusive-use file is refused with `permission denied`, where Plan 9 says `exclusive use file already open`.
 
 A `Tcreate` that fails after the file is made, when the server's open files are all in use, leaves the file in the directory and <fid> referring to it, not open, rather than to the directory.
