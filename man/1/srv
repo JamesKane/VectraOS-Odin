@@ -1,0 +1,59 @@
+page=srv sect=1 summary="post a 9P server over TCP in /srv, and mount it"
+    src=cmd/srv.c,lib/vx-ns/relay.c
+    keys=post,mount,tcp,dial,9fs,share,9front
+
+# SYNOPSIS
+
+```usage
+srv [-abcCmnNq] [-s seconds] [net!]host [srvname [mtpt]]
+```
+
+# DESCRIPTION
+
+`srv` dials a 9P server, posts the connection in srvfs(4)'s `/srv` as `/srv/`<srvname>, and, if asked, mounts it on <mtpt>, as 9front's `srv` does (M6 step 6d4d2c).
+The connection is a relay(4)'s: one session, which every mount of the post shares, and which goes on after `srv` exits for as long as the post or a mount holds it.
+The mount is made in the namespace `srv` shares with the shell that ran it, so the shell and its children have it.
+
+The address is <host>, <net>`!`<host> or <net>`!`<host>`!`<service>; the network is `tcp` and the service `9fs` (564) unless given.
+Without <srvname>, the post is named after the address's last `/`-separated element; without <mtpt>, the mount point is `/n/` and the address after its network.
+Giving <mtpt> means mounting.
+
+If `/srv/`<srvname> is there already, `srv` says so and exits; asked to mount, it mounts that post instead, or, if it answers no more, removes it and dials again.
+A mount that fails because the server hung up removes the post, dials again and tries once more.
+
+: `-a`, `-b`, `-c`
+  Mount, after what is on <mtpt>, before it, or letting files be created there, as rc(1)'s `mount` takes them.
+: `-C`
+  Mount; there is no mount cache, so it is `-m`.
+: `-m`
+  Mount.
+: `-q`
+  Post, or find the post there already, quietly, and do not mount.
+: `-n`
+  No authentication: there is none to do until keyd (M10).
+: `-N`
+  Attach as `none`, and do not try again.
+: `-s` <seconds>
+  Wait that long between dialing and posting.
+
+# EXAMPLES
+
+```rc
+% srv tcp!10.0.2.101!564 u9 /n/u9
+% ls /n/u9
+etc  hello.txt
+% mount /srv/u9 /n/again
+```
+
+# SEE ALSO
+
+srvfs(4), relay(4), rc(1), ns(1); 9front's `srv` command
+
+# DIAGNOSTICS
+
+As 9front's: `srv: /srv/u9 already exists`, `srv: dial tcp!host!9fs: ...`, `srv tcp!host: mount failed: ...`; the exit status is `dial`, `post`, `mount` or `usage`.
+
+# BUGS
+
+9front's `-e`, a command's standard input and output as the connection, is not there: `srv` dials TCP only.
+The post is the relay's connector, so a relay that exits (its server hung up) leaves a post of nothing until it is mounted again or removed.

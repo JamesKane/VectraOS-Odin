@@ -115,7 +115,7 @@ connect :: proc "contextless" (from: ^Handles, name: string) -> (c: ^p9.Client, 
 
 // A connection through a connector handle (which the namespace takes, if it
 // succeeds), in a free slot.
-@(private="file", require_results)
+@(require_results)
 connect_handle :: proc "contextless" (connector: vx.Handle) -> (c: ^p9.Client, st: vx.Status) {
 	for &k, i in conns {
 		if k.end != vx.HANDLE_NONE {
@@ -200,7 +200,7 @@ Group :: struct {
 	seq:   u64, // the sequence the table was last built from
 }
 
-@(private="file")
+@(private)
 group: Group
 
 @(private="file")
@@ -219,7 +219,7 @@ request: Nsd_Request
 // One call to nsd on ch: args, then text and names, giving handles; the
 // reply, its handles in got. Returns the channel's status, or the reply's;
 // on a failure, any handle that came is closed.
-@(private="file", require_results)
+@(private, require_results)
 nsd :: proc "contextless" (ch: vx.Handle, call: ns.Nsd_Call, args: ns.Nsd_Args, text, names: string, give: []vx.Handle, got: []vx.Handle) -> (rep: ns.Nsd_Msg, st: vx.Status) {
 	if len(text) + len(names) > len(request.bytes) {
 		return {}, .Err_Range
@@ -265,7 +265,8 @@ script: ns.Script
 
 // Replays a group's text onto an empty table: a mount's source is a
 // connection the table has from it already, a connector nsd keeps for the
-// group (/srv/NAME), or an address to dial. A line that fails is said, and
+// group (/srv/NAME, or an address a member mounted through a relay:
+// relay.odin), or an address to dial. A line that fails is said, and
 // the rest replayed: one line lost, not all after it.
 @(private="file", require_results)
 group_apply :: proc "contextless" (space: ^ns.Namespace, text: string) -> vx.Status {
@@ -283,7 +284,8 @@ group_apply :: proc "contextless" (space: ^ns.Namespace, text: string) -> vx.Sta
 			src, old := op.args[0], op.args[1]
 			aname := len(op.args) > 2 ? op.args[2] : ""
 			st = ns.mount_srv(space, src, aname, old, op.flags)
-			if st == .Err_Not_Found && len(src) > 5 && str.has_prefix(src, "/srv/") {
+			post := len(src) > 5 && str.has_prefix(src, "/srv/")
+			if st == .Err_Not_Found { // a post, or an address mounted through a relay: nsd has it
 				connector: [1]vx.Handle
 				_, st = nsd(group.chan, .Connector, {}, src, "", nil, connector[:])
 				c: ^p9.Client
@@ -295,7 +297,8 @@ group_apply :: proc "contextless" (space: ^ns.Namespace, text: string) -> vx.Sta
 				} else {
 					rt.close_all(connector[0])
 				}
-			} else if st == .Err_Not_Found { // an address: dialed
+			}
+			if st == .Err_Not_Found && !post { // an address dialed by its first member: dialed
 				c, dsrc, dst := ns.dial(space, src)
 				st = dst
 				if st == .Ok {

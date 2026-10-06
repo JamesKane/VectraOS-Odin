@@ -31,11 +31,10 @@ Every other manifest post is reached only by the grants manifests give (svc(6)),
 
 # SEE ALSO
 
-svc(6), svcd(8), namespace(6), mount(1), version(5); 9front's `#s` device
+srv(1), svc(6), svcd(8), namespace(6), rc(1), version(5); 9front's `#s` device
 
 # BUGS
 
 srvfs keeps its posts in memory: a restart loses them, and svcd lists the `srvmode=` posts only when it first starts srvfs.
 There are at most 64 posts, 64 users and 63-byte names.
 A post's mode cannot be changed after it is made, and its owner is the attaching user's name, unchecked until keyd (M10).
-Nothing yet makes a post but srvtest and svcd: the `srv` command is M6 step 6d4d2c.

@@ -152,9 +152,10 @@ builtin_run :: proc "contextless" (argv: ^rc.Word, n: int) -> bool {
 		}
 		return true
 	case "mount":
-		// A service this namespace has a connection from (/srv/NAME, as ns
-		// prints it, so its output replays), or a 9P server over TCP,
-		// tcp!HOST!PORT or 9p://HOST:PORT.
+		// A post, /srv/NAME, which this namespace has a connection from (as
+		// ns prints it, so its output replays) or srvfs has (srv(1)'s, say);
+		// or a 9P server over TCP, tcp!HOST!PORT or 9p://HOST:PORT, through
+		// a relay, so the children share its session (procns's relay.odin).
 		if !flags_ok || n - first < 2 || n - first > 3 {
 			usage(usage_of.TEXT_mount)
 			return true
@@ -163,13 +164,9 @@ builtin_run :: proc "contextless" (argv: ^rc.Word, n: int) -> bool {
 		aname := n - first == 3 ? w[first + 2] : ""
 		st: vx.Status
 		if len(from) > 5 && str.has_prefix(from, "/srv/") {
-			st = ns.mount_srv(&space, from, aname, old, flags)
+			st = procns.mount_post(&space, from, aname, old, flags)
 		} else {
-			c, src, dst := ns.dial(&space, from)
-			st = dst
-			if st == .Ok {
-				st = ns.mount(&space, c, vx.HANDLE_NONE, src, aname, old, flags)
-			}
+			st = procns.mount_addr(&space, from, aname, old, flags)
 		}
 		report("mount", st)
 		return true

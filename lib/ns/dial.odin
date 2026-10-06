@@ -15,6 +15,9 @@ package ns
 // A child cannot be handed a TCP connection as it is handed a ring
 // connector, so its spawn records say dial=ADDRESS, and it dials its own
 // (lib/procns). Within a process, mounts of one address share a connection.
+// A program that mounts by name (rc, srv) goes through a relay instead
+// (lib/procns's relay.odin), whose session its children and namespace group
+// share.
 
 import "abi:vx"
 import "vx:p9"
@@ -104,7 +107,6 @@ dial_release :: proc "contextless" (c: ^p9.Client) -> bool {
 // "9p://HOST:PORT" as "tcp!HOST!PORT", in out; anything else as it is. ok is
 // false for an empty address, one that does not fit, or a 9p:// one without
 // both a host and a port.
-@(private="file")
 dial_address :: proc "contextless" (addr: string, out: []u8) -> (s: string, ok: bool) {
 	SCHEME :: "9p://"
 	if len(addr) > len(SCHEME) && str.has_prefix(addr, SCHEME) {

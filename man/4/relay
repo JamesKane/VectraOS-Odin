@@ -27,6 +27,6 @@ srvfs(4), namespace(6), mount(1), version(5); 9front's mount driver, `devmnt.c`
 
 # BUGS
 
-Nothing starts a relay yet but relaytest: the `srv` command, and `mount tcp!...` through a relay, are M6 step 6d4d2c.
-There is no authentication (`Tauth` is passed on, but nothing speaks it before keyd, M10).
+srv(1) starts one for each post, and rc(1)'s `mount tcp!...` one for each address its namespace group mounts (`lib/vx-ns/relay.c`).
+There is no authentication (`Tauth` is passed on, but nothing speaks it before keyd, M10); as a Plan 9 server refuses `none` until a session has authenticated, a client attaching as `none`, or as no one, attaches as `vectra`, as vx-ns's own dialing does.
 At most 64 requests are on the stream at once, and 16 clients connect.

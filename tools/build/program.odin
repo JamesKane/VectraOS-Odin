@@ -61,6 +61,7 @@ PROGRAMS := []Program {
 	{name = "install", dir = "cmd/install", place = .Bootfs, cports = {"monocypher"}},
 	{name = "ls", dir = "cmd/ls", place = .Bootfs},
 	{name = "cat", dir = "cmd/cat", place = .Bootfs},
+	{name = "srv", dir = "cmd/srv", place = .Bootfs},
 	{name = "echo", dir = "cmd/echo", place = .Bootfs},
 	{name = "ps", dir = "cmd/ps", place = .Bootfs},
 	{name = "ns", dir = "cmd/ns", place = .Bootfs},

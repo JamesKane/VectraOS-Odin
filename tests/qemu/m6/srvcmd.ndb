@@ -1,0 +1,46 @@
+# tests/qemu/srvcmd.ndb: srv(1) and mounts shared through relays (M6 step
+# 6d4d2c), against u9fs: srv posts and mounts, and the shell has the mount
+# after srv has gone; /srv lists the post; any process mounts it by name; a
+# second srv finds it; a mount of tcp!... goes through a relay, and the
+# children replay it through that relay rather than dialing: while a child
+# cat has both mounts, there are two TCP conversations, the relays', and no
+# more.
+
+scenario=srvcmd timeout=60
+expect="netd: 10.0.2.15/24 from dhcp, gateway 10.0.2.2"
+prompt="% "
+send="srv tcp!10.0.2.101!564 u9 /n/u9"
+prompt="% "
+send="ls /n/u9"
+line="etc  hello.txt"
+prompt="% "
+send="ls /srv"
+expect="u9"
+prompt="% "
+send="mount /srv/u9 /n/again"
+prompt="% "
+send="cat /n/again/hello.txt"
+line="hello from the host"
+prompt="% "
+send="srv tcp!10.0.2.101!564 u9"
+line="srv: /srv/u9 already exists"
+prompt="% "
+send="srv -q tcp!10.0.2.101!564 u9"
+prompt="% "
+send="mount tcp!10.0.2.101!564 /n/direct"
+prompt="% "
+send="cat /n/direct/hello.txt /net/tcp/*/status | /boot/bin/posix/grep -c Established"
+line="2"
+prompt="% "
+send="/boot/bin/posix/cat /n/u9/hello.txt"
+line="hello from the host"
+prompt="% "
+send="srv tcp!10.0.2.101!1 nothing"
+expect="srv: dial tcp!10.0.2.101!1: "
+prompt="% "
+send="echo done"
+line="done"
+fail="vx: panic"
+fail="FAILED"
+fail=") killed: "
+fail="rc: "

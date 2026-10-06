@@ -253,7 +253,7 @@ A failure prints `rc:`, the command's name and why on the command's standard err
   `-c` lets files be created in <new> through the union.
 : `mount` `[-abc]` <srv> <old> [<aname>]
   Mounts a file server on <old>, with the flags as for `bind`, attaching to <aname> if one is given.
-  <srv> is `/srv/`<name>, a service this namespace has a connection to, as ns(1) prints it, so its output can be run again; or a 9P server over TCP, `tcp!`<host>`!`<port> or `9p://`<host>`:`<port>.
+  <srv> is `/srv/`<name>, a service this namespace has a connection to, as ns(1) prints it, so its output can be run again, or a post in srvfs(4)'s `/srv`, as srv(1) makes; or a 9P server over TCP, `tcp!`<host>`!`<port> or `9p://`<host>`:`<port>, mounted through a relay(4) of its own, so the shell's children and the rest of its namespace group share its one session.
 : `unmount` [<new>] <old>
   Undoes a `bind` or `mount` of <new> on <old>, or everything on <old> if <new> is not given.
 

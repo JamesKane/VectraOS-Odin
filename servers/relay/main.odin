@@ -481,6 +481,13 @@ forward :: proc "contextless" (conn: int, t: ^p9.Msg, resp: []u8) -> (int, p9.Se
 	}
 	u := t^
 	newfid := p9.NOFID
+	// As vx:ns's dialed attaches: a Plan 9 server refuses "none" until the
+	// session has authenticated, and nothing can before keyd (upstream's
+	// M10), so a client with no user (the console shell, as yet) attaches as
+	// vectra.
+	if (t.type == .Tattach || t.type == .Tauth) && (t.uname == "" || t.uname == "none") {
+		u.uname = "vectra"
+	}
 	for f in p9.MESSAGES[u8(t.type)].fields {
 		field: ^p9.Fid
 		local: p9.Fid
