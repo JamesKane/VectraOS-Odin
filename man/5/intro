@@ -7,7 +7,7 @@ Section 5 describes 9Px, the protocol every file server speaks: Plan 9's 9P2000 
 There is one page for each kind of message, its request and reply together, named for the request without its `T`, as `walk` covers `Twalk` and `Rwalk`.
 
 A client offers its version and extensions in `Tversion`, such as `9P2000.x/1 +map +posix`, and the server replies with those it has.
-A client or server that speaks only `9P2000`, or one of its dialects such as `9P2000.L`, is answered with `9P2000`, and the extensions are off; so VectraOS mounts Plan 9's and Linux's servers, and they mount its.
+A client or server that speaks only `9P2000`, or a dialect of it such as `9P2000.u`, is answered with `9P2000`, and the extensions are off; one that speaks `9P2000.L` is answered in it (dotl(5)); so VectraOS mounts Plan 9's and Linux's servers, and they mount its.
 An extension word the other side does not know is ignored.
 
 The extensions are `dref`, `map`, `lease`, `notify`, `xattr` and `posix`.

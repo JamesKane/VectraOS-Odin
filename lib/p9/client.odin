@@ -65,6 +65,17 @@ Client :: struct {
 	next_fid:   Fid, // taken atomically: threads share a connection
 	uname:      string, // who attaches; empty: client_user, or "none"
 	serial:     Xfer, // a serial transport's one call
+	// 9P2000.L (upstream's 6d4c2): the directories open on it, whose reads
+	// are Treaddir made into stat entries, each with the cookie and offset to
+	// go on from.
+	dirs_lock:  u32, // a spin lock: threads share a connection
+	dirs:       [16]Dir_Read,
+}
+
+@(private)
+Dir_Read :: struct {
+	fid:        Fid, // 0: free
+	cookie, at: u64,
 }
 
 // A reply, decoded where it landed; its strings and data are the call's
@@ -145,7 +156,59 @@ exchange :: proc "contextless" (c: ^Client, t: ^Msg, rc: ^Rcall, send := vx.HAND
 	if rc.r.type == .Rerror {
 		return error_status(rc.r.ename)
 	}
+	if rc.r.type == .Rlerror {
+		return errno_status(rc.r.ecode) // 9P2000.L's: an errno
+	}
 	return u8(rc.r.type) == u8(t.type) + 1 ? .Ok : .Err_Invalid
+}
+
+// --- 9P2000.L's directory reads (upstream's 6d4c2) ---
+
+@(private="file")
+dotl :: proc "contextless" (c: ^Client) -> bool {
+	return c.dialect == .P9_2000L
+}
+
+@(private="file")
+dirs_lock :: proc "contextless" (c: ^Client) {
+	for intrinsics.atomic_exchange_explicit(&c.dirs_lock, 1, .Acquire) != 0 {
+		intrinsics.cpu_relax()
+	}
+}
+
+@(private="file")
+dirs_unlock :: proc "contextless" (c: ^Client) {
+	intrinsics.atomic_store_explicit(&c.dirs_lock, 0, .Release)
+}
+
+// fid's slot in the table, or -1; with add, a free one taken for it.
+@(private="file")
+dir_slot :: proc "contextless" (c: ^Client, fid: Fid, add: bool) -> int {
+	free := -1
+	for &d, i in c.dirs {
+		if d.fid == fid {
+			return i
+		}
+		if d.fid == 0 && free < 0 {
+			free = i
+		}
+	}
+	if add && free >= 0 {
+		c.dirs[free] = {
+			fid = fid,
+		}
+	}
+	return add ? free : -1
+}
+
+@(private="file")
+dir_note :: proc "contextless" (c: ^Client, fid: Fid, dir: bool) {
+	dirs_lock(c)
+	i := dir_slot(c, fid, dir)
+	if !dir && i >= 0 {
+		c.dirs[i].fid = 0
+	}
+	dirs_unlock(c)
 }
 
 // A call whose reply says nothing the caller keeps.
@@ -167,12 +230,27 @@ bufsize :: proc "contextless" (c: ^Client) -> u32 {
 
 // Negotiates a session: 9Px with the given extensions, and an msize no larger
 // than the buffers. A 9P2000 server answers 9P2000, and then extensions are
-// empty.
+// empty. One that answers "unknown" is asked for 9P2000.L (diod, QEMU's
+// virtfs: Linux's dialect), then for plain 9P2000 (upstream 02 §3.1).
 @(require_results)
 client_version :: proc "contextless" (c: ^Client, msize: u32, extensions: Extensions) -> vx.Status {
+	m := min(msize, bufsize(c))
+	e := version_as(c, m, .P9_2000X, extensions)
+	if e == .Err_Unsupported && c.dialect == .Unknown {
+		e = version_as(c, m, .P9_2000L, {})
+	}
+	if e == .Err_Unsupported && c.dialect == .Unknown {
+		e = version_as(c, m, .P9_2000, {})
+	}
+	return e
+}
+
+// One Tversion of dialect d: what the server answers, in c.
+@(private="file", require_results)
+version_as :: proc "contextless" (c: ^Client, msize: u32, d: Dialect, extensions: Extensions) -> vx.Status {
 	version: [96]u8
-	t := Msg{type = .Tversion, tag = NOTAG, msize = min(msize, bufsize(c))}
-	t.version = string(version[:version_format(.P9_2000X, extensions, version[:])])
+	t := Msg{type = .Tversion, tag = NOTAG, msize = msize}
+	t.version = string(version[:version_format(d, extensions, version[:])])
 	rc: Rcall
 	defer finish(c, &rc)
 	exchange(c, &t, &rc) or_return
@@ -194,6 +272,9 @@ client_attach_qid :: proc "contextless" (c: ^Client, aname: string) -> (fid: Fid
 		uname = c.uname
 	}
 	t := Msg{type = .Tattach, fid = new_fid(c), afid = NOFID, uname = uname, aname = aname}
+	if dotl(c) {
+		t.has_n_uname, t.n_uname = true, NONUNAME // by name, as there are no numbers to give
+	}
 	rc: Rcall
 	defer finish(c, &rc)
 	e = exchange(c, &t, &rc)
@@ -209,6 +290,9 @@ client_attach :: proc "contextless" (c: ^Client, aname: string) -> (fid: Fid, e:
 @(require_results)
 client_clunk :: proc "contextless" (c: ^Client, fid: Fid) -> vx.Status {
 	t := Msg{type = .Tclunk, fid = fid}
+	if dotl(c) {
+		dir_note(c, fid, false)
+	}
 	return call(c, &t)
 }
 
@@ -256,23 +340,164 @@ client_walk :: proc "contextless" (c: ^Client, fid: Fid, path: string) -> (newfi
 	return to, .Ok
 }
 
+// Linux's open flags from a 9P mode (9P2000.L's Tlopen and Tlcreate).
+@(private="file")
+flags_of_mode :: proc "contextless" (mode: Open_Mode) -> (flags: u32) {
+	#partial switch mode.access { // O_RDONLY, for Read and Exec
+	case .Write:
+		flags = 1
+	case .Rdwr:
+		flags = 2
+	}
+	if mode.trunc {
+		flags |= L_O_TRUNC
+	}
+	return
+}
+
+// Tlopen: Topen in 9P2000.L's words; a directory open is noted for its reads.
+@(private="file", require_results)
+lopen :: proc "contextless" (c: ^Client, fid: Fid, mode: Open_Mode) -> vx.Status {
+	if mode.rclose {
+		return .Err_Unsupported // .L has no remove-on-close
+	}
+	t := Msg{type = .Tlopen, fid = fid, lflags = flags_of_mode(mode)}
+	rc: Rcall
+	defer finish(c, &rc)
+	exchange(c, &t, &rc) or_return
+	dir_note(c, fid, .Dir in rc.r.qid.type)
+	return .Ok
+}
+
 @(require_results)
 client_open :: proc "contextless" (c: ^Client, fid: Fid, mode: Open_Mode) -> vx.Status {
+	if dotl(c) {
+		return lopen(c, fid, mode)
+	}
 	t := Msg{type = .Topen, fid = fid, mode = mode}
 	return call(c, &t)
 }
 
-// Creates name in the directory fid, which then refers to the new file, open.
+// Creates name in the directory fid, which then refers to the new file,
+// open. Under 9P2000.L a file is Tlcreate's, and a directory Tmkdir's, then
+// walked to and opened.
 @(require_results)
 client_create :: proc "contextless" (c: ^Client, fid: Fid, name: string, perm: u32, mode: Open_Mode) -> vx.Status {
+	if dotl(c) && perm &~ (DMDIR | 0o777) != 0 {
+		return .Err_Unsupported // DMAPPEND and the rest
+	}
+	if dotl(c) && perm & DMDIR != 0 {
+		t := Msg{type = .Tmkdir, fid = fid, name = name, lmode = perm & 0o777}
+		call(c, &t) or_return
+		w := Msg{type = .Twalk, fid = fid, newfid = fid, nwname = 1}
+		w.wname[0] = name
+		call(c, &w) or_return
+		return lopen(c, fid, mode)
+	}
+	if dotl(c) {
+		if mode.rclose {
+			return .Err_Unsupported
+		}
+		t := Msg{type = .Tlcreate, fid = fid, name = name, lflags = flags_of_mode(mode), lmode = perm & 0o777}
+		return call(c, &t)
+	}
 	t := Msg{type = .Tcreate, fid = fid, name = name, perm = perm, mode = mode}
 	return call(c, &t)
+}
+
+// A Treaddir entry's type as a 9P mode: the type, and permissions it does
+// not carry (any reader may stat the file for its own).
+@(private="file")
+mode_of_dirent :: proc "contextless" (type: u8) -> u32 {
+	switch type {
+	case DT_DIR:
+		return DMDIR | 0o755
+	case DT_LNK:
+		return DMSYMLINK | 0o777
+	}
+	return 0o644
+}
+
+// POSIX's file type as 9P's mode bits.
+@(private="file")
+type_bits :: proc "contextless" (type: u32) -> u32 {
+	switch type {
+	case S_IFDIR:
+		return DMDIR
+	case S_IFLNK:
+		return DMSYMLINK
+	case S_IFCHR:
+		return DMDEVICE
+	}
+	return 0
+}
+
+// A directory's read under 9P2000.L: Treaddir from the cookie the last read
+// ended at, its entries written into buf as 9P2000's stat entries (whole,
+// as a directory read has them), each with its type in its mode and nothing
+// else; offset 0, or where the last read ended (9P2000's rule).
+@(private="file", require_results)
+readdir_as_stat :: proc "contextless" (c: ^Client, slot: int, offset: u64, buf: []u8) -> (n: int, e: vx.Status) {
+	dirs_lock(c)
+	d := c.dirs[slot]
+	dirs_unlock(c)
+	if offset == 0 {
+		d.cookie, d.at = 0, 0
+	}
+	if offset != d.at {
+		return 0, .Err_Range
+	}
+	// A dirent is 24 bytes and its name; a stat entry 49 and the name: ask
+	// for what will fit made over.
+	count := u32(min(len(buf), int(max(u32))))
+	t := Msg{type = .Treaddir, fid = d.fid, offset = d.cookie, count = min(count / 2, c.msize - IOHDRSZ)}
+	used := 0
+	{
+		rc: Rcall
+		defer finish(c, &rc)
+		exchange(c, &t, &rc) or_return
+		pos := 0
+		for {
+			q, next, type, name, ok := dirent_next(rc.r.data, &pos)
+			if !ok {
+				break
+			}
+			st := Stat {
+				qid  = q,
+				mode = mode_of_dirent(type),
+				name = name,
+			}
+			k := stat_encode(&st, buf[used:])
+			if k == 0 {
+				break
+			}
+			used += k
+			d.cookie = next
+		}
+		if used == 0 && pos < len(rc.r.data) {
+			return 0, .Err_Too_Small // not one entry fits
+		}
+	}
+	dirs_lock(c)
+	if c.dirs[slot].fid == d.fid {
+		c.dirs[slot].cookie, c.dirs[slot].at = d.cookie, d.at + u64(used)
+	}
+	dirs_unlock(c)
+	return used, .Ok
 }
 
 // Reads up to len(buf) bytes (at most msize - 24) at offset into buf. Returns
 // how many; 0 at the end.
 @(require_results)
 client_read :: proc "contextless" (c: ^Client, fid: Fid, offset: u64, buf: []u8) -> (n: int, e: vx.Status) {
+	if dotl(c) {
+		dirs_lock(c)
+		slot := dir_slot(c, fid, false)
+		dirs_unlock(c)
+		if slot >= 0 {
+			return readdir_as_stat(c, slot, offset, buf)
+		}
+	}
 	count := u32(min(len(buf), int(c.msize - IOHDRSZ)))
 	t := Msg{type = .Tread, fid = fid, offset = offset, count = count}
 	rc: Rcall
@@ -307,6 +532,17 @@ Stat_Text :: struct {
 // one (.Err_Too_Small if they do not fit).
 @(require_results)
 client_stat :: proc "contextless" (c: ^Client, fid: Fid, out: ^Stat, keep: ^Stat_Text = nil) -> vx.Status {
+	if dotl(c) { // 9P2000.L has no Tstat: Tgetattr's, without a name (it carries none)
+		a := client_getattr(c, fid) or_return
+		out^ = {
+			qid    = a.qid,
+			mode   = type_bits(a.mode & S_IFMT) | (a.mode & 0o777),
+			atime  = u32(a.atime_sec),
+			mtime  = u32(a.mtime_sec),
+			length = a.size,
+		}
+		return .Ok
+	}
 	t := Msg{type = .Tstat, fid = fid}
 	rc: Rcall
 	defer finish(c, &rc)
@@ -396,7 +632,7 @@ client_walk_names :: proc "contextless" (c: ^Client, fid: Fid, names: []string, 
 
 @(require_results)
 client_getattr :: proc "contextless" (c: ^Client, fid: Fid) -> (attr: Attr, e: vx.Status) {
-	if .Xattr not_in c.extensions {
+	if .Xattr not_in c.extensions && !dotl(c) {
 		return {}, .Err_Unsupported
 	}
 	t := Msg{type = .Tgetattr, fid = fid, mask = GETATTR_BASIC}
@@ -411,7 +647,7 @@ client_getattr :: proc "contextless" (c: ^Client, fid: Fid) -> (attr: Attr, e: v
 // or a time "now" is .Err_Unsupported there (the caller gives the time).
 @(require_results)
 client_setattr :: proc "contextless" (c: ^Client, fid: Fid, a: Setattr) -> vx.Status {
-	if .Xattr in c.extensions {
+	if .Xattr in c.extensions || dotl(c) {
 		t := Msg{type = .Tsetattr, fid = fid, setattr = a}
 		return call(c, &t)
 	}
@@ -441,7 +677,7 @@ client_setattr :: proc "contextless" (c: ^Client, fid: Fid, a: Setattr) -> vx.St
 // connection.
 @(require_results)
 client_renameat :: proc "contextless" (c: ^Client, olddir: Fid, oldname: string, newdir: Fid, newname: string) -> vx.Status {
-	if .Posix not_in c.extensions {
+	if .Posix not_in c.extensions && !dotl(c) {
 		return .Err_Unsupported
 	}
 	t := Msg{type = .Trenameat, fid = olddir, name = oldname, newfid = newdir, name2 = newname}
@@ -450,7 +686,7 @@ client_renameat :: proc "contextless" (c: ^Client, olddir: Fid, oldname: string,
 
 @(require_results)
 client_symlink :: proc "contextless" (c: ^Client, dir: Fid, name, target: string) -> vx.Status {
-	if .Posix not_in c.extensions {
+	if .Posix not_in c.extensions && !dotl(c) {
 		return .Err_Unsupported
 	}
 	t := Msg{type = .Tsymlink, fid = dir, name = name, name2 = target}
@@ -461,7 +697,7 @@ client_symlink :: proc "contextless" (c: ^Client, dir: Fid, name, target: string
 // fit).
 @(require_results)
 client_readlink :: proc "contextless" (c: ^Client, fid: Fid, buf: []u8) -> (target: string, e: vx.Status) {
-	if .Posix not_in c.extensions {
+	if .Posix not_in c.extensions && !dotl(c) {
 		return "", .Err_Unsupported
 	}
 	t := Msg{type = .Treadlink, fid = fid}
@@ -476,7 +712,7 @@ client_readlink :: proc "contextless" (c: ^Client, fid: Fid, buf: []u8) -> (targ
 
 @(require_results)
 client_fsync :: proc "contextless" (c: ^Client, fid: Fid) -> vx.Status {
-	if .Posix not_in c.extensions {
+	if .Posix not_in c.extensions && !dotl(c) {
 		return .Ok // a server without it has no later to write at
 	}
 	t := Msg{type = .Tfsync, fid = fid}
@@ -535,7 +771,7 @@ client_append :: proc "contextless" (c: ^Client, fid: Fid, append: bool) -> vx.S
 // end.
 @(require_results)
 client_lock :: proc "contextless" (c: ^Client, fid: Fid, type: Lock_Type, start, length: u64, proc_id: u32) -> (status: Lock_Status, e: vx.Status) {
-	if .Posix not_in c.extensions {
+	if .Posix not_in c.extensions && !dotl(c) {
 		return .Error, .Err_Unsupported
 	}
 	t := Msg{type = .Tlock, fid = fid, lock_type = type, start = start, length = length, proc_id = proc_id, client_id = ""}
@@ -556,7 +792,7 @@ Lock_Held :: struct {
 // range and owner, or .Unlock as its type when none would.
 @(require_results)
 client_getlock :: proc "contextless" (c: ^Client, fid: Fid, type: Lock_Type, start, length: u64, proc_id: u32) -> (l: Lock_Held, e: vx.Status) {
-	if .Posix not_in c.extensions {
+	if .Posix not_in c.extensions && !dotl(c) {
 		return {}, .Err_Unsupported
 	}
 	t := Msg{type = .Tgetlock, fid = fid, lock_type = type, start = start, length = length, proc_id = proc_id, client_id = ""}

@@ -5,16 +5,31 @@
 
 // 9P2000.L's, unchanged on the wire, for the posix and xattr extensions
 // (docs/proto/posix.md). A server answers them only once one is negotiated.
+P9_MSG(Rlerror,    7, P9F_ECODE)                            // 9P2000.L's errors (6d4c2)
+P9_MSG(Tstatfs,    8, P9F_FID)
+P9_MSG(Rstatfs,    9, P9F_STATFS)
+P9_MSG(Tlopen,    12, P9F_FID, P9F_LFLAGS)
+P9_MSG(Rlopen,    13, P9F_QID, P9F_IOUNIT)
+P9_MSG(Tlcreate,  14, P9F_FID, P9F_NAME, P9F_LFLAGS, P9F_LMODE, P9F_GID)
+P9_MSG(Rlcreate,  15, P9F_QID, P9F_IOUNIT)
 P9_MSG(Tsymlink,  16, P9F_FID, P9F_NAME, P9F_NAME2, P9F_GID)
 P9_MSG(Rsymlink,  17, P9F_QID)
 P9_MSG(Treadlink, 22, P9F_FID)
 P9_MSG(Rreadlink, 23, P9F_NAME2)
+P9_MSG(Trename,   20, P9F_FID, P9F_NEWFID, P9F_NAME)            // fid, dfid, name (9P2000.L)
+P9_MSG(Rrename,   21)
 P9_MSG(Tgetattr,  24, P9F_FID, P9F_MASK)
 P9_MSG(Rgetattr,  25, P9F_ATTR)
 P9_MSG(Tsetattr,  26, P9F_FID, P9F_SETATTR)
 P9_MSG(Rsetattr,  27)
 P9_MSG(Tfsync,    50, P9F_FID, P9F_DATASYNC)
 P9_MSG(Rfsync,    51)
+P9_MSG(Treaddir,  40, P9F_FID, P9F_OFFSET, P9F_COUNT)           // 9P2000.L: entries from a cookie
+P9_MSG(Rreaddir,  41, P9F_DATA)
+P9_MSG(Tmkdir,    72, P9F_FID, P9F_NAME, P9F_LMODE, P9F_GID)
+P9_MSG(Rmkdir,    73, P9F_QID)
+P9_MSG(Tunlinkat, 76, P9F_FID, P9F_NAME, P9F_LFLAGS)
+P9_MSG(Runlinkat, 77)
 P9_MSG(Tlink,     70, P9F_FID, P9F_NEWFID, P9F_NAME)            // dfid, fid, name
 P9_MSG(Rlink,     71)
 P9_MSG(Trenameat, 74, P9F_FID, P9F_NAME, P9F_NEWFID, P9F_NAME2) // olddirfid, oldname, newdirfid, newname
@@ -50,9 +65,9 @@ P9_MSG(Rwriteref, 163, P9F_COUNT)
 
 P9_MSG(Tversion, 100, P9F_MSIZE, P9F_VERSION)
 P9_MSG(Rversion, 101, P9F_MSIZE, P9F_VERSION)
-P9_MSG(Tauth,    102, P9F_AFID, P9F_UNAME, P9F_ANAME)
+P9_MSG(Tauth,    102, P9F_AFID, P9F_UNAME, P9F_ANAME, P9F_NUNAME)
 P9_MSG(Rauth,    103, P9F_QID)
-P9_MSG(Tattach,  104, P9F_FID, P9F_AFID, P9F_UNAME, P9F_ANAME)
+P9_MSG(Tattach,  104, P9F_FID, P9F_AFID, P9F_UNAME, P9F_ANAME, P9F_NUNAME)
 P9_MSG(Rattach,  105, P9F_QID)
 P9_MSG(Rerror,   107, P9F_ENAME)
 P9_MSG(Tflush,   108, P9F_OLDTAG)

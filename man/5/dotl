@@ -1,0 +1,78 @@
+page=dotl sect=5 summary="9P2000.L, Linux's dialect: its own messages, and errors as numbers"
+    names=dotl,9P2000.L,Rlerror,Tlopen,Rlopen,Tlcreate,Rlcreate,Tmkdir,Rmkdir,Tunlinkat,Runlinkat,Trename,Rrename,Treaddir,Rreaddir,Tstatfs,Rstatfs
+    src=lib/vx-9p/server.c,lib/vx-9p/client.c,lib/vx-9p/codec.c,lib/vx-9p/messages.def
+    keys=9p,9p2000.l,linux,v9fs,diod,virtfs,lopen,lcreate,readdir,mkdir,unlinkat,statfs,errno
+
+# SYNOPSIS
+
+```text
+size[4] Rlerror tag[2] ecode[4]
+size[4] Tlopen tag[2] fid[4] flags[4]
+size[4] Rlopen tag[2] qid[13] iounit[4]
+size[4] Tlcreate tag[2] fid[4] name[s] flags[4] mode[4] gid[4]
+size[4] Rlcreate tag[2] qid[13] iounit[4]
+size[4] Tmkdir tag[2] dfid[4] name[s] mode[4] gid[4]
+size[4] Rmkdir tag[2] qid[13]
+size[4] Tunlinkat tag[2] dfid[4] name[s] flags[4]
+size[4] Runlinkat tag[2]
+size[4] Trename tag[2] fid[4] dfid[4] name[s]
+size[4] Rrename tag[2]
+size[4] Treaddir tag[2] fid[4] offset[8] count[4]
+size[4] Rreaddir tag[2] count[4] data[count]
+size[4] Tstatfs tag[2] fid[4]
+size[4] Rstatfs tag[2] type[4] bsize[4] blocks[8] bfree[8] bavail[8]
+                     files[8] ffree[8] fsid[8] namelen[4]
+```
+
+# DESCRIPTION
+
+9P2000.L is Linux's dialect of 9P2000, which its v9fs client speaks by default and which servers such as diod and QEMU's virtfs speak alone (M6 step 6d4c2).
+A session is 9P2000.L when `Tversion` names `9P2000.L` and the server answers so (version(5)).
+Its `Tattach` and `Tauth` end with a number for the user, <n_uname>`[4]`, after <aname>.
+It has no `Topen`, `Tcreate`, `Tstat` or `Twstat`, and has instead:
+: `Tlopen`
+  Opens <fid> as `Topen` does, by Linux's open flags: the access mode in the low two bits, `O_TRUNC` (`01000`).
+: `Tlcreate`
+  Makes a file <name> in the directory <fid>, which then refers to it, open, as `Tcreate` does, with POSIX's <mode>.
+: `Tmkdir`
+  Makes a directory <name> in <dfid>, which stays as it is.
+: `Tunlinkat`
+  Removes <name> from the directory <dfid>; <flags> `AT_REMOVEDIR` (`0x200`) for a directory, which it must then be.
+: `Trename`
+  Moves <fid>'s file into the directory <dfid> as <name>.
+: `Treaddir`
+  Reads an open directory's entries from the cookie <offset> (0 at the start): each is qid`[13]` offset`[8]` type`[1]` name`[s]`, its offset the cookie for the entry after it, its type Linux's `DT_*`.
+: `Tstatfs`
+  The file system's numbers, as Linux's `statfs` has them.
+and borrows the messages of 9Px's `posix` and `xattr` extensions that are its own: `Tgetattr`, `Tsetattr`, `Trenameat`, `Tsymlink`, `Treadlink`, `Tfsync`, `Tlock` and `Tgetlock` (getattr(5), link(5), symlink(5), fsync(5), lock(5)).
+Every error is `Rlerror`, whose <ecode> is Linux's errno.
+
+## VectraOS's servers
+
+vx-9p's server answers 9P2000.L itself, for every file server: `Tlopen` and `Tlcreate` are its `Topen` and `Tcreate`, `Treaddir` its directory entries by index, `Tmkdir`, `Tunlinkat` and `Trename` the file server's create, remove and rename, and `Tstatfs` numbers it does not keep (the type `V9FS_MAGIC`, a 4096-byte block, 255-byte names, and zeros).
+A message 9P2000.L has and it does not, such as `Txattrwalk` or `Tmknod`, is answered `Rlerror` `EOPNOTSUPP` rather than ending the connection.
+So Linux's `mount -t 9p` mounts a VectraOS server in its default dialect.
+
+## VectraOS's client
+
+vx-9p's client asks for 9P2000.L when a server answers 9Px's `Tversion` with `unknown`, as diod and virtfs do, and for plain 9P2000 if it answers that too.
+In a 9P2000.L session its calls keep their 9P2000 meaning:
+- `p9c_open` and `p9c_create` send `Tlopen` and `Tlcreate`, a directory's create `Tmkdir`, then a walk to it and `Tlopen`;
+- `p9c_stat` sends `Tgetattr`, and gives a stat entry without a name, which 9P2000.L does not carry;
+- a read of a directory open on the connection sends `Treaddir` and returns 9P2000's stat entries, each with its type in its mode, from the start or where the last read ended;
+- `ORCLOSE`, `DMAPPEND` and `DMEXCL` have no 9P2000.L form, and are `operation not supported`.
+
+# SEE ALSO
+
+version(5), intro(5), getattr(5), link(5); Linux's `include/net/9p/9p.h` and `net/9p/client.c`, where the formats are
+
+# DIAGNOSTICS
+
+The errno numbers and the statuses they are: `ENOENT` 2, not found; `EEXIST` 17; `EACCES` 13 (and `EPERM` 1, `EISDIR` 21, `EROFS` 30), access; `EBADF` 9; `EBUSY` 16, bad state; `ERANGE` 34 (and `ENAMETOOLONG` 36); `ENOMEM` 12; `EOPNOTSUPP` 95 (and `ENOSYS` 38), unsupported; `EMSGSIZE` 90; `ECONNREFUSED` 111; `ETIMEDOUT` 110; `EPIPE` 32; `EINTR` 4; `ECHILD` 10; `EIO` 5, and any number not listed; `ENOSPC` 28; `EAGAIN` 11; `EINVAL` 22; `ENOTDIR` 20, not found; `ENOTEMPTY` 39, exists.
+
+# BUGS
+
+Nothing outside the host's tests speaks 9P2000.L to VectraOS yet: a client mounting diod, or Linux mounting a VectraOS server, has not been tried.
+`Tlcreate`'s and `Tmkdir`'s <gid>, and `Tattach`'s <n_uname>, are ignored; the client sends 0 and `~0`.
+`Tstatfs`'s counts are zeros.
+A directory's stat entry from `Treaddir` has its type and nothing else: no permissions, length or times.

@@ -1,5 +1,6 @@
 // 9P2000 and 9Px (upstream 02 §3), with the 9P2000.L messages of 9Px's
-// posix and xattr extensions (upstream docs/proto/posix.md): the codec for
+// posix and xattr extensions (upstream docs/proto/posix.md) and Linux's
+// 9P2000.L itself (upstream's M6 step 6d4c2, dotl(5)): the codec for
 // messages, stat entries and 9Px version strings; the server framework (server.odin), which keeps a
 // hostile client inside its attach root; and a client (client.odin). Neither
 // side has a transport of its own: the server turns one request into one
@@ -206,6 +207,30 @@ Prot :: bit_set[Prot_Flag;u32]
 
 TOKEN_SIZE :: 16
 
+// Rstatfs's body (9P2000.L).
+Statfs :: struct {
+	type, bsize:                               u32,
+	blocks, bfree, bavail, files, ffree, fsid: u64,
+	namelen:                                   u32,
+}
+
+// Tattach's and Tauth's numeric user, when it names none (9P2000.L).
+NONUNAME :: max(u32)
+
+// Linux's open flags, as Tlopen and Tlcreate carry them, and Tunlinkat's.
+L_O_ACCMODE :: u32(3)
+L_O_CREAT :: u32(0o100)
+L_O_EXCL :: u32(0o200)
+L_O_TRUNC :: u32(0o1000)
+L_O_APPEND :: u32(0o2000)
+L_AT_REMOVEDIR :: u32(0x200)
+
+// Rreaddir's entries' types: Linux's DT_*.
+DT_REG :: u8(8)
+DT_DIR :: u8(4)
+DT_LNK :: u8(10)
+DT_CHR :: u8(2)
+
 Msg :: struct {
 	type:   Type,
 	tag:    u16,
@@ -247,6 +272,13 @@ Msg :: struct {
 	length:     u64,
 	client_id:  string,
 	token:      [TOKEN_SIZE]u8,
+	// 9P2000.L's (upstream's M6 step 6d4c2).
+	lflags:      u32,
+	lmode:       u32,
+	ecode:       u32,
+	n_uname:     u32, // Tattach's and Tauth's numeric user (NONUNAME: none)
+	has_n_uname: bool, // it is on the wire (a .L or .u client's)
+	statfs:      Statfs,
 }
 
 // --- Encoding ---
@@ -321,6 +353,17 @@ put_setattr :: proc "contextless" (o: ^str.Buf, a: ^Setattr) {
 	put(o, a.atime_nsec)
 	put(o, a.mtime_sec)
 	put(o, a.mtime_nsec)
+}
+
+@(private="file")
+put_statfs :: proc "contextless" (o: ^str.Buf, sf: ^Statfs) {
+	put(o, sf.type)
+	put(o, sf.bsize)
+	rest := [?]u64{sf.blocks, sf.bfree, sf.bavail, sf.files, sf.ffree, sf.fsid}
+	for v in rest {
+		put(o, v)
+	}
+	put(o, sf.namelen)
 }
 
 // Encodes m into buf. Returns its length, or 0 if it does not fit or is not a
@@ -438,6 +481,18 @@ encode :: proc "contextless" (m: ^Msg, buf: []u8) -> int {
 			put(&o, transmute(u32)m.prot)
 		case .Roffset:
 			put(&o, m.roffset)
+		case .Lflags:
+			put(&o, m.lflags)
+		case .Lmode:
+			put(&o, m.lmode)
+		case .Ecode:
+			put(&o, m.ecode)
+		case .Nuname:
+			if m.has_n_uname {
+				put(&o, m.n_uname)
+			}
+		case .Statfs:
+			put_statfs(&o, &m.statfs)
 		}
 	}
 	if o.failed || u64(o.len) > u64(max(u32)) {
@@ -663,6 +718,24 @@ decode :: proc "contextless" (buf: []u8, m: ^Msg) -> vx.Status {
 			m.prot = transmute(Prot)get(&in_, u32)
 		case .Roffset:
 			m.roffset = get(&in_, u64)
+		case .Lflags:
+			m.lflags = get(&in_, u32)
+		case .Lmode:
+			m.lmode = get(&in_, u32)
+		case .Ecode:
+			m.ecode = get(&in_, u32)
+		case .Nuname: // the last field: a 9P2000 client sends none
+			m.has_n_uname = remaining(&in_) >= 4
+			m.n_uname = m.has_n_uname ? get(&in_, u32) : NONUNAME
+		case .Statfs:
+			sf := &m.statfs
+			sf.type = get(&in_, u32)
+			sf.bsize = get(&in_, u32)
+			rest := [?]^u64{&sf.blocks, &sf.bfree, &sf.bavail, &sf.files, &sf.ffree, &sf.fsid}
+			for v in rest {
+				v^ = get(&in_, u64)
+			}
+			sf.namelen = get(&in_, u32)
 		}
 	}
 	if in_.failed || in_.pos != len(buf) {
@@ -753,12 +826,44 @@ next_entry :: proc "contextless" (it: ^Dir_Entries) -> (entry: Stat, ok: bool) {
 	return entry, true
 }
 
+// --- 9P2000.L's directory entries ---
+
+// One Rreaddir entry, qid[13] offset[8] type[1] name[s], is written at the
+// end of o (o.failed if it does not fit).
+@(private)
+dirent_put :: proc "contextless" (o: ^str.Buf, q: Qid, next: u64, type: u8, name: string) {
+	put_qid(o, q)
+	put(o, next)
+	put(o, type)
+	put_str(o, name)
+}
+
+// The next Rreaddir entry in buf from pos, which it moves past it; not ok at
+// the end, or at an entry that does not fit (or holds a NUL).
+@(private)
+dirent_next :: proc "contextless" (buf: []u8, pos: ^int) -> (q: Qid, next: u64, type: u8, name: string, ok: bool) {
+	in_ := In{buf = buf, pos = pos^}
+	if in_.pos >= len(buf) {
+		return
+	}
+	q = get_qid(&in_)
+	next = get(&in_, u64)
+	type = get(&in_, u8)
+	name = get_str(&in_)
+	if in_.failed {
+		return {}, 0, 0, "", false
+	}
+	pos^ = in_.pos
+	return q, next, type, name, true
+}
+
 // --- Version negotiation (upstream 02 §3.1) ---
 
 Dialect :: enum u8 {
 	Unknown = 0,
-	P9_2000, // plain 9P2000; also what a 9P2000.L or .u client gets from a VectraOS server
+	P9_2000, // plain 9P2000; also what a 9P2000.u client gets from a VectraOS server
 	P9_2000X, // 9Px: "9P2000.x/1" and its extensions
+	P9_2000L, // Linux's 9P2000.L (upstream's M6 step 6d4c2): its own messages, and errors as errno
 }
 
 // 9Px's extensions, as words after the dialect: "9P2000.x/1 +dref +map". The
@@ -802,7 +907,10 @@ version_parse :: proc "contextless" (v: string) -> (d: Dialect, ext: Extensions)
 		}
 		return .P9_2000X, ext
 	}
-	// 9P2000 itself, and any dialect of it (".L", ".u"), are answered with 9P2000.
+	if base == "9P2000.L" {
+		return .P9_2000L, {}
+	}
+	// 9P2000 itself, and any other dialect of it (".u"), are answered with 9P2000.
 	if str.has_prefix(base, "9P2000") {
 		return .P9_2000, {}
 	}
@@ -824,6 +932,8 @@ version_format :: proc "contextless" (d: Dialect, ext: Extensions, buf: []u8) ->
 		}
 	case .P9_2000:
 		str.write_string(&o, "9P2000")
+	case .P9_2000L:
+		str.write_string(&o, "9P2000.L")
 	case .Unknown:
 		str.write_string(&o, "unknown")
 	}
@@ -877,6 +987,73 @@ ERRORS_HEARD := [?]Error_Text {
 	{.Err_Bad_Handle, "fid unknown or out of range"},
 	{.Err_Access, "exclusive use file already open"},
 	{.Err_No_Space, "no space left on device"},
+}
+
+// 9P2000.L's errors are Linux's errno numbers (Rlerror): each status's, and
+// back. A number not here is EIO's.
+@(private="file")
+Errno :: struct {
+	status: vx.Status,
+	errno:  u32,
+}
+
+@(private="file", rodata)
+ERRNOS := [?]Errno {
+	{.Err_Not_Found, 2},
+	{.Err_Exists, 17},
+	{.Err_Access, 13},
+	{.Err_Bad_Handle, 9},
+	{.Err_Bad_State, 16},
+	{.Err_Range, 34},
+	{.Err_No_Memory, 12},
+	{.Err_Unsupported, 95},
+	{.Err_Too_Small, 90},
+	{.Err_Refused, 111},
+	{.Err_Timed_Out, 110},
+	{.Err_Peer_Closed, 32},
+	{.Err_Interrupted, 4},
+	{.Err_No_Child, 10},
+	{.Err_Io, 5},
+	{.Err_No_Space, 28},
+	{.Err_Should_Wait, 11},
+	{.Err_Invalid, 22},
+}
+
+// Numbers a .L server sends that mean one of these too.
+@(private="file", rodata)
+ERRNOS_HEARD := [?]Errno {
+	{.Err_Access, 1}, // EPERM
+	{.Err_Not_Found, 20}, // ENOTDIR
+	{.Err_Access, 21}, // EISDIR
+	{.Err_Range, 36}, // ENAMETOOLONG
+	{.Err_Unsupported, 38}, // ENOSYS
+	{.Err_Exists, 39}, // ENOTEMPTY
+	{.Err_Access, 30}, // EROFS
+}
+
+// The errno Rlerror carries for st.
+status_errno :: proc "contextless" (st: vx.Status) -> u32 {
+	for e in ERRNOS {
+		if e.status == st {
+			return e.errno
+		}
+	}
+	return 5
+}
+
+// The Status an Rlerror's errno stands for.
+errno_status :: proc "contextless" (n: u32) -> vx.Status {
+	for e in ERRNOS {
+		if e.errno == n {
+			return e.status
+		}
+	}
+	for e in ERRNOS_HEARD {
+		if e.errno == n {
+			return e.status
+		}
+	}
+	return .Err_Io
 }
 
 error_text :: proc "contextless" (st: vx.Status) -> string {

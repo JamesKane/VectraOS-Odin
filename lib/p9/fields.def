@@ -44,3 +44,9 @@ P9_FIELD(DESCFLAGS, U32,  desc_flags) // Tdesc's: append 1
 P9_FIELD(PROT,    U32,    prot)       // Tmap's: read 1, write 2, exec 4
 // 9Px's dref extension (docs/proto/dref.md)
 P9_FIELD(ROFFSET, U64,    roffset)    // where in the request's VMO the data is, or goes
+// 9P2000.L's (M6 step 6d4c2), as Linux's net/9p has them:
+P9_FIELD(LFLAGS,  U32,    lflags)     // Tlopen's and Tlcreate's Linux open flags; Tunlinkat's AT_REMOVEDIR
+P9_FIELD(LMODE,   U32,    lmode)      // Tlcreate's and Tmkdir's POSIX mode
+P9_FIELD(ECODE,   U32,    ecode)      // Rlerror's Linux errno
+P9_FIELD(NUNAME,  NUNAME, n_uname)    // Tattach's and Tauth's in .L and .u: there if has_n_uname, read if bytes remain
+P9_FIELD(STATFS,  STATFS, statfs)     // Rstatfs's body

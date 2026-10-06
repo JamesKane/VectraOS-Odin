@@ -32,7 +32,8 @@ The <version> string is a dialect, then, for 9Px, the extensions, each a word `+
 `9P2000.x/1` is 9Px, version 1.
 The words are `dref`, `map`, `lease`, `notify`, `xattr` and `posix`; a word the reader does not know, or one without its `+`, is ignored.
 The server answers with the extensions it has of those offered, in that order, and the session has exactly those.
-A client offering `9P2000`, or any string that starts with it, such as `9P2000.L` or `9P2000.u`, is answered with `9P2000`: plain 9P2000, with no extensions and no dialect's messages, so Linux's v9fs falls back to 9P2000 too.
+A client offering `9P2000.L` is answered with `9P2000.L`, Linux's dialect, which vx-9p's server speaks (dotl(5), M6 step 6d4c2).
+A client offering `9P2000`, or any other string that starts with it, such as `9P2000.u`, is answered with `9P2000`: plain 9P2000, with no extensions and no dialect's messages.
 Any other string is answered with an `Rversion` whose <version> is `unknown`, as Plan 9 has it, and the connection stays without a session, so the client may try again.
 
 The extensions and what they add:
@@ -51,7 +52,8 @@ The extensions and what they add:
 Each server says which it has: fsd(4) has `posix`, `xattr`, `map` and `dref`; tmpfs(4), dosfs(4), isofs(4), distd(8) and ptyd(4) `posix` and `xattr`; bootfs(4), sysfs(4) and nullfs(4) `xattr`; vx9pserve(8) none.
 A message of an extension not negotiated is answered with an `Rerror`, `operation not supported`.
 VectraOS's client offers `+dref +map +xattr +posix` on a ring, and only `9P2000.x/1`, no extensions, over TCP, since the extensions are for rings; a Plan 9 server answers that with `9P2000`.
-9Px's errors are 9P2000's `Rerror` strings (see error(5)), never 9P2000.L's `Rlerror` numbers, whatever the extensions.
+A server that answers `unknown` is asked for `9P2000.L`, then for `9P2000`.
+9Px's errors are 9P2000's `Rerror` strings (see error(5)), never 9P2000.L's `Rlerror` numbers, whatever the extensions; a 9P2000.L session's are `Rlerror`'s.
 
 A `Tversion` that succeeds starts a new session: the server first clunks every fid the connection had, as clunk(5) describes, letting go of their open files and locks.
 A `Tversion` sent in the middle of a session does the same, even when it is then refused.
@@ -69,12 +71,12 @@ A 9P2000.L client, from the same test:
 
 ```text
 Tversion tag 65535 msize 4096 version '9P2000.L'
-Rversion tag 65535 msize 4096 version '9P2000'
+Rversion tag 65535 msize 4096 version '9P2000.L'
 ```
 
 # SEE ALSO
 
-intro(5), attach(5), clunk(5), error(5); the extensions' specifications are `docs/proto/posix.md`, `docs/proto/map.md` and `docs/proto/dref.md`, and the negotiation `docs/02` §3.1
+intro(5), attach(5), clunk(5), error(5), dotl(5); the extensions' specifications are `docs/proto/posix.md`, `docs/proto/map.md` and `docs/proto/dref.md`, and the negotiation `docs/02` §3.1
 
 # BUGS
 

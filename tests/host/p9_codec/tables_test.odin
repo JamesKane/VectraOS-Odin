@@ -87,6 +87,10 @@ kind_type :: proc(k: p9.Field_Kind) -> typeid {
 		return p9.Setattr
 	case .Token:
 		return [p9.TOKEN_SIZE]u8
+	case .Nuname:
+		return u32 // with has_n_uname beside it
+	case .Statfs:
+		return p9.Statfs
 	}
 	return nil
 }

@@ -704,7 +704,9 @@ posix_mode :: proc "contextless" (mode: u32) -> u32 {
 @(private="file", require_results)
 serve_posix :: proc "contextless" (s: ^Server, t: ^Msg, r: ^Msg) -> vx.Status {
 	xattr := t.type == .Tgetattr || t.type == .Tsetattr
-	if (xattr ? Extension.Xattr : Extension.Posix) not_in s.extensions {
+	linux_has := t.type != .Tshare && t.type != .Tjoin && t.type != .Tseek && t.type != .Tdesc
+	dotl := s.dialect == .P9_2000L && linux_has // 9P2000.L's own messages, which these extensions borrow
+	if !dotl && (xattr ? Extension.Xattr : Extension.Posix) not_in s.extensions {
 		return .Err_Unsupported
 	}
 	if t.type == .Tjoin {
@@ -955,19 +957,182 @@ serve_wstat :: proc "contextless" (s: ^Server, f: ^Fid_Entry, t: ^Msg) -> vx.Sta
 	return .Ok
 }
 
+// --- 9P2000.L (upstream's M6 step 6d4c2) ---
+//
+// Linux's dialect, for its `mount -t 9p` and the servers it speaks to. Its
+// Tlopen and Tlcreate are Topen and Tcreate with Linux's flags (serve turns
+// them into those); its Tgetattr, Tsetattr, Trenameat, Tsymlink, Treadlink,
+// Tfsync, Tlock and Tgetlock are the posix and xattr extensions' (which
+// borrowed them); the rest are here. Errors go back as Rlerror, an errno.
+
+// A 9P open mode from Linux's open flags.
+@(private="file")
+mode_of_flags :: proc "contextless" (flags: u32) -> (mode: Open_Mode) {
+	switch flags & L_O_ACCMODE {
+	case 1:
+		mode.access = .Write
+	case 2:
+		mode.access = .Rdwr
+	}
+	mode.trunc = flags & L_O_TRUNC != 0
+	return // O_APPEND: Linux's client writes at the end itself
+}
+
+@(private="file")
+dirent_type :: proc "contextless" (mode: u32) -> u8 {
+	switch {
+	case mode & DMDIR != 0:
+		return DT_DIR
+	case mode & DMSYMLINK != 0:
+		return DT_LNK
+	case mode & DMDEVICE != 0:
+		return DT_CHR
+	}
+	return DT_REG
+}
+
+// Rreaddir's entries from the cookie (an entry's index): qid[13] offset[8]
+// type[1] name[s], each entry's offset the next one's cookie.
+@(private="file", require_results)
+readdir_l :: proc "contextless" (s: ^Server, f: ^Fid_Entry, cookie: u64, out: []u8) -> (count: u32, e: vx.Status) {
+	used := 0
+	for i := cookie; i < u64(max(u32)); i += 1 {
+		child, re := s.fs.readdir(s.fs.ctx, f.node, u32(i))
+		if re == .Err_Not_Found {
+			break
+		}
+		re or_return
+		st: Stat
+		s.fs.stat(s.fs.ctx, child, &st) or_return
+		o := str.Buf{buf = out[used:]}
+		dirent_put(&o, st.qid, i + 1, dirent_type(st.mode), st.name)
+		if o.failed {
+			if used == 0 {
+				return 0, .Err_Too_Small // not even one entry fits the count asked for
+			}
+			break
+		}
+		used += o.len
+	}
+	return u32(used), .Ok
+}
+
+// Tmkdir, Tunlinkat, Trename, Treaddir and Tstatfs.
+@(private="file", require_results)
+serve_l :: proc "contextless" (s: ^Server, t: ^Msg, r: ^Msg, resp: []u8) -> vx.Status {
+	f := fid_find(s, t.fid)
+	if f == nil {
+		return .Err_Bad_Handle
+	}
+	#partial switch t.type {
+	case .Tmkdir:
+		if .Dir not_in f.qid.type || !new_name_ok(t.name) {
+			return .Err_Invalid
+		}
+		if s.fs.create == nil {
+			return .Err_Access
+		}
+		node := s.fs.create(s.fs.ctx, f.node, t.name, DMDIR | (t.lmode & 0o777), OREAD) or_return
+		qid, e := qid_of(s, node)
+		r.qid = qid
+		if s.fs.clunk != nil {
+			s.fs.clunk(s.fs.ctx, node, true) // the create opened it; no fid holds it
+		}
+		return e
+	case .Tunlinkat:
+		if .Dir not_in f.qid.type || !new_name_ok(t.name) {
+			return .Err_Invalid
+		}
+		if s.fs.remove == nil {
+			return .Err_Access
+		}
+		child := s.fs.walk(s.fs.ctx, f.node, t.name) or_return
+		st: Stat
+		e := s.fs.stat(s.fs.ctx, child, &st)
+		if e == .Ok {
+			dir := st.mode & DMDIR != 0
+			if dir != (t.lflags & L_AT_REMOVEDIR != 0) {
+				e = dir ? .Err_Access : .Err_Not_Found // EISDIR, ENOTDIR as errno has them
+			} else {
+				e = s.fs.remove(s.fs.ctx, child)
+			}
+		}
+		if s.fs.clunk != nil {
+			s.fs.clunk(s.fs.ctx, child, false)
+		}
+		return e
+	case .Trename:
+		to := fid_find(s, t.newfid)
+		if to == nil {
+			return .Err_Bad_Handle
+		}
+		if .Dir not_in to.qid.type || !new_name_ok(t.name) {
+			return .Err_Invalid
+		}
+		if s.fs.rename == nil || f.node == f.root {
+			return .Err_Access
+		}
+		st: Stat
+		s.fs.stat(s.fs.ctx, f.node, &st) or_return
+		old_buf: [256]u8
+		if len(st.name) >= len(old_buf) {
+			return .Err_Range
+		}
+		old := string(old_buf[:copy(old_buf[:], st.name)])
+		dir := s.fs.parent(s.fs.ctx, f.node) or_return
+		return s.fs.rename(s.fs.ctx, dir, old, to.node, t.name)
+	case .Treaddir:
+		if !f.open || .Dir not_in f.qid.type {
+			return .Err_Access
+		}
+		if len(resp) < RREAD_HDR {
+			return .Err_Too_Small
+		}
+		room := min(s.msize - IOHDRSZ, u32(min(len(resp) - RREAD_HDR, int(max(u32)))))
+		out := resp[RREAD_HDR:][:min(t.count, room)]
+		count := readdir_l(s, f, t.offset, out) or_return
+		r.data = out[:count]
+		return .Ok
+	case .Tstatfs: // what Linux's statfs asks for; the file servers keep no such numbers
+		r.statfs = {
+			type    = 0x01021997, // V9FS_MAGIC
+			bsize   = 4096,
+			namelen = 255,
+		}
+		return .Ok
+	}
+	return .Err_Unsupported
+}
+
 // Handles one request (one whole message) and writes the reply into resp.
 // Returns the reply's length with .Reply; otherwise the length is 0.
 @(require_results)
 serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: int, res: Serve_Result) {
 	t, r: Msg
+	dotl := s.dialect == .P9_2000L
 	if decode(req, &t) != .Ok {
-		return 0, .Hang_Up
+		// A .L request this server does not know (Txattrwalk, Tmknod):
+		// Rlerror, as Linux's client expects, not a hang-up.
+		whole := len(req) >= 7 && (u64(req[0]) | u64(req[1]) << 8 | u64(req[2]) << 16 | u64(req[3]) << 24) == u64(len(req))
+		if !dotl || !whole || req[4] % 2 != 0 || known(Type(req[4])) {
+			return 0, .Hang_Up
+		}
+		r = {type = .Rlerror, tag = u16(req[5]) | u16(req[6]) << 8, ecode = status_errno(.Err_Unsupported)} // EOPNOTSUPP
+		if reply_len = encode(&r, resp); reply_len == 0 {
+			return 0, .Hang_Up
+		}
+		return reply_len, .Reply
 	}
-	if u8(t.type) % 2 != 0 || t.type == .Rerror {
+	if u8(t.type) % 2 != 0 || t.type == .Rerror || t.type == .Rlerror {
 		return 0, .Hang_Up // only T-messages come to a server
 	}
 	r.type = Type(u8(t.type) + 1)
 	r.tag = t.tag
+	if dotl && t.type == .Tlopen { // Topen, in Linux's words; Rlopen is Ropen's shape
+		t.type, t.mode = .Topen, mode_of_flags(t.lflags)
+	} else if dotl && t.type == .Tlcreate { // Tcreate, likewise; a file, never a directory (Tmkdir)
+		t.type, t.perm, t.mode = .Tcreate, t.lmode & 0o777, mode_of_flags(t.lflags)
+	}
 	e := vx.Status.Ok
 	f: ^Fid_Entry
 
@@ -1192,6 +1357,8 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 			e = serve_map(s, &t, &r)
 		case .Treadref, .Twriteref:
 			e = serve_dref(s, &t, &r)
+		case .Tmkdir, .Tunlinkat, .Trename, .Treaddir, .Tstatfs:
+			e = dotl ? serve_l(s, &t, &r, resp) : .Err_Unsupported
 		case:
 			return 0, .Hang_Up
 		}
@@ -1199,7 +1366,9 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 	if e == .Err_Should_Wait && (t.type == .Tread || t.type == .Twrite || t.type == .Topen) {
 		return 0, .Defer
 	}
-	if e != .Ok {
+	if e != .Ok && s.dialect == .P9_2000L {
+		r = {type = .Rlerror, tag = t.tag, ecode = status_errno(e)}
+	} else if e != .Ok {
 		r = {type = .Rerror, tag = t.tag, ename = error_text(e)}
 	}
 	if reply_len = encode(&r, resp); reply_len == 0 {

@@ -523,7 +523,8 @@ link_at :: proc "contextless" (p: string, target: ^Path_Buf) -> (r: int, t: stri
 		return errno_of(st), ""
 	}
 	s: p9.Stat
-	if .Posix in c.extensions && p9.client_stat(c, fid, &s) == .Ok && s.mode & p9.DMSYMLINK != 0 {
+	links := .Posix in c.extensions || c.dialect == .P9_2000L // a 9P2000.L server's too
+	if links && p9.client_stat(c, fid, &s) == .Ok && s.mode & p9.DMSYMLINK != 0 {
 		got, rst := p9.client_readlink(c, fid, target[:len(target) - 1])
 		#partial switch rst {
 		case .Ok:

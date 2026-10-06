@@ -192,6 +192,22 @@ ram_remove :: proc "contextless" (ctx: rawptr, node: p9.Node) -> vx.Status {
 	return .Ok
 }
 
+// 9P2000.L's Trename and Trenameat need one (6d4c2): within the tree, by name.
+ram_rename :: proc "contextless" (ctx: rawptr, olddir: p9.Node, oldname: string, newdir: p9.Node, newname: string) -> vx.Status {
+	r := (^Ram)(ctx)
+	n, e := ram_walk(ctx, olddir, oldname)
+	if e != .Ok {
+		return .Err_Not_Found
+	}
+	if len(newname) > 15 {
+		return .Err_Range
+	}
+	copy(r.names[n][:], newname)
+	r.nodes[n].name = string(r.names[n][:len(newname)])
+	r.nodes[n].parent = newdir
+	return .Ok
+}
+
 // A server for the tree, before Tversion.
 ram_server :: proc(s: ^p9.Server, r: ^Ram) {
 	s^ = {
@@ -207,6 +223,7 @@ ram_server :: proc(s: ^p9.Server, r: ^Ram) {
 			write = ram_write,
 			create = ram_create,
 			remove = ram_remove,
+			rename = ram_rename,
 			clone = ram_clone,
 			clunk = ram_clunk,
 		},
@@ -345,9 +362,9 @@ test_hostile_client :: proc(t: ^testing.T) {
 	server.msize = 0
 	testing.expect_value(t, raw(h, {type = .Tattach, tag = 1, fid = 1, afid = p9.NOFID}), vx.Status.Err_Bad_State)
 	testing.expect(t, raw(h, {type = .Tversion, tag = p9.NOTAG, msize = 100, version = "9P2000"}) != ok)
-	testing.expect_value(t, raw(h, {type = .Tversion, tag = p9.NOTAG, msize = 4096, version = "9P2000.L"}), ok)
+	testing.expect_value(t, raw(h, {type = .Tversion, tag = p9.NOTAG, msize = 4096, version = "9P2000.u"}), ok)
 	testing.expect_value(t, h.reply.msize, 4096)
-	testing.expect_value(t, h.reply.version, "9P2000") // .L is answered with plain 9P2000
+	testing.expect_value(t, h.reply.version, "9P2000") // .u is answered with plain 9P2000 (.L as .L, 6d4c2)
 
 	// Attached at "docs": no walk may leave /docs.
 	testing.expect_value(t, raw(h, {type = .Tattach, tag = 1, fid = 1, afid = p9.NOFID, aname = "docs"}), ok)
@@ -573,4 +590,120 @@ test_share_tokens :: proc(t: ^testing.T) {
 	testing.expect_value(t, e, vx.Status.Ok)
 	testing.expect(t, third == again, "the same token while holds are outstanding")
 	testing.expect_value(t, p9.client_clunk(&c, f), vx.Status.Ok)
+}
+
+// --- 9P2000.L (upstream's M6 step 6d4c2) ---
+
+// A server that knows 9P2000.L and not 9Px, as diod and QEMU's virtfs are:
+// "unknown" to a 9Px Tversion, and the rest is the server's.
+dotl_only :: proc "contextless" (ctx: rawptr, req: []u8, resp: []u8) -> int {
+	t: p9.Msg
+	if p9.decode(req, &t) == .Ok && t.type == .Tversion && len(t.version) >= 8 && t.version[:8] == "9P2000.x" {
+		r := p9.Msg{type = .Rversion, tag = t.tag, msize = t.msize, version = "unknown"}
+		return p9.encode(&r, resp)
+	}
+	return p9test.loopback(ctx, req, resp)
+}
+
+// One request in Linux's own bytes: the reply's length, its bytes in resp.
+dotl_raw :: proc(s: ^p9.Server, req: []u8, resp: []u8) -> int {
+	n, res := p9.serve(s, req, resp)
+	return res == .Reply ? n : 0
+}
+
+@(test)
+test_dotl :: proc(t: ^testing.T) {
+	ram: Ram
+	server: p9.Server
+	ram_init(&ram)
+	ram_server(&server, &ram)
+	tbuf, rbuf: [8192]u8
+	c := p9.Client{rpc = dotl_only, ctx = &server, tbuf = tbuf[:], rbuf = rbuf[:]}
+	testing.expect_value(t, p9.client_version(&c, 8192, {.Posix, .Xattr}), vx.Status.Ok)
+	testing.expect_value(t, c.dialect, p9.Dialect.P9_2000L)
+	testing.expect_value(t, c.extensions, p9.Extensions{})
+	testing.expect_value(t, server.dialect, p9.Dialect.P9_2000L)
+	root, e := p9.client_attach(&c, "")
+	testing.expect_value(t, e, vx.Status.Ok)
+	_, e = p9.client_walk(&c, root, "nothing")
+	testing.expect_value(t, e, vx.Status.Err_Not_Found) // an errno, Rlerror's
+	docs: p9.Fid
+	docs, e = p9.client_walk(&c, root, "docs")
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect_value(t, p9.client_open(&c, docs, p9.OREAD), vx.Status.Ok) // Tlopen
+
+	// A directory read: Treaddir, made into stat entries.
+	dir: [1024]u8
+	n, re := p9.client_read(&c, docs, 0, dir[:])
+	testing.expect_value(t, re, vx.Status.Ok)
+	a, sub := false, false
+	it := p9.Dir_Entries{buf = dir[:n]}
+	for st in p9.next_entry(&it) {
+		if st.name == "a.txt" {
+			a = st.mode & p9.DMDIR == 0
+		}
+		if st.name == "sub" {
+			sub = st.mode & p9.DMDIR != 0
+		}
+	}
+	testing.expect(t, n > 0)
+	testing.expect(t, a)
+	testing.expect(t, sub)
+	n2, re2 := p9.client_read(&c, docs, u64(n), dir[:])
+	testing.expect_value(t, re2, vx.Status.Ok) // where it ended: the end
+	testing.expect_value(t, n2, 0)
+	_, re = p9.client_read(&c, docs, 1, dir[:])
+	testing.expect_value(t, re, vx.Status.Err_Range)
+
+	// Tlcreate, Tmkdir, Tgetattr as a stat, Trenameat.
+	st: p9.Stat
+	d2: p9.Fid
+	d2, e = p9.client_walk(&c, root, "docs")
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect_value(t, p9.client_create(&c, d2, "n.txt", 0o644, p9.ORDWR), vx.Status.Ok)
+	testing.expect_value(t, p9.client_stat(&c, d2, &st), vx.Status.Ok)
+	testing.expect_value(t, st.mode & p9.DMDIR, 0)
+	testing.expect_value(t, st.mode & 0o777, 0o644)
+	testing.expect_value(t, p9.client_clunk(&c, d2), vx.Status.Ok)
+	d2, e = p9.client_walk(&c, root, "docs")
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect_value(t, p9.client_create(&c, d2, "nd", p9.DMDIR | 0o755, p9.OREAD), vx.Status.Ok)
+	testing.expect_value(t, p9.client_stat(&c, d2, &st), vx.Status.Ok)
+	testing.expect(t, st.mode & p9.DMDIR != 0)
+	testing.expect_value(t, p9.client_clunk(&c, d2), vx.Status.Ok)
+	docs2: p9.Fid
+	docs2, e = p9.client_walk(&c, root, "docs")
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect_value(t, p9.client_renameat(&c, docs2, "n.txt", docs2, "m.txt"), vx.Status.Ok)
+	d2, e = p9.client_walk(&c, docs2, "m.txt")
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect_value(t, p9.client_clunk(&c, d2), vx.Status.Ok)
+	testing.expect_value(t, p9.client_create(&c, docs2, "x", p9.DMAPPEND | 0o644, p9.OWRITE), vx.Status.Err_Unsupported)
+
+	// Linux's bytes: Tlopen of a fid not open, then Tstatfs, Tunlinkat, and a
+	// message the server lacks (Txattrwalk), which is Rlerror, not a hang-up.
+	d2, e = p9.client_walk(&c, docs2, "m.txt")
+	testing.expect_value(t, e, vx.Status.Ok)
+	resp: [512]u8
+	lopen := [15]u8{15, 0, 0, 0, 12, 9, 0, u8(d2), u8(d2 >> 8), 0, 0, 2, 0, 0, 0} // O_RDWR
+	testing.expect_value(t, dotl_raw(&server, lopen[:], resp[:]), 24) // Rlopen: qid[13] iounit[4]
+	testing.expect_value(t, resp[4], 13)
+	testing.expect_value(t, resp[5], 9)
+	statfs := [11]u8{11, 0, 0, 0, 8, 3, 0, u8(root), u8(root >> 8), 0, 0}
+	testing.expect_value(t, dotl_raw(&server, statfs[:], resp[:]), 67)
+	testing.expect_value(t, resp[4], 9)
+	testing.expect_value(t, resp[7], 0x97)
+	testing.expect_value(t, resp[10], 0x01)
+	// Tunlinkat docs2 "nd" AT_REMOVEDIR
+	unlink := [19]u8{19, 0, 0, 0, 76, 4, 0, u8(docs2), u8(docs2 >> 8), 0, 0, 2, 0, 'n', 'd', 0, 2, 0, 0}
+	testing.expect_value(t, dotl_raw(&server, unlink[:], resp[:]), 7)
+	testing.expect_value(t, resp[4], 77)
+	testing.expect_value(t, dotl_raw(&server, unlink[:], resp[:]), 11) // Rlerror ENOENT now
+	testing.expect_value(t, resp[4], 7)
+	testing.expect_value(t, resp[7], 2)
+	xattr := [17]u8{17, 0, 0, 0, 30, 5, 0, u8(root), u8(root >> 8), 0, 0, 77, 0, 0, 0, 0, 0}
+	testing.expect_value(t, dotl_raw(&server, xattr[:], resp[:]), 11)
+	testing.expect_value(t, resp[4], 7)
+	testing.expect_value(t, resp[5], 5)
+	testing.expect_value(t, resp[7], 95) // EOPNOTSUPP
 }

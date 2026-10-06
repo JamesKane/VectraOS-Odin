@@ -254,7 +254,7 @@ fd_renameat :: proc "contextless" (olddirfd: int, old: string, newdirfd: int, ne
 	// The directories, as fd_parent left them in the buffers before the names.
 	d1 := string(b1[:uintptr(raw_data(n1)) - uintptr(&b1[0])])
 	d2 := string(b2[:uintptr(raw_data(n2)) - uintptr(&b2[0])])
-	posix := c1 == c2 && .Posix in c1.extensions
+	posix := c1 == c2 && (.Posix in c1.extensions || c1.dialect == .P9_2000L) // Trenameat's
 	r: int
 	switch {
 	case c1 != c2 || (!posix && d1 != d2):

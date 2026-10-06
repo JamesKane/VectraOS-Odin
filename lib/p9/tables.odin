@@ -10,17 +10,33 @@ package p9
 // Terror (106) does not exist.
 Type :: enum u8 {
 	None      = 0,
-	// 9P2000.L's, unchanged on the wire, for the posix and xattr extensions.
+	// 9P2000.L's, unchanged on the wire, for the posix and xattr extensions,
+	// and for a 9P2000.L session (upstream's M6 step 6d4c2).
+	Rlerror   = 7, // 9P2000.L's errors
+	Tstatfs   = 8,
+	Rstatfs   = 9,
+	Tlopen    = 12,
+	Rlopen    = 13,
+	Tlcreate  = 14,
+	Rlcreate  = 15,
 	Tsymlink  = 16,
 	Rsymlink  = 17,
 	Treadlink = 22,
 	Rreadlink = 23,
+	Trename   = 20, // fid, dfid, name (9P2000.L)
+	Rrename   = 21,
 	Tgetattr  = 24,
 	Rgetattr  = 25,
 	Tsetattr  = 26,
 	Rsetattr  = 27,
 	Tfsync    = 50,
 	Rfsync    = 51,
+	Treaddir  = 40, // 9P2000.L: entries from a cookie
+	Rreaddir  = 41,
+	Tmkdir    = 72,
+	Rmkdir    = 73,
+	Tunlinkat = 76,
+	Runlinkat = 77,
 	Tlink     = 70,
 	Rlink     = 71,
 	Trenameat = 74,
@@ -123,6 +139,12 @@ Field :: enum u8 {
 	Prot, // Tmap's: read 1, write 2, exec 4
 	// 9Px's dref extension.
 	Roffset, // where in the request's VMO the data is, or goes
+	// 9P2000.L's (upstream's M6 step 6d4c2), as Linux's net/9p has them.
+	Lflags, // Tlopen's and Tlcreate's Linux open flags; Tunlinkat's AT_REMOVEDIR
+	Lmode, // Tlcreate's and Tmkdir's POSIX mode
+	Ecode, // Rlerror's Linux errno
+	Nuname, // Tattach's and Tauth's in .L and .u: there if has_n_uname, read if bytes remain
+	Statfs, // Rstatfs's body
 }
 
 // How a field is laid out on the wire.
@@ -140,6 +162,8 @@ Field_Kind :: enum u8 {
 	Attr, // Rgetattr's: valid[8] qid[13] mode[4] uid[4] gid[4], then 15 u64s
 	Setattr, // Tsetattr's: valid[4] mode[4] uid[4] gid[4], then 5 u64s
 	Token, // 16 bytes
+	Nuname, // n_uname[4], the message's last field: written if has_n_uname, read if bytes remain
+	Statfs, // Rstatfs's: type[4] bsize[4], then 6 u64s, then namelen[4]
 }
 
 Field_Info :: struct {
@@ -188,6 +212,11 @@ FIELDS := [Field]Field_Info {
 	.Descflags = {.U32, "desc_flags"},
 	.Prot      = {.U32, "prot"},
 	.Roffset   = {.U64, "roffset"},
+	.Lflags    = {.U32, "lflags"},
+	.Lmode     = {.U32, "lmode"},
+	.Ecode     = {.U32, "ecode"},
+	.Nuname    = {.Nuname, "n_uname"},
+	.Statfs    = {.Statfs, "statfs"},
 }
 
 // A message type's name and its fields in wire order. An entry with no name
@@ -200,14 +229,25 @@ Message :: struct {
 
 @(rodata)
 MESSAGES := [256]Message {
+	7 = {"Rlerror", {.Ecode}}, // 9P2000.L's errors (6d4c2)
+	8 = {"Tstatfs", {.Fid}},
+	9 = {"Rstatfs", {.Statfs}},
+	12 = {"Tlopen", {.Fid, .Lflags}},
+	13 = {"Rlopen", {.Qid, .Iounit}},
+	14 = {"Tlcreate", {.Fid, .Name, .Lflags, .Lmode, .Gid}},
+	15 = {"Rlcreate", {.Qid, .Iounit}},
 	16 = {"Tsymlink", {.Fid, .Name, .Name2, .Gid}},
 	17 = {"Rsymlink", {.Qid}},
+	20 = {"Trename", {.Fid, .Newfid, .Name}}, // fid, dfid, name (9P2000.L)
+	21 = {"Rrename", {}},
 	22 = {"Treadlink", {.Fid}},
 	23 = {"Rreadlink", {.Name2}},
 	24 = {"Tgetattr", {.Fid, .Mask}},
 	25 = {"Rgetattr", {.Attr}},
 	26 = {"Tsetattr", {.Fid, .Setattr}},
 	27 = {"Rsetattr", {}},
+	40 = {"Treaddir", {.Fid, .Offset, .Count}}, // 9P2000.L: entries from a cookie
+	41 = {"Rreaddir", {.Data}},
 	50 = {"Tfsync", {.Fid, .Datasync}},
 	51 = {"Rfsync", {}},
 	52 = {"Tlock", {.Fid, .Locktype, .Lockflags, .Start, .Length, .Procid, .Clientid}},
@@ -216,13 +256,17 @@ MESSAGES := [256]Message {
 	55 = {"Rgetlock", {.Locktype, .Start, .Length, .Procid, .Clientid}},
 	70 = {"Tlink", {.Fid, .Newfid, .Name}}, // dfid, fid, name
 	71 = {"Rlink", {}},
+	72 = {"Tmkdir", {.Fid, .Name, .Lmode, .Gid}},
+	73 = {"Rmkdir", {.Qid}},
 	74 = {"Trenameat", {.Fid, .Name, .Newfid, .Name2}}, // olddirfid, oldname, newdirfid, newname
 	75 = {"Rrenameat", {}},
+	76 = {"Tunlinkat", {.Fid, .Name, .Lflags}},
+	77 = {"Runlinkat", {}},
 	100 = {"Tversion", {.Msize, .Version}},
 	101 = {"Rversion", {.Msize, .Version}},
-	102 = {"Tauth", {.Afid, .Uname, .Aname}},
+	102 = {"Tauth", {.Afid, .Uname, .Aname, .Nuname}},
 	103 = {"Rauth", {.Qid}},
-	104 = {"Tattach", {.Fid, .Afid, .Uname, .Aname}},
+	104 = {"Tattach", {.Fid, .Afid, .Uname, .Aname, .Nuname}},
 	105 = {"Rattach", {.Qid}},
 	107 = {"Rerror", {.Ename}},
 	108 = {"Tflush", {.Oldtag}},
