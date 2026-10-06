@@ -6,7 +6,7 @@
 scenario=sched timeout=120 cmdline=vx.skip=rc,netd with=schedtest
 expect="schedtest: realtime against a hog"
 expect="schedtest: reserved against a hog"
-expect="schedtest: 121 checks, 0 failed"
+expect="schedtest: back-to-back calls answered"
 line="svcd: schedtest exited"
 fail="vx: panic"
 fail="schedtest: FAILED"

@@ -130,9 +130,10 @@ Sched_Info :: struct { // thread_state(.Get_Sched): /proc/N/threads/T/sched
 	period, budget, left:   Duration, // its context's; left, of the budget this period
 	exhausted:              u64, // periods its context ran out of budget in
 	reserved:               u64, // the CPUs its context reserved
+	lent_task, lent_thread: u64, // the channel_call caller it runs for, on its scheduling; or 0
 }
 
-#assert(size_of(Sched_Info) == 56)
+#assert(size_of(Sched_Info) == 72)
 
 // Every channel message starts with this header. The kernel writes
 // sender_intent; the rest is the protocol's.

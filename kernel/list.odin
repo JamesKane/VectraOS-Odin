@@ -19,6 +19,15 @@ fifo_push :: proc "contextless" (q: ^Fifo($T), x: ^T) {
 	q.tail = x
 }
 
+// Queues x first: the next fifo_pop takes it.
+fifo_push_front :: proc "contextless" (q: ^Fifo($T), x: ^T) {
+	x.next = q.head
+	q.head = x
+	if q.tail == nil {
+		q.tail = x
+	}
+}
+
 // The oldest element, taken off the queue, or nil if it is empty.
 fifo_pop :: proc "contextless" (q: ^Fifo($T)) -> ^T {
 	x := q.head

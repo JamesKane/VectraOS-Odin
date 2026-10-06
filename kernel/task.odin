@@ -119,9 +119,15 @@ Thread :: struct {
 	state:        Thread_State,
 	// Its scheduling (sched.odin, ADR-0016), under the scheduler's lock: the
 	// context it is bound to, holding a reference, and the CPU of that
-	// context's reservation it is bound to.
+	// context's reservation it is bound to; the channel_call caller lending
+	// it its scheduling, and the thread this one, in channel_call, lends its
+	// own to; and whether its loan's call has been answered, so that it
+	// keeps the loan only until it blocks, or its slice ends.
 	ctx:          ^Sched_Ctx,
 	core:         Maybe(u32),
+	donor:        ^Thread,
+	donee:        ^Thread,
+	lend_tail:    bool,
 	next:         ^Thread, // in the ready queue (under the scheduler's lock)
 	wait_next:    ^Thread, // in a port's waiters (under the port's lock); never the same link as next
 	sleep_next:   ^Thread, // in its CPU's sleep queue, ordered by wake_at

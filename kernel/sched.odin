@@ -18,6 +18,20 @@ import vx "abi:vx"
 // run its threads bound to them and nothing else; one CPU, the first, is
 // never reserved. A thread made ready in a band above one running preempts it.
 //
+// Donation (6d6c2, upstream's 01 §4.5): a thread in channel_call lends its
+// scheduling, its intent and its context, to the thread serving the call, as
+// seL4 MCS does and as Zircon's channel calls make the port waiter they wake
+// the owner of the caller's wait (object/channel_dispatcher.rs,
+// write_self_locked's queue_to_own). The loan goes first to the port waiter
+// the request wakes, then to the thread that reads it, and ends with the
+// call; a thread runs on a loan only if it is above its own. The thread woken
+// goes on the caller's CPU, which the caller is about to leave, and the
+// reply's caller on the replier's: each switches straight to the other.
+// Answered, the server keeps the loan until it next blocks, or its slice
+// ends, so that it gets back to its wait for the next call: seL4's reply and
+// receive are one call, ours two, and between them a server of a lower band
+// would wait behind every thread above it.
+//
 // The kernel runs with interrupts off. They are on only in user mode and in
 // an idle thread's wait. A CPU with nothing to run sleeps with no timer armed
 // unless a sleeper or a spent context needs one; a thread made ready while it
@@ -42,6 +56,7 @@ Cpu :: struct {
 	run_start:  Instant, // when current began running, for charging its context
 	reserved:   ^Sched_Ctx, // the context that reserved this CPU, or none
 	resched:    bool, // call schedule before returning to user mode
+	lending:    ^Thread, // a channel_call delivering its request: the port waiter it wakes is lent to
 	reap:       ^Thread, // a thread that died here, for whoever runs next to free
 	idle_stack: u64, // the idle stack's lowest byte
 	// Which task tables this CPU has loaded (0: none), and how many times it
@@ -107,9 +122,9 @@ reap_after_switch :: proc "contextless" () {
 	}
 }
 
-// A thread's intent: its context's, or its own.
+// A thread's own intent: its context's, or its own.
 @(private="file")
-thread_intent :: proc "contextless" (t: ^Thread) -> vx.Intent {
+own_intent :: proc "contextless" (t: ^Thread) -> vx.Intent {
 	return t.ctx != nil ? t.ctx.intent : t.intent
 }
 
@@ -119,10 +134,34 @@ intent_band :: proc "contextless" (i: vx.Intent) -> vx.Intent {
 	return i >= .Realtime && i <= .Background ? i : .Interactive
 }
 
-// The context t's time is charged to.
+// Loans go at most this deep: a server calling a server calling a server.
+@(private="file")
+LEND_DEPTH :: 8
+
+// The thread whose scheduling t runs on: itself, or the highest of the
+// callers lending to it, along the chain, above its own.
+@(private="file")
+sched_source :: proc "contextless" (t: ^Thread) -> ^Thread {
+	best := t
+	o := t.donor
+	for i := 0; i < LEND_DEPTH && o != nil; i, o = i + 1, o.donor {
+		if intent_band(own_intent(o)) < intent_band(own_intent(best)) {
+			best = o
+		}
+	}
+	return best
+}
+
+// A thread's intent: its own, or a loan's.
+@(private="file")
+thread_intent :: proc "contextless" (t: ^Thread) -> vx.Intent {
+	return own_intent(sched_source(t))
+}
+
+// The context t's time is charged to: its own, or a loan's.
 @(private="file")
 ctx_of :: proc "contextless" (t: ^Thread) -> ^Sched_Ctx {
-	return t.ctx
+	return sched_source(t).ctx
 }
 
 // Its band: a smaller value is a higher band.
@@ -166,6 +205,13 @@ may_run :: proc "contextless" (t: ^Thread, c: ^Cpu) -> bool {
 run_enqueue :: proc "contextless" (t: ^Thread) {
 	t.state = .Ready
 	fifo_push(&sched.run[band_of(t)], t)
+}
+
+// Queues t first in its band: a hand-off, run next.
+@(private="file")
+run_push :: proc "contextless" (t: ^Thread) {
+	t.state = .Ready
+	fifo_push_front(&sched.run[band_of(t)], t)
 }
 
 // The first ready thread of the highest band that may run on c, taken off
@@ -295,6 +341,20 @@ make_ready :: proc "contextless" (t: ^Thread) {
 	sleep_remove(t)
 	run_enqueue(t)
 	kick_for(t)
+}
+
+// Makes t ready to run next here, where the current thread is about to block
+// or to fall below it: a hand-off, if this CPU may run it; else as make_ready.
+@(private="file")
+make_ready_here :: proc "contextless" (t: ^Thread) {
+	self := this_cpu()
+	if !may_run(t, self) || (self.current != &self.idle && band_of(self.current) < band_of(t)) {
+		make_ready(t)
+		return
+	}
+	sleep_remove(t)
+	run_push(t)
+	self.resched = true
 }
 
 // Gets a CPU to a thread just queued: this one if it is idle and may run it,
@@ -547,7 +607,8 @@ sched_reserve_cpus :: proc "contextless" (x: ^Sched_Ctx, count: u32) -> (set: vx
 // What thread_state's .Get_Sched gives, and /proc/N/threads/T/sched shows.
 sched_info :: proc "contextless" (t: ^Thread) -> vx.Sched_Info {
 	spin_guard(&sched.lock)
-	x := t.ctx
+	from := sched_source(t)
+	x := from.ctx // what it runs on: its own, or a loan's
 	info := vx.Sched_Info {
 		intent = thread_intent(t),
 		core   = -1,
@@ -567,7 +628,111 @@ sched_info :: proc "contextless" (t: ^Thread) -> vx.Sched_Info {
 		info.reserved = transmute(u64)t.ctx.reserved
 		info.reserved_count = u32(card(t.ctx.reserved))
 	}
+	if from != t {
+		info.lent_task = from.task != nil ? from.task.id : 0
+		info.lent_thread = u64(from.id)
+	}
 	return info
+}
+
+// --- Donation (6d6c2) ---
+
+// Ends the loan t, a caller, made: its call is over. Under the lock.
+@(private="file")
+unlend_locked :: proc "contextless" (t: ^Thread) {
+	if t.donee == nil {
+		return
+	}
+	if t.donee.donor == t {
+		t.donee.donor = nil
+		t.donee.lend_tail = false
+	}
+	t.donee = nil
+}
+
+// Ends the loan t runs on, if its call was answered: t has blocked, or used
+// its slice, since.
+@(private="file")
+tail_end :: proc "contextless" (t: ^Thread) {
+	if !t.lend_tail {
+		return
+	}
+	t.lend_tail = false
+	if t.donor != nil && t.donor.donee == t {
+		t.donor.donee = nil
+	}
+	t.donor = nil
+}
+
+// from, in channel_call, lends its scheduling to `to`, which serves its
+// call: moved from where it was, and kept from to's loan if that is higher.
+// Never in a loop: from lending to a thread lending, along its chain, to from.
+@(private="file")
+lend_locked :: proc "contextless" (from, to: ^Thread) {
+	if from == to || from.donee == to {
+		return
+	}
+	unlend_locked(from)
+	o := from.donor
+	for i := 0; i < LEND_DEPTH && o != nil; i, o = i + 1, o.donor {
+		if o == to {
+			return
+		}
+	}
+	if to.donor != nil {
+		if band_of(to.donor) <= band_of(from) {
+			return // what it has is as high
+		}
+		to.donor.donee = nil
+	}
+	to.donor = from
+	from.donee = to
+	to.lend_tail = false
+}
+
+// The reader of a call's request serves it: the caller's scheduling is lent
+// to it.
+sched_lend :: proc "contextless" (from, to: ^Thread) {
+	spin_guard(&sched.lock)
+	lend_locked(from, to)
+}
+
+// t's call is over. Unanswered, its loan ends; answered, the server keeps it
+// as a tail until it blocks (tail_end), which a new call of t's, or t's end,
+// cuts short.
+sched_unlend :: proc "contextless" (t: ^Thread) {
+	spin_guard(&sched.lock)
+	if t.donee == nil || t.donee.donor != t || !t.donee.lend_tail {
+		unlend_locked(t)
+	}
+}
+
+// While a channel_call delivers its request: the port waiter it wakes is lent
+// to (thread_wake_token). Under the channel's lock, interrupts off.
+sched_lending :: proc "contextless" (caller: ^Thread) {
+	this_cpu().lending = caller
+}
+
+// Wakes a channel_call caller with its reply: its loan ended (the server
+// keeps it until it blocks), and run next here, in the replier's place, if
+// this CPU may.
+thread_wake_reply :: proc "contextless" (t: ^Thread, token: rawptr, result: vx.Status) -> bool {
+	spin_guard(&sched.lock)
+	if t.donee != nil && t.donee.donor == t {
+		t.donee.lend_tail = true // until it blocks
+	}
+	if token == nil || t.wait_token != token {
+		return false
+	}
+	t.wait_token = nil
+	if t.state == .Blocked {
+		t.wait_result = result
+		make_ready_here(t)
+	} else {
+		t.pending_result = result
+		t.wake_pending = true
+	}
+	return true
 }
 
 // Switches to the next ready thread, or to this CPU's idle thread. Called with
@@ -673,9 +838,19 @@ thread_wake_token :: proc "contextless" (t: ^Thread, token: rawptr, result: vx.S
 		return false
 	}
 	t.wait_token = nil
+	self := this_cpu()
+	caller := self.lending
+	if caller != nil { // the first woken serves the call
+		lend_locked(caller, t)
+		self.lending = nil
+	}
 	if t.state == .Blocked {
 		t.wait_result = result
-		make_ready(t)
+		if caller != nil && t.donor == caller {
+			make_ready_here(t) // the caller is about to block: run the server in its place
+		} else {
+			make_ready(t)
+		}
 	} else {
 		t.pending_result = result // for its block, which returns at once
 		t.wake_pending = true
@@ -701,6 +876,7 @@ thread_block :: proc "contextless" (deadline: Instant, leeway: Instant) -> vx.St
 		spin_unlock(&sched.lock)
 		return t.wait_result
 	}
+	tail_end(t) // an answered call's loan ends as its server waits again
 	t.state = .Blocked
 	if deadline != INFINITE {
 		t.wake_at = deadline
@@ -764,7 +940,11 @@ sched_timer :: proc "contextless" () {
 		// The slice is over: switch if someone of its band or above is
 		// waiting, else give the running thread another one. (Re-arming the
 		// old, expired end would fire at once, for ever, and the thread would
-		// never get back to user mode.)
+		// never get back to user mode.) An answered call's loan ends here too.
+		if c.current != &c.idle && c.current.lend_tail {
+			tail_end(c.current)
+			c.resched = true
+		}
 		if c.current == &c.idle || ready_for(c, band_of(c.current)) {
 			c.resched = true
 		} else {
@@ -836,6 +1016,9 @@ task_fault_start :: proc "contextless" () {
 sched_exit_current :: proc "contextless" () -> ! {
 	spin_lock(&sched.lock)
 	c := this_cpu()
+	unlend_locked(c.current) // its loans end, both ways
+	c.current.lend_tail = true
+	tail_end(c.current)
 	c.current.state = .Dead
 	c.reap = c.current
 	schedule_locked()
