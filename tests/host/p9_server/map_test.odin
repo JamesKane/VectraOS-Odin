@@ -196,17 +196,17 @@ test_map_dref :: proc(t: ^testing.T) {
 		h := hex.encode(req[:n], context.temp_allocator)
 		fmt.sbprintf(&dump, "%d %s %s\n", step.conn, step.vmo ? "H" : "-", h)
 		s := &servers[step.conn]
-		s.request_handle = step.vmo ? REQUEST_VMO : vx.HANDLE_NONE
+		p9.request_handle = step.vmo ? REQUEST_VMO : vx.HANDLE_NONE
 		strings.builder_reset(&calls)
 		reply_len, res := p9.serve(s, req[:n], resp[:])
 		fmt.sbprintf(&b, "%d > %s %s\n", step.conn, step.vmo ? "H" : "-", h)
 		strings.write_string(&b, strings.to_string(calls))
 		fmt.sbprintf(&b, "%d < %s", step.conn, res == .Reply ? string(hex.encode(resp[:reply_len], context.temp_allocator)) : fmt.tprint(res))
-		if s.reply_handle != vx.HANDLE_NONE {
-			fmt.sbprintf(&b, " handle=%d", u32(s.reply_handle))
+		if p9.reply_handle != vx.HANDLE_NONE {
+			fmt.sbprintf(&b, " handle=%d", u32(p9.reply_handle))
 		}
 		strings.write_string(&b, "\n")
-		s.reply_handle, s.request_handle = vx.HANDLE_NONE, vx.HANDLE_NONE // the transport's
+		p9.reply_handle, p9.request_handle = vx.HANDLE_NONE, vx.HANDLE_NONE // the transport's
 	}
 	if P9_MAP_DUMP != "" {
 		_ = os.write_entire_file(P9_MAP_DUMP, transmute([]u8)strings.to_string(dump))

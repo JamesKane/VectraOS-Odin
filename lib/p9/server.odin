@@ -42,8 +42,8 @@ package p9
 // Tsetattr (upstream docs/proto/posix.md). With map, Tmap answers a VMO,
 // and with dref, Treadref and Twriteref move data through the client's VMO
 // (upstream docs/proto/map.md, dref.md); with srv, Ropen and Twrite carry
-// handles (srv.md). The handles go by the transport, through Server's
-// reply_handle and request_handle.
+// handles (srv.md). The handles go by the transport, through the
+// thread-local reply_handle and request_handle.
 
 import "base:intrinsics"
 import "abi:vx"
@@ -190,13 +190,19 @@ Server :: struct {
 	shared:     ^Shared, // the server's open files and locks, for posix; may be nil
 	version:    [96]u8, // Rversion's string
 	stat:       [1024]u8, // Rstat's entry
-	// The handle the last reply carries (Rmap's VMO), for the transport to
-	// pass on; HANDLE_NONE when it carries none. The transport's to close.
-	reply_handle:   vx.Handle,
-	// The handle the request carried (dref's VMO), set by the transport;
-	// HANDLE_NONE when it carried none. The transport's to close.
-	request_handle: vx.Handle,
 }
+
+// The handles of the call being served, each thread's own: a call is served
+// by one thread from start to finish, whether or not it lets the server go
+// meanwhile (vx:p9ring's release, upstream's M6 step 6d5a), and other calls
+// on the connection may be served then. The request's (dref's VMO, a post's
+// connector), set by the transport, HANDLE_NONE when it carried none; the
+// reply's (Rmap's VMO, srv's connector), for the transport to pass on. Both
+// the transport's to close.
+@(thread_local)
+request_handle: vx.Handle
+@(thread_local)
+reply_handle: vx.Handle
 
 // What serve made of a request.
 Serve_Result :: enum u8 {
@@ -822,7 +828,7 @@ serve_map :: proc "contextless" (s: ^Server, t: ^Msg, r: ^Msg) -> vx.Status {
 		return .Err_Range
 	}
 	m := s.fs.map_range(s.fs.ctx, f.node, t.offset, t.length, t.prot) or_return
-	s.reply_handle = m.vmo
+	reply_handle = m.vmo
 	r.offset, r.length = m.vmo_offset, m.avail
 	return .Ok
 }
@@ -846,7 +852,7 @@ serve_dref :: proc "contextless" (s: ^Server, t: ^Msg, r: ^Msg) -> vx.Status {
 	if read ? f.mode.access == .Write : !writes(f.mode) {
 		return .Err_Access
 	}
-	if s.request_handle == vx.HANDLE_NONE {
+	if request_handle == vx.HANDLE_NONE {
 		return .Err_Invalid // no VMO came with it
 	}
 	o := s.shared != nil ? f.file : nil
@@ -862,7 +868,7 @@ serve_dref :: proc "contextless" (s: ^Server, t: ^Msg, r: ^Msg) -> vx.Status {
 			offset = st.length
 		}
 	}
-	count := op(s.fs.ctx, f.node, offset, s.request_handle, t.roffset, t.count) or_return
+	count := op(s.fs.ctx, f.node, offset, request_handle, t.roffset, t.count) or_return
 	if o != nil && t.offset == OFFSET_CURRENT {
 		o.offset = offset + u64(count)
 	}
@@ -1281,7 +1287,7 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 					}
 					break
 				}
-				s.reply_handle = h
+				reply_handle = h
 			}
 			f.open = true
 			f.mode = plain_mode(t.mode)
@@ -1340,9 +1346,9 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 				e = .Err_Access
 			} else if t.count > s.msize - IOHDRSZ {
 				e = .Err_Too_Small
-			} else if s.request_handle != vx.HANDLE_NONE && .Srv in s.extensions && s.fs.write_handle != nil {
-				e = s.fs.write_handle(s.fs.ctx, f.node, s.request_handle) // srv: a post; the file server's now
-				s.request_handle = vx.HANDLE_NONE
+			} else if request_handle != vx.HANDLE_NONE && .Srv in s.extensions && s.fs.write_handle != nil {
+				e = s.fs.write_handle(s.fs.ctx, f.node, request_handle) // srv: a post; the file server's now
+				request_handle = vx.HANDLE_NONE
 				r.count = t.count
 			} else {
 				r.count, e = write(s, f, &t)

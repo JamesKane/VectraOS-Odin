@@ -1,0 +1,5 @@
+# tests/user/pooltest.ndb: pooltest, with pooltestd on /n/pool (tests/qemu/pool.ndb).
+
+service=pooltest program=/boot/bin/pooltest console
+mount=/ srv=bootfs
+mount=/n/pool srv=pooltest

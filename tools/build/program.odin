@@ -42,6 +42,8 @@ PROGRAMS := []Program {
 	{name = "wstattest", dir = "tests/user/wstattest", place = .Tests},
 	{name = "srvtest", dir = "tests/user/srvtest", place = .Tests},
 	{name = "relaytest", dir = "tests/user/relaytest", place = .Tests},
+	{name = "pooltestd", dir = "tests/user/pooltestd", place = .Tests},
+	{name = "pooltest", dir = "tests/user/pooltest", place = .Tests},
 	{name = "constest", dir = "tests/user/constest", place = .Tests},
 	{name = "nettest", dir = "tests/user/nettest", place = .Tests},
 	{name = "tcptest", dir = "tests/user/tcptest", place = .Tests},

@@ -176,10 +176,13 @@ A server is one loop around one port, as `p9_ring_serve` in `lib/vx-9p/ring_serv
 - Read the listen channel until it is empty, answering each connection request with a new ring.
 - If nothing is left to do, prepare to sleep on each connection, which sets its `NEED_WAKEUP` and looks once more; bind each idle connection's doorbell, and the listen channel, to the port where they are not bound already.
 - Wait on the port, with a deadline if the server has timers of its own, and handle what comes: a doorbell, a client gone (`VX_TRIGGER_PEER_CLOSED` on its end), the listen channel, or a source of the server's own, such as a driver's interrupt.
-- End the sleep on every connection, and go round again.
+- End the sleep on every connection it was prepared on, and go round again.
 
 A packet's key names a connection by its slot and the slot's generation, so a packet from a binding on a connection that has gone is not taken for the slot's next connection.
-A server that works so needs one thread, and the file servers built on vx-9p have one.
+A server that works so needs one thread, and a file server built on vx-9p is served as by one: under the server's lock, one request at a time (M6 step 6d5a).
+One whose operation is to wait, a device's I/O, say, lets the lock go with `p9_release` and takes it back with `p9_acquire`, as 9front's lib9p does with `srvrelease` and `srvacquire`; meanwhile another of its threads runs the loop, a parked one or a new one, up to the server's `max_threads`.
+The request stays held, busy: a request on its fid waits behind it, a `Tflush` of it waits for its reply, and a `Tversion` for every busy request on the connection; a connection whose client goes is closed once its last busy request is done.
+Only the thread that sleeps on the port prepares the connections for it and ends their sleep after; others, done with a request, park.
 
 # EXAMPLES
 

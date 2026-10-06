@@ -1,0 +1,12 @@
+# tests/qemu/pool.ndb: worker threads in vx-9p's ring server (M6 step 6d5a):
+# a server answering others while a read waits let go, three at once, a
+# Tflush waiting for a busy read, a connection closed after its
+# busy read (tests/user/pooltest.c, against tests/user/pooltestd.c).
+
+scenario=pool timeout=60 cmdline=vx.skip=rc with=pooltestd,pooltest
+expect="pooltest: 26 checks, 0 failed"
+line="svcd: pooltest exited"
+fail="vx: panic"
+fail="pooltest: FAILED"
+fail="svcd: pooltest exited: "
+fail=") killed: "

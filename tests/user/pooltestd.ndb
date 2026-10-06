@@ -1,0 +1,3 @@
+# tests/user/pooltestd.ndb: pooltestd, posted as /srv/pooltest (tests/qemu/pool.ndb).
+
+service=pooltestd program=/boot/bin/pooltestd post=pooltest console

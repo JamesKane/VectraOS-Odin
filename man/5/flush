@@ -22,7 +22,7 @@ Several flushes of one request are answered in order, and a flush of a tag no re
 
 A VectraOS server answers every `Tflush` at once with `Rflush`, whatever <oldtag> names.
 It completes each request as it arrives, so nothing is pending when the `Tflush` is read, except a `Tread`, `Twrite` or `Topen` the file server cannot do yet, such as a read of a console with nothing typed or an open of a listen file with no call.
-On a ring such a request is held while the connection takes more (rings(7)), and a `Tflush` of it drops it, unanswered, before the `Rflush` goes out (M6 step 6d4a).
+On a ring such a request is held while the connection takes more (rings(7)), and a `Tflush` of it drops it, unanswered, before the `Rflush` goes out (M6 step 6d4a); a request a thread is serving, the server let go meanwhile (`p9_release`, M6 step 6d5a), is answered first, and the `Rflush` after it.
 
 VectraOS's ring client sends `Tflush` for a call whose wait is interrupted, if the caller wants to hear of the interruption, and for a call past its connection's timeout.
 It keeps the call's tag until the `Rflush`, and a reply that comes first is the call's answer; otherwise the call returns `VX_ERR_INTERRUPTED` or `VX_ERR_TIMED_OUT`.
