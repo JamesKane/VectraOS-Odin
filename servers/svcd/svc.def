@@ -6,6 +6,7 @@
 KEY("service", "service")
 KEY("service", "program")
 KEY("service", "post")
+KEY("service", "srvmode")
 KEY("service", "arch")
 KEY("service", "when")
 KEY("service", "restart")

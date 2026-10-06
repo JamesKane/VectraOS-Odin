@@ -1,0 +1,11 @@
+# tests/qemu/srv.ndb: /srv as a file tree (M6 step 6d4d2a): srvfs's posts,
+# made at run time and by svcd's srvmode=, opened for connectors, owned and
+# permitted (tests/user/srvtest.c).
+
+scenario=srv timeout=60 cmdline=vx.skip=rc with=srvtest
+expect="srvtest: 24 checks, 0 failed"
+line="svcd: srvtest exited"
+fail="vx: panic"
+fail="srvtest: FAILED"
+fail="svcd: srvtest exited: "
+fail=") killed: "

@@ -15,3 +15,4 @@ mount -a /srv/ptyd /dev
 mount /srv/proc /proc
 mount /srv/net /net
 mount /srv/sys /sys
+mount -c /srv/srv /srv

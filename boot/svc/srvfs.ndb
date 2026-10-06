@@ -1,0 +1,5 @@
+# boot/svc/srvfs.ndb: /srv as a file tree (servers/srvfs), posted as
+# /srv/srv and mounted on /srv by the namespace templates: posts made at run
+# time, and the manifest posts that say srvmode= (svcd lists those).
+
+service=srvfs program=/boot/bin/srvfs post=srv console restart

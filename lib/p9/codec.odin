@@ -875,6 +875,7 @@ Extension :: enum u32 {
 	Notify,
 	Xattr,
 	Posix,
+	Srv, // handles beside Ropen and Twrite, for srvfs's posts (upstream's docs/proto/srv.md)
 }
 
 Extensions :: bit_set[Extension;u32]
@@ -887,6 +888,7 @@ EXTENSION_WORDS := [Extension]string {
 	.Notify = "notify",
 	.Xattr  = "xattr",
 	.Posix  = "posix",
+	.Srv    = "srv",
 }
 
 // Reads a version string: its dialect and, for 9Px, the extensions it names.

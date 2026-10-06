@@ -5,7 +5,8 @@ page=svc sect=6 summary="service manifests, and the spawn message they become"
 # SYNOPSIS
 
 ```text
-service=name program=/boot/bin/prog [post=srv] [arch=arch] [when=word]
+service=name program=/boot/bin/prog [post=srv [srvmode=mode]]
+        [arch=arch] [when=word]
     [restart] [console] [bootimage] [storeimage] [resource] [pager]
     [acpi] [tasks] [cmdline] [entropy]
 arg=value
@@ -50,6 +51,8 @@ The keys of a `service=` record:
   A post, `/srv/<srv>`, that the service serves.
   svcd makes a channel, keeps its client end as `/srv/<srv>` for mounts and connectors, and gives the service its server end as the handle `listen`; it keeps a duplicate of that end too, so connections made while the service restarts wait for it.
   A service posting `cons` becomes svcd's console, and one posting `proc` is procfs(4), with which svcd then registers every service.
+: `srvmode`
+  The post listed in srvfs(4)'s `/srv` as well, owned by `sys`, with these permissions, in octal (M6 step 6d4d2a); a post without it is reached only through the grants manifests give, `mount=` and `connect=`, not by name.
 : `arch`
   `x86_64` or `aarch64`: the service exists only on that architecture.
   Without it, on both.

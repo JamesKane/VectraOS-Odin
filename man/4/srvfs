@@ -1,0 +1,41 @@
+page=srvfs sect=4 summary="/srv as a file tree: posts made, listed, opened and removed at run time"
+    src=servers/srvfs/srvfs.c,servers/svcd/svcd.c
+    keys=srv,post,connector,mount,9front,share
+
+# SYNOPSIS
+
+```usage
+srvfs
+```
+
+# DESCRIPTION
+
+srvfs serves `/srv` as 9front's `#s` device does (M6 step 6d4d2a): each file is a post, a connector to a server, which a program opens to mount that server, and any program can make one.
+svcd(8) starts it from `boot/svc/srvfs.ndb` and posts it as `/srv/srv`; `/lib/ns/posix` mounts it on `/srv`, with `-c`.
+
+Making a post is two steps, as on 9front: create `/srv/<name>`, with the permissions it is to have, then write the file with the connector beside the message (9Px's `srv` extension, `docs/proto/srv.md`).
+Opening a post gives a duplicate of the connector beside the reply, which the opener connects through.
+The open is checked against the post's owner's permission bits, or everyone else's; there are no groups.
+Only the owner may remove a post, which drops the connector; connections already made through it go on.
+A post made with `ORCLOSE` goes when its maker's fid does.
+
+svcd lists a manifest's post here when the manifest says `srvmode=`, owned by `sys`, with those permissions; `nullfs`'s `/srv/null` is listed so, for anyone.
+Every other manifest post is reached only by the grants manifests give (svc(6)), not by name: the system's servers stay out of reach of a program that has not been given them (01 §2).
+
+# FILES
+
+: `boot/svc/srvfs.ndb`
+  Its manifest.
+: `docs/proto/srv.md`
+  The extension it speaks.
+
+# SEE ALSO
+
+svc(6), svcd(8), namespace(6), mount(1), version(5); 9front's `#s` device
+
+# BUGS
+
+srvfs keeps its posts in memory: a restart loses them, and svcd lists the `srvmode=` posts only when it first starts srvfs.
+There are at most 64 posts, 64 users and 63-byte names.
+A post's mode cannot be changed after it is made, and its owner is the attaching user's name, unchecked until keyd (M10).
+Nothing yet makes a post but srvtest and svcd: the `srv` command is M6 step 6d4d2c.

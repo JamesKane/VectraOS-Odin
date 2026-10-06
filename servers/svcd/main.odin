@@ -9,9 +9,9 @@
 // A manifest is ndb records: a service= record, then the records that belong
 // to it, up to the next service=.
 //
-//   service=NAME program=/boot/bin/PROG [post=SRV] [bootimage] [console] [tasks]
-//           [resource] [pager] [acpi] [cmdline] [restart] [arch=A] [when=WORD]
-//           [storeimage]
+//   service=NAME program=/boot/bin/PROG [post=SRV [srvmode=MODE]] [bootimage]
+//           [console] [tasks] [resource] [pager] [acpi] [cmdline] [restart]
+//           [arch=A] [when=WORD] [storeimage]
 //   arg=VALUE                                  an argument, in order
 //   env=NAME=VALUE                             an environment variable
 //   mount=OLD srv=SRV [aname=A] [flags=abc]    a mount in its namespace
@@ -108,9 +108,11 @@ Service :: struct {
 }
 
 Post :: struct {
-	name:   [dynamic; MAX_NAME]u8,
-	client: vx.Handle, // /srv/NAME,
-	server: vx.Handle, // and svcd's handle to the service's end
+	name:    [dynamic; MAX_NAME]u8,
+	client:  vx.Handle, // /srv/NAME,
+	server:  vx.Handle, // and svcd's handle to the service's end
+	srvmode: u32, // srvmode=: listed in srvfs's /srv with these permissions, owned by sys
+	listed:  bool,
 }
 
 services: [dynamic; MAX_SERVICES]Service // a service's index is its .Exit key
@@ -166,6 +168,59 @@ ensure_post :: proc "contextless" (name: string) -> ^Post {
 	_ = append(&p.name, name) // it fits: checked above
 	_ = append(&posts, p) // and so does it
 	return &posts[len(posts) - 1]
+}
+
+// The manifest posts that say srvmode=, listed in srvfs's /srv (upstream's
+// M6 step 6d4d2a), owned by sys: created there, then written with a
+// connector of their own. Without srvfs (skipped), nothing; a srvfs that
+// does not answer within a few seconds is given up on.
+@(private="file")
+list_conn: rt.Conn
+
+list_posts :: proc "contextless" () {
+	srv := find_post("srv")
+	if srv == nil || skipped("srvfs") {
+		return
+	}
+	connector, dst := rt.handle_dup(srv.client, vx.RIGHTS_SAME)
+	if dst != .Ok {
+		return
+	}
+	defer rt.close_all(connector)
+	if rt.p9_connect(connector, &list_conn) != .Ok {
+		return
+	}
+	defer rt.p9_disconnect(&list_conn)
+	c := &list_conn.c
+	list_conn.timeout = 5_000_000_000
+	c.uname = "sys"
+	root, ast := p9.client_attach(c, "")
+	if ast != .Ok {
+		return
+	}
+	for &p in posts {
+		if !p.listed {
+			continue
+		}
+		fid, st := p9.client_walk(c, root, "")
+		if st == .Ok {
+			st = p9.client_create(c, fid, string(p.name[:]), p.srvmode, p9.OWRITE)
+		}
+		dup: vx.Handle
+		if st == .Ok {
+			dup, st = rt.handle_dup(p.client, vx.RIGHTS_SAME)
+		}
+		if st == .Ok {
+			st = rt.p9_write_handle(c, fid, dup)
+		}
+		if st != .Ok {
+			say("cannot list /srv/", string(p.name[:]), " in srvfs\n")
+		}
+		if fid != 0 {
+			_ = p9.client_clunk(c, fid)
+		}
+	}
+	_ = p9.client_clunk(c, root)
 }
 
 // A reader over one manifest, from `at`; values decode into its own scratch.
@@ -266,7 +321,18 @@ read_manifest :: proc "contextless" (path, text: string) {
 				_, restart := ndb.get(&rec, "restart")
 				s := Service{manifest = text, at = before, restart = restart}
 				_ = append(&s.name, name)
-				if srv != "" && ensure_post(srv) == nil {
+				made := ensure_post(srv)
+				if mode, _ := ndb.get(&rec, "srvmode"); made != nil && mode != "" { // octal, as chmod has it
+					m := u32(0)
+					for c in transmute([]u8)mode {
+						if c < '0' || c > '7' {
+							break
+						}
+						m = m * 8 + u32(c - '0')
+					}
+					made.srvmode, made.listed = m & 0o777, true
+				}
+				if srv != "" && made == nil {
 					say("skipping ", name, ": cannot post it (too many, or a long name)\n")
 				} else {
 					_ = append(&services, s)
@@ -734,8 +800,13 @@ vx_main :: proc() -> int {
 	for drivers in ([2]bool{true, false}) { // drivers first, so the console is there for the rest
 		for &s, i in services {
 			if (len(s.devices) > 0) == drivers && !s.broken && !skipped(name_of(&s)) && wanted(&s) {
-				if started := start(i); started != .Ok {
+				started := start(i)
+				if started != .Ok {
 					cannot("cannot start ", &s, started)
+				}
+				// srvfs up: the posts that say srvmode= are listed before the services after it look.
+				if started == .Ok && name_of(&s) == "srvfs" {
+					list_posts()
 				}
 			}
 		}

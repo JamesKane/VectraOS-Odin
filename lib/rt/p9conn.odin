@@ -714,7 +714,7 @@ p9_connect :: proc "contextless" (connector: vx.Handle, k: ^Conn) -> (st: vx.Sta
 		pipe = &ring_pipe,
 		ctx  = k,
 	}
-	return p9.client_version(&k.c, MSIZE, {.Posix, .Xattr, .Map, .Dref})
+	return p9.client_version(&k.c, MSIZE, {.Posix, .Xattr, .Map, .Dref, .Srv}) // what the server has of them
 }
 
 // Ends the connection: its ring's memory and its slots' buffers are
@@ -892,4 +892,17 @@ p9_readref :: proc "contextless" (k: ^Conn, fid: p9.Fid, offset: u64, vmo: vx.Ha
 @(require_results)
 p9_writeref :: proc "contextless" (k: ^Conn, fid: p9.Fid, offset: u64, vmo: vx.Handle, roffset: u64, count: u32) -> (done: u32, st: vx.Status) {
 	return p9_ref(k, .Twriteref, fid, offset, vmo, roffset, count)
+}
+
+// --- srv (upstream's docs/proto/srv.md, its M6 step 6d4d2a) ---
+
+// Writes to fid with h beside the message (a post), which goes to the
+// server whatever the answer, or is closed here if no call carried it.
+@(require_results)
+p9_write_handle :: proc "contextless" (c: ^p9.Client, fid: p9.Fid, h: vx.Handle) -> vx.Status {
+	taken, st := p9.client_write_handle(c, fid, h)
+	if !taken {
+		close_all(h)
+	}
+	return st
 }

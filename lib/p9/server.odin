@@ -41,8 +41,9 @@ package p9
 // by all its connections (Shared, below), and with xattr, Tgetattr and
 // Tsetattr (upstream docs/proto/posix.md). With map, Tmap answers a VMO,
 // and with dref, Treadref and Twriteref move data through the client's VMO
-// (upstream docs/proto/map.md, dref.md); the handles go by the transport,
-// through Server's reply_handle and request_handle.
+// (upstream docs/proto/map.md, dref.md); with srv, Ropen and Twrite carry
+// handles (srv.md). The handles go by the transport, through Server's
+// reply_handle and request_handle.
 
 import "base:intrinsics"
 import "abi:vx"
@@ -108,6 +109,13 @@ Fs :: struct {
 	// and Twrite's. The VMO stays the framework's.
 	read_ref:  proc "contextless" (ctx: rawptr, node: Node, offset: u64, vmo: vx.Handle, roffset: u64, count: u32) -> (done: u32, st: vx.Status),
 	write_ref: proc "contextless" (ctx: rawptr, node: Node, offset: u64, vmo: vx.Handle, roffset: u64, count: u32) -> (done: u32, st: vx.Status),
+	// The srv extension (upstream's docs/proto/srv.md, its M6 step 6d4d2a),
+	// each optional: an open whose reply carries a handle (srvfs's
+	// connector; HANDLE_NONE for a file with none to give), and a write that
+	// carries one (a post's), which becomes the file server's whatever it
+	// answers.
+	open_handle:  proc "contextless" (ctx: rawptr, node: Node, mode: Open_Mode) -> (h: vx.Handle, st: vx.Status),
+	write_handle: proc "contextless" (ctx: rawptr, node: Node, h: vx.Handle) -> vx.Status,
 }
 
 MAX_FIDS :: 256 // per connection, for now
@@ -1261,6 +1269,20 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 					break
 				}
 			}
+			if t.type == .Topen && .Srv in s.extensions && s.fs.open_handle != nil {
+				h: vx.Handle // srv: the reply carries it (a connector); none, for a file with none to give
+				if h, e = s.fs.open_handle(s.fs.ctx, f.node, t.mode); e != .Ok {
+					if s.fs.clunk != nil {
+						s.fs.clunk(s.fs.ctx, f.node, true)
+					}
+					if f.file != nil { // its open file was never anyone's
+						f.file.used = false
+						f.file = nil
+					}
+					break
+				}
+				s.reply_handle = h
+			}
 			f.open = true
 			f.mode = plain_mode(t.mode)
 			if t.mode.rclose && f.file != nil {
@@ -1318,6 +1340,10 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 				e = .Err_Access
 			} else if t.count > s.msize - IOHDRSZ {
 				e = .Err_Too_Small
+			} else if s.request_handle != vx.HANDLE_NONE && .Srv in s.extensions && s.fs.write_handle != nil {
+				e = s.fs.write_handle(s.fs.ctx, f.node, s.request_handle) // srv: a post; the file server's now
+				s.request_handle = vx.HANDLE_NONE
+				r.count = t.count
 			} else {
 				r.count, e = write(s, f, &t)
 			}

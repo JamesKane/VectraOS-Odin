@@ -854,3 +854,38 @@ client_ref :: proc "contextless" (c: ^Client, type: Type, fid: Fid, offset, roff
 	}
 	return rc.r.count, taken, .Ok
 }
+
+// --- srv (upstream's docs/proto/srv.md, its M6 step 6d4d2a) ---
+
+// Opens fid, and takes the handle the reply carries (srvfs's connector).
+@(require_results)
+client_open_handle :: proc "contextless" (c: ^Client, fid: Fid, mode: Open_Mode) -> (h: vx.Handle, e: vx.Status) {
+	if .Srv not_in c.extensions {
+		return vx.HANDLE_NONE, .Err_Unsupported
+	}
+	t := Msg{type = .Topen, fid = fid, mode = mode}
+	rc: Rcall
+	defer finish(c, &rc)
+	exchange(c, &t, &rc) or_return
+	if rc.x.handle == vx.HANDLE_NONE {
+		return vx.HANDLE_NONE, .Err_Invalid // an Ropen without it
+	}
+	h = rc.x.handle
+	rc.x.handle = vx.HANDLE_NONE // taken
+	return h, .Ok
+}
+
+// Writes to fid with `send` beside the message (a post), which the
+// transport moves or closes once a call has it: taken says so, and one not
+// taken is the caller's to close (lib/rt's p9_write_handle does).
+@(require_results)
+client_write_handle :: proc "contextless" (c: ^Client, fid: Fid, send: vx.Handle) -> (taken: bool, e: vx.Status) {
+	if .Srv not_in c.extensions {
+		return false, .Err_Unsupported
+	}
+	t := Msg{type = .Twrite, fid = fid, data = transmute([]u8)string("post")}
+	rc: Rcall
+	defer finish(c, &rc)
+	e = exchange(c, &t, &rc, send)
+	return rc.x != nil, e
+}

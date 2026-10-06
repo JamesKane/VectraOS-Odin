@@ -30,7 +30,7 @@ The <version> string is a dialect, then, for 9Px, the extensions, each a word `+
 ```
 
 `9P2000.x/1` is 9Px, version 1.
-The words are `dref`, `map`, `lease`, `notify`, `xattr` and `posix`; a word the reader does not know, or one without its `+`, is ignored.
+The words are `dref`, `map`, `lease`, `notify`, `xattr`, `posix` and `srv`; a word the reader does not know, or one without its `+`, is ignored.
 The server answers with the extensions it has of those offered, in that order, and the session has exactly those.
 A client offering `9P2000.L` is answered with `9P2000.L`, Linux's dialect, which vx-9p's server speaks (dotl(5), M6 step 6d4c2).
 A client offering `9P2000`, or any other string that starts with it, such as `9P2000.u`, is answered with `9P2000`: plain 9P2000, with no extensions and no dialect's messages.
@@ -46,6 +46,8 @@ The extensions and what they add:
   `Tmap`, a file's range as a VMO: map(5).
 : `dref`
   `Treadref` and `Twriteref`, whose data is in a VMO, not the message: dref(5).
+: `srv`
+  Handles beside `Ropen` and `Twrite`, for srvfs(4)'s posts: `docs/proto/srv.md`.
 : `lease`, `notify`
   Nothing yet.
 

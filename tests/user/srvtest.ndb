@@ -1,0 +1,6 @@
+# tests/user/srvtest.ndb: srvtest in the POSIX namespace, whose /srv is
+# srvfs (tests/qemu/srv.ndb), as vectra.
+
+service=srvtest program=/boot/bin/srvtest console
+user=vectra
+ns=posix
