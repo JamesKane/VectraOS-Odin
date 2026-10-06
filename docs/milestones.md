@@ -96,7 +96,7 @@ New vendored imports: Monocypher (ADR-0011) and ACPICA (ADR-0012), each behind a
 
 ## P6: M6, chasing upstream
 
-Upstream's M6 steps are ported as they land; scenarios are upstream's as of the step last ported (`tests/qemu/m6/`, from `3cb6968`; unchanged at `366394f`, but `tests/user/slottest.ndb`; unchanged again from `08cc12f` to `f9c14e9`, 6c).
+Upstream's M6 steps are ported as they land; scenarios are upstream's as of the step last ported (`tests/qemu/m6/`, from `3cb6968`; unchanged at `366394f`, but `tests/user/slottest.ndb`; unchanged again from `08cc12f` to `f9c14e9`, 6c; at `225e876`, 6d3, with `threads.ndb` and `tests/user/threadtest.ndb` added).
 
 | Step | Here | Commit |
 |---|---|---|
@@ -118,9 +118,15 @@ Upstream's M6 steps are ported as they land; scenarios are upstream's as of the 
 | 6c4. Protection keys on x86, and `as_protect` (upstream `e2942df`) | CR4.PKE and PKRU in XCR0; keys 1-15; rights live in the kernel for the thread's copies, kept per thread at switches and in the area; `as_protect`'s cuts and limits; `.Err_Access` from a denied copy; handlers with key 0 opened; musl's `SEGV_PKUERR` and `si_pkey`; `rights=` in regs.ndb. Under TCG ktest has 15 keys | `2bef63a` |
 | 6c5. aarch64's user copies unprivileged (upstream `b7f3d81`) | LDTR and STTR, the futex word's LDTR and a barrier; no keys on aarch64 | `4e0f42a` |
 | vx:guide's header values (upstream `705fd16`) | A header value not UTF-8 once decoded (ndb's hex form) refused; the cross-check against upstream's guide.c at `f9c14e9`, its corpus's new input, 1,000,000 mutated inputs matching | `310e32b` |
+| 6d1. Native threads, with thread-local storage (upstream `9c20b2a`) | `rt.thread_spawn`, `thread_join`, `thread_stack`, `rt.Mutex`; each thread its own copy of PT_TLS (found through `__ehdr_start`), x86_64 variant II, aarch64 variant I; Odin's `@(thread_local)` in programs (`-no-thread-local` the kernel's alone; odin's initial-exec model, which ld.lld relaxes to local-exec), `.tdata`/`.tbss` and PT_TLS in the linker scripts; printing under one lock; threadtest in Odin (its initialised thread-local in assembly), 69 checks | `35e0390` |
+| 6d2a. POSIX threads (upstream `6239640`) | `__clone` and `__unmapself` in the back end (musl's generic ones excluded), threads of the process's task; the back end under one recursive lock, let go at its waits; a thread's own state an Odin `@(thread_local)` record in musl's TLS (ADR-0007 amended); `tkill` to one thread | `4caa0c8` |
+| 6d2b. Note stacks, sigaltstack, ucontext registers, signal routing (upstream `cfd25d8`) | ADR-0014 (upstream's ADR-0036): `.Get_Note_Stack`/`.Set_Note_Stack` and the divert onto the note stack; a note handler's `fp`; `sigaltstack`, `SA_ONSTACK`, a handler's ucontext registers and FP/SIMD state, signals passed to a thread that does not block them; ktest's note-stack case | `8b94a3c` |
+| 6d3. Robust futexes, futexes keyed by VMO (upstream `225e876`) | ADR-0015 (upstream's ADR-0037): `thread_set_robust`, the walk at a thread's end and at `task_exec`, `vx_user_cas32` in the fixup table; futex keys by VMO and offset (`.Err_Bad_State` on an absent page); POSIX thread ids `slot << 22 \| pid`, `set_robust_list`; ktest's robust and evict-and-supply cases | `9b39eee` |
 
 After 6a5, `m6/man`, `shell`, `rc`, `rcscript`, `boot`, `ns`, `ktest`, `posix`, `fsd` and `net` pass on x86_64 and aarch64 (2026-10-05).
 
 After 6a6c, `m6/rc`, `rcscript`, `shell`, `boot`, `iso`, `mount`, `netd`, `ns`, `man`, `ktest`, `posix`, `fsd`, `net` and the scenarios that run rc scripts (`fsdadm`, `fsddump`, `fsdperm`, `fsddref`, `dosfs`, `dosfswrite`, `distd`, `install`, `isofs`, `powercut`, `rtc`) pass on x86_64 and aarch64 (`rtc` x86_64 only); `slots` fails on both, as it does at `b626d78` before 6a6 (distd's apply: the store full).
 
 After 6b, `m6/ktest`, `man`, `boot`, `shell`, `rc`, `slots`, `install`, `distd`, `block`, `net`, `dbg`, `proc`, `posix` and `fsd` pass on x86_64 and aarch64, with `acpi` (x86_64) and `acpiarm` (aarch64) (2026-10-05).
+
+After 6d3, `m6/ktest`, `threads`, `posix`, `boot`, `shell`, `rc`, `rcscript`, `fsd`, `net`, `dbg`, `dbgmusl`, `proc`, `panic`, `stack-overflow`, `smp`, `lua`, `sbase`, `ns`, `maptest`, `fsddref`, `powercut` and `simd` pass on x86_64 and aarch64 (2026-10-05).
