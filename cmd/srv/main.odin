@@ -104,7 +104,7 @@ run :: proc() -> string {
 					return usage.TEXT
 				}
 				for c in transmute([]u8)args[i] {
-					sleeptime = sleeptime * 10 + u64(c - '0')
+					sleeptime = sleeptime * 10 + (u64(c) - '0') // as upstream's, unchecked (docs/UPSTREAM-FINDINGS.md)
 				}
 				j = len(a)
 			case:
