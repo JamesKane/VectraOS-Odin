@@ -202,12 +202,13 @@ A thread's registers can be read only while it holds still: stopped at an event,
 
 A process that calls `vx_prof_init` (`lib/vx-prof/prof.h`) gives procfs its profiling ring, a VMO, with a `PROC_PROF` call on the listen channel, naming where it maps it.
 procfs maps the ring too, writes a nonce of its own into it, and takes it only if the process's memory at that address shows the nonce, the proof that the process maps that VMO there.
+The VMO holds a ring for each thread (M6 step 6d6b): the first 32 threads that time a zone claim one each and write it alone, sharing no counter; any after them share one more, counted atomically.
 
 : `prof/ctl`
   `zones on` or `zones off` turns the process's zones on or off.
   It fails with `file does not exist` if the process has given no ring.
 : `prof/zones`
-  The ring as it is now: a `vx_prof_header`, then the records it holds, oldest first.
+  The rings as they are now: a `vx_prof_header`, whose `head` and `cap` say how many records follow, then every thread's records merged oldest first by their end, each naming its thread's id.
   Its times are in cycles of the counter sysfs(4) describes in `/sys/clock/info`.
 
 `prof` is listed in the process's directory, and its two files in it.

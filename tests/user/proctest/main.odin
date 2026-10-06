@@ -156,6 +156,22 @@ wait_text :: proc "contextless" (buf: []u8) -> []u8 {
 
 notes_seen: u32
 
+// A busy thread timing zones, 50 of them (upstream's 6d6b).
+tick := prof.Zone {
+	name = "tick",
+}
+
+zones_thread :: proc(arg: rawptr) {
+	for _ in 0 ..< 50 {
+		t := prof.begin(&tick)
+		spin: int
+		for k in 0 ..< 2000 {
+			intrinsics.volatile_store(&spin, k)
+		}
+		prof.end(&tick, t)
+	}
+}
+
 on_note :: proc "contextless" (e: ^vx.Exception, note: string, fp: rawptr) -> rt.Noted {
 	if !str.contains(note, "group") && !str.contains(note, "poke") {
 		return .Dflt
@@ -478,14 +494,65 @@ test_prof :: proc "contextless" () {
 	}
 	check(write_file(c, "prof/ctl", "zones off") == .Ok) // its own ring is still the one
 
+	// A ring per thread (upstream's M6 step 6d6b): four busy threads of this
+	// process's own, each one's records in a ring it claimed, carrying its
+	// id; the file has all four, merged by their ends.
+	check(prof.init(ns.connector(&space, "/proc")) == .Ok)
+	check(write_file(me, "prof/ctl", "zones on") == .Ok)
+	@(static) busy: [4]rt.Thread
+	for &b in busy {
+		bst: vx.Status
+		b, bst = rt.thread_spawn(zones_thread, nil)
+		check(bst == .Ok)
+	}
+	for &b in busy {
+		rt.thread_join(&b)
+	}
+	owners: [4]u32
+	owned := 0
+	own := true
+	vmo := prof.header()
+	for i in u32(1) ..= prof.THREADS {
+		if vmo == nil {
+			break
+		}
+		rg := prof.ring_at(vmo, i)
+		who := intrinsics.atomic_load(&rg.thread)
+		head := intrinsics.atomic_load(&rg.head)
+		if who == 0 || head == 0 {
+			continue
+		}
+		if owned < 4 {
+			owners[owned] = who
+		}
+		owned += 1
+		for k in 0 ..< min(head, u64(prof.CAP)) {
+			own = own && prof.ring_records(rg)[k].thread == who
+		}
+		own = own && head >= 50
+	}
+	check(owned == 4 && own && owners[0] != owners[1] && owners[2] != owners[3] && owners[0] != owners[3])
+	check(vmo != nil && intrinsics.atomic_load(&prof.ring_at(vmo, 0).head) == 0) // none shared
+	check(write_file(me, "prof/ctl", "zones off") == .Ok)
+	got = read_whole(proc_path(me, "prof/zones"), ring.bytes[:])
+	nm := got > size_of(prof.Header) ? (got - size_of(prof.Header)) / size_of(prof.Record) : 0
+	m := ([^]prof.Record)(&ring.bytes[size_of(prof.Header)])[:nm]
+	by_end := nm >= 200
+	seen: u32
+	for i in 0 ..< nm {
+		by_end = by_end && (i == 0 || m[i].end >= m[i - 1].end)
+		for o, k in owners {
+			if m[i].thread == o {
+				seen |= 1 << u32(k)
+			}
+		}
+	}
+	check(by_end && seen == 0xf)
+
 	// A ring whose header lies about its size: procfs reads it within its own.
-	at, given = make_ring()
-	check(at != 0)
-	if at != 0 {
-		lying := (^prof.Header)(uintptr(at))
-		lying^ = {magic = prof.MAGIC, version = 1, counter_hz = clock.counter_hz, cap = 0xffff_ffff}
-		intrinsics.atomic_store(&lying.head, u64(1) << 40)
-		check(give_ring(me, at, given) == .Ok)
+	if vmo != nil {
+		vmo.cap = 0xffff_ffff
+		intrinsics.atomic_store(&vmo.head, u64(1) << 40)
 	}
 	got = read_whole(proc_path(me, "prof/zones"), ring.bytes[:])
 	check(got >= size_of(prof.Header) && got <= int(prof.RING))

@@ -532,7 +532,7 @@ test_procfs :: proc(t: ^testing.T) {
 
 	// maps, images and info, byte for byte.
 	text, _ = read_file(&c, root, "9/maps", buf[:])
-	testing.expect_value(t, text, "base=0x400000 size=0x1000 prot=r-x offset=0x0\nbase=0x600000 size=0x2000 prot=rw- offset=0x1000\nbase=0x700000 size=0x10000 prot=rw- offset=0x0\n")
+	testing.expect_value(t, text, "base=0x400000 size=0x1000 prot=r-x offset=0x0\nbase=0x600000 size=0x2000 prot=rw- offset=0x1000\nbase=0x700000 size=0x109000 prot=rw- offset=0x0\n")
 	text, _ = read_file(&c, root, "9/images", buf[:])
 	testing.expect_value(t, text, "name=ls base=0x400000 build-id=" + BUILD_ID + "\n")
 	text, _ = read_file(&c, root, "9/info", buf[:])
@@ -884,41 +884,72 @@ test_procfs :: proc(t: ^testing.T) {
 	testing.expect_value(t, e, vx.Status.Err_Invalid)
 	_, e = write_file(&c, root, "9/prof/ctl", "zones off")
 	testing.expect_value(t, hdr.enabled, 0)
-	// zones: the header, its cap held to the ring's size, then the records
-	// held, oldest first.
-	records := ([^]prof.Record)(&ring_mem()[size_of(prof.Header)])
-	slots := u32((prof.RING - size_of(prof.Header)) / size_of(prof.Record))
-	for i in u64(0) ..< 5 {
-		records[i] = {start = 100 * (i + 1), end = 100 * (i + 1) + 50, zone = 1, thread = 1}
+	// zones (upstream's 6d6b): the header, whose head and cap say how many
+	// records follow, then every ring's records merged oldest first by their
+	// end. What the header says of the VMO is not believed: a lie about its
+	// size changes nothing.
+	ring_put :: proc(i: u32, owner: u32, ends: []u64) {
+		r := prof.ring_at((^prof.Header)(&ring_words), i)
+		r.thread = owner
+		for e, k in ends {
+			prof.ring_records(r)[k] = {start = e - 10, end = e, zone = 1, thread = owner}
+		}
+		r.head = u64(len(ends))
 	}
-	hdr.cap, hdr.head = 0xffff_ffff, 3 // a header that lies about its size
-	{
-		f, _ := p9.client_walk(&c, root, "9/prof/zones")
-		_ = p9.client_open(&c, f, p9.OREAD)
-		got: [dynamic; 4096]u8
-		for {
-			n, e = p9.client_read(&c, f, u64(len(got)), buf[:512])
+	zones :: proc(c: ^p9.Client, root: p9.Fid, out: []u8) -> []u8 {
+		f, _ := p9.client_walk(c, root, "9/prof/zones")
+		_ = p9.client_open(c, f, p9.OREAD)
+		got := 0
+		for got < len(out) {
+			n, e := p9.client_read(c, f, u64(got), out[got:][:min(len(out) - got, 4096)])
 			if e != .Ok || n == 0 {
 				break
 			}
-			_ = append(&got, ..buf[:n])
+			got += n
 		}
-		_ = p9.client_clunk(&c, f)
-		testing.expect_value(t, len(got), size_of(prof.Header) + 3 * size_of(prof.Record))
-		snap := (^prof.Header)(&got[0])
-		testing.expect_value(t, snap.cap, slots)
-		testing.expect_value(t, snap.magic, prof.MAGIC)
-		recs := ([^]prof.Record)(&got[size_of(prof.Header)])[:3]
-		testing.expect_value(t, recs[0].start, 100)
-		testing.expect_value(t, recs[2].start, 300)
+		_ = p9.client_clunk(c, f)
+		return out[:got]
 	}
-	hdr.cap, hdr.head = 2, 5 // the ring has wrapped: the last two, oldest first
-	text, _ = read_file(&c, root, "9/prof/zones", buf[:])
-	testing.expect_value(t, len(text), size_of(prof.Header) + 2 * size_of(prof.Record))
+	ring_put(0, 0, {50}) // shared: a thread past the first 32
+	ring_put(1, 3, {150, 350, 550})
+	ring_put(2, 4, {250, 450})
+	hdr.cap, hdr.head = 0xffff_ffff, 1 << 40 // a header that lies about its size
+	@(static) merged: [size_of(prof.Header) + 2 * prof.CAP * size_of(prof.Record)]u8
 	{
-		recs := ([^]prof.Record)(raw_data(text[size_of(prof.Header):]))[:2]
-		testing.expect_value(t, recs[0].start, 200) // record 3 of 5, in slot 3 % 2 = 1
-		testing.expect_value(t, recs[1].start, 100) // record 4, in slot 0
+		got := zones(&c, root, merged[:])
+		testing.expect_value(t, len(got), size_of(prof.Header) + 6 * size_of(prof.Record))
+		snap := (^prof.Header)(&got[0])
+		testing.expect_value(t, snap.magic, prof.MAGIC)
+		testing.expect_value(t, snap.head, 6)
+		testing.expect_value(t, snap.cap, 6)
+		testing.expect_value(t, snap.rings, 0)
+		recs := ([^]prof.Record)(&got[size_of(prof.Header)])[:6]
+		ENDS := [6]u64{50, 150, 250, 350, 450, 550}
+		OWNERS := [6]u32{0, 3, 4, 3, 4, 3}
+		for r, i in recs {
+			testing.expectf(t, r.end == ENDS[i] && r.thread == OWNERS[i], "record %d: end %d of thread %d", i, r.end, r.thread)
+		}
+	}
+	// A ring that has wrapped: its last CAP records, oldest first, the
+	// newest in its first slot.
+	{
+		r := prof.ring_at(hdr, 2)
+		for &rec, k in prof.ring_records(r) {
+			rec = {start = 1, end = 600 + u64(k), zone = 1, thread = 4}
+		}
+		prof.ring_records(r)[0].end = 600 + u64(prof.CAP)
+		r.head = u64(prof.CAP) + 1
+		got := zones(&c, root, merged[:])
+		nrec := (len(got) - size_of(prof.Header)) / size_of(prof.Record)
+		testing.expect_value(t, nrec, 4 + int(prof.CAP))
+		recs := ([^]prof.Record)(&got[size_of(prof.Header)])[:nrec]
+		testing.expect_value(t, recs[4].end, 601) // 50, 150, 350, 550, then ring 2's oldest
+		testing.expect_value(t, recs[nrec - 1].end, 600 + u64(prof.CAP))
+		by_end := true
+		for i in 1 ..< nrec {
+			by_end = by_end && recs[i].end >= recs[i - 1].end
+		}
+		testing.expect_value(t, by_end, true)
 	}
 	text, _ = read_file(&c, root, "7/prof/zones", buf[:])
 	testing.expect_value(t, text, "")

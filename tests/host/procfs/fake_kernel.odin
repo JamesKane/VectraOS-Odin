@@ -9,6 +9,7 @@ package procfs_test
 
 import vx "abi:vx"
 import "vx:ns"
+import "vx:prof"
 import procfs "../../../servers/procfs"
 
 TASKS :: vx.Handle(0x101) // the "tasks" handle the fake spawn message gives: svcd's task
@@ -71,7 +72,7 @@ NS_TEXT :: "mount -a /srv/bootfs /\nbind /boot /n\n"
 
 // The host memory a profiling ring lives in, mapped by both procfs and the
 // process that gives it.
-ring_words: [64 * 1024 / 8]u64 // u64s, for the header's alignment
+ring_words: [prof.RING / 8]u64 // u64s, for the header's alignment
 
 // The VMOs procfs makes for its debugger's tables (6d6a), each mapped once,
 // from a pool of host memory: their sizes, and the bytes unmapped since.

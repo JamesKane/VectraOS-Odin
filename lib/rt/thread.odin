@@ -136,6 +136,7 @@ Tcb :: struct {
 	arg:                rawptr,
 	stack_lo, stack_hi: u64,
 	running:            u32, // 1 until fn returns: thread_join waits on it
+	id:                 u32, // the kernel's id for the thread (thread_create's; the first thread's 1)
 }
 
 // A thread thread_spawn made, for thread_join. The zero value is none.
@@ -239,6 +240,7 @@ thread_main_init :: proc "contextless" () {
 		tcb.stack_lo, tcb.stack_hi = mi.base, mi.base + mi.size
 	}
 	intrinsics.atomic_store(&tcb.running, 1)
+	tcb.id = 1 // a task's first thread
 	_ = tls_set(tp)
 }
 
@@ -272,7 +274,7 @@ thread_spawn :: proc "contextless" (fn: Thread_Proc, arg: rawptr, stack_size: u6
 	tcb.fn, tcb.arg, tcb.stack_lo, tcb.stack_hi = fn, arg, at, at + stack
 	intrinsics.atomic_store(&tcb.running, 1)
 	th: vx.Handle
-	th, st = thread_create(self)
+	th, tcb.id, st = thread_create_id(self)
 	if st == .Ok {
 		st = thread_start(th, u64(uintptr(rawptr(thread_entry))), at + stack, vx.HANDLE_NONE, tp)
 	}
@@ -295,6 +297,13 @@ thread_join :: proc "contextless" (t: ^Thread) {
 	_ = handle_close(t.handle)
 	_ = as_unmap(self, t.base, t.size)
 	t^ = {}
+}
+
+// The calling thread's id, as the kernel gives it (/proc/N/threads/ID);
+// 1 on a thread vx:rt did not set up.
+thread_self_id :: proc "contextless" () -> u32 {
+	t := tcb_get()
+	return t != nil && t.id != 0 ? t.id : 1
 }
 
 // The calling thread's stack: [lo, hi). ok is false on a thread vx:rt did

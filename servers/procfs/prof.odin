@@ -1,8 +1,9 @@
 // /proc/N/prof (upstream docs/05 §9), a process's profiling zones.
 //
 //   /proc/N/prof/ctl     zones on · zones off
-//   /proc/N/prof/zones   the ring as it is now: a prof.Header, then the
-//                        records it holds, oldest first (vx:prof)
+//   /proc/N/prof/zones   the rings as they are now: a prof.Header, then
+//                        every thread's records, merged oldest first by
+//                        their end (vx:prof)
 //
 // A process gives procfs its ring with process.PROF (prof.init): procfs maps
 // the VMO too, writes a challenge of its own into it, and takes it only if the
@@ -20,8 +21,6 @@ import "vx:rt"
 
 @(private="file")
 rings: [MAX_PROCS]^prof.Header // each process's, mapped here; nil if none
-@(private="file")
-PROF_SLOTS :: u32((prof.RING - size_of(prof.Header)) / size_of(prof.Record))
 
 @(private)
 prof_forget :: proc "contextless" (p: ^Proc) {
@@ -76,31 +75,60 @@ prof_ctl :: proc "contextless" (p: ^Proc, cmd: string) -> vx.Status {
 	return .Ok
 }
 
-// The ring, as it is now: its header, then its records in order. The process
-// still writes the header, so what it says is read once and held to the
-// ring's size: a cap or head it changed gives it nonsense, not procfs a fault.
+@(private="file")
+N_RINGS :: prof.THREADS + 1
+
+// The rings, as they are now: the header, then every ring's records merged
+// oldest first by their end (each thread's ring is in that order already;
+// ring 0, shared, nearly). The process still writes all of it, so what it
+// says is read once and held to the VMO's layout: a head it changed gives
+// it nonsense, not procfs a fault; and a record its thread may have been
+// writing over while it was copied is left out (upstream's 6d6b).
 @(private)
 prof_snapshot :: proc "contextless" (p: ^Proc) -> []u8 {
+	@(static) all: [N_RINGS * prof.CAP]prof.Record // each ring's, oldest first, at i * CAP
 	@(static) snap: struct {
 		header:  prof.Header,
-		records: [PROF_SLOTS]prof.Record,
+		records: [N_RINGS * prof.CAP]prof.Record,
 	}
+	#assert(size_of(snap) <= prof.RING) // as upstream's, which holds the file to the VMO's size
 	h := rings[p.slot]
 	if h == nil {
 		return nil
 	}
 	snap.header = h^
-	head := intrinsics.atomic_load_explicit(&h.head, .Acquire)
-	ring := snap.header.cap
-	if ring == 0 || ring > PROF_SLOTS {
-		ring = PROF_SLOTS
+	from, to: [N_RINGS]u32
+	for i in u32(0) ..< N_RINGS {
+		r := prof.ring_at(h, i)
+		head := intrinsics.atomic_load_explicit(&r.head, .Acquire)
+		n := min(head, u64(prof.CAP))
+		first := head - n
+		base := i * prof.CAP
+		for k in u64(0) ..< n {
+			all[u64(base) + k] = prof.ring_records(r)[(first + k) % u64(prof.CAP)]
+		}
+		after := intrinsics.atomic_load_explicit(&r.head, .Acquire) // what was written meanwhile
+		lost := after > head ? after - head : 0 // over the oldest ones
+		if after < head {
+			lost = n // a head it set back: nothing trusted
+		}
+		from[i], to[i] = base + u32(min(lost, n)), base + u32(n)
 	}
-	snap.header.cap = ring
-	n := min(head, u64(ring))
-	first := head - n
-	recs := ([^]prof.Record)(intrinsics.ptr_offset(h, 1))[:ring]
-	for i in 0 ..< n {
-		snap.records[i] = recs[(first + i) % u64(ring)]
+	written := 0
+	for ; written < len(snap.records); written += 1 { // the earliest end among them
+		best := -1
+		for i in 0 ..< N_RINGS {
+			if from[i] < to[i] && (best < 0 || all[from[i]].end < all[from[best]].end) {
+				best = i
+			}
+		}
+		if best < 0 {
+			break
+		}
+		snap.records[written] = all[from[best]]
+		from[best] += 1
 	}
-	return ptr_bytes(&snap)[:size_of(prof.Header) + int(n) * size_of(prof.Record)]
+	snap.header.head = u64(written)
+	snap.header.cap, snap.header.rings = u32(written), 0
+	return ptr_bytes(&snap)[:size_of(prof.Header) + written * size_of(prof.Record)]
 }
