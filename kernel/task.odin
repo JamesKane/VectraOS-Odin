@@ -113,10 +113,15 @@ Thread :: struct {
 	user_arg:     u64,
 	user_arg2:    u64,
 	started:      bool, // thread_start has taken it (under its task's lock)
-	intent:       vx.Intent,
+	intent:       vx.Intent, // its own (sched_ctx_configure with no context)
 	last_of_task: bool, // its exit ended its task (reaped in sched.odin)
 	console_line: User_Line, // debug_write output not yet ended, which goes out whole at its newline
 	state:        Thread_State,
+	// Its scheduling (sched.odin, ADR-0016), under the scheduler's lock: the
+	// context it is bound to, holding a reference, and the CPU of that
+	// context's reservation it is bound to.
+	ctx:          ^Sched_Ctx,
+	core:         Maybe(u32),
 	next:         ^Thread, // in the ready queue (under the scheduler's lock)
 	wait_next:    ^Thread, // in a port's waiters (under the port's lock); never the same link as next
 	sleep_next:   ^Thread, // in its CPU's sleep queue, ordered by wake_at

@@ -95,6 +95,7 @@ PROGRAMS := []Program {
 	// functions are optnone, and the house flags give -g and frame pointers.
 	// Its lib/vx-rt/rt.c is this tree's stand-in for upstream's runtime.
 	{name = "dbgdemo", source = "tests/user/dbgdemo.c", place = .Tests, kind = .C},
+	{name = "schedtest", dir = "tests/user/schedtest", place = .Tests},
 }
 
 program_path :: proc(a: ^Arch, mode: Mode, name: string) -> string {

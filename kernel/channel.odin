@@ -186,7 +186,7 @@ channel_deliver :: proc "contextless" (to: ^Channel, m: ^Channel_Msg) -> vx.Stat
 // On success the message belongs to the channel; on failure to the caller.
 @(require_results)
 channel_write :: proc "contextless" (c: ^Channel, m: ^Channel_Msg) -> vx.Status {
-	msg_header(m).sender_intent = .Interactive
+	msg_header(m).sender_intent = sched_thread_intent(this_cpu().current)
 	spin_lock(&c.pair.lock)
 	defer spin_unlock(&c.pair.lock)
 	peer := channel_peer(c)
@@ -235,7 +235,7 @@ channel_call :: proc "contextless" (c: ^Channel, request: ^Channel_Msg, deadline
 	c.next_txid = CALL_TXID | c.next_txid & SIDE_TXID | (c.next_txid + 1) &~ (CALL_TXID | SIDE_TXID)
 	h := msg_header(request)
 	h.txid = w.txid
-	h.sender_intent = .Interactive
+	h.sender_intent = sched_thread_intent(t)
 	request.call = &w
 	st = channel_deliver(peer, request)
 	if st == .Ok {

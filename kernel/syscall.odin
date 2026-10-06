@@ -809,6 +809,67 @@ sys_channel_call :: proc "contextless" (h: vx.Handle, args_ptr: Uva, deadline: i
 	return msg_to_user(reply, rd_bytes, rd_handles)
 }
 
+// --- Scheduling contexts (ADR-0016) ---
+
+@(private="file", require_results)
+sys_sched_ctx_create :: proc "contextless" (params, out: Uva) -> vx.Status {
+	p: vx.Sched_Params
+	copy_in(&p, params) or_return
+	x := sched_ctx_create(&p) or_return
+	return return_handle(&x.obj, {.Write, .Manage, .Inspect, .Duplicate, .Transfer}, out)
+}
+
+// Binds a thread (none: the caller) to a context (none: unbinds it), on a
+// CPU of its reservation or none (-1).
+@(private="file", require_results)
+sys_sched_ctx_bind :: proc "contextless" (ctx, th: vx.Handle, core: u64) -> vx.Status {
+	x: ^Sched_Ctx
+	if ctx != vx.HANDLE_NONE {
+		x = handle_get_as(current_task(), ctx, Sched_Ctx, {.Write}) or_return
+	}
+	defer if x != nil {
+		object_release(&x.obj)
+	}
+	t := this_cpu().current
+	if th != vx.HANDLE_NONE {
+		t = handle_get_as(current_task(), th, Thread, {.Manage}) or_return
+	}
+	defer if th != vx.HANDLE_NONE {
+		object_release(&t.obj)
+	}
+	return sched_bind(t, x, i32(i64(core)))
+}
+
+// Changes a context; with none, the caller's own intent.
+@(private="file", require_results)
+sys_sched_ctx_configure :: proc "contextless" (ctx: vx.Handle, params: Uva) -> vx.Status {
+	p: vx.Sched_Params
+	copy_in(&p, params) or_return
+	if ctx == vx.HANDLE_NONE {
+		return sched_set_own(this_cpu().current, &p)
+	}
+	x := handle_get_as(current_task(), ctx, Sched_Ctx, {.Manage}) or_return
+	defer object_release(&x.obj)
+	return sched_ctx_set(x, &p)
+}
+
+// Whole CPUs for a context: any, or the fastest tier, which is every CPU
+// until /sys/cpu publishes tiers; another tier, or a capacity, is
+// .Err_Refused, as the machine has none.
+@(private="file", require_results)
+sys_sched_reserve :: proc "contextless" (ctx: vx.Handle, count, cls, domain, flags: u64, out: Uva) -> vx.Status {
+	_, flags_ok := options_of(vx.Reserve_Flags, flags)
+	tier0 := u64(vx.core_tier(0))
+	if (cls != u64(vx.CORE_ANY) && cls != tier0) || domain != u64(vx.DOMAIN_ANY) || !flags_ok || count > MAX_CPUS {
+		return cls >> 8 == 0x20 || (cls >> 8 == 1 && cls != tier0) ? .Err_Refused : .Err_Invalid
+	}
+	x := handle_get_as(current_task(), ctx, Sched_Ctx, {.Manage}) or_return
+	set, st := sched_reserve_cpus(x, u32(count))
+	object_release(&x.obj)
+	copied := copy_out(out, &set)
+	return st != .Ok ? st : copied
+}
+
 // --- Counters, bindings, futexes ---
 
 @(private="file", require_results)
@@ -1328,6 +1389,14 @@ syscall_dispatch :: proc "contextless" (nr: u64, a: [6]u64) -> i64 {
 		return result(sys_port_wait(vx.Handle(a[0]), i64(a[1]), i64(a[2]), Uva(a[3]), a[4]))
 	case .Port_Post:
 		return i64(sys_port_post(vx.Handle(a[0]), Uva(a[1])))
+	case .Sched_Ctx_Create:
+		return i64(sys_sched_ctx_create(Uva(a[0]), Uva(a[1])))
+	case .Sched_Ctx_Bind:
+		return i64(sys_sched_ctx_bind(vx.Handle(a[0]), vx.Handle(a[1]), a[2]))
+	case .Sched_Ctx_Configure:
+		return i64(sys_sched_ctx_configure(vx.Handle(a[0]), Uva(a[1])))
+	case .Sched_Reserve:
+		return i64(sys_sched_reserve(vx.Handle(a[0]), a[1], a[2], a[3], a[4], Uva(a[5])))
 	case .Counter_Create:
 		return i64(sys_counter_create(a[0], Uva(a[1])))
 	case .Counter_Signal:

@@ -393,3 +393,40 @@ futex_wake :: proc "contextless" (word: ^u32, count: u32) -> (int, vx.Status) {
 thread_set_robust :: proc "contextless" (head: rawptr, size: u64, owner: u32) -> vx.Status {
 	return status(vx_syscall(.Thread_Set_Robust, addr(head), size, u64(owner)))
 }
+
+// --- Scheduling contexts (ADR-0016, upstream's ADR-0038) ---
+
+@(require_results)
+sched_ctx_create :: proc "contextless" (p: ^vx.Sched_Params) -> (vx.Handle, vx.Status) {
+	h: vx.Handle
+	st := status(vx_syscall(.Sched_Ctx_Create, addr(p), addr(&h)))
+	return h, st
+}
+
+// Binds thread (HANDLE_NONE: the caller) to ctx (HANDLE_NONE: unbinds), on
+// core (a CPU of its reservation) or -1.
+@(require_results)
+sched_ctx_bind :: proc "contextless" (ctx, thread: vx.Handle, core: i32 = -1) -> vx.Status {
+	return status(vx_syscall(.Sched_Ctx_Bind, u64(ctx), u64(thread), u64(i64(core))))
+}
+
+@(require_results)
+sched_ctx_configure :: proc "contextless" (ctx: vx.Handle, p: ^vx.Sched_Params) -> vx.Status {
+	return status(vx_syscall(.Sched_Ctx_Configure, u64(ctx), addr(p)))
+}
+
+// count whole CPUs for ctx, all or .Err_Refused; 0 gives back its own.
+@(require_results)
+sched_reserve :: proc "contextless" (ctx: vx.Handle, count: u32, cls := vx.CORE_ANY, domain := vx.DOMAIN_ANY, flags := vx.Reserve_Flags{}) -> (vx.Core_Set, vx.Status) {
+	set: vx.Core_Set
+	st := status(vx_syscall(.Sched_Reserve, u64(ctx), u64(count), u64(cls), u64(domain), u64(transmute(u32)flags), addr(&set)))
+	return set, st
+}
+
+// The calling thread's intent, anything but .Realtime, which needs a context
+// (upstream's 09 §5.7 vx_intent_set, in vx-rt until libvx).
+@(require_results)
+intent_set :: proc "contextless" (intent: vx.Intent) -> vx.Status {
+	p := vx.Sched_Params{intent = intent}
+	return sched_ctx_configure(vx.HANDLE_NONE, &p)
+}

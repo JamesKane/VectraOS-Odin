@@ -24,6 +24,7 @@ Obj_Type :: enum u8 {
 	Dma_Domain,
 	Dma_Mapping,
 	Pager,
+	Sched_Ctx, // ADR-0016 (upstream's ADR-0038)
 }
 
 Object :: struct {
@@ -60,6 +61,8 @@ obj_type_of :: #force_inline proc "contextless" ($T: typeid) -> Obj_Type {
 		return .Dma_Mapping
 	} else when T == Pager {
 		return .Pager
+	} else when T == Sched_Ctx {
+		return .Sched_Ctx
 	} else {
 		#panic("not a kernel object")
 	}
@@ -170,6 +173,8 @@ object_destroy :: proc "contextless" (o: ^Object) {
 		dma_mapping_destroy(cast(^Dma_Mapping)o)
 	case .Pager:
 		pager_destroy(cast(^Pager)o)
+	case .Sched_Ctx:
+		sched_ctx_destroy(cast(^Sched_Ctx)o)
 	}
 }
 

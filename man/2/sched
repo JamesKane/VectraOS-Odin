@@ -1,39 +1,70 @@
-page=sched sect=2 summary="scheduling contexts and core reservations (reserved)"
-    names=sched_ctx_create,sched_ctx_bind,sched_ctx_configure,sched_reserve
-    src=kernel/syscall/syscall.c,abi/vx/syscalls.def
-    keys=schedule,scheduler,intent,realtime,budget,period,reserve,cores,affinity
+page=sched sect=2 summary="scheduling contexts, intents, admission and core reservations"
+    names=sched_ctx_create,sched_ctx_bind,sched_ctx_configure,sched_reserve,vx_intent_set
+    src=kernel/sched/sched.c,kernel/syscall/syscall.c,abi/vx/abi.h,lib/vx-rt/base.c,docs/adr/0038-scheduling-contexts.md
+    keys=schedule,scheduler,intent,realtime,budget,period,reserve,cores,affinity,admission,band
 
 # SYNOPSIS
 
-There are no `vx-rt` wrappers.
-The calls are made raw, as `vx_syscall(VX_SYS_sched_ctx_create, ...)`, `vx_syscall(VX_SYS_sched_ctx_bind, ...)`, `vx_syscall(VX_SYS_sched_ctx_configure, ...)` and `vx_syscall(VX_SYS_sched_reserve, ...)`.
+```c
+vx_status vx_sched_ctx_create(const vx_sched_params *p, vx_handle *out);
+vx_status vx_sched_ctx_bind(vx_handle ctx, vx_handle thread, int32_t core);
+vx_status vx_sched_ctx_configure(vx_handle ctx, const vx_sched_params *p);
+vx_status vx_sched_reserve(vx_handle ctx, uint32_t count, uint32_t cls,
+                           uint32_t domain, uint32_t flags, vx_core_set *out);
+vx_status vx_intent_set(uint32_t intent);
+```
 
 # DESCRIPTION
 
-These calls are reserved.
-Their numbers are allotted, and the kernel implements none of them: each returns `VX_ERR_UNSUPPORTED`.
-
-They are meant to manage scheduling contexts, each a CPU budget, a period and an intent that threads are bound to and that `channel_call` donates to the server it calls (01 §8):
+A thread says what it needs, an intent, rather than a priority or a core (01 §8, ADR-0038, M6 step 6d6c).
+The intents are bands of the scheduler, highest first: `VX_INTENT_REALTIME`, `VX_INTENT_INTERACTIVE_FRAME`, `VX_INTENT_INTERACTIVE` (every thread's to start with), `VX_INTENT_THROUGHPUT` and `VX_INTENT_BACKGROUND`.
+Threads of one band share the CPUs round robin, in 10 ms slices; a thread made ready in a band above one running preempts it.
+A channel message's `sender_intent` is its sender's.
 
 : `sched_ctx_create`
-  Is to make a scheduling context for an intent, admitting a `realtime` budget or refusing it with a reason.
+  Makes a scheduling context with the parameters in a `vx_sched_params`, and gives a handle to it with `WRITE`, `MANAGE`, `INSPECT`, `DUPLICATE` and `TRANSFER`.
+  A `realtime` context has a `period`, 1 ms to 10 s, and a `budget` of CPU time in each, 100 µs up to the period; it is admitted, or refused with `REFUSED`, never degraded: the budgets of every admitted context together, as fractions of their periods, may come to at most 80% of the CPUs.
+  Other intents take neither.
+  A context goes with its last handle and its last bound thread, and its budget and reserved CPUs with it.
 : `sched_ctx_bind`
-  Is to bind a thread to a context, several threads sharing one context's budget and deadline, or to bind a thread to one core of a reservation.
+  Binds a thread, by a handle with `MANAGE` or `VX_HANDLE_NONE` for the caller, to a context held with `WRITE`; the thread then runs with its intent and, if it is `realtime`, against its budget, which every thread bound to it shares.
+  Spent, its threads wait until the next period fills it.
+  <core> is -1, or a CPU of the context's reservation, which the thread then runs on, alone.
+  A <ctx> of `VX_HANDLE_NONE` unbinds the thread.
 : `sched_ctx_configure`
-  Is to change a context's parameters, carrying a kernel-internal core mask for drivers that need a particular core.
+  Changes a context, held with `MANAGE`; a `realtime` one is admitted again, and keeps its old budget if the new one is refused.
+  With `VX_HANDLE_NONE` it sets the calling thread's own intent, which may be anything but `realtime`: `vx_intent_set`.
 : `sched_reserve`
-  Is to reserve whole cores for a program, by tier, last-level cache or NUMA node, granted or refused and never degraded.
+  Reserves <count> whole CPUs for a context held with `MANAGE`, all of them or `REFUSED`, and gives the grant in a `vx_core_set`, a mask of CPU indices and their count; with a <count> of 0 it gives back what the context has.
+  The first CPU is never reserved, so one always stays shared.
+  A reserved CPU runs only the context's threads bound to it; what ran there leaves at its next switch.
+  <cls> is `VX_CORE_ANY` or `VX_CORE_TIER(0)`, <domain> `VX_DOMAIN_ANY`, and <flags> may name `VX_RESERVE_NO_SMT_SIBLINGS` and `VX_RESERVE_SAME_LLC`.
 
-Until they land, every thread runs as `VX_INTENT_INTERACTIVE`, the intent channel messages carry as `sender_intent`, and the kernel's threads share one round-robin ready queue in 10 ms slices.
+A thread's scheduling is readable by `thread_state`'s `VX_STATE_GET_SCHED`, a `vx_sched_info`, and as text in procfs(4)'s `/proc/N/threads/T/sched`.
+
+# EXAMPLES
+
+A thread that needs 3 ms of CPU in each 10 ms:
+
+```c
+vx_handle rt;
+vx_sched_params p = {.intent = VX_INTENT_REALTIME,
+                     .period = 10'000'000, .budget = 3'000'000};
+if (vx_sched_ctx_create(&p, &rt) == VX_OK)
+  vx_sched_ctx_bind(rt, VX_HANDLE_NONE, -1);
+```
 
 # SEE ALSO
 
-intro(2)
+thread_state(2), procfs(4), intro(2); `docs/01-kernel-ipc.md` §8
 
 # DIAGNOSTICS
 
-Each returns `VX_ERR_UNSUPPORTED`.
+`REFUSED` for a budget that does not fit, a reservation that cannot be granted whole, or a tier or capacity the machine does not have; `INVALID` for parameters out of range, a `realtime` intent of a thread's own, or a core not in the context's reservation; `ACCESS` for a handle without the right the call needs.
 
 # BUGS
 
-None of the design's scheduling exists: no intents but `interactive`, no admission test, no donation through `channel_call`, no reservations, and no placement on heterogeneous cores.
+The limits are the machine's, not each user's, until keyd (M10): one program can take all 80%, or every CPU but the first.
+Lower bands starve under load from higher ones, as bands do.
+`channel_call` does not yet run the server on the caller's context (donation, M6 step 6d6c2).
+There are no tiers or NUMA domains yet (`/sys/cpu` does not publish them), the kernel's core mask for drivers is not there, interrupts are not steered away from reserved CPUs, and a thread bound to a context is charged for a whole slice's time on the CPU it runs, kernel time included.
