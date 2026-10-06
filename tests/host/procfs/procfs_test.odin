@@ -271,7 +271,7 @@ test_procfs :: proc(t: ^testing.T) {
 	testing.expect_value(t, p9test.list(&c, root, ""), "1 2 7 9 13 12 14")
 	testing.expect_value(t, p9test.list(&c, root, "9"), "status ctl note notepg noteid ppid wait ns events mem maps images info prof threads")
 	testing.expect_value(t, p9test.list(&c, root, "9/threads"), "1 2")
-	testing.expect_value(t, p9test.list(&c, root, "9/threads/2"), "status regs regs.ndb fpregs xregs ctl")
+	testing.expect_value(t, p9test.list(&c, root, "9/threads/2"), "status regs regs.ndb fpregs xregs ctl sched")
 	testing.expect_value(t, p9test.list(&c, root, "9/prof"), "ctl zones")
 
 	// Names that are not processes, threads or files.

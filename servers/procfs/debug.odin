@@ -1248,6 +1248,58 @@ thread_status_text :: proc "contextless" (p: ^Proc, tid: u32, buf: []u8) -> int 
 	return w.failed ? 0 : w.len
 }
 
+@(private="file")
+put_dec :: proc "contextless" (w: ^ndb.Writer, key: string, v: u64) {
+	buf: [20]u8
+	ndb.put(w, key, str.format_u64(buf[:], v))
+}
+
+// threads/T/sched (upstream's ADR-0038): its intent, and its context's
+// period, budget, what is left of it this period, the periods it ran out
+// in, and its CPUs; and the channel_call caller it runs for, if any.
+@(private)
+sched_text :: proc "contextless" (p: ^Proc, tid: u32, buf: []u8) -> int {
+	INTENTS := [vx.Intent]string {
+		.Realtime          = "realtime",
+		.Interactive_Frame = "interactive-frame",
+		.Interactive       = "interactive",
+		.Throughput        = "throughput",
+		.Background        = "background",
+	}
+	si: vx.Sched_Info
+	if rt.thread_state(p.task, tid, .Get_Sched, &si) != .Ok {
+		return 0
+	}
+	w := ndb.Writer{buf = buf}
+	intent := "unknown"
+	if u32(si.intent) == 0 {
+		intent = ""
+	} else if si.intent <= .Background {
+		intent = INTENTS[si.intent]
+	}
+	ndb.put(&w, "intent", intent)
+	ndb.put(&w, "context", si.bound != 0 ? "yes" : "no")
+	if si.period != 0 {
+		put_dec(&w, "period", u64(si.period))
+		put_dec(&w, "budget", u64(si.budget))
+		put_dec(&w, "left", u64(si.left))
+		put_dec(&w, "exhausted", si.exhausted)
+	}
+	if si.reserved != 0 {
+		put_hex(&w, "reserved", si.reserved)
+		put_dec(&w, "cores", u64(si.reserved_count))
+	}
+	if si.core >= 0 {
+		put_dec(&w, "core", u64(si.core))
+	}
+	if si.lent_task != 0 {
+		put_dec(&w, "lent_task", si.lent_task)
+		put_dec(&w, "lent_thread", si.lent_thread)
+	}
+	_ = ndb.end(&w)
+	return w.failed ? 0 : w.len
+}
+
 @(private)
 regs_ndb_text :: proc "contextless" (p: ^Proc, tid: u32, buf: []u8) -> int {
 	r: vx.Regs
