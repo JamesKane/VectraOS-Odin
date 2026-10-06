@@ -47,6 +47,14 @@ fake_syscall :: proc "c" (nr: vx.Syscall, a0, a1, a2, a3, a4, a5: u64) -> i64 {
 	return i64(vx.Status.Err_Unsupported)
 }
 
+// lib/rt's thread end, in assembly on the target. fsd's reads link in
+// vx:p9ring's release, which can start a thread; here there is no ring
+// server, so release never does, and nothing gets here.
+@(export, link_name = "vx_thread_finish")
+fake_thread_finish :: proc "c" (word: ^u32, wake, exit: u64) -> ! {
+	libc.abort()
+}
+
 // The volume, in memory.
 disk: []u8
 
@@ -305,17 +313,21 @@ test_fsd :: proc(t: ^testing.T) {
 	_ = p9.client_clunk(&all.c, held)
 
 	// A users file of 127 users and no none: fsd adds none, in a slot of its
-	// own, and goes on answering. Then the old one again.
+	// own; but since upstream's M6 step 6d5c every user keeps its place, the
+	// old none (id 1) staying as a gone one, so with adm and vectra placed the
+	// new ones do not fit beside it: refused, the users as they were. Then a
+	// malformed one, and the old one again.
 	b := strings.builder_make(context.temp_allocator)
 	strings.write_string(&b, "0:adm:adm:vectra\n2:u2::\n1000:vectra:vectra:\n")
 	for i in 3 ..= 126 {
 		strings.write_string(&b, fmt.tprintf("%d:u%d::\n", i, i))
 	}
 	testing.expect_value(t, write_file(adm, "users", strings.to_string(b)), vx.Status.Ok)
-	testing.expect_value(t, len(fsd.ut.users), 128)
+	testing.expect_value(t, len(fsd.ut.users), 3)
+	testing.expect(t, strings.contains(string(kernel_log[:kernel_log_len]), "fsd: /adm/users has more users than fit beside those gone since fsd started: the users stay as they were\n"))
 	testing.expect_value(t, p9test.list(&adm.c, adm.root, ""), "ctl status users")
 	testing.expect_value(t, write_file(adm, "users", "0:adm:nobody:\n"), vx.Status.Ok) // malformed: kept as they were
-	testing.expect_value(t, len(fsd.ut.users), 128)
+	testing.expect_value(t, len(fsd.ut.users), 3)
 	testing.expect(t, strings.contains(string(kernel_log[:kernel_log_len]), "fsd: /adm/users is malformed: the users stay as they were\n"))
 	testing.expect_value(t, write_file(adm, "users", users), vx.Status.Ok)
 	testing.expect_value(t, len(fsd.ut.users), 3)

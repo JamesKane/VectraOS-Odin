@@ -88,6 +88,12 @@ Fs :: struct {
 	remove:  proc "contextless" (ctx: rawptr, node: Node) -> vx.Status,
 	// Optional: a fid let the node go; opened says whether the fid had it open.
 	clunk:    proc "contextless" (ctx: rawptr, node: Node, opened: bool),
+	// Optional (upstream's M6 step 6d5c): a fid has come to hold the node
+	// (+1), at an attach, a walk, a create, a clone or a join, or let it go
+	// (-1), when it is clunked or moves on; exactly paired, unlike clunk,
+	// which is told of nodes no fid held. fsd counts the fids on each
+	// snapshot with it.
+	fid_node: proc "contextless" (ctx: rawptr, node: Node, delta: int),
 	// The posix and xattr extensions, each optional: a server without one
 	// refuses its message. Rgetattr needs nothing new: it is made from stat.
 	setattr:  proc "contextless" (ctx: rawptr, node: Node, a: ^Setattr) -> vx.Status,
@@ -204,6 +210,13 @@ request_handle: vx.Handle
 @(thread_local)
 reply_handle: vx.Handle
 
+// While not 0, the file server's calls keep the server's lock (vx:p9ring's
+// release refuses): what is done in more than one call is then one step, as
+// an append's end and its write, or a read at an open file's offset and the
+// offset's moving on (upstream's M6 step 6d5b).
+@(thread_local)
+keep_lock: u32
+
 // What serve made of a request.
 Serve_Result :: enum u8 {
 	Reply, // send the reply it wrote
@@ -292,7 +305,15 @@ unlock :: proc "contextless" (sh: ^Shared, conn: ^Server, proc_id: u32, any_proc
 }
 
 @(private="file")
+fid_holds :: proc "contextless" (s: ^Server, node: Node, delta: int) {
+	if s.fs.fid_node != nil {
+		s.fs.fid_node(s.fs.ctx, node, delta)
+	}
+}
+
+@(private="file")
 fid_drop :: proc "contextless" (s: ^Server, f: ^Fid_Entry) {
+	fid_holds(s, f.node, -1)
 	remove := f.orclose
 	if o := f.file; o != nil && s.shared != nil {
 		remove = remove || (o.orclose && o.fids == 1) // its last fid
@@ -387,7 +408,9 @@ open_node :: proc "contextless" (s: ^Server, f: ^Fid_Entry, mode: Open_Mode) -> 
 	if s.fs.clunk != nil {
 		s.fs.clunk(s.fs.ctx, f.node, false)
 	}
+	fid_holds(s, f.node, -1)
 	f.node, f.qid = node, qid
+	fid_holds(s, node, 1)
 	return .Ok
 }
 
@@ -439,7 +462,12 @@ read_dir :: proc "contextless" (s: ^Server, f: ^Fid_Entry, offset: u64, out: []u
 			return 0, re
 		}
 		st: Stat
-		if se := s.fs.stat(s.fs.ctx, child, &st); se != .Ok {
+		se := s.fs.stat(s.fs.ctx, child, &st)
+		if se == .Err_Not_Found { // gone since it was listed (upstream's 6d5b)
+			f.dir_index += 1
+			continue
+		}
+		if se != .Ok {
 			return 0, se
 		}
 		n := stat_encode(&st, out[used:])
@@ -463,9 +491,13 @@ read_dir :: proc "contextless" (s: ^Server, f: ^Fid_Entry, offset: u64, out: []u
 }
 
 // Writes at the offset given, or at the open file's (OFFSET_CURRENT): its end
-// if it appends, which is atomic, as the server does one request at a time.
+// if it appends, which is atomic, the server's lock kept for the whole of it
+// (keep_lock).
 @(private="file", require_results)
 write :: proc "contextless" (s: ^Server, f: ^Fid_Entry, t: ^Msg) -> (count: u32, e: vx.Status) {
+	keep := u32(.Append in f.qid.type || t.offset == OFFSET_CURRENT)
+	keep_lock += keep
+	defer keep_lock -= keep
 	o := s.shared != nil ? f.file : nil
 	offset := t.offset
 	if .Append in f.qid.type { // DMAPPEND: at the end, whatever the offset
@@ -632,6 +664,7 @@ serve_join :: proc "contextless" (s: ^Server, t: ^Msg, r: ^Msg) -> vx.Status {
 	o.fids += 1
 	n.qid = qid
 	n.node, n.root = o.node, o.node
+	fid_holds(s, n.node, 1)
 	n.open = true
 	n.mode = o.mode
 	n.file = o
@@ -868,7 +901,11 @@ serve_dref :: proc "contextless" (s: ^Server, t: ^Msg, r: ^Msg) -> vx.Status {
 			offset = st.length
 		}
 	}
-	count := op(s.fs.ctx, f.node, offset, request_handle, t.roffset, t.count) or_return
+	keep := u32(t.offset == OFFSET_CURRENT) // the offset, and its moving on, one step
+	keep_lock += keep
+	count, e := op(s.fs.ctx, f.node, offset, request_handle, t.roffset, t.count)
+	keep_lock -= keep
+	e or_return
 	if o != nil && t.offset == OFFSET_CURRENT {
 		o.offset = offset + u64(count)
 	}
@@ -1017,7 +1054,11 @@ readdir_l :: proc "contextless" (s: ^Server, f: ^Fid_Entry, cookie: u64, out: []
 		}
 		re or_return
 		st: Stat
-		s.fs.stat(s.fs.ctx, child, &st) or_return
+		if se := s.fs.stat(s.fs.ctx, child, &st); se == .Err_Not_Found {
+			continue // gone since it was listed
+		} else if se != .Ok {
+			return 0, se
+		}
 		o := str.Buf{buf = out[used:]}
 		dirent_put(&o, st.qid, i + 1, dirent_type(st.mode), st.name)
 		if o.failed {
@@ -1181,6 +1222,7 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 			}
 			if e == .Ok {
 				f.root, f.qid = f.node, r.qid
+				fid_holds(s, f.node, 1)
 			} else if f != nil {
 				f^ = {}
 			}
@@ -1221,8 +1263,12 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 			if n == f && s.fs.clunk != nil {
 				s.fs.clunk(s.fs.ctx, f.node, false) // walked fids are never open
 			}
+			if n == f {
+				fid_holds(s, f.node, -1)
+			}
 			root := f.root
 			n^ = {fid = t.newfid, used = true, node = node, root = root, qid = qid}
+			fid_holds(s, node, 1)
 		case .Topen, .Tcreate:
 			if f = fid_find(s, t.fid); f == nil {
 				e = .Err_Bad_Handle
@@ -1249,7 +1295,9 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 					if s.fs.clunk != nil {
 						s.fs.clunk(s.fs.ctx, f.node, false)
 					}
+					fid_holds(s, f.node, -1)
 					f.node = node
+					fid_holds(s, node, 1)
 					qid: Qid
 					if qid, e = qid_of(s, node); e == .Ok {
 						f.qid = qid
@@ -1326,11 +1374,14 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 				}
 				offset = o.offset
 			}
+			keep := u32(o != nil && t.offset == OFFSET_CURRENT) // the offset, and its moving on, one step
+			keep_lock += keep
 			if .Dir in f.qid.type {
 				count, e = read_dir(s, f, offset, out)
 			} else {
 				count, e = s.fs.read(s.fs.ctx, f.node, offset, out)
 			}
+			keep_lock -= keep
 			if e == .Ok && count > u32(len(out)) {
 				e = .Err_Range // the file server claims more than it was given room for
 				break

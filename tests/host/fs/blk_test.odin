@@ -623,6 +623,64 @@ test_free :: proc(t: ^testing.T) {
 	expect_digest(t, "free", d.bytes, 0x717bc4d3566062b3)
 }
 
+// Not upstream's (it has no host test of them): readers' epochs (its M6 step
+// 6d5b, gefs's). A block freed while a reader reads waits on its epoch's
+// list; the epoch moves on only when every reader is in the current one,
+// freeing the list two behind; with no reader, everything waiting is freed.
+@(test)
+test_epochs :: proc(t: ^testing.T) {
+	d := memdev_new(66)
+	defer memdev_free(d)
+	f := new(fs.Fs)
+	defer free(f)
+	fresh(t, f, d, 1, 64, 256)
+	a := &f.arenas[0]
+	bp: [3]fs.Bptr
+	for &p in bp {
+		b := fs.new_block(f, .Dat)
+		p = b.bp
+		fs.drop(f, b)
+	}
+	testing.expect(t, fs.end_op(f))
+	freed := proc(t: ^testing.T, f: ^fs.Fs, bp: fs.Bptr, loc := #caller_location) {
+		testing.expect(t, fs.free_block(f, bp), loc = loc)
+		testing.expect(t, fs.end_op(f), loc = loc)
+	}
+
+	testing.expect(t, !fs.readers_active(f))
+	testing.expect(t, fs.reader_enter(f)) // a reader in epoch 0
+	testing.expect(t, fs.readers_active(f))
+	freed(t, f, bp[0]) // on 0's list; every reader in 0, so the epoch moves to 1
+	testing.expect(t, !is_free(a, bp[0].addr))
+	testing.expect_value(t, f.epoch, 1)
+	freed(t, f, bp[1]) // on 1's; the reader still in 0, so the epoch stays
+	testing.expect_value(t, f.epoch, 1)
+	testing.expect(t, !is_free(a, bp[1].addr))
+	fs.reader_leave(f)
+	testing.expect(t, fs.reader_enter(f)) // again, in 1
+	freed(t, f, bp[2]) // on 1's; the epoch moves to 2, and 2's list (empty) is freed
+	testing.expect_value(t, f.epoch, 2)
+	testing.expect(t, !is_free(a, bp[0].addr))
+	testing.expect(t, !is_free(a, bp[2].addr))
+	testing.expect(t, fs.end_op(f)) // the reader in 1, older than 2: nothing moves
+	testing.expect_value(t, f.epoch, 2)
+	fs.reader_leave(f)
+	testing.expect(t, fs.reader_enter(f)) // in 2
+	testing.expect(t, fs.end_op(f)) // to 0, freeing 0's list: the first block
+	testing.expect_value(t, f.epoch, 0)
+	testing.expect(t, is_free(a, bp[0].addr))
+	testing.expect(t, !is_free(a, bp[1].addr))
+	testing.expect(t, !is_free(a, bp[2].addr))
+	fs.reader_leave(f)
+	testing.expect(t, !fs.readers_active(f))
+	testing.expect(t, fs.end_op(f)) // no reader: everything waiting
+	testing.expect(t, is_free(a, bp[1].addr))
+	testing.expect(t, is_free(a, bp[2].addr))
+	testing.expect(t, arena_sane(a))
+	testing.expect_value(t, f.err, vx.Status.Ok)
+	fs.close(f)
+}
+
 // M5 step 10's close-out of the block layer: a log block's header is in its
 // hash (its chain pointer damaged is found), and a failed write leaves the
 // volume failed and the block not dirty.

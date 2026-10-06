@@ -11,6 +11,17 @@ import "vx:str"
 
 status_text: [dynamic; 16 * 1024]u8 // what does not fit is cut, as upstream's is
 
+// Each open of status reads a copy of its own, made at the open (and again
+// at a read from its start), so two readers at once never share one
+// (upstream's M6 step 6d5c): the open moves its fid to the copy's node (the
+// framework's clone), and the copy goes with its last fid.
+Status_Copy :: struct {
+	used: bool,
+	fids: u32,
+	text: [dynamic; 16 * 1024]u8,
+}
+status_copies: [STATUS_COPIES]Status_Copy
+
 @(private="file")
 check_said: [dynamic; 159]u8 // the last check's verdict, cut as upstream's 160-byte string is
 
@@ -117,6 +128,7 @@ open_branch :: proc "contextless" (name: string) -> ^fs.Branch {
 
 @(private="file")
 run_check :: proc "contextless" () {
+	quiesce()
 	c: fs.Check
 	st := fs.check_volume(&vol, &c)
 	clear(&check_said)

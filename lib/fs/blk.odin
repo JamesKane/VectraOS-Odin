@@ -1,5 +1,6 @@
 package fs
 
+import "base:intrinsics"
 import vx "abi:vx"
 
 // Blocks (upstream docs/11 §3, §6): the block cache, reading and checking
@@ -22,12 +23,23 @@ import vx "abi:vx"
 //
 // Freeing depends on the tree a block left (fs.gen, base and snaptree, set by
 // the tree being changed). A block born in the generation being built (since
-// the last commit) is freed when the current operation ends, the epoch gefs's
-// readers need (single-threaded here). One born earlier is still reachable
-// from the last commit: a branch's is killed, kept on fs.dead for the
-// commit's deadlists, unless it was born before the branch's base, when the
-// branch it came from frees it; the snapshot tree's is deferred, freed once
-// the next commit is durable (fs.deferred).
+// the last commit) is freed when the current operation ends. One born earlier
+// is still reachable from the last commit: a branch's is killed, kept on
+// fs.dead for the commit's deadlists, unless it was born before the branch's
+// base, when the branch it came from frees it; the snapshot tree's is
+// deferred, freed once the next commit is durable (fs.deferred).
+//
+// Readers on other threads (upstream's M6 step 6d5b), after gefs's epochs
+// (its blk.c's limbo, epochstart and epochclean): a thread may read the trees
+// with the lock their changes are made under let go, the block cache under a
+// lock of its own (Mem's lock), entering a read with reader_enter and
+// leaving it with reader_leave. It enters, and copies the tree it reads,
+// with the changes' lock held, so the copy is a root the changes have done
+// with. A block given back (block_dealloc) while a reader reads goes on the
+// list of the epoch it was freed in; the epoch moves on when every reader in
+// a read is in the current one, and the list two behind is given back then
+// (readers_reclaim, at each operation's end). A block given back while none
+// reads, and every one waiting, is given back at once: nothing can reach it.
 
 Blk_Flag :: enum u8 {
 	Dirty, // changed since it was written: never evicted
@@ -137,7 +149,14 @@ Fs :: struct {
 	deferred:    Vec(Addr), // freed once the next commit is durable
 	reads:       u64, // blocks, for tests and status
 	writes:      u64,
+	// Readers (see the top), each word read and written atomically.
+	epoch:       u32, // 0, 1 or 2
+	reading:     [READERS]u32, // a reader's epoch | READING while it reads
+	gone:        [3]Vec(Addr), // given back in each epoch, not yet freed in the arenas
 }
+
+READERS :: 32 // threads that read at once
+READING :: u32(4) // or'd with a reader's epoch: it is in a read
 
 // An arena's allocation log entry: an address with the op in its low byte,
 // and a length after it for the ranged ops.
@@ -156,6 +175,20 @@ Log_Op :: enum u8 {
 MINCACHE :: 4 * MAXHEIGHT + 64 + 8
 
 // --- The cache ---
+
+@(private = "file")
+cache_lock :: proc "contextless" (fs: ^Fs) {
+	if fs.mem.lock != nil {
+		fs.mem.lock(fs.mem.ctx, true)
+	}
+}
+
+@(private = "file")
+cache_unlock :: proc "contextless" (fs: ^Fs) {
+	if fs.mem.lock != nil {
+		fs.mem.lock(fs.mem.ctx, false)
+	}
+}
 
 @(private = "file")
 cache_slot :: proc "contextless" (fs: ^Fs, addr: Addr) -> int {
@@ -247,7 +280,8 @@ cache_take :: proc "contextless" (fs: ^Fs) -> ^Blk {
 	return b
 }
 
-hold :: proc "contextless" (fs: ^Fs, b: ^Blk) -> ^Blk {
+@(private = "file")
+hold_locked :: proc "contextless" (fs: ^Fs, b: ^Blk) -> ^Blk {
 	if b.ref == 0 {
 		lru_unlink(fs, b)
 	}
@@ -255,28 +289,58 @@ hold :: proc "contextless" (fs: ^Fs, b: ^Blk) -> ^Blk {
 	return b
 }
 
+hold :: proc "contextless" (fs: ^Fs, b: ^Blk) -> ^Blk {
+	cache_lock(fs)
+	defer cache_unlock(fs)
+	return hold_locked(fs, b)
+}
+
 drop :: proc "contextless" (fs: ^Fs, b: ^Blk) {
 	if b == nil {
 		return
 	}
+	cache_lock(fs)
 	b.ref -= 1
 	if b.ref == 0 {
 		lru_push(fs, b)
 	}
+	cache_unlock(fs)
 }
 
 // Drops a block from the cache altogether (its address freed for reuse).
 cache_forget :: proc "contextless" (fs: ^Fs, addr: Addr) {
+	cache_lock(fs)
 	if b := cache_find(fs, addr); b != nil {
 		cache_del(fs, b)
 	}
+	cache_unlock(fs)
 }
 
-// A block read but refused, given back unreferenced.
+// A block read but refused, given back unreferenced; the cache's lock held.
 @(private = "file")
 cache_return :: proc "contextless" (fs: ^Fs, b: ^Blk) {
 	b.ref = 0
 	lru_push(fs, b)
+}
+
+// Sets or clears a block's dirty flag, under the cache's lock: its LRU flag,
+// which readers change, shares its byte.
+@(private = "file")
+set_dirty :: proc "contextless" (fs: ^Fs, b: ^Blk, dirty: bool) {
+	cache_lock(fs)
+	if dirty {
+		b.flags += {.Dirty}
+	} else {
+		b.flags -= {.Dirty}
+	}
+	cache_unlock(fs)
+}
+
+@(private = "file")
+is_dirty :: proc "contextless" (fs: ^Fs, b: ^Blk) -> bool {
+	cache_lock(fs)
+	defer cache_unlock(fs)
+	return .Dirty in b.flags
 }
 
 // --- Checking a block read from the disk ---
@@ -400,36 +464,50 @@ get :: proc "contextless" (fs: ^Fs, bp: Bptr, want: Block_Types) -> ^Blk {
 		return nil
 	}
 	chained := want <= CHAINED
-	if b := cache_find(fs, bp.addr); b != nil {
-		if b.type not_in want || (!chained && b.bp.hash != bp.hash) {
-			fail(fs, .Err_Invalid)
+	cache_lock(fs)
+	defer cache_unlock(fs)
+	b := cache_find(fs, bp.addr)
+	if b == nil {
+		if b = cache_take(fs); b == nil {
 			return nil
 		}
-		return hold(fs, b)
-	}
-	b := cache_take(fs)
-	if b == nil {
-		return nil
-	}
-	fs.reads += 1
-	st := fs.dev.read(fs.dev.ctx, bp.addr, &b.buf)
-	ok := st == .Ok && (chained || xxh64(b.buf[:], 0) == bp.hash)
-	if ok {
-		ok = parse_block(b, want)
-	}
-	if !ok {
-		fail(fs, st != .Ok ? st : .Err_Invalid)
+		fs.reads += 1
+		// Read with the cache's lock let go, into a block no one else can
+		// see; another reader may read the same one meanwhile, and the first
+		// in keeps it.
+		cache_unlock(fs)
+		st := fs.dev.read(fs.dev.ctx, bp.addr, &b.buf)
+		ok := st == .Ok && (chained || xxh64(b.buf[:], 0) == bp.hash)
+		if ok {
+			ok = parse_block(b, want)
+		}
+		cache_lock(fs)
+		there := ok ? cache_find(fs, bp.addr) : nil
+		if ok && there == nil {
+			b.bp = bp
+			cache_put(fs, b)
+			return b
+		}
+		if !ok {
+			fail(fs, st != .Ok ? st : .Err_Invalid)
+		}
 		cache_return(fs, b)
+		if b = there; b == nil {
+			return nil
+		}
+	}
+	if b.type not_in want || (!chained && b.bp.hash != bp.hash) {
+		fail(fs, .Err_Invalid)
 		return nil
 	}
-	b.bp = bp
-	cache_put(fs, b)
-	return b
+	return hold_locked(fs, b)
 }
 
 // A new block of `type` at addr, held, empty.
 new_block_at :: proc "contextless" (fs: ^Fs, addr: Addr, type: Block_Type) -> ^Blk {
+	cache_lock(fs)
 	b := cache_take(fs)
+	cache_unlock(fs)
 	if b == nil {
 		return nil
 	}
@@ -438,8 +516,10 @@ new_block_at :: proc "contextless" (fs: ^Fs, addr: Addr, type: Block_Type) -> ^B
 	b.nval, b.valsz, b.nbuf, b.bufsz, b.logsz = 0, 0, 0, 0, 0
 	b.logp = {}
 	b.buf = {}
+	cache_lock(fs)
 	b.flags += {.Dirty}
 	cache_put(fs, b)
+	cache_unlock(fs)
 	return b
 }
 
@@ -475,11 +555,13 @@ write_block :: proc "contextless" (fs: ^Fs, b: ^Blk) -> bool {
 		// The volume has failed, and says so to every caller from now on; the
 		// block is let go of rather than kept dirty, which nothing could evict
 		// (M5 step 10).
+		cache_lock(fs)
 		b.flags -= {.Dirty}
 		cache_del(fs, b)
+		cache_unlock(fs)
 		return fail(fs, st)
 	}
-	b.flags -= {.Dirty}
+	set_dirty(fs, b, false)
 	fs.rr_writes += 1
 	if fs.rr_writes == 4096 { // every few thousand writes, the next arena
 		fs.rr += 1
@@ -635,14 +717,14 @@ log_append :: proc "contextless" (fs: ^Fs, a: ^Arena, off: Addr, n: u64, op: Log
 		put64(data(lb)[lb.logsz:], n)
 		lb.logsz += 8
 	}
-	lb.flags += {.Dirty}
+	set_dirty(fs, lb, true)
 	return true
 }
 
 // Writes the log's open block, if it has changed.
 @(require_results)
 log_flush :: proc "contextless" (fs: ^Fs, a: ^Arena) -> bool {
-	if .Dirty not_in a.logtl.flags {
+	if !is_dirty(fs, a.logtl) {
 		return true
 	}
 	return write_block(fs, a.logtl)
@@ -753,15 +835,21 @@ log_tail :: proc "contextless" (fs: ^Fs, h: Arena_Hdr) -> ^Blk {
 		return nil
 	}
 	cache_forget(fs, h.logtl)
+	cache_lock(fs)
 	b := cache_take(fs)
+	if b != nil {
+		fs.reads += 1
+	}
+	cache_unlock(fs)
 	if b == nil {
 		return nil
 	}
-	fs.reads += 1
 	st := fs.dev.read(fs.dev.ctx, h.logtl, &b.buf)
 	if st != .Ok || xxh64(b.buf[LOGHDSZ:][:h.tailsz], 0) != h.tailhash {
 		fail(fs, st != .Ok ? st : .Err_Invalid)
+		cache_lock(fs)
 		cache_return(fs, b)
+		cache_unlock(fs)
 		return nil
 	}
 	b.type = .Log
@@ -771,7 +859,9 @@ log_tail :: proc "contextless" (fs: ^Fs, h: Arena_Hdr) -> ^Blk {
 	for &c in b.buf[LOGHDSZ + int(h.tailsz):] {
 		c = 0
 	}
+	cache_lock(fs)
 	cache_put(fs, b)
+	cache_unlock(fs)
 	return b
 }
 
@@ -884,7 +974,7 @@ log_compress :: proc "contextless" (fs: ^Fs, a: ^Arena) -> bool {
 		a.loghd = {addr = blks[0]}
 		a.logtl = b
 		a.nlog, a.lastlog = u64(used), u64(used)
-		b.flags += {.Dirty}
+		set_dirty(fs, b, true)
 		a.retired = old
 		old = nil
 	} else {
@@ -984,8 +1074,8 @@ new_block :: proc "contextless" (fs: ^Fs, type: Block_Type) -> ^Blk {
 	return addr != 0 ? new_block_at(fs, addr, type) : nil
 }
 
-@(require_results)
-block_dealloc :: proc "contextless" (fs: ^Fs, addr: Addr) -> bool {
+@(private = "file", require_results)
+dealloc_now :: proc "contextless" (fs: ^Fs, addr: Addr) -> bool {
 	a := arena_of(fs, addr)
 	if a == nil {
 		return fail(fs, .Err_Invalid)
@@ -996,6 +1086,111 @@ block_dealloc :: proc "contextless" (fs: ^Fs, addr: Addr) -> bool {
 	}
 	a.used -= BLKSZ
 	return true
+}
+
+// --- Readers' epochs (see the top) ---
+
+// This thread's place in Fs.reading, plus one (0: none yet), once it has
+// read; and the places taken, by every thread.
+@(private = "file", thread_local)
+reader_slot: u32
+@(private = "file")
+reader_slots: u32
+
+// Enters a read from a thread other than the one making changes, with the
+// changes' lock held: what it reads from now is not freed under it. False if
+// there is no place left for this thread: it reads with the lock held.
+@(require_results)
+reader_enter :: proc "contextless" (fs: ^Fs) -> bool {
+	if reader_slot == 0 {
+		if intrinsics.atomic_load(&reader_slots) >= READERS {
+			return false
+		}
+		n := intrinsics.atomic_add(&reader_slots, 1)
+		if n >= READERS {
+			return false
+		}
+		reader_slot = n + 1
+	}
+	e := intrinsics.atomic_load(&fs.epoch)
+	intrinsics.atomic_store(&fs.reading[reader_slot - 1], e | READING)
+	return true
+}
+
+// Leaves the read entered.
+reader_leave :: proc "contextless" (fs: ^Fs) {
+	if reader_slot != 0 {
+		intrinsics.atomic_store(&fs.reading[reader_slot - 1], 0)
+	}
+}
+
+// Whether any reader is in a read.
+readers_active :: proc "contextless" (fs: ^Fs) -> bool {
+	for &r in fs.reading {
+		if intrinsics.atomic_load(&r) & READING != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// Gives back what waits on epoch e's list.
+@(private = "file", require_results)
+reclaim_list :: proc "contextless" (fs: ^Fs, e: u32) -> bool {
+	ok := true
+	for addr in items(&fs.gone[e]) {
+		if !ok {
+			break
+		}
+		ok = dealloc_now(fs, addr)
+	}
+	fs.gone[e].n = 0
+	return ok
+}
+
+// Gives back every block waiting: only while no reader reads.
+@(private = "file", require_results)
+reclaim_all :: proc "contextless" (fs: ^Fs) -> bool {
+	ok := true
+	for e in u32(0) ..< 3 {
+		if ok {
+			ok = reclaim_list(fs, e)
+		}
+		fs.gone[e].n = 0
+	}
+	return ok
+}
+
+// Moves the epoch on if every reader in a read is in the current one, and
+// gives back what was freed two epochs before; with no reader reading,
+// everything waiting. The changes' thread calls it, at each operation's end
+// (end_op), and before a commit or a check, which count every block.
+@(require_results)
+readers_reclaim :: proc "contextless" (fs: ^Fs) -> bool {
+	if !readers_active(fs) {
+		return reclaim_all(fs)
+	}
+	ge := intrinsics.atomic_load(&fs.epoch)
+	for &r in fs.reading {
+		x := intrinsics.atomic_load(&r)
+		if x & READING != 0 && x != ge | READING {
+			return true // one still in an older epoch
+		}
+	}
+	old := (ge + 1) % 3 // two behind: no reader in a read can reach it
+	ok := reclaim_list(fs, old)
+	intrinsics.atomic_store(&fs.epoch, old)
+	return ok
+}
+
+// A block no longer in use given back to its arena: at once if no reader
+// reads, or else once no reader can still reach it.
+@(require_results)
+block_dealloc :: proc "contextless" (fs: ^Fs, addr: Addr) -> bool {
+	if !readers_active(fs) {
+		return reclaim_all(fs) && dealloc_now(fs, addr)
+	}
+	return vec_push(fs, &fs.gone[intrinsics.atomic_load(&fs.epoch)], addr)
 }
 
 // A block the tree being changed no longer points at (see the top).
@@ -1038,7 +1233,7 @@ end_op :: proc "contextless" (fs: ^Fs) -> bool {
 		ok = block_dealloc(fs, bp.addr)
 	}
 	fs.limbo.n = 0
-	return ok
+	return ok && readers_reclaim(fs)
 }
 
 // The library's state over a device, with a cache of `cache` blocks (at least
@@ -1085,6 +1280,9 @@ close :: proc "contextless" (fs: ^Fs) {
 	}
 	mem_release(fs, fs.arenas)
 	vec_free(fs, &fs.limbo)
+	for &g in fs.gone {
+		vec_free(fs, &g)
+	}
 	vec_free(fs, &fs.dead)
 	vec_free(fs, &fs.deferred)
 	mem_release(fs, fs.hash)

@@ -7,11 +7,10 @@ import vx "abi:vx"
 // in it. Nothing is allocated any other way.
 
 // The first error is the volume's, and sticks: nothing more is written after
-// it. Returns false, so a failing path can say `return fail(fs, ...)`.
+// it. Returns false, so a failing path can say `return fail(fs, ...)`. Set
+// atomically: readers on other threads may fail at once (blk.odin's epochs).
 fail :: proc "contextless" (fs: ^Fs, st: vx.Status) -> bool {
-	if fs.err == .Ok {
-		fs.err = st
-	}
+	_, _ = intrinsics.atomic_compare_exchange_strong(&fs.err, vx.Status.Ok, st) // the first error only, whichever thread had it
 	return false
 }
 

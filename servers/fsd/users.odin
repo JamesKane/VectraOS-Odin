@@ -19,7 +19,7 @@ import "vx:users"
 ut: users.Table
 
 @(private="file")
-ut_next: users.Table
+ut_next, ut_fresh: users.Table
 
 uid_of :: proc "contextless" (node: Id) -> u32 {
 	return int(node.user) < len(ut.users) ? ut.users[node.user].id : users.NONE_ID
@@ -32,7 +32,9 @@ is_none :: proc "contextless" (node: Id) -> bool {
 @(private="file")
 users_text: [64 * 1024]u8
 
-// The users table from the adm branch's /users, or the default.
+// The users table from the adm branch's /users, or the default. The users
+// keep their places in the table across a reload (users.merge, upstream's
+// M6 step 6d5c): a node carries its user's index.
 load_users :: proc "contextless" () {
 	ok := false
 	if br, st := fs.branch_open(&vol, "adm"); st == .Ok {
@@ -44,16 +46,21 @@ load_users :: proc "contextless" () {
 		}
 		if st == .Ok && f.d.length < len(users_text) {
 			got, st = fs.read(&vol, &br.t, &f, 0, users_text[:])
-			ok = st == .Ok && users.parse(&ut, string(users_text[:got]), &ut_next)
+			ok = st == .Ok && users.parse(&ut_fresh, string(users_text[:got]), &ut_next)
 		}
 	}
+	if ok && users.merge(&ut, &ut_fresh, &ut_next) {
+		return
+	}
 	if ok {
+		rt.print("fsd: /adm/users has more users than fit beside those gone since fsd started: the users stay as they were\n")
 		return
 	}
 	if len(ut.users) > 0 {
 		rt.print("fsd: /adm/users is malformed: the users stay as they were\n")
 		return
 	}
-	_ = users.parse(&ut, users.DEFAULT, &ut_next)
+	_ = users.parse(&ut_fresh, users.DEFAULT, &ut_next)
+	_ = users.merge(&ut, &ut_fresh, &ut_next)
 	rt.print("fsd: no /adm/users it can read: adm and none only\n")
 }

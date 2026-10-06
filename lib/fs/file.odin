@@ -501,6 +501,11 @@ read_block :: proc "contextless" (v: ^Vol, t: ^Tree, qid, off: u64, buf: ^[BLKSZ
 	return .Ok
 }
 
+// read's block, each reader's own: reads run on several threads at once
+// (blk.odin's epochs, upstream's M6 step 6d5b).
+@(private = "file", thread_local)
+read_blk: [BLKSZ]u8
+
 // Up to len(buf) bytes of f from off; the count read (0 at or past the end).
 @(require_results)
 read :: proc "contextless" (v: ^Vol, t: ^Tree, f: ^File, off: u64, buf: []u8) -> (got: u64, st: vx.Status) {
@@ -511,7 +516,7 @@ read :: proc "contextless" (v: ^Vol, t: ^Tree, f: ^File, off: u64, buf: []u8) ->
 		return 0, .Ok
 	}
 	n := min(u64(len(buf)), f.d.length - off)
-	blk := &v.blk
+	blk := &read_blk
 	for got < n {
 		at := off + got
 		base := at / BLKSZ * BLKSZ
