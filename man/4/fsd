@@ -163,6 +163,13 @@ A rollback of a branch reads its mapped files' pages again; deleting a snapshot 
 
 A `dref` read or write, whose data is in a VMO of the client's, is copied 64 KiB at a time through a buffer of `fsd`'s own, never by mapping the client's VMO.
 
+@node=threads title="Threads"
+
+`fsd` serves on up to 8 threads, as gefs does (M6 step 6d5b): a walk, a stat, an open, a read or a listing lets the server go (rings(7)) at its first wait for the disk, and reads the rest without it, so one waiting on the disk holds up no one else, several read at once, and one the cache answers costs no more than before.
+Every change is made on one thread at a time, with the server held, as is everything `fsd` keeps of its own: open files, the users, the page cache.
+A reader reads the tree as it was when it began: what a change frees is given back only once no reader that began before it can reach it (`lib/vx-fs/blk.c`'s epochs), and a commit, or a check, first waits for the readers in progress to finish.
+A listing of a directory that changes meanwhile may miss or repeat names, as 9P allows; a name removed between being listed and being read is left out.
+
 # EXAMPLES
 
 The test volume's manifest, `tests/user/fsdvol.ndb`: partd(8) serves the test disk's system partition as `disk1.vectra`, and `fsd` serves the volume on it:
@@ -267,7 +274,8 @@ Requests fail with the 9P framework's words: `permission denied` for a permissio
 
 # BUGS
 
-`fsd` is single-threaded: a request that waits for the disk delays every other client.
+Reads only are served on several threads (M6 step 6d5b): a change, a commit included, holds the server while it waits for the disk, and the disk takes one block at a time from all of them.
+Space that readers in progress keep from being given back is not counted free until they leave, so a nearly full volume can refuse a write while another client reads.
 
 Its reasons are the framework's, not its own: a halted volume answers `fid already in use`, and a 17th branch `file does not exist`.
 A branch, once attached, stays open until `fsd` exits, so `del` refuses it, and 16 branches at most can ever be attached in one run.
@@ -275,7 +283,7 @@ A branch, once attached, stays open until `fsd` exits, so `del` refuses it, and 
 At most 32 snapshots are open at once, and one is closed only when its label is deleted; a slot freed by `del` is the next snapshot's, and fids still on it read that one's file of the same qid, unchecked.
 A 33rd snapshot, by label or through the dump view, which anyone can walk, fails until `fsd` restarts.
 
-Smaller review findings, due with M6's pipelined server: reloading the users file maps live fids to whoever now has their place in the table; `halt` still reaps orphans; `rename` and `symlink` can make a real `ctl` or `status` in `adm`'s root; a create counts no open when the 512-entry open table is full, and any client can fill it; the dump view shows the first 256 dated labels in key order; two readers of `status` at once share one buffer; `ORCLOSE` is ignored.
+Smaller review findings, due in M6 step 6d5c: reloading the users file maps live fids to whoever now has their place in the table; `halt` still reaps orphans; `rename` and `symlink` can make a real `ctl` or `status` in `adm`'s root; a create counts no open when the 512-entry open table is full, and any client can fill it; the dump view shows the first 256 dated labels in key order; two readers of `status` at once share one buffer; `ORCLOSE` is ignored.
 Closing any file called `users` in the `adm` branch, not only the root's, reads the users again.
 
 `rollback` makes the `BRANCH@before-N` label before rolling back, and leaves it if the rollback then fails; a branch's name past 223 bytes is cut short in that label.

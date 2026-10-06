@@ -543,11 +543,17 @@ last_block :: proc "contextless" (fs: ^Fs) -> Addr {
 
 // --- The commit ---
 
-// Makes everything changed so far durable at once (11 §6).
+// Makes everything changed so far durable at once (11 §6). With readers on
+// other threads (blk.odin), its caller waits until none is in a read first,
+// and lets none in until it returns: what they kept from being given back is
+// logged free then, and what the commit frees is free at once.
 @(require_results)
 commit :: proc "contextless" (v: ^Vol) -> vx.Status {
 	fs := &v.fs
 	if fs.err != .Ok {
+		return fs.err
+	}
+	if !readers_reclaim(fs) {
 		return fs.err
 	}
 	// 1. What is written so far lands first.

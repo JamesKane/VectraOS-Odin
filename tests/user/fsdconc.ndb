@@ -1,0 +1,8 @@
+# tests/user/fsdconc.ndb: fsdconc as vectra, with fsd's home branch on /tmp
+# and its processes on /proc (tests/qemu/fsdconc.ndb).
+
+service=fsdconc program=/boot/bin/fsdconc console
+user=vectra
+ns=posix
+mount=/tmp srv=fsd aname=home flags=c
+connect=nsd

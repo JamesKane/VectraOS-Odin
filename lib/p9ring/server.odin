@@ -254,11 +254,13 @@ worker_main :: proc(arg: rawptr) {
 // wait (upstream's M6 step 6d5a, 9front lib9p's srvrelease): another thread
 // serves meanwhile, a parked one or a new one if none other is running.
 // Nothing of the file server's own is kept safe by the server's lock until
-// acquire takes it back. Outside a ring server's call, nothing.
-release :: proc "contextless" () {
+// acquire takes it back. False, and nothing done, outside a ring server's
+// call, or while the call must keep the lock (vx:p9's keep_lock, upstream's
+// M6 step 6d5b): then acquire is not to be called.
+release :: proc "contextless" () -> bool {
 	s := current
-	if s == nil || self == nil {
-		return
+	if s == nil || self == nil || p9.keep_lock != 0 {
+		return false
 	}
 	self.released = true
 	s.running -= 1
@@ -278,9 +280,10 @@ release :: proc "contextless" () {
 		}
 	}
 	rt.mutex_unlock(&s.lock)
+	return true
 }
 
-// Takes the server back after release (lib9p's srvacquire).
+// Takes the server back after a release that let it go (lib9p's srvacquire).
 acquire :: proc "contextless" () {
 	s := current
 	if s == nil || self == nil {

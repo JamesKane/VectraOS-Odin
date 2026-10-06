@@ -1221,9 +1221,20 @@ static void test_terminals(void) {
   int before = signals[SIGINT], status = 0;
   pid_t child = fork();
   if (child == 0) _exit(read(s, buf, sizeof buf) == -1 && errno == EINTR ? 21 : 1);
-  nanosleep(&(struct timespec){.tv_nsec = 100'000'000}, nullptr);
-  CHECK(write(m, "\x03", 1) == 1);
-  CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 21);
+  // A ^C that comes before the child's read has started is handled there and
+  // spent, and the read then waits for ever: so ^C again until the read ends
+  // (M6 step 6d5b; the race behind the scenarios' rare hang here).
+  bool typed = true;
+  pid_t waited = 0;
+  for (int tries = 0; tries < 20 && !waited; tries++) {
+    nanosleep(&(struct timespec){.tv_nsec = 100'000'000}, nullptr);
+    typed = typed && write(m, "\x03", 1) == 1;
+    for (double end = now_seconds() + 0.5;
+         !(waited = waitpid(child, &status, WNOHANG)) && now_seconds() < end;)
+      nanosleep(&(struct timespec){.tv_nsec = 10'000'000}, nullptr);
+  }
+  CHECK(typed);
+  CHECK(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 21);
   for (double end = now_seconds() + 1; signals[SIGINT] <= before && now_seconds() < end;) sched_yield();
   CHECK(signals[SIGINT] > before); // the parent is in the group too
   signal(SIGINT, SIG_DFL);

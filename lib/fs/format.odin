@@ -532,4 +532,8 @@ Mem :: struct {
 	ctx:   rawptr,
 	alloc: proc "contextless" (ctx: rawptr, size: int) -> rawptr,
 	free:  proc "contextless" (ctx: rawptr, p: rawptr, size: int),
+	// Optional (upstream's M6 step 6d5b): takes or lets go of a lock over
+	// the block cache, for a caller with readers on other threads (blk.odin's
+	// epochs).
+	lock:  proc "contextless" (ctx: rawptr, take: bool),
 }

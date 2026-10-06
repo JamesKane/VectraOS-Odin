@@ -117,6 +117,7 @@ open_branch :: proc "contextless" (name: string) -> ^fs.Branch {
 
 @(private="file")
 run_check :: proc "contextless" () {
+	quiesce()
 	c: fs.Check
 	st := fs.check_volume(&vol, &c)
 	clear(&check_said)

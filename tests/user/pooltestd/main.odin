@@ -92,7 +92,7 @@ fs_readdir :: proc "contextless" (ctx: rawptr, dir: p9.Node, index: u32) -> (chi
 wait_released :: proc "contextless" (deadline: vx.Instant, gated: bool, from: u32) {
 	waiting += 1
 	peak = max(peak, waiting)
-	p9ring.release()
+	released := p9ring.release()
 	if gated {
 		for intrinsics.atomic_load(&gate) == from {
 			_ = rt.futex_wait(&gate, from, vx.INFINITE)
@@ -103,7 +103,9 @@ wait_released :: proc "contextless" (deadline: vx.Instant, gated: bool, from: u3
 			_ = rt.futex_wait(&never, 0, deadline)
 		}
 	}
-	p9ring.acquire()
+	if released {
+		p9ring.acquire()
+	}
 	waiting -= 1
 }
 

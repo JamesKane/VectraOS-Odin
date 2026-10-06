@@ -47,6 +47,14 @@ fake_syscall :: proc "c" (nr: vx.Syscall, a0, a1, a2, a3, a4, a5: u64) -> i64 {
 	return i64(vx.Status.Err_Unsupported)
 }
 
+// lib/rt's thread end, in assembly on the target. fsd's reads link in
+// vx:p9ring's release, which can start a thread; here there is no ring
+// server, so release never does, and nothing gets here.
+@(export, link_name = "vx_thread_finish")
+fake_thread_finish :: proc "c" (word: ^u32, wake, exit: u64) -> ! {
+	libc.abort()
+}
+
 // The volume, in memory.
 disk: []u8
 

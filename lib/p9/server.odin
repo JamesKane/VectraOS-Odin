@@ -204,6 +204,13 @@ request_handle: vx.Handle
 @(thread_local)
 reply_handle: vx.Handle
 
+// While not 0, the file server's calls keep the server's lock (vx:p9ring's
+// release refuses): what is done in more than one call is then one step, as
+// an append's end and its write, or a read at an open file's offset and the
+// offset's moving on (upstream's M6 step 6d5b).
+@(thread_local)
+keep_lock: u32
+
 // What serve made of a request.
 Serve_Result :: enum u8 {
 	Reply, // send the reply it wrote
@@ -439,7 +446,12 @@ read_dir :: proc "contextless" (s: ^Server, f: ^Fid_Entry, offset: u64, out: []u
 			return 0, re
 		}
 		st: Stat
-		if se := s.fs.stat(s.fs.ctx, child, &st); se != .Ok {
+		se := s.fs.stat(s.fs.ctx, child, &st)
+		if se == .Err_Not_Found { // gone since it was listed (upstream's 6d5b)
+			f.dir_index += 1
+			continue
+		}
+		if se != .Ok {
 			return 0, se
 		}
 		n := stat_encode(&st, out[used:])
@@ -463,9 +475,13 @@ read_dir :: proc "contextless" (s: ^Server, f: ^Fid_Entry, offset: u64, out: []u
 }
 
 // Writes at the offset given, or at the open file's (OFFSET_CURRENT): its end
-// if it appends, which is atomic, as the server does one request at a time.
+// if it appends, which is atomic, the server's lock kept for the whole of it
+// (keep_lock).
 @(private="file", require_results)
 write :: proc "contextless" (s: ^Server, f: ^Fid_Entry, t: ^Msg) -> (count: u32, e: vx.Status) {
+	keep := u32(.Append in f.qid.type || t.offset == OFFSET_CURRENT)
+	keep_lock += keep
+	defer keep_lock -= keep
 	o := s.shared != nil ? f.file : nil
 	offset := t.offset
 	if .Append in f.qid.type { // DMAPPEND: at the end, whatever the offset
@@ -868,7 +884,11 @@ serve_dref :: proc "contextless" (s: ^Server, t: ^Msg, r: ^Msg) -> vx.Status {
 			offset = st.length
 		}
 	}
-	count := op(s.fs.ctx, f.node, offset, request_handle, t.roffset, t.count) or_return
+	keep := u32(t.offset == OFFSET_CURRENT) // the offset, and its moving on, one step
+	keep_lock += keep
+	count, e := op(s.fs.ctx, f.node, offset, request_handle, t.roffset, t.count)
+	keep_lock -= keep
+	e or_return
 	if o != nil && t.offset == OFFSET_CURRENT {
 		o.offset = offset + u64(count)
 	}
@@ -1017,7 +1037,11 @@ readdir_l :: proc "contextless" (s: ^Server, f: ^Fid_Entry, cookie: u64, out: []
 		}
 		re or_return
 		st: Stat
-		s.fs.stat(s.fs.ctx, child, &st) or_return
+		if se := s.fs.stat(s.fs.ctx, child, &st); se == .Err_Not_Found {
+			continue // gone since it was listed
+		} else if se != .Ok {
+			return 0, se
+		}
 		o := str.Buf{buf = out[used:]}
 		dirent_put(&o, st.qid, i + 1, dirent_type(st.mode), st.name)
 		if o.failed {
@@ -1326,11 +1350,14 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 				}
 				offset = o.offset
 			}
+			keep := u32(o != nil && t.offset == OFFSET_CURRENT) // the offset, and its moving on, one step
+			keep_lock += keep
 			if .Dir in f.qid.type {
 				count, e = read_dir(s, f, offset, out)
 			} else {
 				count, e = s.fs.read(s.fs.ctx, f.node, offset, out)
 			}
+			keep_lock -= keep
 			if e == .Ok && count > u32(len(out)) {
 				e = .Err_Range // the file server claims more than it was given room for
 				break
