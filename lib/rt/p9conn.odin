@@ -150,6 +150,18 @@ chunks_give :: proc "contextless" (a: ^Chunks, off, length: u64) {
 KEY_BELL :: 1
 @(private="file")
 KEY_CLOSED :: 2
+RING_KEY_POKE :: u64(3) // a packet ring_waiting's port gets: a note came just before the sleep
+
+// A program's own say in how calls wait, on every connection (the musl back
+// end's, upstream's M6 step 6d4b; unset elsewhere):
+//   - ring_flush_wanted: an interrupted call is flushed if it says so (a
+//     connection's own `interrupted` comes first);
+//   - ring_waiting: what the thread is about to sleep on (a port, or a
+//     futex word), and (HANDLE_NONE, nil) after, so a note handler that
+//     runs just before the sleep can end it (a RING_KEY_POKE packet, or the
+//     word moved).
+ring_flush_wanted: proc "contextless" () -> bool
+ring_waiting: proc "contextless" (port: vx.Handle, word: ^u32)
 
 @(private="file")
 Slot_State :: enum u32 {
@@ -383,7 +395,25 @@ waited :: proc "contextless" (k: ^Conn, s: ^Slot, any: u32) -> bool {
 // Whether the caller of an interrupted call wants it flushed.
 @(private="file")
 wants_flush :: proc "contextless" (k: ^Conn) -> bool {
-	return k.interrupted != nil && k.interrupted(k.interrupted_ctx)
+	if k.interrupted != nil {
+		return k.interrupted(k.interrupted_ctx)
+	}
+	return flush_due()
+}
+
+// Before a sleep: whether a signal already came that wants the call flushed
+// (the program's hook, which looks at what is pending; a connection's own
+// is asked only when a wait is interrupted).
+@(private="file")
+flush_due :: proc "contextless" () -> bool {
+	return ring_flush_wanted != nil && ring_flush_wanted()
+}
+
+@(private="file")
+will_wait :: proc "contextless" (port: vx.Handle, word: ^u32) {
+	if ring_waiting != nil {
+		ring_waiting(port, word)
+	}
 }
 
 // Leads: reads every completion, until the wait is over. .Err_Interrupted
@@ -404,21 +434,26 @@ lead :: proc "contextless" (k: ^Conn, s: ^Slot, any: u32, deadline: vx.Instant, 
 		if waited(k, s, any) {
 			return .Ok
 		}
+		if hear && flush_due() {
+			return .Err_Interrupted // one that came before the sleep
+		}
 		seen, _ := counter_read(k.end)
 		if !ring.prepare_sleep(&k.ring) {
 			continue
 		}
 		pk: [1]vx.Packet
 		_ = port_bind(k.port, k.end, .Counter_Ge, KEY_BELL, seen + 1)
+		will_wait(k.port, nil)
 		got, wst := port_wait(k.port, deadline, 0, pk[:])
+		will_wait(vx.HANDLE_NONE, nil)
 		ring.end_sleep(&k.ring) // the binding made for this wait may fire later too
-		#partial switch wst {
-		case .Err_Interrupted:
+		if wst == .Err_Interrupted || (got == 1 && pk[0].key == RING_KEY_POKE) {
 			if hear && wants_flush(k) {
 				return .Err_Interrupted
 			}
 			continue
-		case .Err_Timed_Out:
+		}
+		if wst == .Err_Timed_Out {
 			return .Err_Timed_Out
 		}
 		if got != 1 || pk[0].key == KEY_CLOSED {
@@ -462,12 +497,22 @@ wait :: proc "contextless" (k: ^Conn, s: ^Slot, any: u32, deadline: vx.Instant, 
 		// leader stops: one taken between the look and the sleep ends the sleep.
 		value := intrinsics.atomic_load(&k.replies)
 		mutex_unlock(&k.lock)
-		#partial switch futex_wait(&k.replies, value, deadline) {
+		if hear && flush_due() {
+			return .Err_Interrupted // one that came before the sleep
+		}
+		will_wait(vx.HANDLE_NONE, &k.replies)
+		w := futex_wait(&k.replies, value, deadline)
+		will_wait(vx.HANDLE_NONE, nil)
+		#partial switch w {
 		case .Err_Timed_Out:
 			return .Err_Timed_Out
 		case .Err_Interrupted:
 			if hear && wants_flush(k) {
 				return .Err_Interrupted
+			}
+		case .Err_Bad_State:
+			if hear && flush_due() {
+				return .Err_Interrupted // a poke
 			}
 		}
 	}

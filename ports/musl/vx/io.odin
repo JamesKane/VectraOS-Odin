@@ -22,13 +22,14 @@ console_write :: proc "contextless" (p: []u8) -> int {
 
 // A pipe's message: a header, then up to PIPE_CHUNK bytes.
 @(private="file")
-pipe_msg: struct {
+Pipe_Msg :: struct {
 	header: vx.Msg_Header,
 	data:   [PIPE_CHUNK]u8,
 }
 
 @(private="file")
 pipe_write :: proc "contextless" (o: ^Ofd, p: []u8) -> int {
+	pipe_msg: Pipe_Msg = --- // the thread's: its waits let the back end go (a static one was another thread's to overwrite)
 	done := 0
 	for done < len(p) {
 		k := copy(pipe_msg.data[:], p[done:])
@@ -121,12 +122,71 @@ counted :: proc "contextless" (n: int, st: vx.Status) -> int {
 	return st != .Ok ? errno_of(st) : n
 }
 
+// --- Calls that may wait for long (upstream's 6d4b) ---
+//
+// A read of a terminal, the console or a server's pipe, a write a full pipe
+// holds, a wait for a child: the back end is let go for the 9P call, so the
+// process's other threads go on meanwhile. The description is held for the
+// call (a close from another thread takes effect after it), and a file whose
+// offset is kept here takes one read or write at a time. Metadata calls
+// (walk, stat, open, clunk) are quick, and keep the back end.
+
+@(private="file")
+file_read_unlocked :: proc "contextless" (o: ^Ofd, buf: []u8) -> (n: int, st: vx.Status) {
+	o.refs += 1
+	shared := file_shared(o)
+	held := be_wait_begin()
+	if shared {
+		n, st = p9.client_read(o.f.c, o.f.fid, p9.OFFSET_CURRENT, buf)
+	} else {
+		rt.mutex_lock(&o.io)
+		n, st = ns.read(&o.f, buf)
+		rt.mutex_unlock(&o.io)
+	}
+	be_wait_end(held)
+	ofd_release(o)
+	return
+}
+
+// One write of buf: at the server's offset (shared), at offset (if not -1),
+// or at the description's own.
+@(private="file")
+file_write_unlocked :: proc "contextless" (o: ^Ofd, buf: []u8, offset: i64) -> (n: int, st: vx.Status) {
+	o.refs += 1
+	shared := file_shared(o)
+	held := be_wait_begin()
+	if offset >= 0 || shared {
+		n, st = p9.client_write(o.f.c, o.f.fid, offset >= 0 ? u64(offset) : p9.OFFSET_CURRENT, buf)
+	} else {
+		rt.mutex_lock(&o.io)
+		n, st = ns.write(&o.f, buf)
+		rt.mutex_unlock(&o.io)
+	}
+	be_wait_end(held)
+	ofd_release(o)
+	return
+}
+
+// The console's read (vx:rt's): one reader at a time, the back end let go.
+@(private="file")
+console_readers: rt.Mutex
+
+@(private="file")
+console_read_unlocked :: proc "contextless" (buf: []u8) -> (n: int, st: vx.Status) {
+	held := be_wait_begin()
+	rt.mutex_lock(&console_readers)
+	n, st = rt.console_read(buf)
+	rt.mutex_unlock(&console_readers)
+	be_wait_end(held)
+	return
+}
+
 @(private="file")
 file_write :: proc "contextless" (o: ^Ofd, p: []u8) -> int {
 	if file_shared(o) { // at the open file's offset, or its end, which the server moves on
 		done := 0
 		for done < len(p) {
-			w, st := p9.client_write(o.f.c, o.f.fid, p9.OFFSET_CURRENT, p[done:][:min(len(p) - done, IO_MAX)])
+			w, st := file_write_unlocked(o, p[done:][:min(len(p) - done, IO_MAX)], -1)
 			if (st != .Ok || w == 0) && done > 0 {
 				return done
 			}
@@ -149,7 +209,7 @@ file_write :: proc "contextless" (o: ^Ofd, p: []u8) -> int {
 	}
 	done := 0
 	for done < len(p) {
-		w, st := ns.write(&o.f, p[done:][:min(len(p) - done, IO_MAX)])
+		w, st := file_write_unlocked(o, p[done:][:min(len(p) - done, IO_MAX)], -1)
 		if (st != .Ok || w == 0) && done > 0 {
 			return done
 		}
@@ -181,7 +241,7 @@ fd_read :: proc "contextless" (fd: int, buf: []u8) -> int {
 		if o.ra != nil {
 			return ra_read(o, b, .Nonblock not_in o.flags)
 		}
-		return counted(rt.console_read(b))
+		return counted(console_read_unlocked(b))
 	case .Pipe_In:
 		return pipe_read(o, b)
 	case .File:
@@ -191,10 +251,7 @@ fd_read :: proc "contextless" (fd: int, buf: []u8) -> int {
 		if o.ra != nil {
 			return ra_read(o, b, .Nonblock not_in o.flags)
 		}
-		if file_shared(o) {
-			return counted(p9.client_read(o.f.c, o.f.fid, p9.OFFSET_CURRENT, b))
-		}
-		return counted(ns.read(&o.f, b))
+		return counted(file_read_unlocked(o, b))
 	}
 	return fail(.EBADF)
 }
@@ -270,14 +327,12 @@ fd_readv :: proc "contextless" (fd: int, iov: [^]linux.Iovec, count: int) -> int
 
 // stdio's writes come as a buffer and the data after it: gathered into one
 // write, so a line reaches the console or a pipe whole.
-@(private="file")
-gather: [PIPE_CHUNK]u8
-
 fd_writev :: proc "contextless" (fd: int, iov: [^]linux.Iovec, count: int) -> int {
 	v, total, e := iovecs(iov, count)
 	if e < 0 {
 		return e
 	}
+	gather: [PIPE_CHUNK]u8 = --- // the thread's: a write lets the back end go
 	if total <= len(gather) {
 		at := 0
 		for x in v {
@@ -326,7 +381,12 @@ fd_pread :: proc "contextless" (fd: int, buf: []u8, offset: i64) -> int {
 	if offset < 0 {
 		return fail(.EINVAL)
 	}
-	return counted(p9.client_read(o.f.c, o.f.fid, u64(offset), buf[:min(len(buf), IO_MAX)]))
+	o.refs += 1
+	held := be_wait_begin()
+	n, st := p9.client_read(o.f.c, o.f.fid, u64(offset), buf[:min(len(buf), IO_MAX)])
+	be_wait_end(held)
+	ofd_release(o)
+	return counted(n, st)
 }
 
 fd_pwrite :: proc "contextless" (fd: int, buf: []u8, offset: i64) -> int {
@@ -340,7 +400,7 @@ fd_pwrite :: proc "contextless" (fd: int, buf: []u8, offset: i64) -> int {
 	if offset < 0 {
 		return fail(.EINVAL)
 	}
-	return counted(p9.client_write(o.f.c, o.f.fid, u64(offset), buf[:min(len(buf), IO_MAX)]))
+	return counted(file_write_unlocked(o, buf[:min(len(buf), IO_MAX)], offset))
 }
 
 // preadv2 and pwritev2, which musl's pread and pwrite use first: at the

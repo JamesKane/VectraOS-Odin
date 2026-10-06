@@ -2,8 +2,8 @@
 // (note.odin). The kernel starts it as if called, with the Exception it put
 // on the stack in rdi. It saves the FP/SIMD registers, which the kernel does
 // not put in an Exception, before any Odin runs: every component XCR0
-// enables, in XSAVE's standard image, in a page of the stack, 64-aligned (at
-// most a page: the kernel's limit, ADR-0035), its header zeroed by general
+// enables, in XSAVE's standard image, in as much of the stack as this
+// CPU needs (vx_note_xsave_bytes, note.odin), 64-aligned, its header zeroed by general
 // registers, as XRSTOR wants it and nothing vector may be touched before it
 // is saved. Then vx_note_dispatch, and vx_note_resume, which does not return.
 
@@ -13,7 +13,7 @@
     .type vx_note_entry, @function
 vx_note_entry:
     movq %rdi, %rbx        // the Exception, kept across the calls
-    subq $4160, %rsp       // a page, whatever the alignment takes
+    subq vx_note_xsave_bytes(%rip), %rsp // what this CPU needs (note.odin), whatever the alignment takes
     andq $-64, %rsp
     xorl %eax, %eax        // XSAVE needs a zeroed header (bytes 512-575)
     movq %rax, 512(%rsp)

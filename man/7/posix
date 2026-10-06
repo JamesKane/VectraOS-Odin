@@ -94,7 +94,9 @@ A stopping signal stops the process through its `ctl`, and `SIGKILL`, `SIGSTOP` 
 pthreads are musl's own, on kernel threads of the process's task: the back end's `__clone` starts one with musl's thread pointer, and its end clears and wakes the word musl joins on.
 The first thread's id is the process's; another's is its slot in the back end's table of threads (1 to 255) shifted left 22, plus the pid, so that it fits the 30 bits a lock word keeps for its owner and no two processes' threads share one (ADR-0037).
 `pthread_create` fails with `EAGAIN` past 255 threads besides the first.
-The back end is one lock, held through each call (recursive, as the back end calls musl), and let go where a call waits: a pipe, a sleep, a futex, `sigsuspend`.
+The back end is one lock, held through each call (recursive, as the back end calls musl), and let go where a call waits: a pipe, a sleep, a futex, `sigsuspend`, and the 9P calls that may wait for long, a file's or terminal's read or write, the console's read and a wait for a child (M6 step 6d4b).
+The threads share the process's 9P connections, with up to 7 calls in flight on each (rings(7)).
+A signal that comes during such a call, not blocked and not ignored, flushes it (flush(5)): the call returns `EINTR`, or with `SA_RESTART` is made again, after the handler; a reply that came first stands.
 The mask is each thread's own, and a new thread starts with its creator's.
 `pthread_kill` posts a note to the one thread, whose handler runs there.
 `fork` in a thread makes a child of that thread alone.
@@ -167,7 +169,8 @@ intro(1), lua(1), make(1), namespace(6), svc(6), procfs(4), ptyd(4), netd(4), tm
 
 # BUGS
 
-Threads take turns at the back end: a 9P call, a file read among them, holds its lock until the server answers (M6 step 6d4).
+A 9P call for a file's metadata (a walk, a stat, an open, a clunk) keeps the back end's lock until it is answered; a server that holds one holds every thread.
+Seven calls held on one connection at once, such as seven threads reading terminals of one ptyd, make an eighth call on it wait for one of them.
 
 There is no `/bin/sh`, and `exec` runs only ELF programs, so `system`, `popen`, `make`'s recipes, Lua's `os.execute` and `io.popen`, `env`, cron, and `ed`'s and `dc`'s `!` fail.
 
@@ -184,7 +187,6 @@ The CPU-time clocks are the monotonic clock.
 Signals have no `sigqueue` or real-time queueing, and `sigaltstack` no `SS_AUTODISARM`.
 A handler without `SA_ONSTACK` may run on the alternate stack, where the kernel put the note, if the thread has one.
 `execve` in a process with more than one thread fails: the kernel's exec wants the caller alone, and nothing ends the others first.
-A signal does not interrupt a 9P call in progress, such as a file read or the console's; its handler runs when the call is done (with the client's `Tflush`, M6 step 6d), though ptyd ends the reads it holds.
 Job control is partial: no `SIGTTIN` or `SIGTTOU`, no controlling terminal kept for a session, and anyone who can write a terminal's `ctl` can set its foreground group.
 
 Sockets are IPv4 only, with no `AF_UNIX` and no `socketpair`; `getaddrinfo` reads `/etc/resolv.conf` and `/etc/hosts`, which the namespace lacks, so only numeric addresses work; a bound port is used only by `listen`; a UDP datagram is at most 16 KiB.

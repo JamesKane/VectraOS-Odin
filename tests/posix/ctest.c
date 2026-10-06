@@ -1623,6 +1623,99 @@ static void test_robust_mutexes(void) {
   unlink("/tmp/robust");
 }
 
+// --- Long calls without the back end (M6 step 6d4b) ---
+
+static int u_slave;
+static char u_buf[64];
+static _Atomic long u_got;
+static _Atomic bool u_done;
+static _Atomic int u_errno;
+
+static void *u_reader(void *arg) {
+  (void)arg;
+  long n = read(u_slave, u_buf, sizeof u_buf);
+  u_errno = n < 0 ? errno : 0;
+  u_got = n;
+  u_done = true;
+  return nullptr;
+}
+
+static _Atomic pid_t u_waited;
+
+static void *u_waiter(void *arg) {
+  int status = 0;
+  u_waited = waitpid((pid_t)(intptr_t)arg, &status, 0);
+  return nullptr;
+}
+
+static void u_on_alarm(int sig) { (void)sig; }
+
+// The main thread's calls go on while another waits in one.
+static bool u_others_go_on(void) {
+  struct stat st;
+  for (int i = 0; i < 50; i++)
+    if (stat("/boot/bin", &st) != 0) return false;
+  int fd = open("/tmp/unlocked", O_RDWR | O_CREAT | O_TRUNC, 0644);
+  bool ok = fd >= 0 && write(fd, "x", 1) == 1;
+  if (fd >= 0) close(fd);
+  unlink("/tmp/unlocked");
+  return ok;
+}
+
+static void u_start_read(pthread_t *t) {
+  u_done = false;
+  u_got = 0;
+  CHECK(pthread_create(t, nullptr, u_reader, nullptr) == 0);
+  nanosleep(&(struct timespec){.tv_nsec = 50'000'000}, nullptr); // in the read, held by ptyd
+}
+
+static void test_unlocked_calls(void) {
+  int m = posix_openpt(O_RDWR | O_NOCTTY);
+  CHECK(m >= 0 && grantpt(m) == 0 && unlockpt(m) == 0);
+  u_slave = open(ptsname(m), O_RDWR | O_NOCTTY);
+  CHECK(u_slave >= 0);
+  pthread_t t;
+
+  // A terminal read waiting for input stops no other thread.
+  u_start_read(&t);
+  CHECK(!u_done && u_others_go_on() && !u_done);
+  CHECK(write(m, "line\n", 5) == 5);
+  CHECK(pthread_join(t, nullptr) == 0 && u_got == 5 && memcmp(u_buf, "line\n", 5) == 0);
+
+  // A signal with a handler that is not SA_RESTART flushes the read: EINTR.
+  struct sigaction sa = {.sa_handler = u_on_alarm}, was;
+  sigaction(SIGALRM, &sa, &was);
+  u_start_read(&t);
+  CHECK(pthread_kill(t, SIGALRM) == 0);
+  for (int i = 0; i < 2000 && !u_done; i++) nanosleep(&(struct timespec){.tv_nsec = 1'000'000}, nullptr);
+  CHECK(u_done && u_got == -1 && u_errno == EINTR);
+  CHECK(pthread_join(t, nullptr) == 0);
+  // With SA_RESTART the read is made again, and gets what is typed after.
+  sa.sa_flags = SA_RESTART;
+  sigaction(SIGALRM, &sa, nullptr);
+  u_start_read(&t);
+  CHECK(pthread_kill(t, SIGALRM) == 0);
+  nanosleep(&(struct timespec){.tv_nsec = 50'000'000}, nullptr);
+  CHECK(!u_done); // reading again
+  CHECK(write(m, "more\n", 5) == 5);
+  CHECK(pthread_join(t, nullptr) == 0 && u_got == 5 && memcmp(u_buf, "more\n", 5) == 0);
+  sigaction(SIGALRM, &was, nullptr);
+  close(u_slave);
+  close(m);
+
+  // A wait for a child stops no other thread.
+  pid_t pid = fork();
+  if (pid == 0) {
+    nanosleep(&(struct timespec){.tv_nsec = 300'000'000}, nullptr);
+    _exit(0);
+  }
+  u_waited = 0;
+  CHECK(pthread_create(&t, nullptr, u_waiter, (void *)(intptr_t)pid) == 0);
+  nanosleep(&(struct timespec){.tv_nsec = 30'000'000}, nullptr);
+  CHECK(u_others_go_on() && u_waited == 0); // done while the child still runs
+  CHECK(pthread_join(t, nullptr) == 0 && u_waited == pid);
+}
+
 static void test_threads(void) {
   pthread_t t[4];
   t_mine = 1000;
@@ -1791,6 +1884,7 @@ int main(int argc, char **argv) {
   test_threads();
   test_signal_contexts();
   test_robust_mutexes();
+  test_unlocked_calls();
 
   atexit(at_exit);
   fprintf(stderr, "ctest: to stderr\n");

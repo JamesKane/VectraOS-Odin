@@ -14,8 +14,11 @@ import "vx:signal"
 // lock, held through each call, recursive within a thread (the back end
 // calls musl, which may call it again), and let go of wherever a call waits
 // (a pipe, a sleep, a futex, sigsuspend), so the thread that would end the
-// wait can come in. A 9P call holds it through the server's answer: the
-// client is one thread's at a time until upstream's 6d4.
+// wait can come in, and across the 9P calls that may wait for long (a
+// file's or terminal's read or write, the console's read, a wait for a
+// child: io.odin, upstream's 6d4b), taken back only once the whole call is
+// done, never inside the ring client, so a leader there never waits on it
+// while a thread holding it waits on the leader. Metadata calls keep it.
 //
 // A thread's own state is a @(thread_local) record, in musl's TLS. musl
 // calls in before its first thread's TLS is set (set_thread_area,
@@ -38,6 +41,10 @@ Be_Thread :: struct {
 	handlers_ran:  u32, // signal.odin's: the handlers run on it,
 	eintr_ran:     u32, // and those of them not SA_RESTART
 	robust:        u64, // set_robust_list's head
+	// What a 9P call of its sleeps on now (6d4b): a signal's handler ends the
+	// sleep, as it would not end a wait it came just before.
+	ring_port:     vx.Handle,
+	ring_word:     ^u32,
 }
 
 @(private="file")

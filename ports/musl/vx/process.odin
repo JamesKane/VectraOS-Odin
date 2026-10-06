@@ -69,8 +69,10 @@ proc_errno :: proc "contextless" (st: vx.Status) -> int {
 	return errno_of(st)
 }
 
-// Reads /proc/PID/FILE (one read) into buf: what it read, or -errno.
-proc_read :: proc "contextless" (pid: i64, file: string, buf: []u8) -> (string, int) {
+// Reads /proc/PID/FILE (one read) into buf: what it read, or -errno. With
+// unlocked, for a file whose read may wait for long (a child's end), the
+// back end is let go for the read itself (upstream's 6d4b).
+proc_read :: proc "contextless" (pid: i64, file: string, buf: []u8, unlocked := false) -> (string, int) {
 	if !proc_mounted {
 		return "", fail(.ESRCH)
 	}
@@ -79,7 +81,9 @@ proc_read :: proc "contextless" (pid: i64, file: string, buf: []u8) -> (string, 
 	if st := ns.open(namespace(), proc_path(pid, file, pb[:]), p9.OREAD, &f); st != .Ok {
 		return "", proc_errno(st)
 	}
+	held := unlocked ? be_wait_begin() : 0
 	n, st := ns.read(&f, buf)
+	be_wait_end(held)
 	ns.close(&f)
 	if st != .Ok {
 		return "", proc_errno(st)
@@ -319,7 +323,7 @@ posix_wait4 :: proc "contextless" (pid: i64, status: ^i32, options: linux.Wait_O
 			}
 		}
 		buf: [512]u8
-		text, n := proc_read(posix_pid(), "wait", buf[:])
+		text, n := proc_read(posix_pid(), "wait", buf[:], unlocked = true) // until a child ends: others go on
 		if n == fail(.ESRCH) {
 			return fail(.ECHILD)
 		}

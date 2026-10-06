@@ -178,8 +178,7 @@ thread(2), exception(2), task(2), procfs(4), ptyd(4), dbg(1), rc(1), kill(1), ps
 
 # BUGS
 
-A note does not interrupt a 9P call: a process blocked in a file read, or on the console, sees its note only when the call is done, unless the server ends the read, as ptyd and procfs's `wait` do.
-The client's `Tflush`, which ADR-0010 has a note send, comes with the pipelined 9P client in M6 step 6d.
+A note to a native program does not interrupt a 9P call unless the program's connection asks for it (its `interrupted` hook, flush(5)); in the POSIX layer a signal flushes the call it interrupts (posix(7)).
 The console driver drops `^C` (drv-uart-16550(3)), so at the console it interrupts nothing.
 
 The design queues notes per task; the kernel queues them per thread, so a note to any thread goes to the one chosen when it is posted.

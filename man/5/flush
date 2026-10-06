@@ -35,6 +35,6 @@ intro(5), version(5), read(5), error(5)
 
 # BUGS
 
-The POSIX layer does not yet ask for a call to be flushed when a signal comes (M6 step 6d4b): a read a server holds, such as a ping(8) with no reply, waits until it is answered.
+A native program's call is flushed by a note only if its connection's `interrupted` hook says so; without one, a read a server holds waits until it is answered.
 
 Before `Tversion` a `Tflush` is answered with an `Rerror`, `fid already in use`, as every request is there; 9P2000 has no `Rerror` for a `Tflush`.

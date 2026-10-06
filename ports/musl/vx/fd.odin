@@ -29,7 +29,9 @@ import "vx:utf"
 // a child (fork, posix_spawn, exec) holds the same channel end, so the reader
 // sees the end of the file when the last writer anywhere has closed.
 //
-// One thread is all a process has until pthreads, so nothing here locks yet.
+// The tables are the back end's, under its lock (threads.odin); a read or
+// write that may wait for long lets it go, holding its description
+// (io.odin).
 
 FD_MAX :: 64
 PIPE_CHUNK :: 4096 // the most a reader's message holds (vx:rt's stdio)
@@ -114,6 +116,7 @@ Ofd :: struct {
 	master:       bool,
 	pty:          u32,
 	locked:       bool, // a lock was taken through it: let go at exit, before the exit is seen
+	io:           rt.Mutex, // a file whose offset is kept here (not file_shared): one read or write at a time
 	ra:           ^Readahead,
 	wb:           ^Readahead, // TCP: data written behind, without waiting (O_NONBLOCK)
 	sock:         Sock,

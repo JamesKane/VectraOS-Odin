@@ -392,6 +392,17 @@ sig_note :: proc "contextless" (e: ^vx.Exception, text: string, fp: rawptr) -> r
 				key = KEY_SIGNAL,
 			}
 			_ = rt.port_post(fd_port, &pk)
+			me := be_me() // a 9P call's sleep: it asks whether to flush (6d4b)
+			if me.ring_port != vx.HANDLE_NONE {
+				poke := vx.Packet {
+					key = rt.RING_KEY_POKE,
+				}
+				_ = rt.port_post(me.ring_port, &poke)
+			}
+			if me.ring_word != nil {
+				intrinsics.atomic_add(me.ring_word, 1)
+				_, _ = rt.futex_wake(me.ring_word, max(u32))
+			}
 		}
 		return .Cont
 	}
@@ -420,7 +431,32 @@ sig_note :: proc "contextless" (e: ^vx.Exception, text: string, fp: rawptr) -> r
 	return .Cont
 }
 
+// The ring client's hooks (6d4b): a 9P call that a signal interrupts is
+// flushed, and ends with EINTR, when a signal this thread does not block is
+// pending and does something (a handler, or a default that is not to
+// ignore); __vx_syscall then runs it, and makes the call again for
+// SA_RESTART. A blocked or ignored one leaves the call to go on.
+@(private="file")
+sig_flush_wanted :: proc "contextless" () -> bool {
+	for sig in (pending_load() + be_me().pending) - be_me().mask {
+		h := actions[sig].handler
+		if h == linux.SIG_IGN || (h == linux.SIG_DFL && signal.default_ignored(signal.Signal(sig))) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+@(private="file")
+sig_ring_waiting :: proc "contextless" (port: vx.Handle, word: ^u32) {
+	me := be_me()
+	me.ring_port, me.ring_word = port, word
+}
+
 sig_init :: proc "contextless" () {
+	rt.ring_flush_wanted = sig_flush_wanted
+	rt.ring_waiting = sig_ring_waiting
 	rt.note_exit = proc_exit_str // a note that is no signal ends the process with it
 	rec: ndb.Record
 	if rt.spawn_record("signals", &rec) {

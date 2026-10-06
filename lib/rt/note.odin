@@ -41,6 +41,15 @@ foreign _ {
 @(private="file")
 note_fn: Note_Handler
 
+// The stack x86_64's entry takes for the XSAVE image (note.S): what this
+// CPU's needs (Cpu_Info.xstate_size), 64-aligned, and 64 for the alignment;
+// the most the kernel allows (a page) until notify asks. A handler on a
+// small alternate stack has the rest (SIGSTKSZ is 8 KiB on x86_64): a page
+// whatever the CPU needs ran a fault on such a stack past its end
+// (upstream's M6 step 6d4b).
+@(export, link_name = "vx_note_xsave_bytes")
+note_xsave_bytes: u64 = 4096 + 64
+
 // How .Dflt ends the program: exits, which flushes output first, unless a C
 // library's back end (ports/musl/vx) has its own.
 note_exit: proc "contextless" (note: string) -> !
@@ -49,6 +58,11 @@ note_exit: proc "contextless" (note: string) -> !
 // program at the first one.
 @(require_results)
 notify :: proc "contextless" (handler: Note_Handler) -> vx.Status {
+	when ODIN_ARCH == .amd64 {
+		if size := u64(cpu().xstate_size); size >= 576 && size <= 4096 {
+			note_xsave_bytes = ((size + 63) &~ 63) + 64
+		}
+	}
 	note_fn = handler
 	entry := handler != nil ? u64(uintptr(rawptr(vx_note_entry))) : 0
 	return exception_bind(self, vx.HANDLE_NONE, entry, {.In_Task})
