@@ -53,6 +53,7 @@ open_file :: proc(c: ^p9.Client, root: p9.Fid, path: string, mode: p9.Open_Mode)
 
 @(test)
 test_nullfs :: proc(t: ^testing.T) {
+	names: p9.Stat_Text
 	run_main(t, "", "nullfs: serving /srv/null, without entropy: random cannot be read\n")
 
 	srv := p9.Server{fs = nullfs.server.fs, max_msize = 8192, supported = nullfs.server.supported}
@@ -67,7 +68,7 @@ test_nullfs :: proc(t: ^testing.T) {
 
 	testing.expect_value(t, p9test.list(&c, root, ""), "null zero random urandom")
 	st: p9.Stat
-	testing.expect_value(t, p9test.stat_of(&c, root, "", &st), vx.Status.Ok)
+	testing.expect_value(t, p9test.stat_of(&c, root, "", &st, &names), vx.Status.Ok)
 	testing.expect_value(t, st.name, "/")
 	testing.expect_value(t, st.mode, p9.DMDIR | 0o555)
 	testing.expect_value(t, st.qid, p9.Qid{type = p9.QTDIR, path = 1})
@@ -76,7 +77,7 @@ test_nullfs :: proc(t: ^testing.T) {
 		path: u64,
 	}
 	for w in ([]Want{{"null", 2}, {"zero", 3}, {"random", 4}, {"urandom", 5}}) {
-		testing.expect_value(t, p9test.stat_of(&c, root, w.name, &st), vx.Status.Ok)
+		testing.expect_value(t, p9test.stat_of(&c, root, w.name, &st, &names), vx.Status.Ok)
 		testing.expect_value(t, st.name, w.name)
 		testing.expect_value(t, st.mode, 0o666)
 		testing.expect_value(t, st.qid, p9.Qid{type = p9.QTFILE, path = w.path})

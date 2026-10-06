@@ -167,6 +167,12 @@ produce :: proc "contextless" (r: ^Ring) -> bool {
 	return intrinsics.atomic_load_explicit(q.flags, .Relaxed) & vx.RING_NEED_WAKEUP != 0
 }
 
+// How many entries the peer has consumed of what this side produced: the
+// head of the queue this side produces into, as a running count.
+peer_consumed :: proc "contextless" (r: ^Ring) -> u32 {
+	return intrinsics.atomic_load_explicit(r.prod.head, .Acquire)
+}
+
 // --- Consuming ---
 
 // Copies the next entry into out (the entry size bytes, which out must hold)

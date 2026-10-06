@@ -1,0 +1,5 @@
+# tests/user/p9pipetest.ndb: the pipelined 9P client and ring server, against
+# ptyd (tests/qemu/p9pipe.ndb).
+
+service=p9pipetest program=/boot/bin/p9pipetest console
+connect=ptyd

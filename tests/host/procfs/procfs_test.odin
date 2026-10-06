@@ -152,6 +152,7 @@ exception :: proc(kind: vx.Exception_Kind, pc: u64, code: u32 = 0, address: u64 
 
 @(test)
 test_procfs :: proc(t: ^testing.T) {
+	names: p9.Stat_Text
 	make_image()
 	add_task({id = 1, name = "svcd", state = .Running, blocked = 1, mapped = 412 * 1024, threads = {{id = 1, state = .Blocked}}})
 	add_task({id = 2, name = "procfs", state = .Running, threads = {{id = 1, state = .Running}}})
@@ -293,7 +294,7 @@ test_procfs :: proc(t: ^testing.T) {
 		f, we := p9.client_walk(&c, root, pc.path)
 		st: p9.Stat
 		if we == .Ok {
-			we = p9.client_stat(&c, f, &st)
+			we = p9.client_stat(&c, f, &st, &names)
 			_ = p9.client_clunk(&c, f)
 		}
 		testing.expectf(t, we == .Ok && st.name == pc.want, "%s: %q (%v)", pc.path, st.name, we)
@@ -301,7 +302,7 @@ test_procfs :: proc(t: ^testing.T) {
 
 	// Stats: qid paths are pid << 32 | thread << 8 | file.
 	st: p9.Stat
-	testing.expect_value(t, p9test.stat_of(&c, root, "", &st), vx.Status.Ok)
+	testing.expect_value(t, p9test.stat_of(&c, root, "", &st, &names), vx.Status.Ok)
 	testing.expect_value(t, st.name, "/")
 	testing.expect_value(t, st.mode, p9.DMDIR | 0o555)
 	testing.expect_value(t, st.qid, p9.Qid{type = p9.QTDIR, path = 1})
@@ -329,7 +330,7 @@ test_procfs :: proc(t: ^testing.T) {
 	}
 	for sc in stat_cases {
 		s: p9.Stat
-		se := p9test.stat_of(&c, root, sc.path, &s)
+		se := p9test.stat_of(&c, root, sc.path, &s, &names)
 		testing.expectf(t, se == .Ok && s.name == sc.name && s.mode == sc.mode && s.qid == sc.qid, "%s: %v %q %o %v", sc.path, se, s.name, s.mode, s.qid)
 	}
 
@@ -497,7 +498,7 @@ test_procfs :: proc(t: ^testing.T) {
 	testing.expect_value(t, e, vx.Status.Err_Interrupted) // the note ended the read held for 7
 	_, e = write_file(&c, root, "9/ctl", "start")
 	testing.expect_value(t, note_text(shell, 1), "posix: SIGCHLD pid=9")
-	_ = p9test.stat_of(&c, root, "7/wait", &st)
+	_ = p9test.stat_of(&c, root, "7/wait", &st, &names)
 	testing.expect_value(t, st.length, 2) // as 9front's: records queued
 	text, e = fs_read(7, .Wait, buf[:])
 	testing.expect_value(t, text, "pid=9 name=ls noteid=7 stopped=20\n")
@@ -521,7 +522,7 @@ test_procfs :: proc(t: ^testing.T) {
 	long := task_by_id(14)
 	_, e = write_file(&c, root, "14/ctl", "kill")
 	fire_exit(long)
-	_ = p9test.stat_of(&c, root, "7/wait", &st)
+	_ = p9test.stat_of(&c, root, "7/wait", &st, &names)
 	testing.expect_value(t, st.length, 0)
 	// A packet about a slot whose process has gone is ignored.
 	fire_exit(long)
@@ -590,12 +591,12 @@ test_procfs :: proc(t: ^testing.T) {
 	fire_exception(ls, 1, exception(.Step, BP + 4))
 	testing.expect_value(t, th1.resumed, vx.Resume_Action.Continue)
 	testing.expect_value(t, string(code_mem[0x100:][:len(TRAP)]), TRAP)
-	_ = p9test.stat_of(&c, root, "9/events", &st)
+	_ = p9test.stat_of(&c, root, "9/events", &st, &names)
 	testing.expect_value(t, st.length, 0)
 	// Hit with it true: an event, and the thread held.
 	fire_exception(ls, 1, exception(.Breakpoint, trap_pc(BP), arg0 = 3))
 	testing.expect_value(t, th1.resumed, vx.Resume_Action(0))
-	_ = p9test.stat_of(&c, root, "9/events", &st)
+	_ = p9test.stat_of(&c, root, "9/events", &st, &names)
 	testing.expect_value(t, st.length, 1)
 	text, e = fs_read(9, .Events, buf[:])
 	testing.expect_value(t, text, "event=break thread=1 pc=0x400100\n")
@@ -712,7 +713,7 @@ test_procfs :: proc(t: ^testing.T) {
 	_, e = write_file(&c, root, "9/ctl", "start")
 	fire_exception(ls, 1, exception(.Interrupt, 0x400200))
 	testing.expect_value(t, th1.resumed, vx.Resume_Action.Pass)
-	_ = p9test.stat_of(&c, root, "9/events", &st)
+	_ = p9test.stat_of(&c, root, "9/events", &st, &names)
 	testing.expect_value(t, st.length, 0)
 
 	// A watchpoint: the task's debug registers; stepped past with them off.

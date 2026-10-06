@@ -286,7 +286,8 @@ test_client :: proc(t: ^testing.T) {
 	testing.expect_value(t, n, 5)
 	testing.expect_value(t, string(buf[:5]), "hello")
 	st: p9.Stat
-	testing.expect_value(t, p9.client_stat(&c, f, &st), vx.Status.Ok)
+	names: p9.Stat_Text
+	testing.expect_value(t, p9.client_stat(&c, f, &st, &names), vx.Status.Ok)
 	testing.expect_value(t, st.length, 5)
 	testing.expect_value(t, len(st.name), 7)
 	testing.expect_value(t, p9.client_remove(&c, f), vx.Status.Ok)
@@ -294,7 +295,7 @@ test_client :: proc(t: ^testing.T) {
 	testing.expect_value(t, e, vx.Status.Err_Not_Found)
 	f, e = p9.client_walk(&c, root, "docs/a.txt/../../b.txt")
 	testing.expect_value(t, e, vx.Status.Ok) // .. inside the root is fine
-	testing.expect_value(t, p9.client_stat(&c, f, &st), vx.Status.Ok)
+	testing.expect_value(t, p9.client_stat(&c, f, &st, &names), vx.Status.Ok)
 	testing.expect_value(t, st.qid.path, 4)
 	_ = p9.client_clunk(&c, f)
 }
@@ -497,7 +498,8 @@ test_open_moves :: proc(t: ^testing.T) {
 	testing.expect_value(t, e, vx.Status.Ok)
 	testing.expect_value(t, string(buf[:n]), "bravo")
 	st: p9.Stat
-	testing.expect_value(t, p9.client_stat(&c, f, &st), vx.Status.Ok)
+	names: p9.Stat_Text
+	testing.expect_value(t, p9.client_stat(&c, f, &st, &names), vx.Status.Ok)
 	testing.expect_value(t, st.qid.path, 4)
 	g, e = p9.client_walk(&c, root, "b.txt")
 	testing.expect_value(t, e, vx.Status.Ok)

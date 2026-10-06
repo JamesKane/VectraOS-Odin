@@ -200,6 +200,7 @@ read_table :: proc(t: ^testing.T, table: ^slots.Table, loc := #caller_location) 
 
 @(test)
 test_distd :: proc(t: ^testing.T) {
+	names: p9.Stat_Text
 	mem_reset()
 	big := pattern(300_000, 7, 251)
 	other := pattern(200_000, 13, 509)
@@ -287,7 +288,7 @@ test_distd :: proc(t: ^testing.T) {
 			{"releases/1/tree/readme-link", "readme-link", p9.DMSYMLINK | 0o777, 0},
 			{"store", "store", p9.DMDIR | 0o555, 0},
 		}) {
-		testing.expectf(t, p9test.stat_of(&x.c, x.root, c.path, &s) == .Ok, "stat %q", c.path)
+		testing.expectf(t, p9test.stat_of(&x.c, x.root, c.path, &s, &names) == .Ok, "stat %q", c.path)
 		testing.expectf(t, s.name == c.name, "stat %q: name %q", c.path, s.name)
 		testing.expectf(t, s.mode == c.mode, "stat %q: mode %o", c.path, s.mode)
 		testing.expectf(t, s.length == c.length, "stat %q: length %d", c.path, s.length)
@@ -328,7 +329,8 @@ test_distd :: proc(t: ^testing.T) {
 	_ = p9.client_clunk(&x.c, f)
 	f, _ = p9.client_walk(&x.c, x.root, fmt.tprintf("%s/readme-link", r))
 	target: string
-	target, e = p9.client_readlink(&x.c, f)
+	link: [256]u8
+	target, e = p9.client_readlink(&x.c, f, link[:])
 	testing.expect_value(t, e, vx.Status.Ok)
 	testing.expect_value(t, target, "README.txt")
 	_ = p9.client_clunk(&x.c, f)

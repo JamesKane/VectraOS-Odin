@@ -20,12 +20,14 @@ A reply that arrives before the `Rflush` is honoured, since its request may have
 The client does not use <oldtag> again until the `Rflush` has come.
 Several flushes of one request are answered in order, and a flush of a tag no request has, or of a request already answered, is answered all the same.
 
-A VectraOS server answers every `Tflush` at once with `Rflush`, whatever <oldtag> names, and abandons nothing.
+A VectraOS server answers every `Tflush` at once with `Rflush`, whatever <oldtag> names.
 It completes each request as it arrives, so nothing is pending when the `Tflush` is read, except a `Tread`, `Twrite` or `Topen` the file server cannot do yet, such as a read of a console with nothing typed or an open of a listen file with no call.
-On a ring such a request is held, and the connection takes nothing more until it is answered, so a `Tflush` sent after it is not read until then.
-The held request's reply then comes before the `Rflush`, which 9P2000 allows, but the flush has cancelled nothing.
+On a ring such a request is held while the connection takes more (rings(7)), and a `Tflush` of it drops it, unanswered, before the `Rflush` goes out (M6 step 6d4a).
 
-VectraOS's client sends one request at a time and never sends `Tflush`, to its own servers or to anyone's.
+VectraOS's ring client sends `Tflush` for a call whose wait is interrupted, if the caller wants to hear of the interruption, and for a call past its connection's timeout.
+It keeps the call's tag until the `Rflush`, and a reply that comes first is the call's answer; otherwise the call returns `VX_ERR_INTERRUPTED` or `VX_ERR_TIMED_OUT`.
+No `Rflush` within the timeout (5 seconds without one) ends the connection.
+Over TCP the client sends one request at a time and no `Tflush`.
 
 # SEE ALSO
 
@@ -33,7 +35,6 @@ intro(5), version(5), read(5), error(5)
 
 # BUGS
 
-`Tflush` cancels nothing, and the client does not send it: a read a server holds, such as a ping(8) with no reply, waits until it is answered; only a connection that sets a timeout of its own gives up.
-Both come with the pipelined client and server.
+The POSIX layer does not yet ask for a call to be flushed when a signal comes (M6 step 6d4b): a read a server holds, such as a ping(8) with no reply, waits until it is answered.
 
 Before `Tversion` a `Tflush` is answered with an `Rerror`, `fid already in use`, as every request is there; 9P2000 has no `Rerror` for a `Tflush`.

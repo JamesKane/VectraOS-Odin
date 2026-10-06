@@ -122,8 +122,8 @@ mutex_lock_until :: proc "contextless" (m: ^Mutex, deadline: vx.Instant) -> bool
 // after that word use registers alone (vx_thread_finish, arch/*/thread.S),
 // so the unmapping cannot pull its stack from under it.
 //
-// The 9P client is not yet safe between threads: a connection is one
-// thread's at a time until upstream's 6d4 (thread(2)'s BUGS).
+// The threads share a program's 9P connections, with several calls in
+// flight on each (p9conn.odin, upstream's 6d4a).
 
 // What a thread runs, with a default context, as vx_main has.
 Thread_Proc :: #type proc(arg: rawptr)

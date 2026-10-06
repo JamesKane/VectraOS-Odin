@@ -1,65 +1,167 @@
 package p9
 
-// The client (upstream 02 §3): one request at a time over any transport that
-// can carry one message and return its reply. Pipelining (02 §3.3) comes with
-// the ring transport. Every reply is checked: its tag, that it answers the
-// request's type, and an Rerror's text back into a Status.
+// The client (upstream 02 §3), over any transport: a serial one that
+// carries one message and returns its reply (a TCP stream, a host test's
+// loopback), or a pipelined one with several calls in flight (the ring,
+// lib/rt's p9conn.odin). Every reply is checked: its tag, that it answers
+// the request's type, and an Rerror's text back into a Status.
+//
+// Each call has its own buffers for the length of the call (an Xfer): with
+// a pipelined transport, so several threads can use one connection; with a
+// serial one, the client's own pair, under the transport's lock if it has
+// one. A call's reply is decoded where it landed, and what the caller keeps
+// of it is copied out before the buffers go back (upstream's M6 step 6d4a).
 
+import "base:intrinsics"
 import "abi:vx"
 
 // Sends req and fills resp with the reply. Returns the reply's length, or 0
 // if the connection is gone.
 Rpc :: proc "contextless" (ctx: rawptr, req: []u8, resp: []u8) -> int
 
+// One call's buffers and handles, the transport's for the length of the call.
+Xfer :: struct {
+	// The request is encoded into req, and the reply lands in resp (perhaps
+	// the same buffer); each holds at least the msize.
+	req, resp:   []u8,
+	tag:         u16, // the transport's choice (NOTAG for Tversion)
+	// The handle the reply carried (Rmap's VMO): the call that wants it
+	// takes it, and the transport closes one not taken.
+	handle:      vx.Handle,
+	// A handle for the request to carry (dref's VMO), which the transport
+	// moves to the server, or closes if it cannot.
+	send_handle: vx.Handle,
+}
+
+// A transport with several calls in flight: a call's buffers from begin
+// (waiting for some if all are in use; nil once the connection is gone),
+// the call (the reply's length; or .Err_Peer_Closed, or .Err_Interrupted or
+// .Err_Timed_Out for a call the transport flushed), and the buffers back
+// with end. msize is the most a call's buffers hold.
+Pipe :: struct {
+	msize: u32,
+	begin: proc "contextless" (ctx: rawptr, version: bool) -> ^Xfer,
+	call:  proc "contextless" (ctx: rawptr, x: ^Xfer, n: int) -> (reply_len: int, st: vx.Status),
+	end:   proc "contextless" (ctx: rawptr, x: ^Xfer),
+}
+
 // Who a client attaches as when it names no one: the program's user (its
 // spawn message's user=, which vx:ns sets here), or "none".
 client_user: string
 
 Client :: struct {
+	// A serial transport: rpc, with tbuf and rbuf (each at least the msize
+	// asked for), and a lock if threads share it (take, or let go; optional).
 	rpc:        Rpc,
 	ctx:        rawptr,
-	tbuf, rbuf: []u8, // each at least the msize asked for
+	tbuf, rbuf: []u8,
+	lock:       proc "contextless" (ctx: rawptr, take: bool),
+	// Or a pipelined one, with ctx, instead.
+	pipe:       ^Pipe,
 	msize:      u32, // negotiated
 	dialect:    Dialect,
 	extensions: Extensions, // negotiated
-	next_tag:   u16,
-	next_fid:   Fid,
+	next_tag:   u16, // a serial transport's
+	next_fid:   Fid, // taken atomically: threads share a connection
 	uname:      string, // who attaches; empty: client_user, or "none"
-	reply:      Msg, // the last reply; its strings and data point into rbuf
-	// The handle the last reply carried (Rmap's VMO), set by the transport;
-	// the call that wants it takes it, and the transport closes one not taken.
-	handle:      vx.Handle,
-	// A handle for the next request to carry (dref's VMO), which the
-	// transport moves to the server, or closes if it cannot.
-	send_handle: vx.Handle,
+	serial:     Xfer, // a serial transport's one call
 }
 
-@(private="file", require_results)
-call :: proc "contextless" (c: ^Client, t: ^Msg) -> vx.Status {
-	if t.type != .Tversion {
-		t.tag = c.next_tag % NOTAG // NOTAG is Tversion's alone
+// A reply, decoded where it landed; its strings and data are the call's
+// buffers', until finish.
+@(private="file")
+Rcall :: struct {
+	r: Msg,
+	x: ^Xfer,
+}
+
+@(private="file")
+new_fid :: proc "contextless" (c: ^Client) -> Fid {
+	return intrinsics.atomic_add_explicit(&c.next_fid, 1, .Relaxed)
+}
+
+@(private="file")
+begin :: proc "contextless" (c: ^Client, version: bool) -> ^Xfer {
+	if c.pipe != nil {
+		return c.pipe.begin(c.ctx, version)
+	}
+	if c.lock != nil {
+		c.lock(c.ctx, true)
+	}
+	c.serial = {
+		req  = c.tbuf,
+		resp = c.rbuf,
+		tag  = NOTAG,
+	}
+	if !version {
+		c.serial.tag = c.next_tag % NOTAG // NOTAG is Tversion's alone
 		c.next_tag += 1
 	}
-	n := encode(t, c.tbuf)
+	return &c.serial
+}
+
+// The call's buffers back.
+@(private="file")
+finish :: proc "contextless" (c: ^Client, rc: ^Rcall) {
+	if rc.x == nil {
+		return
+	}
+	if c.pipe != nil {
+		c.pipe.end(c.ctx, rc.x)
+	} else if c.lock != nil {
+		c.lock(c.ctx, false)
+	}
+	rc.x = nil
+}
+
+// Sends t, with `send` for the request to carry (or HANDLE_NONE), and waits
+// for its reply, in rc.r until finish, which the caller calls whatever this
+// returns.
+@(private="file", require_results)
+exchange :: proc "contextless" (c: ^Client, t: ^Msg, rc: ^Rcall, send := vx.HANDLE_NONE) -> vx.Status {
+	x := begin(c, t.type == .Tversion)
+	rc.x = x
+	if x == nil {
+		return .Err_Peer_Closed // a pipelined connection, gone (and send with it, the caller's)
+	}
+	x.send_handle = send
+	t.tag = x.tag
+	n := encode(t, x.req)
 	if n == 0 {
 		return .Err_Too_Small
 	}
-	rn := c.rpc(c.ctx, c.tbuf[:n], c.rbuf)
-	if rn <= 0 || rn > len(c.rbuf) {
+	rn: int
+	if c.pipe != nil {
+		rn = c.pipe.call(c.ctx, x, n) or_return
+	} else {
+		rn = c.rpc(c.ctx, x.req[:n], x.resp)
+	}
+	if rn <= 0 || rn > len(x.resp) {
 		return .Err_Peer_Closed
 	}
-	if decode(c.rbuf[:rn], &c.reply) != .Ok || c.reply.tag != t.tag {
+	if decode(x.resp[:rn], &rc.r) != .Ok || rc.r.tag != t.tag {
 		return .Err_Invalid
 	}
-	if c.reply.type == .Rerror {
-		return error_status(c.reply.ename)
+	if rc.r.type == .Rerror {
+		return error_status(rc.r.ename)
 	}
-	return u8(c.reply.type) == u8(t.type) + 1 ? .Ok : .Err_Invalid
+	return u8(rc.r.type) == u8(t.type) + 1 ? .Ok : .Err_Invalid
 }
 
-// The largest message both buffers hold.
+// A call whose reply says nothing the caller keeps.
+@(private="file", require_results)
+call :: proc "contextless" (c: ^Client, t: ^Msg) -> vx.Status {
+	rc: Rcall
+	defer finish(c, &rc)
+	return exchange(c, t, &rc)
+}
+
+// The largest message a call's buffers hold.
 @(private="file")
 bufsize :: proc "contextless" (c: ^Client) -> u32 {
+	if c.pipe != nil {
+		return c.pipe.msize
+	}
 	return u32(min(len(c.tbuf), len(c.rbuf), int(max(u32))))
 }
 
@@ -71,27 +173,37 @@ client_version :: proc "contextless" (c: ^Client, msize: u32, extensions: Extens
 	version: [96]u8
 	t := Msg{type = .Tversion, tag = NOTAG, msize = min(msize, bufsize(c))}
 	t.version = string(version[:version_format(.P9_2000X, extensions, version[:])])
-	call(c, &t) or_return
-	c.dialect, c.extensions = version_parse(c.reply.version)
+	rc: Rcall
+	defer finish(c, &rc)
+	exchange(c, &t, &rc) or_return
+	c.dialect, c.extensions = version_parse(rc.r.version)
 	c.extensions &= extensions
-	if c.dialect == .Unknown || c.reply.msize < MIN_MSIZE || c.reply.msize > t.msize {
+	if c.dialect == .Unknown || rc.r.msize < MIN_MSIZE || rc.r.msize > t.msize {
 		return .Err_Unsupported
 	}
-	c.msize = c.reply.msize
+	c.msize = rc.r.msize
 	c.next_fid = 1
 	return .Ok
 }
 
+// Attaches to aname: the new fid, and the root's qid.
 @(require_results)
-client_attach :: proc "contextless" (c: ^Client, aname: string) -> (fid: Fid, e: vx.Status) {
+client_attach_qid :: proc "contextless" (c: ^Client, aname: string) -> (fid: Fid, qid: Qid, e: vx.Status) {
 	uname := len(client_user) > 0 ? client_user : "none"
 	if len(c.uname) > 0 {
 		uname = c.uname
 	}
-	t := Msg{type = .Tattach, fid = c.next_fid, afid = NOFID, uname = uname, aname = aname}
-	c.next_fid += 1
-	e = call(c, &t)
-	return t.fid, e
+	t := Msg{type = .Tattach, fid = new_fid(c), afid = NOFID, uname = uname, aname = aname}
+	rc: Rcall
+	defer finish(c, &rc)
+	e = exchange(c, &t, &rc)
+	return t.fid, rc.r.qid, e
+}
+
+@(require_results)
+client_attach :: proc "contextless" (c: ^Client, aname: string) -> (fid: Fid, e: vx.Status) {
+	fid, _, e = client_attach_qid(c, aname)
+	return
 }
 
 @(require_results)
@@ -104,8 +216,7 @@ client_clunk :: proc "contextless" (c: ^Client, fid: Fid) -> vx.Status {
 // names. An empty path clones the fid.
 @(require_results)
 client_walk :: proc "contextless" (c: ^Client, fid: Fid, path: string) -> (newfid: Fid, e: vx.Status) {
-	from, to := fid, c.next_fid
-	c.next_fid += 1
+	from, to := fid, new_fid(c)
 	// Not str.split_iterator: that would eat the slash after a 16th name,
 	// and a path that ends there would lose its last (empty) walk, which
 	// the server sees.
@@ -125,10 +236,12 @@ client_walk :: proc "contextless" (c: ^Client, fid: Fid, path: string) -> (newfi
 				t.nwname += 1
 			}
 		}
-		e = call(c, &t)
-		if e == .Ok && c.reply.nwqid != t.nwname {
+		rc: Rcall
+		e = exchange(c, &t, &rc)
+		if e == .Ok && rc.r.nwqid != t.nwname {
 			e = .Err_Not_Found // stopped partway
 		}
+		finish(c, &rc)
 		if e != .Ok {
 			if from != fid {
 				_ = client_clunk(c, from)
@@ -162,12 +275,13 @@ client_create :: proc "contextless" (c: ^Client, fid: Fid, name: string, perm: u
 client_read :: proc "contextless" (c: ^Client, fid: Fid, offset: u64, buf: []u8) -> (n: int, e: vx.Status) {
 	count := u32(min(len(buf), int(c.msize - IOHDRSZ)))
 	t := Msg{type = .Tread, fid = fid, offset = offset, count = count}
-	call(c, &t) or_return
-	if c.reply.count > count {
+	rc: Rcall
+	defer finish(c, &rc)
+	exchange(c, &t, &rc) or_return
+	if rc.r.count > count {
 		return 0, .Err_Invalid // more than asked for
 	}
-	copy(buf, c.reply.data)
-	return int(c.reply.count), .Ok
+	return copy(buf, rc.r.data), .Ok
 }
 
 // Writes up to len(data) bytes (at most msize - 24). Returns how many.
@@ -175,20 +289,38 @@ client_read :: proc "contextless" (c: ^Client, fid: Fid, offset: u64, buf: []u8)
 client_write :: proc "contextless" (c: ^Client, fid: Fid, offset: u64, data: []u8) -> (n: int, e: vx.Status) {
 	count := min(len(data), int(c.msize - IOHDRSZ))
 	t := Msg{type = .Twrite, fid = fid, offset = offset, data = data[:count]}
-	call(c, &t) or_return
-	if int(c.reply.count) > count {
+	rc: Rcall
+	defer finish(c, &rc)
+	exchange(c, &t, &rc) or_return
+	if int(rc.r.count) > count {
 		return 0, .Err_Invalid
 	}
-	return int(c.reply.count), .Ok
+	return int(rc.r.count), .Ok
 }
 
-// The fid's stat entry; its strings point into the client's reply buffer and
-// last until the next call.
+// Room for a stat entry's strings, which client_stat copies there.
+Stat_Text :: struct {
+	bytes: [1024]u8,
+}
+
+// The fid's stat entry. Its strings are in keep's bytes, or empty without
+// one (.Err_Too_Small if they do not fit).
 @(require_results)
-client_stat :: proc "contextless" (c: ^Client, fid: Fid, out: ^Stat) -> vx.Status {
+client_stat :: proc "contextless" (c: ^Client, fid: Fid, out: ^Stat, keep: ^Stat_Text = nil) -> vx.Status {
 	t := Msg{type = .Tstat, fid = fid}
-	call(c, &t) or_return
-	return stat_decode(c.reply.stat, out)
+	rc: Rcall
+	defer finish(c, &rc)
+	exchange(c, &t, &rc) or_return
+	if keep == nil {
+		stat_decode(rc.r.stat, out) or_return
+		out.name, out.uid, out.gid, out.muid = "", "", "", ""
+		return .Ok
+	}
+	if len(rc.r.stat) > len(keep.bytes) {
+		return .Err_Too_Small
+	}
+	n := copy(keep.bytes[:], rc.r.stat)
+	return stat_decode(keep.bytes[:n], out)
 }
 
 @(require_results)
@@ -206,12 +338,13 @@ client_walk_names :: proc "contextless" (c: ^Client, fid: Fid, names: []string, 
 	if len(names) > MAXWELEM {
 		return 0, 0, false, .Err_Range
 	}
-	t := Msg{type = .Twalk, fid = fid, newfid = c.next_fid, nwname = u16(len(names))}
-	c.next_fid += 1
+	t := Msg{type = .Twalk, fid = fid, newfid = new_fid(c), nwname = u16(len(names))}
 	copy(t.wname[:], names)
-	call(c, &t) or_return
-	nwqid = int(c.reply.nwqid) <= len(names) ? int(c.reply.nwqid) : 0
-	copy(qids[:nwqid], c.reply.wqid[:nwqid])
+	rc: Rcall
+	defer finish(c, &rc)
+	exchange(c, &t, &rc) or_return
+	nwqid = int(rc.r.nwqid) <= len(names) ? int(rc.r.nwqid) : 0
+	copy(qids[:nwqid], rc.r.wqid[:nwqid])
 	if nwqid == len(names) {
 		return t.newfid, nwqid, true, .Ok
 	}
@@ -229,8 +362,10 @@ client_getattr :: proc "contextless" (c: ^Client, fid: Fid) -> (attr: Attr, e: v
 		return {}, .Err_Unsupported
 	}
 	t := Msg{type = .Tgetattr, fid = fid, mask = GETATTR_BASIC}
-	call(c, &t) or_return
-	return c.reply.attr, .Ok
+	rc: Rcall
+	defer finish(c, &rc)
+	exchange(c, &t, &rc) or_return
+	return rc.r.attr, .Ok
 }
 
 @(require_results)
@@ -262,16 +397,21 @@ client_symlink :: proc "contextless" (c: ^Client, dir: Fid, name, target: string
 	return call(c, &t)
 }
 
-// A symbolic link's target; it points into the reply buffer, until the next
-// call.
+// A symbolic link's target, copied into buf (.Err_Too_Small if it does not
+// fit).
 @(require_results)
-client_readlink :: proc "contextless" (c: ^Client, fid: Fid) -> (target: string, e: vx.Status) {
+client_readlink :: proc "contextless" (c: ^Client, fid: Fid, buf: []u8) -> (target: string, e: vx.Status) {
 	if .Posix not_in c.extensions {
 		return "", .Err_Unsupported
 	}
 	t := Msg{type = .Treadlink, fid = fid}
-	call(c, &t) or_return
-	return c.reply.name2, .Ok
+	rc: Rcall
+	defer finish(c, &rc)
+	exchange(c, &t, &rc) or_return
+	if len(rc.r.name2) > len(buf) {
+		return "", .Err_Too_Small
+	}
+	return string(buf[:copy(buf, rc.r.name2)]), .Ok
 }
 
 @(require_results)
@@ -291,8 +431,10 @@ client_share :: proc "contextless" (c: ^Client, fid: Fid, holds: u32) -> (token:
 		return {}, .Err_Unsupported
 	}
 	t := Msg{type = .Tshare, fid = fid, holds = holds}
-	call(c, &t) or_return
-	return c.reply.token, .Ok
+	rc: Rcall
+	defer finish(c, &rc)
+	exchange(c, &t, &rc) or_return
+	return rc.r.token, .Ok
 }
 
 // A new fid, open on the open file a token names (on this connection's
@@ -302,8 +444,7 @@ client_join :: proc "contextless" (c: ^Client, token: [TOKEN_SIZE]u8) -> (fid: F
 	if .Posix not_in c.extensions {
 		return 0, .Err_Unsupported
 	}
-	t := Msg{type = .Tjoin, newfid = c.next_fid, token = token}
-	c.next_fid += 1
+	t := Msg{type = .Tjoin, newfid = new_fid(c), token = token}
 	call(c, &t) or_return
 	return t.newfid, .Ok
 }
@@ -315,8 +456,10 @@ client_seek :: proc "contextless" (c: ^Client, fid: Fid, offset: i64, whence: Wh
 		return 0, .Err_Unsupported
 	}
 	t := Msg{type = .Tseek, fid = fid, offset = u64(offset), whence = whence}
-	call(c, &t) or_return
-	return c.reply.offset, .Ok
+	rc: Rcall
+	defer finish(c, &rc)
+	exchange(c, &t, &rc) or_return
+	return rc.r.offset, .Ok
 }
 
 @(require_results)
@@ -336,8 +479,10 @@ client_lock :: proc "contextless" (c: ^Client, fid: Fid, type: Lock_Type, start,
 		return .Error, .Err_Unsupported
 	}
 	t := Msg{type = .Tlock, fid = fid, lock_type = type, start = start, length = length, proc_id = proc_id, client_id = ""}
-	call(c, &t) or_return
-	return c.reply.status, .Ok
+	rc: Rcall
+	defer finish(c, &rc)
+	exchange(c, &t, &rc) or_return
+	return rc.r.status, .Ok
 }
 
 // A lock, as Rgetlock describes it.
@@ -355,8 +500,10 @@ client_getlock :: proc "contextless" (c: ^Client, fid: Fid, type: Lock_Type, sta
 		return {}, .Err_Unsupported
 	}
 	t := Msg{type = .Tgetlock, fid = fid, lock_type = type, start = start, length = length, proc_id = proc_id, client_id = ""}
-	call(c, &t) or_return
-	return {type = c.reply.lock_type, start = c.reply.start, length = c.reply.length, proc_id = c.reply.proc_id}, .Ok
+	rc: Rcall
+	defer finish(c, &rc)
+	exchange(c, &t, &rc) or_return
+	return {type = rc.r.lock_type, start = rc.r.start, length = rc.r.length, proc_id = rc.r.proc_id}, .Ok
 }
 
 // What Tmap answers: a VMO for the range, where in it the range starts, and
@@ -375,27 +522,39 @@ client_map :: proc "contextless" (c: ^Client, fid: Fid, offset, length: u64, pro
 		return {}, .Err_Unsupported
 	}
 	t := Msg{type = .Tmap, fid = fid, offset = offset, length = length, prot = prot}
-	call(c, &t) or_return
-	if c.handle == vx.HANDLE_NONE {
+	rc: Rcall
+	defer finish(c, &rc)
+	exchange(c, &t, &rc) or_return
+	if rc.x.handle == vx.HANDLE_NONE {
 		return {}, .Err_Invalid // an Rmap without its VMO
 	}
-	m = {vmo = c.handle, vmo_offset = c.reply.offset, avail = c.reply.length}
-	c.handle = vx.HANDLE_NONE
+	m = {
+		vmo        = rc.x.handle,
+		vmo_offset = rc.r.offset,
+		avail      = rc.r.length,
+	}
+	rc.x.handle = vx.HANDLE_NONE // taken
 	return m, .Ok
 }
 
 // Treadref and Twriteref (upstream's docs/proto/dref.md): count bytes of the
 // file at offset copied into, or from, a VMO at roffset by the server, in one
-// message whatever the msize. The request carries send_handle, which the
-// caller sets to a duplicate of its VMO (lib/rt's p9_readref does), and which
-// the transport moves; one left over was never sent, and is the caller's to
-// close. Returns how many bytes moved.
+// message whatever the msize. The request carries `send`, a duplicate of the
+// caller's VMO (lib/rt's p9_readref makes it), which the transport moves or
+// closes once a call has it: taken says so, and one not taken is the
+// caller's to close. Returns how many bytes moved.
 @(require_results)
-client_ref :: proc "contextless" (c: ^Client, type: Type, fid: Fid, offset, roffset: u64, count: u32) -> (done: u32, e: vx.Status) {
+client_ref :: proc "contextless" (c: ^Client, type: Type, fid: Fid, offset, roffset: u64, count: u32, send: vx.Handle) -> (done: u32, taken: bool, e: vx.Status) {
 	if .Dref not_in c.extensions || (type != .Treadref && type != .Twriteref) {
-		return 0, .Err_Unsupported
+		return 0, false, .Err_Unsupported
 	}
 	t := Msg{type = type, fid = fid, offset = offset, count = count, roffset = roffset}
-	call(c, &t) or_return
-	return c.reply.count, .Ok
+	rc: Rcall
+	defer finish(c, &rc)
+	e = exchange(c, &t, &rc, send)
+	taken = rc.x != nil
+	if e != .Ok {
+		return 0, taken, e
+	}
+	return rc.r.count, taken, .Ok
 }

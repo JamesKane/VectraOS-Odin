@@ -49,6 +49,7 @@ fake_syscall :: proc "c" (nr: vx.Syscall, a0, a1, a2, a3, a4, a5: u64) -> i64 {
 
 @(test)
 test_bootfs :: proc(t: ^testing.T) {
+	names: p9.Stat_Text
 	// The image: directories and files in an order of their own, a path whose
 	// directories are only implied, and an entry for one of those after it.
 	w := tar.Writer{buf = image[:]}
@@ -86,7 +87,7 @@ test_bootfs :: proc(t: ^testing.T) {
 	// Stats: qids are node numbers in the order nodes were made; modes are
 	// read-only; implied directories are 0555.
 	st: p9.Stat
-	testing.expect_value(t, p9test.stat_of(&c, root, "", &st), vx.Status.Ok)
+	testing.expect_value(t, p9test.stat_of(&c, root, "", &st, &names), vx.Status.Ok)
 	testing.expect_value(t, st.name, "/")
 	testing.expect_value(t, st.mode, p9.DMDIR | 0o555)
 	testing.expect_value(t, st.qid, p9.Qid{type = p9.QTDIR, path = 1})
@@ -94,22 +95,22 @@ test_bootfs :: proc(t: ^testing.T) {
 	testing.expect_value(t, st.uid, "boot")
 	testing.expect_value(t, st.gid, "boot")
 	testing.expect_value(t, st.muid, "boot")
-	_ = p9test.stat_of(&c, root, "boot/bin/hello", &st)
+	_ = p9test.stat_of(&c, root, "boot/bin/hello", &st, &names)
 	testing.expect_value(t, st.name, "hello")
 	testing.expect_value(t, st.mode, 0o555)
 	testing.expect_value(t, st.qid, p9.Qid{type = p9.QTFILE, path = 4})
 	testing.expect_value(t, st.length, 13)
-	_ = p9test.stat_of(&c, root, "x", &st)
+	_ = p9test.stat_of(&c, root, "x", &st, &names)
 	testing.expect_value(t, st.mode, p9.DMDIR | 0o500)
 	testing.expect_value(t, st.qid, p9.Qid{type = p9.QTDIR, path = 5})
-	_ = p9test.stat_of(&c, root, "x/y", &st)
+	_ = p9test.stat_of(&c, root, "x/y", &st, &names)
 	testing.expect_value(t, st.mode, p9.DMDIR | 0o555)
 	testing.expect_value(t, st.qid, p9.Qid{type = p9.QTDIR, path = 6})
-	_ = p9test.stat_of(&c, root, "x/y/z.txt", &st)
+	_ = p9test.stat_of(&c, root, "x/y/z.txt", &st, &names)
 	testing.expect_value(t, st.mode, 0o400)
 	testing.expect_value(t, st.qid, p9.Qid{type = p9.QTFILE, path = 7})
 	testing.expect_value(t, st.length, 3)
-	_ = p9test.stat_of(&c, root, "boot/readme", &st)
+	_ = p9test.stat_of(&c, root, "boot/readme", &st, &names)
 	testing.expect_value(t, st.mode, 0o444)
 	testing.expect_value(t, st.qid, p9.Qid{type = p9.QTFILE, path = 8})
 	testing.expect_value(t, st.length, 0)
@@ -157,7 +158,7 @@ test_bootfs :: proc(t: ^testing.T) {
 	}
 	f, e = p9.client_walk(&c, root, "x/y/z.txt/../..")
 	testing.expect_value(t, e, vx.Status.Ok)
-	_ = p9.client_stat(&c, f, &st)
+	_ = p9.client_stat(&c, f, &st, &names)
 	testing.expect_value(t, st.name, "x")
 	_ = p9.client_clunk(&c, f)
 
@@ -168,7 +169,7 @@ test_bootfs :: proc(t: ^testing.T) {
 	testing.expect_value(t, p9test.list(&c, sub, ""), "hello")
 	f, e = p9.client_walk(&c, sub, "..")
 	testing.expect_value(t, e, vx.Status.Ok)
-	_ = p9.client_stat(&c, f, &st)
+	_ = p9.client_stat(&c, f, &st, &names)
 	testing.expect_value(t, st.name, "bin") // `..` at the attach root stays there
 	_ = p9.client_clunk(&c, f)
 	_ = p9.client_clunk(&c, sub)

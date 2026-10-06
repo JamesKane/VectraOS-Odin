@@ -65,7 +65,7 @@ ring_create(2) makes a ring from its parameters: the lengths of the submission q
 It returns three handles: the client's end, the server's end, and the ring's memory, one VMO, which each side maps with as_map(2) wherever it likes.
 The kernel writes the header into the VMO and never reads the ring again.
 
-A ring as 9Px uses it, with 8 entries in each queue, `vx_sqe` and `vx_cqe` entries and 16 KiB arenas, is laid out so, in bytes from the start of the VMO:
+A ring as 9Px uses it, with 8 entries in each queue, `vx_sqe` and `vx_cqe` entries, a 32 KiB client arena and a 48 KiB server arena, is laid out so, in bytes from the start of the VMO:
 
 ```text
      0  header: magic "VXRB", version 1, queue lengths, entry sizes,
@@ -78,9 +78,9 @@ A ring as 9Px uses it, with 8 entries in each queue, `vx_sqe` and `vx_cqe` entri
           and its NEED_WAKEUP flag
   8192  SQ: 8 entries of 64 bytes (vx_sqe), the client's requests
   8704  CQ: 8 entries of 32 bytes (vx_cqe), the server's completions
- 12288  client arena, 16 KiB: written by the client, read by the server
- 28672  server arena, 16 KiB: written by the server, read by the client
- 45056  end
+ 12288  client arena, 32 KiB: written by the client, read by the server
+ 45056  server arena, 48 KiB: written by the server, read by the client
+ 94208  end
 ```
 
 The queues start a page past the index lines, the CQ on the next 64-byte boundary after the SQ, and the arenas on page boundaries; `vx_ring_layout` in `lib/vx-ring/ring.c` computes the offsets, the kernel and both sides alike.
@@ -133,7 +133,15 @@ So every connection is its own ring, as one producer per queue requires, and a c
 On a ring, the local transport, each 9Px message is one submission: opcode `P9_RING_MSG`, its bytes in the client's arena at <arena_off>, <len> long.
 Its reply is one completion: <result> is the reply's length, and <aux2> its offset in the server's arena.
 The connection request is the ordinal `P9_CONNECT`, "cnp9", on the server's listen channel.
-The ring has 8 entries each way and two 16 KiB arenas, so a message is at most 16384 bytes, the msize version(5) negotiates on a ring.
+The ring has 8 entries each way, and a message is at most 16384 bytes, the msize version(5) negotiates on a ring.
+
+Up to 8 requests are in flight on a connection, and the server answers them in any order (M6 step 6d4a); the threads of a process share a connection.
+Each side knows what of its arena is free without asking:
+- a request's bytes stay in the client's arena until its reply comes (or the `Rflush` that ends it), as the server may read them again while it holds the request, so the client takes the arena in 512-byte chunks and gives them back in any order;
+- a reply's bytes are freed as the client consumes the completion, which it does in order, so the server places replies in order.
+Each request reserves room for the largest reply it can have, a read's count, an msize for a stat, 512 bytes for the rest, and the reservations stay an msize short of the server's arena, so the replies a server holds always fit; a client past that is broken, and the server drops it.
+One of the 8 slots is kept for `Tflush`.
+A server holds a request it cannot do yet, as many as 8, and goes on taking more; one on a fid an earlier held request is on waits behind it, so a pipe's writes keep their order (flush(5) has `Tflush`).
 
 A VMO travels beside a message in a handle slot: `Tmap`'s reply carries the file's VMO, with `P9_CQE_HANDLE` in the completion's <flags> and the slot in <aux> (see map(5)), and `Treadref` and `Twriteref` carry the client's, with `VX_SQE_HANDLES` and <handle_slot> (see dref(5)).
 These, and the server-kept open files of the `posix` extension, are why the client offers 9Px's extensions only on a ring.

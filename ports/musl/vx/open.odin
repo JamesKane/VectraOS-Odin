@@ -49,7 +49,8 @@ tty_note :: proc "contextless" (o: ^Ofd, device: bool, pty: u32) {
 // tty_note from the fid's stat: for a file opened again or joined.
 tty_check :: proc "contextless" (o: ^Ofd) {
 	s: p9.Stat
-	if p9.client_stat(o.f.c, o.f.fid, &s) != .Ok || s.mode & p9.DMDEVICE == 0 {
+	names: p9.Stat_Text // a pty's number is its name (upstream passes none: UPSTREAM-FINDINGS)
+	if p9.client_stat(o.f.c, o.f.fid, &s, &names) != .Ok || s.mode & p9.DMDEVICE == 0 {
 		return
 	}
 	tty_note(o, true, pty_number(s.name))
@@ -106,7 +107,8 @@ fd_openat :: proc "contextless" (dirfd: int, path: string, flags: linux.Open_Fla
 		return errno_of(st)
 	}
 	s: p9.Stat
-	st = p9.client_stat(f.c, f.fid, &s)
+	names: p9.Stat_Text // a pty's number is its name
+	st = p9.client_stat(f.c, f.fid, &s, &names)
 	dir := st == .Ok && s.mode & p9.DMDIR != 0
 	device := st == .Ok && s.mode & p9.DMDEVICE != 0
 	pty := device ? pty_number(s.name) : 0

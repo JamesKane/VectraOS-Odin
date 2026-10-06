@@ -1,0 +1,11 @@
+# tests/qemu/p9pipe.ndb: the pipelined 9P client and ring server (M6 step
+# 6d4a): requests held and answered out of order, Tflush by a note and by a
+# timeout, threads sharing a connection (tests/user/p9pipetest.c).
+
+scenario=p9pipe timeout=60 cmdline=vx.skip=rc with=p9pipetest
+expect="p9pipetest: 26 checks, 0 failed"
+line="svcd: p9pipetest exited"
+fail="vx: panic"
+fail="p9pipetest: FAILED"
+fail="svcd: p9pipetest exited: "
+fail=") killed: "

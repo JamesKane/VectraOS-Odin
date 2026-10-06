@@ -17,12 +17,18 @@ import "vx:rt"
 // hook.
 //
 // A request the file server cannot do yet (p9.serve's .Defer) is held, and
-// the connection takes nothing more until it completes: it is served again
-// after every event, after every tick, and when the file server says
-// something it did may let it go on (`again`): a request on another
-// connection, say, that queued what the held one waits for. (Holding one
-// request per connection is what a synchronous client needs; Tflush of a
-// held request comes with pipelining.)
+// served again after every event, after every tick, and when the file server
+// says something it did may let it go on (`again`): a request on another
+// connection, say, that queued what the held one waits for. A connection
+// holds up to rt.DEPTH of them (upstream's M6 step 6d4a) and goes on taking
+// new requests meanwhile, so replies go out in any order, as 9P allows. Two
+// rules keep that safe:
+//   - a request on a fid that an earlier held request is on waits behind it,
+//     so writes to a pipe, say, stay in their order;
+//   - Tflush of a held request drops it, unanswered, before Rflush goes out
+//     (9P's rule: the flushed request's reply comes first, or never).
+// A held request's bytes stay in the client's arena until it is answered,
+// and are copied out again each time it is served.
 //
 // All the connections share one table of open files and locks (p9.Shared),
 // for the posix extension; its tokens come from the spawn message's
@@ -58,16 +64,84 @@ conn_key :: proc "contextless" (kind: Key_Kind, slot: int, gen: u32) -> u64 {
 	return transmute(u64)Port_Key{slot = u32(slot), gen = gen, kind = kind}
 }
 
+// --- The server's arena, allotted in order ---
+//
+// Regions are taken in order, each contiguous (one that would run past the
+// end starts again at 0, the rest of the end going with it), and given back
+// in any order; the space comes free as the oldest regions are given back.
+// Positions count bytes for ever; a position's offset is it modulo the size.
+
+@(private="file")
+REGIONS :: 2 * rt.DEPTH
+
+@(private="file")
+Arena :: struct {
+	size:         u64,
+	head, tail:   u64, // [head, tail): taken
+	first, count: int,
+	regions:      [REGIONS]struct {
+		end:  u64,
+		done: bool,
+	},
+}
+
+// A region of length bytes: its index for arena_free, and its offset; not
+// ok if there is no room now (or no region left).
+@(private="file")
+arena_alloc :: proc "contextless" (a: ^Arena, length: u64) -> (index: int, off: u64, ok: bool) {
+	if length == 0 || length > a.size || a.count == REGIONS {
+		return 0, 0, false
+	}
+	pos := a.tail
+	off = pos % a.size
+	if off + length > a.size { // to the start, the end's rest with it
+		pos += a.size - off
+		off = 0
+	}
+	if pos + length - a.head > a.size {
+		return 0, 0, false
+	}
+	index = (a.first + a.count) % REGIONS
+	a.count += 1
+	a.regions[index] = {
+		end = pos + length,
+	}
+	a.tail = pos + length
+	return index, off, true
+}
+
+// Gives region i back.
+@(private="file")
+arena_free :: proc "contextless" (a: ^Arena, i: int) {
+	a.regions[i].done = true
+	for a.count != 0 && a.regions[a.first].done {
+		a.head = a.regions[a.first].end
+		a.first = (a.first + 1) % REGIONS
+		a.count -= 1
+	}
+}
+
+// A request held for later: its submission (its bytes stay in the client's
+// arena), the VMO it came with, and what the rules above look at.
+@(private="file")
+Held :: struct {
+	e:      vx.Sqe,
+	handle: vx.Handle, // dref's VMO, the server's until it is answered
+	tag:    u16,
+	fid:    p9.Fid, // NOFID: the message has none
+}
+
 Server_Conn :: struct {
-	used, armed:    bool,
-	holding:        bool, // req holds a deferred request (held_len bytes), answered with held_user_data
-	gen, held_len:  u32,
-	held_user_data: u64,
-	ring:           ring.Ring,
-	end:            vx.Handle,
-	srv:            p9.Server,
-	req:            [rt.MSIZE]u8,
-	resp:           [rt.MSIZE]u8,
+	used, armed: bool,
+	gen:         u32,
+	held:        [dynamic; rt.DEPTH]Held, // oldest first
+	ring:        ring.Ring,
+	out:         Arena, // the server's arena: the replies' bytes
+	released:    u32, // completions whose bytes have been given back
+	end:         vx.Handle,
+	srv:         p9.Server,
+	req:         [rt.MSIZE]u8,
+	resp:        [rt.MSIZE]u8,
 }
 
 Server :: struct {
@@ -111,6 +185,10 @@ drop_request_handle :: proc "contextless" (c: ^Server_Conn) {
 @(private="file")
 close_conn :: proc "contextless" (c: ^Server_Conn) {
 	drop_request_handle(c)
+	for h in c.held {
+		rt.close_all(h.handle)
+	}
+	clear(&c.held)
 	p9.hang_up(&c.srv)
 	_ = rt.handle_close(c.end)
 	rt.session_unmap(&c.ring)
@@ -152,7 +230,12 @@ connect :: proc "contextless" (s: ^Server, rep: ^vx.Msg_Header) -> (st: vx.Statu
 	h.client, h.memory = vx.HANDLE_NONE, vx.HANDLE_NONE // moved, whatever happens
 	rt.channel_write(s.listen, memory.ptr_to_bytes(rep), give[:]) or_return
 	c.used = true
-	c.armed, c.holding = false, false
+	c.armed = false
+	clear(&c.held)
+	c.released = 0
+	c.out = {
+		size = u64(len(ring.arena(&c.ring))),
+	}
 	c.end = h.server
 	c.srv = {fs = s.fs, max_msize = rt.MSIZE, supported = s.supported, shared = &s.shared}
 	return .Ok
@@ -170,66 +253,183 @@ Drained :: enum u8 {
 	Broken, // the client broke the protocol, or sent something too broken to answer: drop it
 }
 
-// Serves the requests waiting on one connection, up to its budget: first one
-// it holds, if it can be served now.
+// Gives back the arena of every completion the client has consumed.
+@(private="file")
+release :: proc "contextless" (c: ^Server_Conn) {
+	consumed := ring.peer_consumed(&c.ring)
+	for c.released != consumed && c.out.count != 0 {
+		arena_free(&c.out, c.out.first)
+		c.released += 1
+	}
+}
+
+// Sends a reply of n bytes (none: the request was too broken to answer) for
+// the submission e, with the reply's handle if the request made one. False
+// if the client has broken the protocol: no room in the completion queue or
+// the arena, which a client that keeps to the depth always leaves.
+@(private="file")
+reply :: proc "contextless" (c: ^Server_Conn, e: ^vx.Sqe, n: int) -> bool {
+	release(c)
+	entry: []u8
+	off: u64
+	ok := false
+	if n > 0 {
+		entry, ok = ring.produce_slot(&c.ring)
+	}
+	if ok {
+		_, off, ok = arena_alloc(&c.out, u64(n))
+	}
+	if !ok {
+		rt.close_all(c.srv.reply_handle) // no reply to carry it
+		c.srv.reply_handle = vx.HANDLE_NONE
+		return false
+	}
+	copy(ring.arena(&c.ring)[off:], c.resp[:n])
+	out := vx.Cqe{user_data = e.user_data, result = i64(n), aux2 = off}
+	if c.srv.reply_handle != vx.HANDLE_NONE { // Rmap's VMO, in a slot the completion names
+		h := [1]vx.Handle{c.srv.reply_handle}
+		c.srv.reply_handle = vx.HANDLE_NONE
+		if hslot, hst := rt.ring_put_handles(c.end, h[:]); hst == .Ok {
+			out.flags, out.aux = rt.CQE_HANDLE, hslot
+		} else {
+			rt.close_all(h[0]) // the client finds none, and its call fails
+		}
+	}
+	copy(entry, memory.ptr_to_bytes(&out))
+	if ring.produce(&c.ring) {
+		_ = rt.ring_notify(c.end)
+	}
+	return true
+}
+
+@(private="file")
+Tried :: enum u8 {
+	Answered,
+	Held,
+	Broken,
+}
+
+// Serves h once: its bytes copied out of the client's arena again, its VMO
+// lent to the file server for the call.
+@(private="file")
+try :: proc "contextless" (c: ^Server_Conn, h: ^Held) -> Tried {
+	p, ok := ring.peer_bytes(&c.ring, u64(h.e.arena_off), u64(h.e.len))
+	if !ok || h.e.len > len(c.req) {
+		return .Broken
+	}
+	copy(c.req[:], p)
+	c.srv.request_handle = h.handle
+	h.handle = vx.HANDLE_NONE
+	n, res := p9.serve(&c.srv, c.req[:h.e.len], c.resp[:])
+	if res == .Defer {
+		h.handle = c.srv.request_handle // kept until it is served
+		c.srv.request_handle = vx.HANDLE_NONE
+		return .Held
+	}
+	drop_request_handle(c)
+	return reply(c, &h.e, res == .Reply ? n : 0) ? .Answered : .Broken
+}
+
+// Whether an older held request than held[i] (or than a new one, i ==
+// len(held)) is on fid: if so, it waits behind that one.
+@(private="file")
+behind :: proc "contextless" (c: ^Server_Conn, i: int, fid: p9.Fid) -> bool {
+	if fid == p9.NOFID {
+		return false
+	}
+	for &h in c.held[:i] {
+		if h.fid == fid {
+			return true
+		}
+	}
+	return false
+}
+
+@(private="file")
+unhold :: proc "contextless" (c: ^Server_Conn, i: int) {
+	copy(c.held[i:], c.held[i + 1:])
+	resize(&c.held, len(c.held) - 1)
+}
+
+// The fid a request is on, for the ordering rule; NOFID if none.
+@(private="file")
+request_fid :: proc "contextless" (t: ^p9.Msg) -> p9.Fid {
+	#partial switch t.type {
+	case .Tversion, .Tauth, .Tflush:
+		return p9.NOFID
+	}
+	return t.fid
+}
+
+// Serves the requests waiting on one connection, up to its budget: the held
+// ones first, oldest first, then new ones.
 @(private="file")
 drain :: proc "contextless" (c: ^Server_Conn) -> Drained {
+	for i := 0; i < len(c.held); {
+		if behind(c, i, c.held[i].fid) {
+			i += 1
+			continue
+		}
+		switch try(c, &c.held[i]) {
+		case .Broken:
+			return .Broken
+		case .Answered:
+			unhold(c, i)
+		case .Held:
+			i += 1
+		}
+	}
 	for _ in 0 ..< BUDGET {
-		e := vx.Sqe{user_data = c.held_user_data, len = c.held_len}
-		if !c.holding {
-			st := ring.consume(&c.ring, memory.ptr_to_bytes(&e))
-			if st == .Err_Should_Wait {
-				return .Drained
+		if len(c.held) == rt.DEPTH {
+			return .Drained // a client past the depth waits for its answers
+		}
+		h := Held {
+			fid = p9.NOFID,
+		}
+		st := ring.consume(&c.ring, memory.ptr_to_bytes(&h.e))
+		if st == .Err_Should_Wait {
+			return .Drained
+		}
+		if st != .Ok || h.e.opcode != rt.RING_MSG || h.e.len > len(c.req) {
+			return .Broken
+		}
+		p, ok := ring.peer_bytes(&c.ring, u64(h.e.arena_off), u64(h.e.len))
+		if !ok {
+			return .Broken
+		}
+		if .Handles in h.e.flags { // dref's VMO, for Treadref and Twriteref
+			got: [1]vx.Handle
+			if n, _ := rt.ring_take_handles(c.end, h.e.handle_slot, got[:]); n == 1 {
+				h.handle = got[0]
 			}
-			if st != .Ok || e.opcode != rt.RING_MSG || e.len > len(c.req) {
-				return .Broken
-			}
-			p, ok := ring.peer_bytes(&c.ring, u64(e.arena_off), u64(e.len))
-			if !ok {
-				return .Broken
-			}
-			copy(c.req[:], p)
-			if .Handles in e.flags { // dref's VMO, for Treadref and Twriteref
-				h: [1]vx.Handle
-				if got, _ := rt.ring_take_handles(c.end, e.handle_slot, h[:]); got == 1 {
-					c.srv.request_handle = h[0]
+		}
+		copy(c.req[:], p)
+		t: p9.Msg
+		if p9.decode(c.req[:h.e.len], &t) != .Ok {
+			rt.close_all(h.handle)
+			return .Broken
+		}
+		h.tag = t.tag
+		h.fid = request_fid(&t)
+		if t.type == .Tflush { // a held request it names goes unanswered; then Rflush
+			for &x, i in c.held {
+				if x.tag == t.oldtag {
+					rt.close_all(x.handle)
+					unhold(c, i)
+					break
 				}
 			}
 		}
-		n, res := p9.serve(&c.srv, c.req[:e.len], c.resp[:])
-		c.holding = res == .Defer
-		if c.holding {
-			// A held request keeps its VMO until it is served.
-			c.held_len = e.len
-			c.held_user_data = e.user_data
-			return .Drained
+		if behind(c, len(c.held), h.fid) {
+			_ = append(&c.held, h)
+			continue
 		}
-		drop_request_handle(c)
-		arena := ring.arena(&c.ring)
-		slot: []u8
-		ok := false
-		if res == .Reply && n <= len(arena) {
-			slot, ok = ring.produce_slot(&c.ring)
-		}
-		if !ok {
-			rt.close_all(c.srv.reply_handle) // no reply to carry it
-			c.srv.reply_handle = vx.HANDLE_NONE
-			return .Broken // unanswerable, or a client that does not drain its completions
-		}
-		copy(arena, c.resp[:n])
-		out := vx.Cqe{user_data = e.user_data, result = i64(n)}
-		if c.srv.reply_handle != vx.HANDLE_NONE { // Rmap's VMO, in a slot the completion names
-			h := [1]vx.Handle{c.srv.reply_handle}
-			c.srv.reply_handle = vx.HANDLE_NONE
-			if hslot, hst := rt.ring_put_handles(c.end, h[:]); hst == .Ok {
-				out.flags, out.aux = rt.CQE_HANDLE, hslot
-			} else {
-				rt.close_all(h[0]) // the client finds none, and its call fails
-			}
-		}
-		copy(slot, memory.ptr_to_bytes(&out))
-		if ring.produce(&c.ring) {
-			_ = rt.ring_notify(c.end)
+		switch try(c, &h) {
+		case .Broken:
+			return .Broken
+		case .Held:
+			_ = append(&c.held, h)
+		case .Answered:
 		}
 	}
 	return .More
@@ -314,7 +514,8 @@ serve :: proc "contextless" (s: ^Server) -> vx.Status {
 		}
 
 		// Arm what is idle, then sleep unless something arrived meanwhile. A
-		// connection holding a request waits for an event, not its doorbell.
+		// connection holding requests waits for an event or its doorbell: a
+		// new request, or a Tflush of a held one.
 		if s.again { // a held request may go on now: once more round
 			more = true
 			s.again = false
@@ -324,7 +525,7 @@ serve :: proc "contextless" (s: ^Server) -> vx.Status {
 			if !idle {
 				break
 			}
-			if !c.used || c.holding {
+			if !c.used {
 				continue
 			}
 			seen, _ := rt.counter_read(c.end)

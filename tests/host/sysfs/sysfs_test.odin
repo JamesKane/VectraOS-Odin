@@ -67,6 +67,7 @@ read_file :: proc(c: ^p9.Client, root: p9.Fid, path: string, buf: []u8, offset: 
 
 @(test)
 test_sysfs :: proc(t: ^testing.T) {
+	names: p9.Stat_Text
 	rt.spawn.handle_names[0], rt.spawn.handles[0] = "listen", LISTEN
 	rt.spawn.handle_count = 1
 	testing.expect_value(t, sysfs.vx_main(), int(vx.Status.Err_Unsupported))
@@ -96,7 +97,7 @@ test_sysfs :: proc(t: ^testing.T) {
 			{"clock/info/..", "clock", p9.DMDIR | 0o555, {type = p9.QTDIR, path = 2}},
 		}) {
 		st: p9.Stat
-		testing.expectf(t, p9test.stat_of(&c, root, w.path, &st) == .Ok, "stat %s", w.path)
+		testing.expectf(t, p9test.stat_of(&c, root, w.path, &st, &names) == .Ok, "stat %s", w.path)
 		testing.expect_value(t, st.name, w.name)
 		testing.expect_value(t, st.mode, w.mode)
 		testing.expect_value(t, st.qid, w.qid)

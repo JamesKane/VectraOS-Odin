@@ -226,8 +226,9 @@ ls :: proc(c: ^p9.Client, root: p9.Fid, path: string) -> string {
 }
 
 mode_of :: proc(c: ^p9.Client, root: p9.Fid, path: string) -> u32 {
+	names: p9.Stat_Text
 	st: p9.Stat
-	if p9test.stat_of(c, root, path, &st) != .Ok {
+	if p9test.stat_of(c, root, path, &st, &names) != .Ok {
 		return 0xffff_ffff
 	}
 	return st.mode
@@ -276,6 +277,7 @@ test_dosfs :: proc(t: ^testing.T) {
 
 // tests/user/dosfswrite.rc's checks, on a fresh FAT16 disk (fat=16 disk=64).
 writing :: proc(t: ^testing.T) {
+	names: p9.Stat_Text
 	img :: DIR + "/fat16.img"
 	if !fat_disk(t, img, 64, false) {
 		return
@@ -349,11 +351,11 @@ writing :: proc(t: ^testing.T) {
 	// Beyond the script: what stat says of the rest, and that nothing was
 	// left unflushed.
 	st: p9.Stat
-	testing.expect_value(t, p9test.stat_of(c, root, "dir", &st), vx.Status.Ok)
+	testing.expect_value(t, p9test.stat_of(c, root, "dir", &st, &names), vx.Status.Ok)
 	testing.expect_value(t, st.mode, p9.DMDIR | 0o755)
 	testing.expect_value(t, st.uid, "vectra")
 	testing.expect_value(t, st.mtime, 1_759_536_004) // the fake kernel's UTC, 1759536005, in FAT's 2-second steps
-	testing.expect_value(t, p9test.stat_of(c, root, "dir/copy", &st), vx.Status.Ok)
+	testing.expect_value(t, p9test.stat_of(c, root, "dir/copy", &st, &names), vx.Status.Ok)
 	testing.expect_value(t, st.length, 300_000)
 	testing.expect(t, blkfake.disk.flushes > 0)
 

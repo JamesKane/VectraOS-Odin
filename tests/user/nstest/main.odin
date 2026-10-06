@@ -130,7 +130,8 @@ test_confinement :: proc "contextless" () {
 	fid, wst := p9.client_walk(c, root, "../../../..")
 	check(wst == .Ok)
 	s: p9.Stat
-	check(p9.client_stat(c, fid, &s) == .Ok && s.name == "bin")
+	names: p9.Stat_Text
+	check(p9.client_stat(c, fid, &s, &names) == .Ok && s.name == "bin")
 	_ = p9.client_clunk(c, fid)
 	_, wst = p9.client_walk(c, root, "../svc")
 	check(wst == .Err_Not_Found) // ../ is bin itself; no svc there

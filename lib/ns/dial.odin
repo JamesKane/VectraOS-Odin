@@ -31,11 +31,26 @@ Dialed :: struct {
 	used:       bool,
 	addr:       [dynamic; MAX_SRC]u8, // as /net/cs was asked, for sharing
 	ctl, data:  File,
+	lock:       u32, // a stream carries one call at a time: threads take turns (dial_lock)
 	tbuf, rbuf: [DIAL_MSIZE]u8,
 }
 
 @(private="file")
 dials: [DIALS]Dialed
+
+// How threads take turns at a dialed connection: a lock on a word, taken or
+// let go, which the program gives (vx:procns gives vx:rt's mutex: this
+// package makes no system calls, so the host builds it too). Without one,
+// the connection is one thread's.
+Dial_Lock :: #type proc "contextless" (word: ^u32, take: bool)
+dial_lock: Dial_Lock
+
+@(private="file")
+dial_take_turn :: proc "contextless" (ctx: rawptr, take: bool) {
+	if dial_lock != nil {
+		dial_lock(&(^Dialed)(ctx).lock, take)
+	}
+}
 
 // One 9P exchange over the stream: the request, then a reply as long as its
 // size says. 0 if the connection is gone or the reply cannot be one.
@@ -195,6 +210,7 @@ dial :: proc "contextless" (ns: ^Namespace, addr: string) -> (c: ^p9.Client, src
 		ctx   = d,
 		tbuf  = d.tbuf[:],
 		rbuf  = d.rbuf[:],
+		lock  = dial_take_turn,
 		uname = "vectra",
 	}
 	if st = p9.client_version(&d.c, DIAL_MSIZE, {}); st != .Ok {

@@ -186,6 +186,7 @@ status_lines :: proc(adm: ^Session, prefix: string) -> string {
 
 @(test)
 test_fsd :: proc(t: ^testing.T) {
+	names: p9.Stat_Text
 	buf: bytes.Buffer
 	defer bytes.buffer_destroy(&buf)
 	if err := gzip.load(C_TOOL_GZ, &buf); !testing.expectf(t, err == nil, "gunzip: %v", err) {
@@ -220,15 +221,16 @@ test_fsd :: proc(t: ^testing.T) {
 	big := read_file(home, "big")
 	testing.expect_value(t, len(big), 40000)
 	st: p9.Stat
-	testing.expect_value(t, p9test.stat_of(&home.c, home.root, "README", &st), vx.Status.Ok)
+	testing.expect_value(t, p9test.stat_of(&home.c, home.root, "README", &st, &names), vx.Status.Ok)
 	testing.expect_value(t, st.uid, "vectra")
 	testing.expect_value(t, st.gid, "vectra")
 	testing.expect_value(t, st.mode, 0o644)
 	testing.expect_value(t, st.length, 214)
-	testing.expect_value(t, p9test.stat_of(&home.c, home.root, "", &st), vx.Status.Ok)
+	testing.expect_value(t, p9test.stat_of(&home.c, home.root, "", &st, &names), vx.Status.Ok)
 	testing.expect_value(t, st.name, "/")
 	testing.expect_value(t, st.qid.type, p9.QTDIR)
-	target, rl := p9.client_readlink(&home.c, walk(home, "link"))
+	link: [256]u8
+	target, rl := p9.client_readlink(&home.c, walk(home, "link"), link[:])
 	testing.expect_value(t, rl, vx.Status.Ok)
 	testing.expect_value(t, target, "README")
 
@@ -244,7 +246,7 @@ test_fsd :: proc(t: ^testing.T) {
 	// vectra writes in its home; what it wrote is there through another attach.
 	testing.expect_value(t, write_file(home, "hello.txt", "hello from fsd"), vx.Status.Ok)
 	testing.expect_value(t, read_file(all, "hello.txt"), "hello from fsd")
-	testing.expect_value(t, p9test.stat_of(&home.c, home.root, "hello.txt", &st), vx.Status.Ok)
+	testing.expect_value(t, p9test.stat_of(&home.c, home.root, "hello.txt", &st, &names), vx.Status.Ok)
 	testing.expect_value(t, st.uid, "vectra")
 	testing.expect_value(t, st.muid, "vectra")
 	testing.expect_value(t, st.mtime, u32(now / 1_000_000_000))
@@ -289,7 +291,7 @@ test_fsd :: proc(t: ^testing.T) {
 	f = walk(home, "hello.txt")
 	testing.expect_value(t, p9.client_setattr(&home.c, f, {valid = {.Uid}, uid = 1}), vx.Status.Ok) // vectra is in adm
 	_ = p9.client_clunk(&home.c, f)
-	testing.expect_value(t, p9test.stat_of(&home.c, home.root, "hello.txt", &st), vx.Status.Ok)
+	testing.expect_value(t, p9test.stat_of(&home.c, home.root, "hello.txt", &st, &names), vx.Status.Ok)
 	testing.expect_value(t, st.uid, "none")
 
 	// Open through one attach (%home), removed through another (home): kept
@@ -327,15 +329,15 @@ test_fsd :: proc(t: ^testing.T) {
 	testing.expect_value(t, p9test.list(&dump.c, dump.root, "2026"), "0101")
 	testing.expect_value(t, p9test.list(&dump.c, dump.root, "2026/0101"), "home work")
 	testing.expect_value(t, read_file(dump, "2026/0101/home/hello.txt"), "hello from fsd")
-	testing.expect_value(t, p9test.stat_of(&dump.c, dump.root, "2026/0101/home", &st), vx.Status.Ok)
+	testing.expect_value(t, p9test.stat_of(&dump.c, dump.root, "2026/0101/home", &st, &names), vx.Status.Ok)
 	testing.expect_value(t, st.name, "home")
-	testing.expect_value(t, p9test.stat_of(&dump.c, dump.root, "2026", &st), vx.Status.Ok)
+	testing.expect_value(t, p9test.stat_of(&dump.c, dump.root, "2026", &st, &names), vx.Status.Ok)
 	testing.expect_value(t, st.name, "2026")
 	testing.expect_value(t, st.mode, p9.DMDIR | 0o555)
 	f = walk(dump, "2026/0101/home/docs")
 	up, ue := p9.client_walk(&dump.c, f, "../..")
 	testing.expect_value(t, ue, vx.Status.Ok)
-	testing.expect_value(t, p9.client_stat(&dump.c, up, &st), vx.Status.Ok)
+	testing.expect_value(t, p9.client_stat(&dump.c, up, &st, &names), vx.Status.Ok)
 	testing.expect_value(t, st.name, "0101") // a dated snapshot's root's parent: its day
 	_ = p9.client_clunk(&dump.c, up)
 	_ = p9.client_clunk(&dump.c, f)

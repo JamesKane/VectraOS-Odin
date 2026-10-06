@@ -129,6 +129,7 @@ settings :: proc(c: ^p9.Client, ctl: p9.Fid) -> string {
 
 @(test)
 test_ptyd :: proc(t: ^testing.T) {
+	names: p9.Stat_Text
 	rt.spawn.handle_names[0], rt.spawn.handles[0] = "listen", LISTEN
 	rt.spawn.handle_count = 1
 	testing.expect_value(t, ptyd.vx_main(), int(vx.Status.Err_Unsupported))
@@ -149,15 +150,15 @@ test_ptyd :: proc(t: ^testing.T) {
 	// Opening ptmx makes terminal 0; the fid becomes its master.
 	master := open_path(t, c, root, "ptmx")
 	st: p9.Stat
-	testing.expect_value(t, p9.client_stat(c, master, &st), vx.Status.Ok)
+	testing.expect_value(t, p9.client_stat(c, master, &st, &names), vx.Status.Ok)
 	testing.expect_value(t, st.name, "0")
 	testing.expect_value(t, st.mode, p9.DMDEVICE | 0o620)
 	testing.expect_value(t, st.qid, p9.Qid{type = p9.QTFILE, path = 0x100})
 	testing.expect_value(t, p9test.list(c, root, "pts"), "0 0.ctl")
-	_ = p9test.stat_of(c, root, "pts/0", &st)
+	_ = p9test.stat_of(c, root, "pts/0", &st, &names)
 	testing.expect_value(t, st.mode, p9.DMDEVICE | 0o620)
 	testing.expect_value(t, st.qid.path, 0x200)
-	_ = p9test.stat_of(c, root, "pts/0.ctl", &st)
+	_ = p9test.stat_of(c, root, "pts/0.ctl", &st, &names)
 	testing.expect_value(t, st.name, "0.ctl")
 	testing.expect_value(t, st.mode, 0o666)
 	testing.expect_value(t, st.qid.path, 0x300)
@@ -276,7 +277,7 @@ test_ptyd :: proc(t: ^testing.T) {
 
 	// A second terminal is terminal 1, listed after 0.
 	master1 := open_path(t, c, root, "ptmx")
-	_ = p9.client_stat(c, master1, &st)
+	_ = p9.client_stat(c, master1, &st, &names)
 	testing.expect_value(t, st.name, "1")
 	testing.expect_value(t, p9test.list(c, root, "pts"), "0 0.ctl 1 1.ctl")
 	_ = p9.client_clunk(c, master1)

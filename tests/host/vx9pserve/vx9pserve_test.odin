@@ -72,7 +72,8 @@ test_hostfs :: proc(t: ^testing.T) {
 	testing.expect_value(t, e, vx.Status.Ok)
 	testing.expect_value(t, string(buf[:n]), "hello from the host\n")
 	st: p9.Stat
-	testing.expect_value(t, p9.client_stat(&c, f, &st), vx.Status.Ok)
+	names: p9.Stat_Text
+	testing.expect_value(t, p9.client_stat(&c, f, &st, &names), vx.Status.Ok)
 	testing.expect_value(t, st.length, 20)
 	testing.expect_value(t, st.name, "hello.txt")
 	testing.expect(t, .Dir not_in st.qid.type)

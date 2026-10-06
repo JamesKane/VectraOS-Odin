@@ -158,8 +158,9 @@ test_tmpfs :: proc(t: ^testing.T) {
 // Files: made, written and read back, at offsets and across a hole, grown
 // past their first mapping, and truncated by an open.
 files :: proc(t: ^testing.T, c: ^p9.Client, root: p9.Fid) {
+	names: p9.Stat_Text
 	st: p9.Stat
-	testing.expect_value(t, p9test.stat_of(c, root, "", &st), vx.Status.Ok)
+	testing.expect_value(t, p9test.stat_of(c, root, "", &st, &names), vx.Status.Ok)
 	testing.expect_value(t, st.name, "/")
 	testing.expect_value(t, st.mode, p9.DMDIR | 0o777)
 	testing.expect_value(t, st.mtime, 5)
@@ -177,7 +178,7 @@ files :: proc(t: ^testing.T, c: ^p9.Client, root: p9.Fid) {
 	n, e = p9.client_write(c, f, 8, transmute([]u8)string("x"))
 	testing.expect_value(t, e, vx.Status.Ok)
 	testing.expect_value(t, read_all(c, f), "hello\x00\x00\x00x") // a hole reads as zeros
-	testing.expect_value(t, p9.client_stat(c, f, &st), vx.Status.Ok)
+	testing.expect_value(t, p9.client_stat(c, f, &st, &names), vx.Status.Ok)
 	testing.expect_value(t, st.name, "a")
 	testing.expect_value(t, st.mode, 0o640)
 	testing.expect_value(t, st.length, 9)
@@ -224,6 +225,7 @@ files :: proc(t: ^testing.T, c: ^p9.Client, root: p9.Fid) {
 // Directories: children in the order they came; a directory opens only to
 // read; and a file is not a directory.
 directories :: proc(t: ^testing.T, c: ^p9.Client, root: p9.Fid) {
+	names: p9.Stat_Text
 	f, e := create(t, c, root, "d", p9.DMDIR | 0o755, p9.OREAD)
 	testing.expect_value(t, e, vx.Status.Ok)
 	_ = p9.client_clunk(c, f)
@@ -233,7 +235,7 @@ directories :: proc(t: ^testing.T, c: ^p9.Client, root: p9.Fid) {
 	testing.expect_value(t, p9test.list(c, root, "d"), "z y x")
 	testing.expect_value(t, p9test.list(c, root, ""), "a big d")
 	st: p9.Stat
-	_ = p9test.stat_of(c, root, "d", &st)
+	_ = p9test.stat_of(c, root, "d", &st, &names)
 	testing.expect_value(t, st.mode, p9.DMDIR | 0o755)
 	testing.expect_value(t, st.qid.type, p9.QTDIR)
 	testing.expect_value(t, st.length, 0)
@@ -256,6 +258,7 @@ directories :: proc(t: ^testing.T, c: ^p9.Client, root: p9.Fid) {
 // while open keeps its bytes for that fid, and its id names nothing once
 // the last fid lets go and its slot is used again.
 removing :: proc(t: ^testing.T, c: ^p9.Client, root: p9.Fid) {
+	names: p9.Stat_Text
 	f, e := p9.client_walk(c, root, "d")
 	testing.expect_value(t, p9.client_remove(c, f), vx.Status.Err_Exists) // not empty
 	r, _ := p9.client_walk(c, root, "")
@@ -265,7 +268,7 @@ removing :: proc(t: ^testing.T, c: ^p9.Client, root: p9.Fid) {
 	f, _ = p9.client_walk(c, root, "gone")
 	_ = p9.client_open(c, f, p9.OREAD)
 	st: p9.Stat
-	_ = p9.client_stat(c, f, &st)
+	_ = p9.client_stat(c, f, &st, &names)
 	id := st.qid.path
 	other, _ := p9.client_walk(c, root, "gone")
 	testing.expect_value(t, p9.client_remove(c, other), vx.Status.Ok)
@@ -277,7 +280,7 @@ removing :: proc(t: ^testing.T, c: ^p9.Client, root: p9.Fid) {
 	testing.expect_value(t, unmaps, unmaps_before + 1) // the last fid let go: its mapping goes
 
 	write_file(t, c, root, "again", "") // the removed node's slot, a generation on
-	_ = p9test.stat_of(c, root, "again", &st)
+	_ = p9test.stat_of(c, root, "again", &st, &names)
 	testing.expect_value(t, u32(st.qid.path), u32(id))
 	testing.expect(t, st.qid.path != id)
 	f, _ = p9.client_walk(c, root, "again")
@@ -297,6 +300,7 @@ removing :: proc(t: ^testing.T, c: ^p9.Client, root: p9.Fid) {
 
 // The xattr extension's Tsetattr: size, mode and times, as POSIX has them.
 attributes :: proc(t: ^testing.T, c: ^p9.Client, root: p9.Fid) {
+	names: p9.Stat_Text
 	write_file(t, c, root, "s", "abcdef")
 	f, _ := p9.client_walk(c, root, "s")
 	now = 9_000_000_000
@@ -310,15 +314,15 @@ attributes :: proc(t: ^testing.T, c: ^p9.Client, root: p9.Fid) {
 	testing.expect_value(t, a.mtime_sec, 9) // a size changed without a time: now
 	testing.expect_value(t, p9.client_setattr(c, f, {valid = {.Mode}, mode = 0o104755}), vx.Status.Ok)
 	st: p9.Stat
-	_ = p9.client_stat(c, f, &st)
+	_ = p9.client_stat(c, f, &st, &names)
 	testing.expect_value(t, st.mode, 0o4755) // the permission bits and set-id, no type
 	testing.expect_value(t, p9.client_setattr(c, f, {valid = {.Atime, .Atime_Set, .Mtime, .Mtime_Set}, atime_sec = 11, mtime_sec = 12}), vx.Status.Ok)
-	_ = p9.client_stat(c, f, &st)
+	_ = p9.client_stat(c, f, &st, &names)
 	testing.expect_value(t, st.atime, 11)
 	testing.expect_value(t, st.mtime, 12)
 	now = 13_000_000_000
 	testing.expect_value(t, p9.client_setattr(c, f, {valid = {.Atime, .Mtime}}), vx.Status.Ok)
-	_ = p9.client_stat(c, f, &st)
+	_ = p9.client_stat(c, f, &st, &names)
 	testing.expect_value(t, st.atime, 13) // without _Set: now
 	testing.expect_value(t, st.mtime, 13)
 	testing.expect_value(t, p9.client_setattr(c, f, {valid = {.Uid, .Gid}, uid = 5, gid = 6}), vx.Status.Ok) // owners are not kept
@@ -359,15 +363,17 @@ renaming :: proc(t: ^testing.T, c: ^p9.Client, root: p9.Fid) {
 // Symbolic links: a target kept as the link's bytes, read back by
 // Treadlink, and DMSYMLINK in its mode.
 links :: proc(t: ^testing.T, c: ^p9.Client, root: p9.Fid) {
+	names: p9.Stat_Text
 	testing.expect_value(t, p9.client_symlink(c, root, "l", "d/w"), vx.Status.Ok)
 	f, e := p9.client_walk(c, root, "l")
 	testing.expect_value(t, e, vx.Status.Ok)
 	target: string
-	target, e = p9.client_readlink(c, f)
+	link: [256]u8
+	target, e = p9.client_readlink(c, f, link[:])
 	testing.expect_value(t, e, vx.Status.Ok)
 	testing.expect_value(t, target, "d/w")
 	st: p9.Stat
-	_ = p9.client_stat(c, f, &st)
+	_ = p9.client_stat(c, f, &st, &names)
 	testing.expect_value(t, st.mode, p9.DMSYMLINK | 0o777)
 	testing.expect_value(t, st.length, 3)
 	testing.expect_value(t, p9.client_setattr(c, f, {valid = {.Size}, size = 1}), vx.Status.Err_Invalid)
@@ -375,7 +381,7 @@ links :: proc(t: ^testing.T, c: ^p9.Client, root: p9.Fid) {
 	testing.expect_value(t, p9.client_symlink(c, root, "l", "x"), vx.Status.Err_Exists)
 	testing.expect_value(t, p9.client_symlink(c, root, "m", ""), vx.Status.Err_Invalid)
 	f, _ = p9.client_walk(c, root, "a")
-	_, e = p9.client_readlink(c, f)
+	_, e = p9.client_readlink(c, f, link[:])
 	testing.expect_value(t, e, vx.Status.Err_Invalid) // not a link
 	_ = p9.client_clunk(c, f)
 }

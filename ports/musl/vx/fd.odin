@@ -521,12 +521,14 @@ link_at :: proc "contextless" (p: string, target: ^Path_Buf) -> (r: int, t: stri
 	}
 	s: p9.Stat
 	if .Posix in c.extensions && p9.client_stat(c, fid, &s) == .Ok && s.mode & p9.DMSYMLINK != 0 {
-		r = fail(.EINVAL)
-		if got, rst := p9.client_readlink(c, fid); rst == .Ok {
-			r = len(got) < len(target) ? 1 : fail(.ENAMETOOLONG)
-			if r == 1 {
-				t = string(target[:copy(target[:], got)])
-			}
+		got, rst := p9.client_readlink(c, fid, target[:len(target) - 1])
+		#partial switch rst {
+		case .Ok:
+			r, t = 1, got
+		case .Err_Too_Small:
+			r = fail(.ENAMETOOLONG)
+		case:
+			r = fail(.EINVAL)
 		}
 	}
 	_ = p9.client_clunk(c, fid)

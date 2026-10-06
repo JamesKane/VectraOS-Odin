@@ -100,7 +100,8 @@ readlink :: proc(c: ^p9.Client, root: p9.Fid, path: string) -> string {
 		return fmt.tprintf("(walk: %v)", e)
 	}
 	defer _ = p9.client_clunk(c, f)
-	target, re := p9.client_readlink(c, f)
+	link: [256]u8
+	target, re := p9.client_readlink(c, f, link[:])
 	return re == .Ok ? strings.clone(target, context.temp_allocator) : fmt.tprintf("(readlink: %v)", re)
 }
 
@@ -153,6 +154,7 @@ test_isofs :: proc(t: ^testing.T) {
 
 // /n in tests/user/isofstest.rc: Rock Ridge, owned by vectra.
 rock :: proc(t: ^testing.T) {
+	names: p9.Stat_Text
 	blkfake.spawn("srv:disk1", "-u", "vectra")
 	testing.expect_value(t, isofs.start(), "cannot serve") // mounted, then no port to serve on
 	testing.expect_value(t, blkfake.log(), "isofs: /srv/disk1: ISO 9660 with Rock Ridge \"VECTRAOS\", 194 sectors\n")
@@ -191,14 +193,14 @@ rock :: proc(t: ^testing.T) {
 
 	// Beyond the script: what stat says.
 	st: p9.Stat
-	testing.expect_value(t, p9test.stat_of(c, root, "link-to-readme", &st), vx.Status.Ok)
+	testing.expect_value(t, p9test.stat_of(c, root, "link-to-readme", &st, &names), vx.Status.Ok)
 	testing.expect_value(t, st.mode, p9.DMSYMLINK | 0o777)
 	testing.expect_value(t, st.length, 0)
 	testing.expect_value(t, st.uid, "vectra")
-	testing.expect_value(t, p9test.stat_of(c, root, "deep", &st), vx.Status.Ok)
+	testing.expect_value(t, p9test.stat_of(c, root, "deep", &st, &names), vx.Status.Ok)
 	testing.expect_value(t, st.mode, p9.DMDIR | 0o555)
 	testing.expect_value(t, st.qid.type, p9.QTDIR)
-	testing.expect_value(t, p9test.stat_of(c, root, "README.txt", &st), vx.Status.Ok)
+	testing.expect_value(t, p9test.stat_of(c, root, "README.txt", &st, &names), vx.Status.Ok)
 	testing.expect_value(t, st.mode, 0o444)
 	testing.expect_value(t, st.length, 7)
 	testing.expect_value(t, st.mtime, 1_759_536_000) // SOURCE_DATE_EPOCH's, as the image was written
@@ -206,6 +208,7 @@ rock :: proc(t: ^testing.T) {
 
 // /j in tests/user/isofstest.rc: the Joliet tree (-r), owned by none.
 joliet :: proc(t: ^testing.T) {
+	names: p9.Stat_Text
 	blkfake.spawn("srv:disk1", "-r")
 	testing.expect_value(t, isofs.start(), "cannot serve")
 	testing.expect_value(t, blkfake.log(), "isofs: /srv/disk1: ISO 9660 with Joliet \"VECTRAOS\", 194 sectors\n")
@@ -218,7 +221,7 @@ joliet :: proc(t: ^testing.T) {
 	testing.expect(t, !exists(c, root, "link-to-readme")) // joliet-links
 	testing.expect_value(t, cat(c, root, "\xf0\x9f\x98\x80 smile.txt"), "smile\n") // a surrogate pair
 	st: p9.Stat
-	testing.expect_value(t, p9test.stat_of(c, root, "README.txt", &st), vx.Status.Ok)
+	testing.expect_value(t, p9test.stat_of(c, root, "README.txt", &st, &names), vx.Status.Ok)
 	testing.expect_value(t, st.uid, "none")
 }
 

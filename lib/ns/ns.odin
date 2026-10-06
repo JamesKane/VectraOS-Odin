@@ -524,12 +524,13 @@ mount_raw :: proc "contextless" (ns: ^Namespace, c: ^p9.Client, connector: vx.Ha
 		mounted = true,
 	}
 	_ = append(&m.from, aname)
+	qid: p9.Qid
 	st: vx.Status
-	m.fid, st = p9.client_attach(c, aname)
+	m.fid, qid, st = p9.client_attach_qid(c, aname)
 	if st != .Ok {
 		return st
 	}
-	m.qid = c.reply.qid.path
+	m.qid = qid.path
 	fresh := ns.conns[slot].client == nil
 	if fresh {
 		ns.conns[slot] = {

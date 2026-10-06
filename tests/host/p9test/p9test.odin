@@ -48,12 +48,13 @@ list :: proc(c: ^p9.Client, root: p9.Fid, path: string) -> string {
 	return ok ? joined : "(bad entry)"
 }
 
-// The stat of what is at path (from root).
-stat_of :: proc(c: ^p9.Client, root: p9.Fid, path: string, st: ^p9.Stat) -> vx.Status {
+// The stat of what is at path (from root); its strings in keep, or empty
+// without one.
+stat_of :: proc(c: ^p9.Client, root: p9.Fid, path: string, st: ^p9.Stat, keep: ^p9.Stat_Text = nil) -> vx.Status {
 	f, e := p9.client_walk(c, root, path)
 	if e != .Ok {
 		return e
 	}
 	defer _ = p9.client_clunk(c, f)
-	return p9.client_stat(c, f, st)
+	return p9.client_stat(c, f, st, keep)
 }

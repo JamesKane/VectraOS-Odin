@@ -395,6 +395,18 @@ group_map :: proc "contextless" (vmo: vx.Handle) -> vx.Status {
 	return st
 }
 
+// ns.dial_lock: vx:rt's mutex, on the dialed connection's word.
+@(private="file")
+dial_lock :: proc "contextless" (word: ^u32, take: bool) {
+	m := (^rt.Mutex)(word)
+	#assert(size_of(rt.Mutex) == size_of(u32))
+	if take {
+		rt.mutex_lock(m)
+	} else {
+		rt.mutex_unlock(m)
+	}
+}
+
 @(private="file")
 group_hooks :: proc "contextless" (space: ^ns.Namespace) {
 	space.release = release
@@ -461,6 +473,7 @@ group_make :: proc "contextless" (space: ^ns.Namespace) -> vx.Status {
 @(require_results)
 from_spawn :: proc "contextless" (space: ^ns.Namespace) -> vx.Status {
 	p9.client_user = rt.spawn.user // its attaches name its user (upstream docs/11 §9)
+	ns.dial_lock = dial_lock // a TCP connection's threads take turns
 	group.srv = rt.spawn_take("srv:nsd")
 	if chan := rt.spawn_take("nsgroup"); chan != vx.HANDLE_NONE {
 		return group_join(space, chan)
