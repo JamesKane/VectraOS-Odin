@@ -1,7 +1,7 @@
 page=futex sect=2 summary="wait for a word in memory to change, or wake its waiters"
-    names=futex_wait,futex_wake
-    src=kernel/obj/futex.c,lib/vx-rt/base.c
-    keys=lock,mutex,wait,wake
+    names=futex_wait,futex_wake,thread_set_robust
+    src=kernel/obj/futex.c,kernel/obj/process.c,lib/vx-rt/base.c
+    keys=lock,mutex,wait,wake,robust,owner-died
 
 # SYNOPSIS
 
@@ -9,12 +9,14 @@ page=futex sect=2 summary="wait for a word in memory to change, or wake its wait
 vx_status vx_futex_wait(const _Atomic uint32_t *word, uint32_t expected,
                         vx_instant deadline);
 int64_t vx_futex_wake(const _Atomic uint32_t *word, uint32_t count);
+
+vx_status vx_thread_set_robust(const void *head, uint64_t size, uint32_t owner);
 ```
 
 # DESCRIPTION
 
 A futex is a 32-bit word in memory that threads wait on, the building block of locks and condition variables (see the kernel's design, 01 §4.6).
-It is keyed by the physical address of the word, so the same word mapped into two tasks, through a shared VMO, is one futex.
+It is keyed by the VMO the word is in and its offset there (ADR-0037), so the same word mapped into two tasks, through a shared VMO or a file both map, is one futex, and a pager's page that is evicted and supplied again keeps its waiters.
 
 `vx_futex_wait` blocks the calling thread while <word> holds <expected>, until `vx_futex_wake` wakes it or <deadline> passes.
 The word is checked and the thread queued under the futex's lock, so a wake that comes after the check is never missed, and a word changed before it makes the wait return at once.
@@ -24,6 +26,22 @@ A <deadline> of `VX_INFINITE` never comes.
 
 <word> must be 4-byte aligned and mapped in the caller's address space, in ordinary memory, not a device's.
 
+## Robust locks
+
+A lock in shared memory can outlive the thread holding it.
+`vx_thread_set_robust` registers the calling thread's list of the locks it holds, in Linux's form (ADR-0037).
+- <head> is three words: the first entry of a ring of entries that ends at <head>, the offset from an entry to its lock word, and the entry being added or taken off just now (or 0).
+- <size> is 24.
+- <owner> is the value the thread's lock words hold while it owns them, in their low 30 bits (`VX_FUTEX_OWNER_MASK`).
+A <head> of nullptr unregisters the list.
+
+A lock word is Linux's: `VX_FUTEX_WAITERS` (bit 31) while someone waits, `VX_FUTEX_OWNER_DIED` (bit 30), and the owner.
+When the thread ends, by `thread_exit`, a kill or its task's end, and also at `task_exec`, the kernel walks the list before the memory goes.
+It takes at most 2048 entries, and the walk ends at a pointer it cannot read.
+Each word that still holds <owner> becomes `VX_FUTEX_OWNER_DIED`, with `VX_FUTEX_WAITERS` kept, and if that was set, one waiter is woken.
+The next locker sees that the holder died and that what the lock guarded may be half-changed: POSIX's `EOWNERDEAD`.
+A new thread has no list.
+
 # DIAGNOSTICS
 
 `vx_futex_wait` returns:
@@ -31,7 +49,7 @@ A <deadline> of `VX_INFINITE` never comes.
 : `VX_OK`
   A wake woke it.
 : `VX_ERR_BAD_STATE`
-  <word> did not hold <expected>.
+  <word> did not hold <expected>, or its page is absent (a pager's, evicted): load it and ask again.
 : `VX_ERR_TIMED_OUT`
   <deadline> passed.
 : `VX_ERR_INTERRUPTED`
@@ -43,6 +61,9 @@ A <deadline> of `VX_INFINITE` never comes.
 
 `vx_futex_wake` returns the number woken, or `VX_ERR_INVALID` as above.
 
+`vx_thread_set_robust` returns `VX_OK`, or `VX_ERR_INVALID` for a misaligned <head>, a <size> not 24, or an <owner> of 0 or past `VX_FUTEX_OWNER_MASK`.
+
 # BUGS
 
-A thread that dies holding a lock built on a futex leaves its waiters asleep: robust futexes, which mark such a lock, come in M6 step 6d.
+A thread that dies holding a lock it did not put on its robust list leaves that lock's waiters asleep.
+The walk at a thread's end trusts the thread's memory only as far as reading it safely: a list another thread is changing at that moment may be walked in part.

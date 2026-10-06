@@ -385,3 +385,11 @@ futex_wake :: proc "contextless" (word: ^u32, count: u32) -> (int, vx.Status) {
 	r := vx_syscall(.Futex_Wake, addr(word), u64(count))
 	return max(int(r), 0), status(r)
 }
+
+// The calling thread's robust list (ADR-0037, Linux's layout): head is its
+// three words, size 24, owner the value its lock words hold; head nil
+// unregisters it.
+@(require_results)
+thread_set_robust :: proc "contextless" (head: rawptr, size: u64, owner: u32) -> vx.Status {
+	return status(vx_syscall(.Thread_Set_Robust, addr(head), size, u64(owner)))
+}

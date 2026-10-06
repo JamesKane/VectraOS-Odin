@@ -378,6 +378,27 @@ vx_user_load32_fault:
     mov x0, #0
     ret
 
+// vx_user_cas32(word, old, new, seen) -> bool: an exclusive pair on a user
+// word (a robust lock's, ADR-0037), with acquire and release; *seen gets
+// what was there, and new went in if it was old. There is no unprivileged
+// exclusive, and no overlays to honour (6c5: the CPUs lack them). A fault
+// returns false.
+    .globl vx_user_cas32, vx_user_cas32_fault
+    .type vx_user_cas32, %function
+vx_user_cas32:
+1:  ldaxr w4, [x0]
+    cmp w4, w1
+    b.ne 2f
+    stlxr w5, w2, [x0]
+    cbnz w5, 1b
+2:  str w4, [x3]
+    mov x0, #1
+    ret
+vx_user_cas32_fault:
+    clrex
+    mov x0, #0
+    ret
+
     .bss
     .p2align 4
 overflow_stack:

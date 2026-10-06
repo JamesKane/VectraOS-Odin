@@ -300,6 +300,7 @@ Child_Code :: enum {
 	Fault_Load,
 	Break_Step,
 	Store_Data, // a write to CHILD_DATA, which start_child_bound maps for it, then exit 7
+	Robust_Hold, // registers a robust list at CHILD_DATA (owner 0x1234), then as .Block
 }
 
 CHILD_DATA :: u64(0x30_0000) // .Fault_Load's page, which nothing maps at first
@@ -329,6 +330,14 @@ write_child :: proc "contextless" (what: Child_Code) -> (code: Child_Image) {
 			emit(&code, 0x48, 0xb8); emit32(&code, u32(CHILD_DATA)); emit32(&code, 0) // movabs $CHILD_DATA, %rax
 			emit(&code, 0x48, 0x89, 0x00) // mov %rax, (%rax), then exit 7
 			what = .Exit_7
+		}
+		if what == .Robust_Hold {
+			emit(&code, 0xbf); emit32(&code, u32(CHILD_DATA)) // mov $CHILD_DATA, %edi: the list's head
+			emit(&code, 0xbe); emit32(&code, 24) // mov $24, %esi
+			emit(&code, 0xba); emit32(&code, 0x1234) // mov $0x1234, %edx: its owner value
+			emit(&code, 0xb8); emit32(&code, u32(vx.Syscall.Thread_Set_Robust)) // mov $thread_set_robust, %eax
+			emit(&code, 0x0f, 0x05) // syscall, then wait for ever
+			what = .Block
 		}
 		switch what {
 		case .Exit_7, .Use_Simd, .Break_Step, .Store_Data:
@@ -362,7 +371,7 @@ write_child :: proc "contextless" (what: Child_Code) -> (code: Child_Image) {
 			emit(&code, 0xb8); emit32(&code, u32(vx.Syscall.Port_Wait)) // mov $port_wait, %eax
 			emit(&code, 0x0f, 0x05) // syscall
 			emit(&code, 0xeb, 0xfe) // jmp .
-		case .Block:
+		case .Block, .Robust_Hold:
 			emit(&code, 0x48, 0x8d, 0x7c, 0x24, 0xf0) // lea -16(%rsp), %rdi: a zero word
 			emit(&code, 0x31, 0xf6) // xor %esi, %esi: expect 0
 			emit(&code, 0x48, 0xba); emit32(&code, 0xffffffff); emit32(&code, 0x7fffffff) // mov $INT64_MAX, %rdx
@@ -389,6 +398,14 @@ write_child :: proc "contextless" (what: Child_Code) -> (code: Child_Image) {
 			emit(&code, 0xd2a00001 | u32(CHILD_DATA >> 16) << 5) // movz x1, #CHILD_DATA >> 16, lsl #16
 			emit(&code, 0xf9000021) // str x1, [x1], then exit 7
 			what = .Exit_7
+		}
+		if what == .Robust_Hold {
+			emit(&code, 0xd2a00000 | u32(CHILD_DATA >> 16) << 5) // movz x0, #CHILD_DATA >> 16, lsl #16
+			emit(&code, 0xd2800001 | 24 << 5) // movz x1, #24
+			emit(&code, 0xd2800002 | 0x1234 << 5) // movz x2, #0x1234: its owner value
+			emit(&code, 0xd2800008 | u32(vx.Syscall.Thread_Set_Robust) << 5) // movz x8, #thread_set_robust
+			emit(&code, 0xd4000001) // svc #0, then wait for ever
+			what = .Block
 		}
 		switch what {
 		case .Exit_7, .Use_Simd, .Break_Step, .Store_Data:
@@ -422,7 +439,7 @@ write_child :: proc "contextless" (what: Child_Code) -> (code: Child_Image) {
 			emit(&code, 0xd2800008 | u32(vx.Syscall.Port_Wait) << 5) // movz x8, #port_wait
 			emit(&code, 0xd4000001) // svc #0
 			emit(&code, 0x14000000) // b .
-		case .Block:
+		case .Block, .Robust_Hold:
 			emit(&code, 0xd10043e0) // sub x0, sp, #16: a zero word
 			emit(&code, 0xd2800001) // movz x1, #0: expect 0
 			emit(&code, 0x92800002) // movn x2, #0: all ones
@@ -482,7 +499,7 @@ start_child_bound :: proc "contextless" (what: Child_Code, exc_port: vx.Handle, 
 		return
 	}
 	if data != vx.HANDLE_NONE {
-		if _, st = rt.as_map(task, data, 0, 4096, {}, CHILD_DATA); st != .Ok {
+		if _, st = rt.as_map(task, data, 0, 4096, what == .Robust_Hold ? vx.Map_Options{.Write} : vx.Map_Options{}, CHILD_DATA); st != .Ok {
 			return
 		}
 	}
@@ -1797,6 +1814,152 @@ test_pager :: proc "contextless" () {
 	rt.close_all(late.vmo, quick, pager, src, port)
 }
 
+// --- Robust futexes (ADR-0037) ---
+
+Robust_Head :: struct {
+	next:    u64,
+	offset:  i64,
+	pending: u64,
+}
+
+Robust_Entry :: struct {
+	next: u64,
+	word: u32,
+}
+
+exit_head: Robust_Head
+exit_held, exit_other: Robust_Entry // the thread's lock, and one another owner holds
+
+robust_exiter :: proc "c" (unused: vx.Handle, arg2: u64) -> ! {
+	_ = rt.thread_set_robust(&exit_head, size_of(exit_head), 77)
+	rt.thread_exit() // holding exit_held
+}
+
+Robust_Waiter :: struct {
+	word:     ^u32,
+	expected: u32,
+	result:   vx.Status,
+	done:     bool,
+}
+
+robust_wait :: proc "c" (unused: vx.Handle, arg2: u64) -> ! {
+	w := (^Robust_Waiter)(uintptr(arg2))
+	intrinsics.atomic_store(&w.result, rt.futex_wait(w.word, w.expected, after_ms(3000)))
+	intrinsics.atomic_store(&w.done, true)
+	rt.thread_exit()
+}
+
+robust_waited :: proc "contextless" (w: ^Robust_Waiter) -> bool {
+	for i := 0; i < 3000 && !intrinsics.atomic_load(&w.done); i += 1 {
+		_ = rt.futex_wait(&never, 0, after_ms(1))
+	}
+	return intrinsics.atomic_load(&w.done)
+}
+
+test_robust :: proc "contextless" () {
+	W, DIED :: vx.FUTEX_WAITERS, vx.FUTEX_OWNER_DIED
+	// Refusals.
+	check(rt.thread_set_robust(&exit_head, 16, 77) == .Err_Invalid)
+	check(rt.thread_set_robust(&exit_head, 24, 0) == .Err_Invalid)
+	check(rt.thread_set_robust(rawptr(uintptr(&exit_head) + 4), 24, 77) == .Err_Invalid)
+	check(rt.thread_set_robust(nil, 0, 0) == .Ok)
+
+	// A thread that exits holding a lock: OWNER_DIED, waiters kept; a lock it
+	// lists but another owns is left alone.
+	exit_head = {
+		next   = u64(uintptr(&exit_held)),
+		offset = i64(offset_of(Robust_Entry, word)),
+	}
+	exit_held.next = u64(uintptr(&exit_other))
+	exit_other.next = u64(uintptr(&exit_head))
+	intrinsics.atomic_store(&exit_held.word, 77 | W)
+	intrinsics.atomic_store(&exit_other.word, 78)
+	th, st := rt.thread_create(rt.self)
+	check(st == .Ok && rt.thread_start(th, u64(uintptr(rawptr(robust_exiter))), new_stack(), 0, 0) == .Ok)
+	st = rt.futex_wait(&exit_held.word, 77 | W, after_ms(3000))
+	check(st == .Ok || st == .Err_Bad_State) // woken, or it had gone already
+	check(intrinsics.atomic_load(&exit_held.word) == W | DIED && intrinsics.atomic_load(&exit_other.word) == 78)
+	_ = rt.handle_close(th)
+
+	// A task killed holding a lock in a VMO it shares: the waiter here, on the
+	// same word through its own mapping, is woken (one futex: keyed by VMO).
+	shared, sst := rt.vmo_create(4096)
+	at: u64
+	mst := vx.Status.Err_Invalid
+	if sst == .Ok {
+		at, mst = rt.as_map(rt.self, shared, 0, 4096, {.Write})
+	}
+	check(sst == .Ok && mst == .Ok)
+	if mst != .Ok {
+		return
+	}
+	h := (^Robust_Head)(uintptr(at))
+	e := (^Robust_Entry)(uintptr(at + 64))
+	h^ = {
+		next   = CHILD_DATA + 64, // the child's addresses
+		offset = i64(offset_of(Robust_Entry, word)),
+	}
+	e.next = CHILD_DATA
+	intrinsics.atomic_store(&e.word, 0x1234 | W)
+	@(static) w: Robust_Waiter
+	w = {
+		word     = &e.word,
+		expected = 0x1234 | W,
+	}
+	th, st = rt.thread_create(rt.self)
+	check(st == .Ok && rt.thread_start(th, u64(uintptr(rawptr(robust_wait))), new_stack(), 0, u64(uintptr(&w))) == .Ok)
+	child, cok := start_child_bound(.Robust_Hold, vx.HANDLE_NONE, {}, nil, shared)
+	check(cok && wait_blocked(child)) // registered
+	_ = rt.futex_wait(&never, 0, after_ms(30)) // the waiter waits
+	check(!intrinsics.atomic_load(&w.done))
+	check(rt.task_kill(child, "killed holding a lock") == .Ok)
+	check(robust_waited(&w) && intrinsics.atomic_load(&w.result) == .Ok && intrinsics.atomic_load(&e.word) == W | DIED)
+	rt.close_all(th, child)
+	_ = rt.as_unmap(rt.self, at, 4096)
+	_ = rt.handle_close(shared)
+
+	// A waiter on a pager's page that is evicted and supplied again, in
+	// another physical page: the wake still finds it (keyed by VMO and offset).
+	res := root_resource()
+	port, pst := rt.port_create()
+	weak, wst := rt.handle_dup(res, {.Pager, .Duplicate})
+	pager := vx.HANDLE_NONE
+	pgst := vx.Status.Err_Invalid
+	if pst == .Ok && wst == .Ok {
+		pager, pgst = rt.pager_create(weak, port, 1, 2_000_000_000)
+	}
+	check(pst == .Ok && wst == .Ok && pgst == .Ok)
+	_ = rt.handle_close(weak)
+	five := u32(5)
+	vmo, vst := rt.vmo_create_pager(pager, 9, 4096)
+	src, sst2 := rt.vmo_create(4096)
+	check(vst == .Ok && sst2 == .Ok && rt.vmo_write(src, 0, memory.ptr_to_bytes(&five)) == .Ok && rt.pager_supply(pager, vmo, 0, 4096, src, 0) == .Ok)
+	at, mst = rt.as_map(rt.self, vmo, 0, 4096, {.Write})
+	check(mst == .Ok)
+	word := (^u32)(uintptr(at))
+	w = {
+		word     = word,
+		expected = 5,
+	}
+	th, st = rt.thread_create(rt.self)
+	check(st == .Ok && rt.thread_start(th, u64(uintptr(rawptr(robust_wait))), new_stack(), 0, u64(uintptr(&w))) == .Ok)
+	_ = rt.futex_wait(&never, 0, after_ms(30)) // waiting on the page
+	check(!intrinsics.atomic_load(&w.done))
+	check(rt.pager_op(pager, vmo, .Evict, 0, 4096) == .Ok)
+	check(rt.futex_wait(word, 5, after_ms(10)) == .Err_Bad_State) // absent: load, ask again
+	// The freed page taken by something else first, so the supply's is another.
+	taker, tst := rt.vmo_create(4096)
+	junk := u64(1)
+	check(tst == .Ok && rt.vmo_write(taker, 0, memory.ptr_to_bytes(&junk)) == .Ok)
+	check(rt.pager_supply(pager, vmo, 0, 4096, src, 0) == .Ok) // a new page
+	intrinsics.atomic_store(word, 6)
+	woken, wkst := rt.futex_wake(word, 1)
+	check(wkst == .Ok && woken == 1)
+	check(robust_waited(&w) && intrinsics.atomic_load(&w.result) == .Ok)
+	_ = rt.as_unmap(rt.self, at, 4096)
+	rt.close_all(th, vmo, src, taker, pager, port)
+}
+
 // --- Note stacks (ADR-0036) ---
 
 foreign _ {
@@ -2705,6 +2868,7 @@ vx_main :: proc() -> int {
 	test_exception_port()
 	test_in_task()
 	test_note_stack()
+	test_robust()
 	test_vmo_clone()
 	test_debugger()
 	test_tls()

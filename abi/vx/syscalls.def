@@ -70,3 +70,4 @@ VX_SYSCALL(system_power)
 VX_SYSCALL(clock_set)
 VX_SYSCALL(as_key_alloc) // ADR-0035
 VX_SYSCALL(as_key_free)
+VX_SYSCALL(thread_set_robust) // ADR-0037

@@ -146,6 +146,8 @@ Thread :: struct {
 	// the thread itself changes them.
 	note_stack:        Uva,
 	note_stack_size:   u64,
+	robust_head:       Uva, // its robust list (thread_set_robust, ADR-0037); 0: none
+	robust_owner:      u32, // the owner value its robust lock words hold
 	// thread_interrupt's notes not yet delivered, oldest first: each is its
 	// own exception (Plan 9 queued notes the same way).
 	interrupt_pending: bool, // notes waiting, read without the lock

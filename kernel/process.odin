@@ -111,6 +111,11 @@ thread_start :: proc "contextless" (th: ^Thread, entry, sp: Uva, arg, arg2: u64)
 thread_exit_current :: proc "contextless" () -> ! {
 	th := this_cpu().current
 	t := th.task
+	// Its robust locks marked as the owner's dead, while its address space is
+	// still there (ADR-0015): a kill comes this way too.
+	if th.robust_head != 0 && t.root != 0 {
+		futex_robust_walk(th)
+	}
 	spin_lock(&t.lock)
 	th.exited = true
 	t.live_threads -= 1

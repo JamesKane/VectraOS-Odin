@@ -37,6 +37,7 @@ Be_Thread :: struct {
 	slot:          u32, // in be_threads, plus 1; 0: not there
 	handlers_ran:  u32, // signal.odin's: the handlers run on it,
 	eintr_ran:     u32, // and those of them not SA_RESTART
+	robust:        u64, // set_robust_list's head
 }
 
 @(private="file")
@@ -94,23 +95,20 @@ be_set_tid_address :: proc "contextless" (ctid: ^u32) -> int {
 	if !be_tls {
 		be_tl = be_early
 		be_tls = true
-		be_register(be_only_thread_id(), &be_tl)
+		be_slot_set(0, be_only_thread_id(), &be_tl)
 	}
 	be_tl.ctid, be_tl.tid = ctid, posix_pid()
 	return int(be_tl.tid)
 }
 
+// A thread's id: the pid for the first thread, until set_tid_address says so
+// too.
 be_gettid :: proc "contextless" () -> int {
 	me := be_me()
 	return int(me.tid != 0 ? me.tid : posix_pid())
 }
 
 // --- pthread_create's thread ---
-
-// A thread's id: the first thread's is the process's; another's, its kernel
-// thread id with bit 30 set, so the two never meet.
-@(private="file")
-TID_THREAD :: i64(1) << 30
 
 @(private="file")
 Clone_Fn :: #type proc "c" (arg: rawptr) -> i32
@@ -121,6 +119,7 @@ Clone :: struct {
 	arg:  rawptr,
 	tls:  u64,
 	tid:  i64,
+	slot: u32,
 	ctid: ^u32,
 	mask: linux.Sig_Set,
 }
@@ -135,8 +134,9 @@ clone_entry :: proc "c" (unused: vx.Handle, at: u64) -> ! {
 		tid  = c.tid,
 		ctid = c.ctid,
 		mask = c.mask,
+		slot = c.slot + 1,
 	}
-	be_register(u32(c.tid &~ TID_THREAD), &be_tl)
+	intrinsics.atomic_store(&be_threads[c.slot].t, &be_tl) // __clone gave the slot its kernel id
 	code := c.fn(c.arg)
 	_ = vx_syscall(int(linux.Sys.exit), int(code), 0, 0, 0, 0, 0)
 	intrinsics.trap()
@@ -165,11 +165,18 @@ be_clone :: proc "c" (fn: Clone_Fn, stack: rawptr, flags: i32, arg: rawptr, ptid
 		ctid = flags & linux.CLONE_CHILD_CLEARTID != 0 ? ctid : nil,
 		mask = be_me().mask,
 	}
+	slot := posix_pid() <= PID_MASK ? be_slot_take() : 0
+	if slot == 0 {
+		return i32(fail(.EAGAIN)) // 255 threads besides the first, or a pid past 2^22: no id fits (ADR-0015)
+	}
 	th, id, st := rt.thread_create_id(rt.self)
 	if st != .Ok {
+		intrinsics.atomic_store(&be_threads[slot].id, 0)
 		return i32(errno_of(st))
 	}
-	c.tid = TID_THREAD | i64(id)
+	c.slot = slot
+	c.tid = i64(slot) << TID_SHIFT | posix_pid()
+	intrinsics.atomic_store(&be_threads[slot].id, id)
 	if flags & linux.CLONE_PARENT_SETTID != 0 {
 		ptid^ = i32(c.tid)
 	}
@@ -178,6 +185,7 @@ be_clone :: proc "c" (fn: Clone_Fn, stack: rawptr, flags: i32, arg: rawptr, ptid
 	_ = rt.handle_close(th) // the thread goes on without it
 	if st != .Ok {
 		intrinsics.atomic_sub(&be_live, 1)
+		intrinsics.atomic_store(&be_threads[slot].id, 0)
 		return i32(errno_of(st))
 	}
 	return i32(c.tid)
@@ -234,19 +242,28 @@ be_unmapself :: proc "c" (base: rawptr, size: uint) -> ! {
 // kept pending there, not taken as the process's.
 BE_DIRECTED :: " thread"
 
-// tkill and tgkill: to this thread, delivered as the call returns; to
-// another, a note to its kernel thread, whose handler takes it there.
+// tkill and tgkill: to this thread, its own, delivered as the call returns;
+// to another, a note to its kernel thread (its id's slot says which), whose
+// handler keeps it for that thread.
 be_thread_kill :: proc "contextless" (tid: i64, sig: int) -> int {
 	if sig < 0 || sig > SIG_MAX {
 		return fail(.EINVAL)
 	}
-	if tid == i64(be_gettid()) || tid == posix_pid() {
-		return sig_kill(posix_pid(), sig)
+	pid := posix_pid()
+	slot := u64(tid) >> TID_SHIFT
+	if tid <= 0 || tid & PID_MASK != pid || slot >= BE_THREADS {
+		return fail(.ESRCH)
 	}
-	if tid & TID_THREAD == 0 {
+	id := intrinsics.atomic_load(&be_threads[slot].id)
+	if id == 0 || id == SLOT_TAKEN {
 		return fail(.ESRCH)
 	}
 	if sig == 0 {
+		return 0
+	}
+	if be_me().slot == u32(slot) + 1 {
+		be_me().pending += {sig}
+		sig_set_sender(sig, pid)
 		return 0
 	}
 	buf: [note.ERRMAX]u8
@@ -255,19 +272,29 @@ be_thread_kill :: proc "contextless" (tid: i64, sig: int) -> int {
 	if n + len(BE_DIRECTED) <= len(buf) { // its own: sig_note keeps it for that thread
 		n += copy(buf[n:], BE_DIRECTED)
 	}
-	st := rt.thread_interrupt(rt.self, u32(tid &~ TID_THREAD), string(buf[:n]))
+	st := rt.thread_interrupt(rt.self, id, string(buf[:n]))
 	return st == .Err_Not_Found ? fail(.ESRCH) : errno_of(st)
 }
 
 // --- The process's threads (upstream's M6 step 6d2b) ---
 //
-// Each live thread by its kernel id, for a signal from another process that
-// the thread whose note it came in blocks: be_forward passes it to one that
-// does not. A reader counts itself in before it looks at a thread's record,
-// which be_unregister waits out, so the record (in that thread's TLS) is not
-// gone from under it.
+// Each live thread in a slot, with its kernel id: slot 0 the first thread's,
+// 1 to 255 pthread_create's. A thread's id (gettid, and the owner in musl's
+// lock words) is its slot shifted left 22, plus the pid: 30 bits, unique
+// across processes while pids stay under 2^22 (ADR-0015, upstream's M6 step
+// 6d3). tkill finds the kernel thread through it, and be_forward passes a
+// signal from another process, that the thread whose note it came in
+// blocks, to one that does not. A reader counts itself in before it looks at
+// a thread's record, which be_unregister waits out, so the record (in that
+// thread's TLS) is not gone from under it.
 
-BE_THREADS :: 256 // past these, a thread is not offered signals
+BE_THREADS :: 256
+@(private="file")
+TID_SHIFT :: 22
+@(private="file")
+PID_MASK :: i64(1) << TID_SHIFT - 1
+@(private="file")
+SLOT_TAKEN :: max(u32) // reserved by __clone; its thread not made yet
 
 Be_Slot :: struct {
 	id:      u32, // its kernel thread id; 0: free
@@ -277,14 +304,22 @@ Be_Slot :: struct {
 
 be_threads: [BE_THREADS]Be_Slot
 
-be_register :: proc "contextless" (id: u32, t: ^Be_Thread) {
-	for &s, i in be_threads {
-		if _, ok := intrinsics.atomic_compare_exchange_strong(&s.id, 0, id); ok {
-			intrinsics.atomic_store(&s.t, t)
-			t.slot = u32(i) + 1
-			return
+// A free slot past the first's, reserved; 0 if none.
+@(private="file")
+be_slot_take :: proc "contextless" () -> u32 {
+	for i in 1 ..< BE_THREADS {
+		if _, ok := intrinsics.atomic_compare_exchange_strong(&be_threads[i].id, 0, SLOT_TAKEN); ok {
+			return u32(i)
 		}
 	}
+	return 0
+}
+
+// Slot i is the thread whose record is t, kernel id id.
+be_slot_set :: proc "contextless" (i: u32, id: u32, t: ^Be_Thread) {
+	intrinsics.atomic_store(&be_threads[i].id, id)
+	intrinsics.atomic_store(&be_threads[i].t, t)
+	t.slot = i + 1
 }
 
 @(private="file")
@@ -321,7 +356,7 @@ be_forward :: proc "contextless" (sig: int, text: string) -> bool {
 	me := be_me()
 	for &s in be_threads {
 		id := intrinsics.atomic_load(&s.id)
-		if id == 0 {
+		if id == 0 || id == SLOT_TAKEN {
 			continue
 		}
 		intrinsics.atomic_add(&s.readers, 1)
@@ -403,8 +438,9 @@ be_after_fork :: proc "contextless" () {
 	intrinsics.atomic_store(&be_live, 1) // the thread that forked, alone
 	be_threads = {}
 	me := be_me()
-	me.slot = 0
-	be_register(be_only_thread_id(), me)
+	me.robust = 0 // the child's thread is a new one, with no list (musl registers again)
+	me.pending = {} // and none of the thread's signals pending
+	be_slot_set(0, be_only_thread_id(), me)
 	if me.alt_size != 0 {
 		ns := vx.Note_Stack {
 			base = me.alt_base,

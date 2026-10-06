@@ -32,6 +32,8 @@ foreign _ {
 	vx_user_copy_fault :: proc "c" () --- // an address only
 	vx_user_load32 :: proc "c" (src: rawptr, dst: ^u32) -> bool ---
 	vx_user_load32_fault :: proc "c" () --- // an address only
+	vx_user_cas32 :: proc "c" (word: rawptr, old, new: u32, seen: ^u32) -> bool ---
+	vx_user_cas32_fault :: proc "c" () --- // an address only
 }
 
 // Where a kernel fault on a user address at pc resumes, if pc is inside one
@@ -39,11 +41,14 @@ foreign _ {
 uaccess_fixup :: proc "contextless" (pc: u64) -> u64 {
 	copy_at, copy_fault := u64(uintptr(rawptr(vx_user_copy_in))), u64(uintptr(rawptr(vx_user_copy_fault))) // _out lies between them
 	load_at, load_fault := u64(uintptr(rawptr(vx_user_load32))), u64(uintptr(rawptr(vx_user_load32_fault)))
+	cas_at, cas_fault := u64(uintptr(rawptr(vx_user_cas32))), u64(uintptr(rawptr(vx_user_cas32_fault)))
 	switch {
 	case pc >= copy_at && pc < copy_fault:
 		return copy_fault
 	case pc >= load_at && pc < load_fault:
 		return load_fault
+	case pc >= cas_at && pc < cas_fault:
+		return cas_fault
 	}
 	return 0
 }
@@ -53,6 +58,15 @@ uaccess_fixup :: proc "contextless" (pc: u64) -> u64 {
 @(require_results)
 user_load32 :: proc "contextless" (src: Uva) -> (v: u32, ok: bool) {
 	ok = vx_user_load32(rawptr(uintptr(src)), &v)
+	return
+}
+
+// A compare-and-swap on an aligned 32-bit user word (a robust lock's,
+// ADR-0037): seen is what was there, and new went in if it was old. ok is
+// false if nothing maps it writably now.
+@(require_results)
+user_cas32 :: proc "contextless" (word: Uva, old, new: u32) -> (seen: u32, ok: bool) {
+	ok = vx_user_cas32(rawptr(uintptr(word)), old, new, &seen)
 	return
 }
 
@@ -1126,6 +1140,10 @@ sys_task_exec :: proc "contextless" (sh, bootstrap: vx.Handle, entry, sp: Uva) -
 		return st
 	}
 
+	// The old program's robust locks are let go while its memory is still the
+	// caller's (ADR-0015), and its list goes with it.
+	futex_robust_walk(this_cpu().current)
+
 	// The address spaces change places, and the caller takes the new
 	// program's name. Both locks: nothing else maps into either meanwhile.
 	lock_pair(t, s)
@@ -1392,6 +1410,8 @@ syscall_dispatch :: proc "contextless" (nr: u64, a: [6]u64) -> i64 {
 		return i64(sys_as_key_alloc(vx.Handle(a[0]), Uva(a[1])))
 	case .As_Key_Free:
 		return i64(sys_as_key_free(vx.Handle(a[0]), a[1]))
+	case .Thread_Set_Robust:
+		return i64(sys_thread_set_robust(Uva(a[0]), a[1], a[2]))
 	case .Handle_Dup:
 		return i64(sys_handle_dup(vx.Handle(a[0]), a[1], Uva(a[2])))
 	case .Handle_Close:

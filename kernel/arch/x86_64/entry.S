@@ -304,6 +304,21 @@ vx_user_load32_fault:
     xorl %eax, %eax
     ret
 
+// vx_user_cas32(word, old, new, seen) -> bool: a locked compare-and-swap on a
+// user word (a robust lock's, ADR-0037); *seen gets what was there, and new
+// went in if it was old. A fault returns false.
+    .globl vx_user_cas32, vx_user_cas32_fault
+    .type vx_user_cas32, @function
+vx_user_cas32:
+    movl %esi, %eax
+    lock cmpxchgl %edx, (%rdi)
+    movl %eax, (%rcx)
+    movl $1, %eax
+    ret
+vx_user_cas32_fault:
+    xorl %eax, %eax
+    ret
+
     .set i, 0
     .rept 256
     STUB %i

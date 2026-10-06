@@ -697,6 +697,17 @@ Note_Stack :: struct {
 }
 NOTE_STACK_MIN :: 2048 // as POSIX's MINSIGSTKSZ on x86_64
 
+// thread_set_robust(head, size, owner) (ADR-0037): the calling thread's robust
+// list, Linux's: head is three words (the first entry of a ring that ends at
+// head, the offset from an entry to its lock word, the entry being added or
+// taken off, or 0), size 24, owner the value its lock words hold (1 to
+// FUTEX_OWNER_MASK); head 0 unregisters. As the thread ends (exit, kill,
+// task_exec) the kernel walks at most 2048 entries and sets each word the
+// thread still owns to OWNER_DIED, WAITERS kept, waking one waiter if it was set.
+FUTEX_WAITERS :: u32(0x8000_0000)
+FUTEX_OWNER_DIED :: u32(0x4000_0000)
+FUTEX_OWNER_MASK :: u32(0x3fff_ffff)
+
 // .Get_Xstate's most: the kernel's limit, a page (Cpu_Info.xstate_size says
 // how much of it a thread's state takes).
 XSTATE_MAX :: 4096

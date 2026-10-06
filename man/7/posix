@@ -92,11 +92,13 @@ A stopping signal stops the process through its `ctl`, and `SIGKILL`, `SIGSTOP` 
 @node=threads title="Threads"
 
 pthreads are musl's own, on kernel threads of the process's task: the back end's `__clone` starts one with musl's thread pointer, and its end clears and wakes the word musl joins on.
-The first thread's id is the process's; another's is its kernel thread id with bit 30 set.
+The first thread's id is the process's; another's is its slot in the back end's table of threads (1 to 255) shifted left 22, plus the pid, so that it fits the 30 bits a lock word keeps for its owner and no two processes' threads share one (ADR-0037).
+`pthread_create` fails with `EAGAIN` past 255 threads besides the first.
 The back end is one lock, held through each call (recursive, as the back end calls musl), and let go where a call waits: a pipe, a sleep, a futex, `sigsuspend`.
 The mask is each thread's own, and a new thread starts with its creator's.
 `pthread_kill` posts a note to the one thread, whose handler runs there.
 `fork` in a thread makes a child of that thread alone.
+Robust mutexes (`PTHREAD_MUTEX_ROBUST`) are musl's, over the kernel's robust futexes (futex(2)): a thread that ends holding one, by `pthread_exit` or by its process being killed, leaves it for the next locker with `EOWNERDEAD`, across processes too when it is in a file both map `MAP_SHARED`.
 A signal from another process that the thread it came to blocks is passed to a thread that does not; with none, it waits, the process's, for the first to unblock it.
 `nanosleep` and `clock_nanosleep` end with `EINTR` once a handler has run, `SA_RESTART` or not, as on Linux.
 

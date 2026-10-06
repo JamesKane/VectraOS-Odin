@@ -1531,6 +1531,98 @@ static void test_signal_contexts(void) {
   signal(SIGUSR2, SIG_DFL);
 }
 
+// --- Thread ids and robust mutexes (M6 step 6d3) ---
+
+// On a thread that is not the first: its id fits a lock word's 30 bits, and
+// the mutexes that check their owner by it work.
+static void *t_owner_checks(void *arg) {
+  (void)arg;
+  pid_t tid = gettid();
+  bool ok = tid != getpid() && (tid & 0x3fffffff) == tid;
+  pthread_mutexattr_t a;
+  pthread_mutexattr_init(&a);
+  pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+  pthread_mutex_t r;
+  pthread_mutex_init(&r, &a);
+  ok = ok && pthread_mutex_lock(&r) == 0 && pthread_mutex_lock(&r) == 0 && pthread_mutex_unlock(&r) == 0 &&
+       pthread_mutex_unlock(&r) == 0;
+  pthread_mutexattr_settype(&a, PTHREAD_MUTEX_ERRORCHECK);
+  pthread_mutex_t e;
+  pthread_mutex_init(&e, &a);
+  ok =
+      ok && pthread_mutex_lock(&e) == 0 && pthread_mutex_lock(&e) == EDEADLK && pthread_mutex_unlock(&e) == 0;
+  return (void *)(intptr_t)ok;
+}
+
+static pthread_mutex_t t_robust;
+
+static void *t_dies_holding(void *arg) {
+  (void)arg;
+  pthread_mutex_lock(&t_robust);
+  return nullptr; // and ends, holding it
+}
+
+// A forked child's: m locked, the parent told, and nothing more until it is killed.
+[[noreturn]] static void t_hold_until_killed(pthread_mutex_t *m, int ready) {
+  pthread_mutex_lock(m);
+  write(ready, "l", 1);
+  for (;;) pause();
+}
+
+static void test_robust_mutexes(void) {
+  pthread_t t;
+  void *ok = nullptr;
+  CHECK(pthread_create(&t, nullptr, t_owner_checks, nullptr) == 0 && pthread_join(t, &ok) == 0 && ok);
+
+  // A thread that ends holding a robust mutex: the next locker hears of it,
+  // makes it consistent, and it is a mutex again.
+  pthread_mutexattr_t a;
+  pthread_mutexattr_init(&a);
+  CHECK(pthread_mutexattr_setrobust(&a, PTHREAD_MUTEX_ROBUST) == 0);
+  pthread_mutex_init(&t_robust, &a);
+  CHECK(pthread_create(&t, nullptr, t_dies_holding, nullptr) == 0 && pthread_join(t, nullptr) == 0);
+  int r = pthread_mutex_lock(&t_robust);
+  CHECK(r == EOWNERDEAD && pthread_mutex_consistent(&t_robust) == 0);
+  CHECK(pthread_mutex_unlock(&t_robust) == 0);
+  r = pthread_mutex_lock(&t_robust);
+  CHECK(r == 0);
+  CHECK(pthread_mutex_unlock(&t_robust) == 0);
+
+  // Shared with another process, through a file both map, which is killed
+  // holding it while this one waits: the kernel marks it, and wakes this one.
+  // Where /tmp maps shared (fsd's: ctestfsd).
+  if (!maps_shared) return;
+  int fd = open("/tmp/robust", O_RDWR | O_CREAT | O_TRUNC, 0644);
+  CHECK(fd >= 0 && ftruncate(fd, 4096) == 0);
+  pthread_mutex_t *m = mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  CHECK(m != MAP_FAILED);
+  if (m == MAP_FAILED) return;
+  pthread_mutexattr_setpshared(&a, PTHREAD_PROCESS_SHARED);
+  CHECK(pthread_mutex_init(m, &a) == 0);
+  int ready[2];
+  CHECK(pipe(ready) == 0);
+  pid_t pid = fork();
+  if (pid == 0) t_hold_until_killed(m, ready[1]);
+  char c = 0;
+  CHECK(read(ready[0], &c, 1) == 1 && c == 'l');
+  pid_t killer = fork(); // kills it a little after this one waits
+  if (killer == 0) {
+    nanosleep(&(struct timespec){.tv_nsec = 100'000'000}, nullptr);
+    _exit(kill(pid, SIGKILL) == 0 ? 0 : 1);
+  }
+  r = pthread_mutex_lock(m); // waits until the kill
+  CHECK(r == EOWNERDEAD);
+  int status = 0;
+  CHECK(waitpid(pid, &status, 0) == pid && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+  CHECK(waitpid(killer, &status, 0) == killer && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  CHECK(pthread_mutex_consistent(m) == 0 && pthread_mutex_unlock(m) == 0);
+  close(ready[0]);
+  close(ready[1]);
+  munmap(m, 4096);
+  close(fd);
+  unlink("/tmp/robust");
+}
+
 static void test_threads(void) {
   pthread_t t[4];
   t_mine = 1000;
@@ -1698,6 +1790,7 @@ int main(int argc, char **argv) {
 
   test_threads();
   test_signal_contexts();
+  test_robust_mutexes();
 
   atexit(at_exit);
   fprintf(stderr, "ctest: to stderr\n");

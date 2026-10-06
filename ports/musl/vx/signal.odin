@@ -347,6 +347,11 @@ sig_run_pending :: proc "contextless" () {
 	be_me().call_deadline = kept
 }
 
+// Who sent sig, for its siginfo when it is delivered.
+sig_set_sender :: proc "contextless" (sig: int, who: i64) {
+	sender_of[sig] = who
+}
+
 sig_raise_self :: proc "contextless" (sig: int) {
 	pending_add(sig)
 	sender_of[sig] = posix_pid()

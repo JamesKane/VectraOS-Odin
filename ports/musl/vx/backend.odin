@@ -274,6 +274,19 @@ dispatch :: proc "contextless" (n, a1, a2, a3, a4, a5, a6: int) -> int {
 		return be_thread_kill(i64(i32(a1)), int(i32(a2)))
 	case .tgkill:
 		return i64(i32(a1)) == posix_pid() ? be_thread_kill(i64(i32(a2)), int(i32(a3))) : fail(.ESRCH)
+	case .set_robust_list: // musl's robust mutexes: the kernel marks them OWNER_DIED as the thread ends
+		if a2 != 24 || rt.thread_set_robust(ptr(a1), u64(a2), u32(be_gettid())) != .Ok {
+			return fail(.EINVAL)
+		}
+		be_me().robust = u64(a1)
+		return 0
+	case .get_robust_list: // musl asks it once, to see robust mutexes work
+		if a1 != 0 && a1 != be_gettid() {
+			return fail(.EPERM)
+		}
+		(^uintptr)(ptr(a2))^ = uintptr(be_me().robust)
+		(^uint)(ptr(a3))^ = 24
+		return 0
 	case .kill:
 		return sig_kill(i64(i32(a1)), int(i32(a2)))
 	case .rt_sigaction:
@@ -281,7 +294,7 @@ dispatch :: proc "contextless" (n, a1, a2, a3, a4, a5, a6: int) -> int {
 	case .rt_sigprocmask:
 		return sig_procmask(int(i32(a1)), ptr(a2), (^linux.Sig_Set)(ptr(a3)))
 	case .rt_sigpending:
-		intrinsics.unaligned_store((^linux.Sig_Set)(ptr(a1)), pending_load())
+		intrinsics.unaligned_store((^linux.Sig_Set)(ptr(a1)), pending_load() + be_me().pending) // the process's and the thread's
 		return 0
 	case .rt_sigsuspend:
 		return sig_suspend(sigset_word(ptr(a1)))
