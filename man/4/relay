@@ -1,0 +1,32 @@
+page=relay sect=4 summary="one 9P session over TCP, shared by every client"
+    src=servers/relay/relay.c,lib/vx-9p/ring_server.c,lib/vx-ns/dial.c
+    keys=tcp,dial,share,mount,9front,devmnt,fid,tag,flush
+
+# SYNOPSIS
+
+```usage
+relay address
+```
+
+# DESCRIPTION
+
+relay dials `address` (`tcp!HOST!PORT`, or `9p://HOST:PORT`) through its namespace's `/net`, and serves the 9P session it makes there to every client that connects to its `listen` channel (M6 step 6d4d2b), as 9front's mount driver shares one mounted channel among all the mounts of it.
+The session is versioned once, by the relay; a client's `Tversion` is answered by the relay, with the session's dialect and the smaller msize, and starts that client's session again.
+Each client attaches as itself.
+Fids and tags on the wire are the relay's: each client numbers its own as it likes, and the relay swaps them on the way out and back.
+`Tflush` goes on to the server; the flushed request's reply, if it comes first, is dropped.
+A client that goes has its fids clunked.
+
+The relay runs while anything can reach it: its listen channel's peer, held by a post in srvfs(4) or by whoever spawned it, or a client connected already.
+When the last goes, the relay exits, and its TCP conversation closes.
+If the server hangs up, the relay prints `relay: ADDRESS hung up` and exits, and its clients' calls fail.
+
+# SEE ALSO
+
+srvfs(4), namespace(6), mount(1), version(5); 9front's mount driver, `devmnt.c`
+
+# BUGS
+
+Nothing starts a relay yet but relaytest: the `srv` command, and `mount tcp!...` through a relay, are M6 step 6d4d2c.
+There is no authentication (`Tauth` is passed on, but nothing speaks it before keyd, M10).
+At most 64 requests are on the stream at once, and 16 clients connect.

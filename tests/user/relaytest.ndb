@@ -1,0 +1,6 @@
+# tests/user/relaytest.ndb: relaytest in the POSIX namespace, for its /net
+# (tests/qemu/relay.ndb), as vectra.
+
+service=relaytest program=/boot/bin/relaytest console
+user=vectra
+ns=posix

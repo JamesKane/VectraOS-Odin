@@ -265,12 +265,13 @@ load_scenario :: proc(name: string, a: ^Arch) -> (sc: Scenario, ok: bool) {
 	return sc, true
 }
 
-// Whether the scenario types something that dials addr: what decides which
-// host servers it needs.
+// Whether the scenario reaches addr, which decides the host servers it
+// needs: what it types names it, or what it expects to see does (the relay
+// scenario's, whose test program dials it).
 @(private="file")
 dials :: proc(sc: ^Scenario, addr: string) -> bool {
 	for e in sc.expects {
-		if strings.contains(e.input, addr) {
+		if strings.contains(e.input, addr) || strings.contains(e.text, addr) {
 			return true
 		}
 	}

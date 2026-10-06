@@ -31,6 +31,7 @@ Dialed :: struct {
 	used:       bool,
 	addr:       [dynamic; MAX_SRC]u8, // as /net/cs was asked, for sharing
 	ctl, data:  File,
+	data_path:  [dynamic; 64]u8, // /net/tcp/N/data, for a second open (the relay's reader)
 	lock:       u32, // a stream carries one call at a time: threads take turns (dial_lock)
 	tbuf, rbuf: [DIAL_MSIZE]u8,
 }
@@ -194,6 +195,7 @@ dial :: proc "contextless" (ns: ^Namespace, addr: string) -> (c: ^p9.Client, src
 	path, fits := str.join(path_buf[:], clone_path[:dir], number, "/data")
 	if st == .Ok && fits {
 		st = open(ns, path, p9.ORDWR, &d.data)
+		_ = append(&d.data_path, path) // it fit path_buf, which is as long
 	} else if st == .Ok {
 		st = .Err_Invalid
 	}
@@ -218,4 +220,16 @@ dial :: proc "contextless" (ns: ^Namespace, addr: string) -> (c: ^p9.Client, src
 		return nil, "", st
 	}
 	return &d.c, string(d.addr[:]), .Ok
+}
+
+// A dialed connection's stream: its data file and that file's path, for a
+// second open (the relay's reader). The file is the caller's to use from
+// here, as nothing calls through c again. Not ok if c was not dialed.
+dial_stream :: proc "contextless" (c: ^p9.Client) -> (data: File, path: string, ok: bool) {
+	for &d in dials {
+		if d.used && &d.c == c {
+			return d.data, string(d.data_path[:]), true
+		}
+	}
+	return {}, "", false
 }

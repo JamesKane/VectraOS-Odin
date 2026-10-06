@@ -1,0 +1,13 @@
+# tests/qemu/relay.ndb: the relay (M6 step 6d4d2b): one 9P session to u9fs
+# over TCP shared by two clients, fids and tags remapped, flushes, lifetime
+# (tests/user/relaytest.c).
+
+scenario=relay timeout=60 cmdline=vx.skip=rc with=relaytest
+expect="relay: tcp!10.0.2.101!564 as 9P2000"
+expect="relaytest: 29 checks, 0 failed"
+line="svcd: relaytest exited"
+fail="vx: panic"
+fail="relaytest: FAILED"
+fail="svcd: relaytest exited: "
+fail=") killed: "
+fail="relay: cannot dial"

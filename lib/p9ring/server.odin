@@ -134,6 +134,8 @@ Held :: struct {
 Server_Conn :: struct {
 	used, armed: bool,
 	gen:         u32,
+	slot:        int,
+	owner:       ^Server,
 	held:        [dynamic; rt.DEPTH]Held, // oldest first
 	ring:        ring.Ring,
 	out:         Arena, // the server's arena: the replies' bytes
@@ -163,6 +165,18 @@ Server :: struct {
 	// Set by the file server when what it just did may let a held request go
 	// on: the held requests are served again before the server sleeps.
 	again:         bool,
+	// Optional, in place of fs: each request as it came, on connection
+	// `conn` (its slot), for a server that forwards requests rather than
+	// serving them (the relay, upstream's M6 step 6d4d2b). It answers as
+	// p9.serve does: the reply's length in resp, or .Defer to be asked
+	// again; the rules above hold as for fs, Tflush's too. `closed` is told
+	// when a connection has gone, its held requests dropped unanswered.
+	raw:           proc "contextless" (ctx: rawptr, conn: int, req: []u8, resp: []u8) -> (reply_len: int, res: p9.Serve_Result),
+	closed:        proc "contextless" (ctx: rawptr, conn: int),
+	// Whether to go on serving the connections it has once the listen
+	// channel's peer has gone: serve then returns when the last one goes.
+	// Without it, it returns at once.
+	linger:        bool,
 	// Its connections: default_conns, unless the file server gives more of
 	// its own (procfs, which holds one per process) before serving. At most
 	// MAX_CONNS_LIMIT. serve points it at default_conns otherwise, so a Server
@@ -185,6 +199,9 @@ drop_request_handle :: proc "contextless" (c: ^Server_Conn) {
 @(private="file")
 close_conn :: proc "contextless" (c: ^Server_Conn) {
 	drop_request_handle(c)
+	if c.owner != nil && c.owner.closed != nil {
+		c.owner.closed(c.owner.ctx, c.slot)
+	}
 	for h in c.held {
 		rt.close_all(h.handle)
 	}
@@ -237,6 +254,7 @@ connect :: proc "contextless" (s: ^Server, rep: ^vx.Msg_Header) -> (st: vx.Statu
 		size = u64(len(ring.arena(&c.ring))),
 	}
 	c.end = h.server
+	c.slot, c.owner = i, s
 	c.srv = {fs = s.fs, max_msize = rt.MSIZE, supported = s.supported, shared = &s.shared}
 	return .Ok
 }
@@ -320,7 +338,13 @@ try :: proc "contextless" (c: ^Server_Conn, h: ^Held) -> Tried {
 	copy(c.req[:], p)
 	c.srv.request_handle = h.handle
 	h.handle = vx.HANDLE_NONE
-	n, res := p9.serve(&c.srv, c.req[:h.e.len], c.resp[:])
+	n: int
+	res: p9.Serve_Result
+	if s := c.owner; s != nil && s.raw != nil {
+		n, res = s.raw(s.ctx, c.slot, c.req[:h.e.len], c.resp[:])
+	} else {
+		n, res = p9.serve(&c.srv, c.req[:h.e.len], c.resp[:])
+	}
 	if res == .Defer {
 		h.handle = c.srv.request_handle // kept until it is served
 		c.srv.request_handle = vx.HANDLE_NONE
@@ -473,6 +497,7 @@ serve :: proc "contextless" (s: ^Server) -> vx.Status {
 			drbg.mix(&s.shared.random, transmute([]u8)seed, true)
 		}
 	}
+	listening := true // the listen channel's peer is there (linger)
 	for {
 		more := false // a connection still has requests: no sleeping this time round
 		for &c in s.conns {
@@ -487,15 +512,19 @@ serve :: proc "contextless" (s: ^Server) -> vx.Status {
 			case .Drained:
 			}
 		}
-		for {
+		for listening {
 			msg: Listen_Msg
 			handle := [1]vx.Handle{vx.HANDLE_NONE}
 			size, st := rt.channel_read(s.listen, msg.bytes[:], handle[:])
 			if st == .Err_Should_Wait {
 				break
 			}
-			if st == .Err_Peer_Closed {
+			if st == .Err_Peer_Closed && !s.linger {
 				return st
+			}
+			if st == .Err_Peer_Closed {
+				listening = false
+				break
 			}
 			req := &msg.header
 			if st == .Ok && size.bytes == size_of(req^) && req.ordinal == rt.CONNECT && size.handles == 0 {
@@ -510,6 +539,16 @@ serve :: proc "contextless" (s: ^Server) -> vx.Status {
 				if jsize, jst := rt.channel_read(s.listen, junk[:], junk_handles[:]); jst == .Ok {
 					rt.close_all(..junk_handles[:jsize.handles])
 				}
+			}
+		}
+
+		if !listening { // lingering: until the last connection goes
+			any := false
+			for &c in s.conns {
+				any = any || c.used
+			}
+			if !any {
+				return .Err_Peer_Closed
 			}
 		}
 
@@ -535,7 +574,7 @@ serve :: proc "contextless" (s: ^Server) -> vx.Status {
 				c.armed = rt.port_bind(s.port, c.end, .Counter_Ge, conn_key(.Conn_Bell, i, c.gen), seen + 1) == .Ok
 			}
 		}
-		if idle && !s.listen_armed {
+		if idle && listening && !s.listen_armed {
 			s.listen_armed = rt.port_bind(s.port, s.listen, .Readable, conn_key(.Listen, 0, 0)) == .Ok
 		}
 		deadline := s.tick(s.ctx) if s.tick != nil else vx.INFINITE
