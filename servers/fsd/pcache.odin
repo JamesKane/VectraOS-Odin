@@ -105,6 +105,17 @@ writeback_ranges :: proc "contextless" (c: ^Cached, f: ^fs.File, ranges: []vx.Pa
 	}
 }
 
+// Whether a mapped file keeps a node on the slot (upstream's M6 step 6d5c:
+// a snapshot's slot is closed for another only if not).
+slot_mapped :: proc "contextless" (slot: u32) -> bool {
+	for &c in pcache {
+		if c.used && c.node.slot == slot {
+			return true
+		}
+	}
+	return false
+}
+
 @(private="file")
 pcache_drop :: proc "contextless" (c: ^Cached) {
 	_ = rt.handle_close(c.vmo)

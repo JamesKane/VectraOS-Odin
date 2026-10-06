@@ -4,14 +4,19 @@ package fsd
 // name that labels a snapshot, not a branch, is that snapshot, read-only.
 // `dump` is the dump view: /YYYY/MMDD/BRANCH for every label named
 // BRANCH@YYYY-MM-DD, each BRANCH that snapshot, read-only. Up to RO_SLOTS
-// snapshots are open at once; deleting a label closes its snapshot, and fids
-// on it find nothing from then on.
+// snapshots are open at once (upstream's M6 step 6d5c): one is kept while
+// fids are on it (the framework's fid_node), even once its label is deleted
+// (dead: they find nothing then), so its slot is never another snapshot's
+// under them; and, when all are open, the least recently opened that nothing
+// holds is closed for a new one.
 
 import vx "abi:vx"
 import "vx:fs"
 
 Snapshot :: struct {
-	used:       bool,
+	used, dead: bool,
+	fids:       u32, // fids on its nodes
+	seq:        u64, // when it was opened, for choosing one to close
 	name:       [dynamic; fs.LABELMAX]u8,
 	t:          fs.Tree,
 	root:       u64, // its root's qid
@@ -19,6 +24,8 @@ Snapshot :: struct {
 }
 
 ro: [RO_SLOTS]Snapshot
+@(private="file")
+ro_seq: u64
 
 @(private="file")
 digits :: proc "contextless" (s: string) -> (v: u32, ok: bool) {
@@ -52,18 +59,31 @@ dated :: proc "contextless" (label: string) -> (year, mmdd: u32, nbranch: int, o
 ro_open :: proc "contextless" (name: string) -> (slot: u32, st: vx.Status) {
 	free := u32(RO_SLOTS)
 	for &r, i in ro {
-		if r.used && string(r.name[:]) == name {
+		if r.used && !r.dead && string(r.name[:]) == name {
 			return u32(i), .Ok
 		}
 		if !r.used && free == RO_SLOTS {
 			free = u32(i)
 		}
 	}
-	if free == RO_SLOTS {
-		return 0, .Err_No_Memory
+	if free == RO_SLOTS { // all open: close the oldest no one holds
+		best := u32(RO_SLOTS)
+		for &r, k in ro {
+			if r.used && !r.dead && r.fids == 0 && !slot_mapped(RO_FIRST + u32(k)) && (best == RO_SLOTS || r.seq < ro[best].seq) {
+				best = u32(k)
+			}
+		}
+		if best == RO_SLOTS {
+			return 0, .Err_No_Memory // every one held
+		}
+		ro[best] = {}
+		free = best
 	}
 	r := &ro[free]
-	r^ = {}
+	ro_seq += 1
+	r^ = {
+		seq = ro_seq,
+	}
 	_ = append(&r.name, name)
 	r.t = fs.snap_open(&vol, name) or_return
 	root := fs.root(&vol, &r.t) or_return
@@ -73,11 +93,16 @@ ro_open :: proc "contextless" (name: string) -> (slot: u32, st: vx.Status) {
 	return free, .Ok
 }
 
-// A label going: its snapshot, if open, closed first.
+// A label going: its snapshot, if open, closed first; its slot kept, dead,
+// while fids are on it.
 ro_drop :: proc "contextless" (name: string) {
 	for &r, i in ro {
-		if r.used && string(r.name[:]) == name {
-			r = {}
+		if r.used && !r.dead && string(r.name[:]) == name {
+			if r.fids != 0 {
+				r.dead = true
+			} else {
+				r = {}
+			}
 			pcache_forget(RO_FIRST + u32(i), true) // its slot may be another snapshot's next
 		}
 	}
@@ -89,7 +114,7 @@ dated_snapshot :: proc "contextless" (node: Id) -> ^Snapshot {
 		return nil
 	}
 	r := &ro[node.slot - RO_FIRST]
-	return r.used && r.year != 0 ? r : nil
+	return r.used && !r.dead && r.year != 0 ? r : nil
 }
 
 is_dump :: proc "contextless" (node: Id) -> bool {
@@ -129,8 +154,12 @@ Dumped :: struct {
 	branch:     [dynamic; fs.LABELMAX]u8,
 }
 
+// Every dated label, as long as memory lasts (upstream's M6 step 6d5c: 256
+// before), in memory of its own.
 @(private="file")
-dumps: [dynamic; 256]Dumped
+dumps: []Dumped
+@(private="file")
+ndumps: int
 
 @(private="file")
 dump_less :: proc "contextless" (a, b: ^Dumped) -> bool {
@@ -145,12 +174,24 @@ dump_less :: proc "contextless" (a, b: ^Dumped) -> bool {
 
 @(private="file")
 scan_dumps :: proc "contextless" () {
-	clear(&dumps)
+	ndumps = 0
 	pfx := [1]u8{u8(fs.Key_Kind.Label)}
 	s: fs.Scan
 	fs.scan_start(&s, &vol.snap, pfx[:])
-	for len(dumps) < cap(dumps) {
-		kv := fs.scan_next(&vol.fs, &s) or_break
+	for kv in fs.scan_next(&vol.fs, &s) {
+		if ndumps == len(dumps) {
+			n := len(dumps) != 0 ? 2 * len(dumps) : 256
+			p := table_alloc(n * size_of(Dumped))
+			if p == nil {
+				break // the first ones, then
+			}
+			more := ([^]Dumped)(p)[:n]
+			if dumps != nil {
+				copy(more, dumps[:ndumps])
+				table_free(raw_data(dumps), len(dumps) * size_of(Dumped))
+			}
+			dumps = more
+		}
 		if len(kv.val) != size_of(fs.Label_Disk) {
 			continue
 		}
@@ -166,8 +207,8 @@ scan_dumps :: proc "contextless" () {
 		}
 		_ = append(&d.branch, label[:nbranch])
 		// Kept sorted as they come: inserted after every one not greater.
-		at := len(dumps)
-		_ = append(&dumps, d)
+		at := ndumps
+		ndumps += 1
 		for at > 0 && dump_less(&d, &dumps[at - 1]) {
 			dumps[at] = dumps[at - 1]
 			at -= 1
@@ -207,7 +248,7 @@ dump_walk :: proc "contextless" (dir: Id, name: string) -> (child: Id, st: vx.St
 		if len(name) != 4 || !ok {
 			return {}, .Err_Not_Found
 		}
-		for &d in dumps {
+		for &d in dumps[:ndumps] {
 			if level == 0 && d.year == v {
 				return dump_node(dir, 1, v, 0), .Ok
 			}
@@ -217,7 +258,7 @@ dump_walk :: proc "contextless" (dir: Id, name: string) -> (child: Id, st: vx.St
 		}
 		return {}, .Err_Not_Found
 	}
-	for &d in dumps {
+	for &d in dumps[:ndumps] {
 		if d.year != dump_year(dir) || d.mmdd != dump_mmdd(dir) || string(d.branch[:]) != name {
 			continue
 		}
@@ -240,7 +281,7 @@ dump_readdir :: proc "contextless" (dir: Id, index: u32) -> (child: Id, st: vx.S
 	level := dump_level(dir)
 	n: u32
 	scan_dumps()
-	for &d, i in dumps {
+	for &d, i in dumps[:ndumps] {
 		in_dir := level == 0 || d.year == dump_year(dir)
 		if level == 2 {
 			in_dir = in_dir && d.mmdd == dump_mmdd(dir)

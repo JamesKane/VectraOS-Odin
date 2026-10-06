@@ -88,6 +88,12 @@ Fs :: struct {
 	remove:  proc "contextless" (ctx: rawptr, node: Node) -> vx.Status,
 	// Optional: a fid let the node go; opened says whether the fid had it open.
 	clunk:    proc "contextless" (ctx: rawptr, node: Node, opened: bool),
+	// Optional (upstream's M6 step 6d5c): a fid has come to hold the node
+	// (+1), at an attach, a walk, a create, a clone or a join, or let it go
+	// (-1), when it is clunked or moves on; exactly paired, unlike clunk,
+	// which is told of nodes no fid held. fsd counts the fids on each
+	// snapshot with it.
+	fid_node: proc "contextless" (ctx: rawptr, node: Node, delta: int),
 	// The posix and xattr extensions, each optional: a server without one
 	// refuses its message. Rgetattr needs nothing new: it is made from stat.
 	setattr:  proc "contextless" (ctx: rawptr, node: Node, a: ^Setattr) -> vx.Status,
@@ -299,7 +305,15 @@ unlock :: proc "contextless" (sh: ^Shared, conn: ^Server, proc_id: u32, any_proc
 }
 
 @(private="file")
+fid_holds :: proc "contextless" (s: ^Server, node: Node, delta: int) {
+	if s.fs.fid_node != nil {
+		s.fs.fid_node(s.fs.ctx, node, delta)
+	}
+}
+
+@(private="file")
 fid_drop :: proc "contextless" (s: ^Server, f: ^Fid_Entry) {
+	fid_holds(s, f.node, -1)
 	remove := f.orclose
 	if o := f.file; o != nil && s.shared != nil {
 		remove = remove || (o.orclose && o.fids == 1) // its last fid
@@ -394,7 +408,9 @@ open_node :: proc "contextless" (s: ^Server, f: ^Fid_Entry, mode: Open_Mode) -> 
 	if s.fs.clunk != nil {
 		s.fs.clunk(s.fs.ctx, f.node, false)
 	}
+	fid_holds(s, f.node, -1)
 	f.node, f.qid = node, qid
+	fid_holds(s, node, 1)
 	return .Ok
 }
 
@@ -648,6 +664,7 @@ serve_join :: proc "contextless" (s: ^Server, t: ^Msg, r: ^Msg) -> vx.Status {
 	o.fids += 1
 	n.qid = qid
 	n.node, n.root = o.node, o.node
+	fid_holds(s, n.node, 1)
 	n.open = true
 	n.mode = o.mode
 	n.file = o
@@ -1205,6 +1222,7 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 			}
 			if e == .Ok {
 				f.root, f.qid = f.node, r.qid
+				fid_holds(s, f.node, 1)
 			} else if f != nil {
 				f^ = {}
 			}
@@ -1245,8 +1263,12 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 			if n == f && s.fs.clunk != nil {
 				s.fs.clunk(s.fs.ctx, f.node, false) // walked fids are never open
 			}
+			if n == f {
+				fid_holds(s, f.node, -1)
+			}
 			root := f.root
 			n^ = {fid = t.newfid, used = true, node = node, root = root, qid = qid}
+			fid_holds(s, node, 1)
 		case .Topen, .Tcreate:
 			if f = fid_find(s, t.fid); f == nil {
 				e = .Err_Bad_Handle
@@ -1273,7 +1295,9 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 					if s.fs.clunk != nil {
 						s.fs.clunk(s.fs.ctx, f.node, false)
 					}
+					fid_holds(s, f.node, -1)
 					f.node = node
+					fid_holds(s, node, 1)
 					qid: Qid
 					if qid, e = qid_of(s, node); e == .Ok {
 						f.qid = qid

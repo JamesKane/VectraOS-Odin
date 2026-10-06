@@ -50,7 +50,7 @@ import "vx:users"
 
 COMMIT_EVERY :: vx.Duration(5_000_000_000)
 CACHE_BLOCKS :: 1024 // 16 MiB of tree nodes and data
-MAX_OPEN :: 512 // distinct nodes open at once
+FIRST_OPEN :: 512 // distinct nodes open at once, to start with: the table grows
 
 // A node id, as fsd hands it to the framework (p9.Node) and to clients (the
 // qid's path): the file's qid in its tree, the attaching user's index in
@@ -73,6 +73,10 @@ DUMP_SLOT :: 0x7f
 // The adm branch's made-up files' qids, which no entry has.
 CTL_QID :: u64(1) << 48 - 2
 STATUS_QID :: u64(1) << 48 - 3
+// An open of status's own copy of it (upstream's M6 step 6d5c):
+// STATUS_COPY_QID + its index.
+STATUS_COPIES :: 16
+STATUS_COPY_QID :: u64(1) << 48 - 64
 
 disk: driver.Blk
 vol: fs.Vol // large: in static storage, never copied
@@ -156,6 +160,18 @@ mem_free :: proc "contextless" (ctx: rawptr, p: rawptr, n: int) {
 	_ = rt.as_unmap(rt.self, u64(uintptr(p)), size)
 }
 
+// Memory for fsd's own tables that grow: the volume's (upstream's mem_alloc,
+// which tests/host/fsd gives from the host's).
+table_alloc :: proc "contextless" (n: int) -> rawptr {
+	return vol.fs.mem.alloc != nil ? vol.fs.mem.alloc(vol.fs.mem.ctx, n) : nil
+}
+
+table_free :: proc "contextless" (p: rawptr, n: int) {
+	if vol.fs.mem.free != nil {
+		vol.fs.mem.free(vol.fs.mem.ctx, p, n)
+	}
+}
+
 // --- Nodes ---
 
 // Times, in ns: UTC once there is a wall clock (upstream ADR-0031), from
@@ -186,7 +202,7 @@ tree_of :: proc "contextless" (node: Id) -> ^fs.Tree {
 	}
 	if s >= RO_FIRST && s < RO_FIRST + RO_SLOTS {
 		r := &ro[s - RO_FIRST]
-		return r.used ? &r.t : nil
+		return r.used && !r.dead ? &r.t : nil
 	}
 	return nil
 }
@@ -200,8 +216,12 @@ is_branch :: proc "contextless" (node: Id, name: string) -> bool {
 	return s < fs.MAXBRANCH && vol.br[s].open && fs.branch_name(&vol.br[s]) == name
 }
 
+is_status_copy :: proc "contextless" (node: Id) -> bool {
+	return node.qid >= STATUS_COPY_QID && node.qid < STATUS_COPY_QID + STATUS_COPIES
+}
+
 is_made_up :: proc "contextless" (node: Id) -> bool {
-	return is_branch(node, "adm") && (node.qid == CTL_QID || node.qid == STATUS_QID)
+	return is_branch(node, "adm") && (node.qid == CTL_QID || node.qid == STATUS_QID || is_status_copy(node))
 }
 
 is_readonly :: proc "contextless" (node: Id) -> bool {
@@ -365,7 +385,28 @@ Opened :: struct {
 	count: u32,
 }
 
-opens: [MAX_OPEN]Opened
+// The table grows as it fills (upstream's M6 step 6d5c: a fixed 512 let any
+// client fill it for everyone), doubling, in memory of its own.
+opens: []Opened
+
+@(private="file")
+opens_grow :: proc "contextless" () -> bool {
+	n := len(opens) != 0 ? 2 * len(opens) : FIRST_OPEN
+	p := table_alloc(n * size_of(Opened))
+	if p == nil {
+		return false
+	}
+	more := ([^]Opened)(p)[:n]
+	for &o in more {
+		o = {}
+	}
+	if opens != nil {
+		copy(more, opens)
+		table_free(raw_data(opens), len(opens) * size_of(Opened))
+	}
+	opens = more
+	return true
+}
 
 open_slot :: proc "contextless" (node: Id, make: bool) -> ^Opened {
 	free: ^Opened
@@ -377,11 +418,28 @@ open_slot :: proc "contextless" (node: Id, make: bool) -> ^Opened {
 			free = &o
 		}
 	}
-	if !make || free == nil {
+	if !make {
 		return nil
+	}
+	if free == nil {
+		at := len(opens)
+		if !opens_grow() {
+			return nil
+		}
+		free = &opens[at]
 	}
 	free^ = {node = node}
 	return free
+}
+
+// Whether a file could be opened now: an entry free, or room to grow.
+open_room :: proc "contextless" () -> bool {
+	for &o in opens {
+		if o.count == 0 {
+			return true
+		}
+	}
+	return opens_grow()
 }
 
 // --- Permissions ---
@@ -621,10 +679,7 @@ fs_open :: proc "contextless" (ctx: rawptr, n: p9.Node, mode: p9.Open_Mode) -> (
 		if ctl ? .R in want || !is_adm(node) : writes {
 			return .Err_Access
 		}
-		if !ctl && make_status() != .Ok {
-			return .Err_No_Memory
-		}
-		return .Ok
+		return .Ok // status: its copy is made by fs_clone
 	}
 	if writes && is_readonly(node) {
 		return .Err_Access // a snapshot, or the dump view
@@ -653,8 +708,56 @@ fs_open :: proc "contextless" (ctx: rawptr, n: p9.Node, mode: p9.Open_Mode) -> (
 
 @(private="file")
 fs_clunk :: proc "contextless" (ctx: rawptr, n: p9.Node, was_open: bool) {
+	node := Id(n)
+	if is_status_copy(node) && status_copies[node.qid - STATUS_COPY_QID].fids == 0 { // an open that never got its fid
+		status_copies[node.qid - STATUS_COPY_QID].used = false
+	}
 	if was_open {
-		clunk_node(Id(n))
+		clunk_node(node)
+	}
+}
+
+// status's open: a copy of its own (Status_Copy).
+@(private="file")
+fs_clone :: proc "contextless" (ctx: rawptr, n: p9.Node, mode: p9.Open_Mode) -> (opened: p9.Node, st: vx.Status) {
+	node := Id(n)
+	if !is_made_up(node) || node.qid != STATUS_QID {
+		return 0, .Err_Not_Found // not a clone file
+	}
+	k := 0
+	for k < STATUS_COPIES && status_copies[k].used {
+		k += 1
+	}
+	if k == STATUS_COPIES {
+		return 0, .Err_No_Memory
+	}
+	make_status() or_return
+	c := &status_copies[k]
+	c^ = {
+		used = true,
+		text = status_text,
+	}
+	return p9.Node(node_of(node.slot, node.user, STATUS_COPY_QID + u64(k), node.permissive)), .Ok
+}
+
+// A fid took node, or let it go (the framework's fid_node): what holds a
+// snapshot's slot, and a copy of status.
+@(private="file")
+fs_fid_node :: proc "contextless" (ctx: rawptr, n: p9.Node, delta: int) {
+	node := Id(n)
+	if s := node.slot; s >= RO_FIRST && s < RO_FIRST + RO_SLOTS && ro[s - RO_FIRST].used {
+		r := &ro[s - RO_FIRST]
+		r.fids = delta < 0 && r.fids == 0 ? 0 : u32(int(r.fids) + delta)
+		if r.fids == 0 && r.dead {
+			r^ = {} // deleted, and the last fid gone: the slot is free
+		}
+	}
+	if is_status_copy(node) && is_made_up(node) {
+		c := &status_copies[node.qid - STATUS_COPY_QID]
+		c.fids = delta < 0 && c.fids == 0 ? 0 : u32(int(c.fids) + delta)
+		if c.fids == 0 {
+			c.used = false
+		}
 	}
 }
 
@@ -672,23 +775,30 @@ clunk_node :: proc "contextless" (node: Id) {
 	if st != .Ok {
 		return
 	}
-	if fs.is_orphan(&f) { // the last of a removed file
-		if fs.reap(&vol, tree_of(node), node.qid) == .Ok {
+	if fs.is_orphan(&f) { // the last of a removed file; after halt, its branch's next attach frees it
+		if !halted && fs.reap(&vol, tree_of(node), node.qid) == .Ok {
 			changed()
 		}
 	} else if is_branch(node, "adm") && string(f.key[:f.nkey][9:]) == "users" {
-		load_users() // /adm/users, as it is now
+		if root, rst := fs.root(&vol, tree_of(node)); rst == .Ok && fs.kget64(f.key[1:]) == root.d.qid_path {
+			load_users() // /adm/users, as it is now: the root's, not any file called users
+		}
 	}
 }
 
 @(private="file")
 fs_read :: proc "contextless" (ctx: rawptr, n: p9.Node, offset: u64, buf: []u8) -> (count: u32, st: vx.Status) {
 	node := Id(n)
-	if is_made_up(node) { // status, as it was when opened (or read from the start)
+	if is_made_up(node) { // status, as it was when opened (or read from the start): the open's copy
+		if !is_status_copy(node) {
+			return 0, .Err_Access
+		}
+		c := &status_copies[node.qid - STATUS_COPY_QID]
 		if offset == 0 {
 			_ = make_status()
+			c.text = status_text
 		}
-		text := status_text[:]
+		text := c.text[:]
 		return u32(copy(buf, text[min(offset, u64(len(text))):])), .Ok
 	}
 	if c := pcache_find(node); c != nil {
@@ -879,6 +989,13 @@ fs_readdir :: proc "contextless" (ctx: rawptr, d: p9.Node, index: u32) -> (child
 	return child, st
 }
 
+// Whether name in dir is one of adm's made-up files, ctl and status, which
+// no create, rename or symlink may make real (upstream's M6 step 6d5c).
+@(private="file")
+made_up_name :: proc "contextless" (dir: Id, d: ^fs.File, name: string) -> bool {
+	return is_branch(dir, "adm") && d.nkey == 9 && (name == "ctl" || name == "status")
+}
+
 @(private="file", require_results)
 name_ok :: proc "contextless" (name: string) -> vx.Status {
 	return len(name) == 0 || len(name) > fs.NAMEMAX ? .Err_Range : .Ok
@@ -897,8 +1014,11 @@ fs_create :: proc "contextless" (ctx: rawptr, d: p9.Node, name: string, perm: u3
 	if !may(dir, &df.d, {.W}) {
 		return 0, .Err_Access
 	}
-	if is_branch(dir, "adm") && df.nkey == 9 && (name == "ctl" || name == "status") {
+	if made_up_name(dir, &df, name) {
 		return 0, .Err_Exists
+	}
+	if !open_room() {
+		return 0, .Err_No_Memory // the create opens it: room first, not after
 	}
 	// Plan 9's: no more of the directory's bits, and in its group.
 	bits := isdir ? perm & (df.d.mode & 0o777) : perm & (~u32(0o666) | (df.d.mode & 0o666))
@@ -1041,6 +1161,9 @@ fs_rename :: proc "contextless" (ctx: rawptr, od: p9.Node, oldname: string, nd: 
 	if !may(olddir, &a.d, {.W}) || !may(newdir, &b.d, {.W}) {
 		return .Err_Access
 	}
+	if made_up_name(newdir, &b, newname) {
+		return .Err_Exists
+	}
 	slot := olddir.slot
 	fs.rename(&vol, tree_of(olddir), &a, oldname, &b, newname, now_ns(), open_qid, &slot) or_return
 	changed()
@@ -1058,6 +1181,9 @@ fs_symlink :: proc "contextless" (ctx: rawptr, d: p9.Node, name, target: string)
 	df := file_of(dir) or_return
 	if !may(dir, &df.d, {.W}) {
 		return 0, .Err_Access
+	}
+	if made_up_name(dir, &df, name) {
+		return 0, .Err_Exists
 	}
 	f := fs.symlink(&vol, tree_of(dir), &df, name, target, uid_of(dir), df.d.gid, now_ns()) or_return
 	changed()
@@ -1125,6 +1251,8 @@ server := p9ring.Server {
 		create    = fs_create,
 		remove    = fs_remove,
 		clunk     = fs_clunk,
+		clone     = fs_clone,
+		fid_node  = fs_fid_node,
 		setattr   = fs_setattr,
 		rename    = fs_rename,
 		symlink   = fs_symlink,

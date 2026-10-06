@@ -1,0 +1,8 @@
+# tests/user/fsdfix.ndb: fsdfix as vectra, one of adm, with fsd's home
+# branch on /tmp (tests/qemu/fsdfix.ndb).
+
+service=fsdfix program=/boot/bin/fsdfix console
+user=vectra
+ns=posix
+mount=/tmp srv=fsd aname=home flags=c
+connect=nsd

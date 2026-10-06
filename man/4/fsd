@@ -280,11 +280,11 @@ Space that readers in progress keep from being given back is not counted free un
 Its reasons are the framework's, not its own: a halted volume answers `fid already in use`, and a 17th branch `file does not exist`.
 A branch, once attached, stays open until `fsd` exits, so `del` refuses it, and 16 branches at most can ever be attached in one run.
 
-At most 32 snapshots are open at once, and one is closed only when its label is deleted; a slot freed by `del` is the next snapshot's, and fids still on it read that one's file of the same qid, unchecked.
-A 33rd snapshot, by label or through the dump view, which anyone can walk, fails until `fsd` restarts.
+At most 32 snapshots are held open by fids at once (M6 step 6d5c): a 33rd, by label or through the dump view, which anyone can walk, is refused with `out of memory` until a fid on one of the others goes; one nothing holds is closed for it.
+A snapshot whose label is deleted while fids are on it finds them nothing from then on.
 
-Smaller review findings, due in M6 step 6d5c: reloading the users file maps live fids to whoever now has their place in the table; `halt` still reaps orphans; `rename` and `symlink` can make a real `ctl` or `status` in `adm`'s root; a create counts no open when the 512-entry open table is full, and any client can fill it; the dump view shows the first 256 dated labels in key order; two readers of `status` at once share one buffer; `ORCLOSE` is ignored.
-Closing any file called `users` in the `adm` branch, not only the root's, reads the users again.
+Every client shares the 9P framework's table of open files, 256 for the server, and any client can fill it; `fsd`'s own table of open files grows.
+A user removed from the users file keeps a place in the table until `fsd` restarts, so the users file can name at most 127 users less those removed since.
 
 `rollback` makes the `BRANCH@before-N` label before rolling back, and leaves it if the rollback then fails; a branch's name past 223 bytes is cut short in that label.
 

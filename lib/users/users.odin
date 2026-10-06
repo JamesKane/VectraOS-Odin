@@ -184,3 +184,42 @@ parse :: proc "contextless" (t: ^Table, text: string, next: ^Table) -> bool {
 	t^ = next^
 	return true
 }
+
+// A user the file no longer has, kept in its place in a table (merge).
+GONE_ID :: u32(0xffff_fffd)
+
+// t made fresh, each user t has still at the index it has in t, a user
+// fresh adds where t has no one, and a user fresh no longer has left in its
+// place as gone (GONE_ID, no name), for an index handed out (fsd's nodes
+// carry one) never to come to mean someone else (upstream's M6 step 6d5c).
+// Users are the same user by id. The table is built in next first. False,
+// and t as it was, if they do not fit.
+@(require_results)
+merge :: proc "contextless" (t: ^Table, fresh: ^Table, next: ^Table) -> bool {
+	placed: [MAX + 1]bool
+	clear(&next.users)
+	for &u in t.users {
+		j := 0
+		for j < len(fresh.users) && (placed[j] || fresh.users[j].id != u.id || u.id == GONE_ID) {
+			j += 1
+		}
+		if j < len(fresh.users) {
+			_ = append(&next.users, fresh.users[j])
+			placed[j] = true
+		} else {
+			_ = append(&next.users, User{id = GONE_ID, lead = NO_LEADER})
+		}
+	}
+	for &u, j in fresh.users {
+		if placed[j] {
+			continue
+		}
+		if len(next.users) == MAX + 1 {
+			return false
+		}
+		_ = append(&next.users, u)
+	}
+	next.none = u32(index_named(next.users[:], "none"))
+	t^ = next^
+	return true
+}
