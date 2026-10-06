@@ -14,6 +14,7 @@
 package procfs_test
 
 import vx "abi:vx"
+import "core:fmt"
 import "core:strings"
 import "core:testing"
 import "vx:p9"
@@ -770,6 +771,95 @@ test_procfs :: proc(t: ^testing.T) {
 		_ = p9.client_clunk(&c, f)
 		testing.expect_value(t, task_by_id(1).debug_key, 0) // not svcd's
 	}
+
+	// --- All-stop (upstream's 6d6a) ---
+	// When a thread stops with an event, every other thread of the task is
+	// frozen, each by its own thread_suspend, and thawed when the stopped one
+	// is let go. Here with 18 threads, more than the 16 procfs followed
+	// before, the last blocked in a call.
+	many := add_task({id = 16, name = "many", state = .Running})
+	_ = append(&many.maps, Fake_Map{base = 0x400000, flags = {.Exec}, bytes = code_mem[:]})
+	for i in u32(1) ..= 18 {
+		_ = append(&many.threads, Fake_Thread{id = i, state = i == 18 ? .Blocked : .Running})
+	}
+	testing.expect_value(t, register(t, 16, 1, {.No_Wait}), vx.Status.Ok)
+	frozen :: proc(task: ^Fake_Task) -> (n: int) {
+		for th in task.threads {
+			n += th.suspends > 0 ? 1 : 0
+		}
+		return
+	}
+	ABP :: 0x400180
+	_, e = write_file(&c, root, "16/ctl", "break 0x400180")
+	testing.expect_value(t, e, vx.Status.Ok)
+	// Each thread stops at it in turn: the others frozen while it is held,
+	// and while it steps over the breakpoint; all thawed once it is past.
+	for i in u32(1) ..= 17 {
+		th := thread_of(many, i)
+		fire_exception(many, i, exception(.Breakpoint, trap_pc(ABP)))
+		testing.expectf(t, frozen(many) == 17 && th.suspends == 0, "thread %d: %d others frozen", i, frozen(many))
+		text, _ = fs_read(16, .Events, buf[:])
+		testing.expect_value(t, text, fmt.tprintf("event=break thread=%d pc=0x400180\n", i))
+		_, e = write_file(&c, root, "16/ctl", "start")
+		testing.expect_value(t, th.resumed, vx.Resume_Action.Step)
+		testing.expect_value(t, frozen(many), 17) // none runs past it while its trap is out
+		fire_exception(many, i, exception(.Step, ABP + 4))
+		testing.expect_value(t, th.resumed, vx.Resume_Action.Continue)
+		testing.expect_value(t, frozen(many), 0)
+	}
+	// Two threads stopped at once: the second's exception came while it was
+	// frozen, so it is thawed and held; ctl's start lets nothing go while its
+	// event is unread, then lets both go, the others thawed once both are past.
+	fire_exception(many, 3, exception(.Breakpoint, trap_pc(ABP)))
+	fire_exception(many, 5, exception(.Breakpoint, trap_pc(ABP)))
+	testing.expect_value(t, thread_of(many, 5).suspends, 0)
+	testing.expect_value(t, frozen(many), 16)
+	text, _ = read_file(&c, root, "16/threads/18/status", buf[:])
+	testing.expect_value(t, text, "state=frozen\n") // suspended while blocked in a call
+	text, _ = fs_read(16, .Events, buf[:])
+	testing.expect_value(t, text, "event=break thread=3 pc=0x400180\n")
+	_, e = write_file(&c, root, "16/ctl", "start")
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect_value(t, thread_of(many, 3).resumed, vx.Resume_Action(0)) // 5's stop first
+	text, _ = fs_read(16, .Events, buf[:])
+	testing.expect_value(t, text, "event=break thread=5 pc=0x400180\n")
+	_, e = write_file(&c, root, "16/ctl", "start")
+	testing.expect_value(t, thread_of(many, 3).resumed, vx.Resume_Action.Step)
+	testing.expect_value(t, thread_of(many, 5).resumed, vx.Resume_Action.Step)
+	fire_exception(many, 3, exception(.Step, ABP + 4))
+	testing.expect_value(t, frozen(many), 16) // 5 still has the trap out
+	fire_exception(many, 5, exception(.Step, ABP + 4))
+	testing.expect_value(t, frozen(many), 0)
+	// A step of the stopped thread leaves the others frozen; its resume
+	// thaws them. A freeze of the debugger's own outlasts all-stop's.
+	_, e = write_file(&c, root, "16/ctl", "freeze 7")
+	testing.expect_value(t, e, vx.Status.Ok)
+	fire_exception(many, 2, exception(.Breakpoint, trap_pc(ABP)))
+	_, _ = fs_read(16, .Events, buf[:])
+	testing.expect_value(t, thread_of(many, 7).suspends, 2)
+	_, e = write_file(&c, root, "16/threads/2/ctl", "step")
+	testing.expect_value(t, e, vx.Status.Ok)
+	fire_exception(many, 2, exception(.Step, ABP + 4))
+	text, _ = fs_read(16, .Events, buf[:])
+	testing.expect_value(t, text, "event=step thread=2 pc=0x400184\n")
+	testing.expect_value(t, frozen(many), 17)
+	_, e = write_file(&c, root, "16/threads/2/ctl", "resume")
+	testing.expect_value(t, thread_of(many, 2).resumed, vx.Resume_Action.Continue)
+	testing.expect_value(t, frozen(many), 1)
+	testing.expect_value(t, thread_of(many, 7).suspends, 1) // its own freeze
+	_, e = write_file(&c, root, "16/ctl", "thaw 7")
+	testing.expect_value(t, frozen(many), 0)
+	// detach with a thread held: it and the others go on, and the
+	// debugger's tables are let go.
+	fire_exception(many, 4, exception(.Breakpoint, trap_pc(ABP)))
+	testing.expect_value(t, frozen(many), 17)
+	_, e = write_file(&c, root, "16/ctl", "detach")
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect_value(t, frozen(many), 0)
+	testing.expect_value(t, thread_of(many, 4).resumed, vx.Resume_Action.Continue)
+	testing.expect_value(t, vmo_unmapped, vmo_pool_used)
+	_, e = write_file(&c, root, "16/ctl", "kill")
+	fire_exit(many)
 
 	// --- Profiling zones ---
 

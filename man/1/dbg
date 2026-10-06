@@ -49,6 +49,7 @@ A blank line, or one starting `#`, does nothing; an unknown word prints the list
 : `cont`, `continue`
   Resume the process, and wait for it to stop.
   A fault it stopped at is passed on, to the program's handler or to procfs(4).
+  If another thread stopped at the same time, nothing resumes: `cont` reports that thread's stop instead, as procfs(4) keeps it for the next read.
 : `step`
   Step the current thread one instruction, and wait.
 : `bt`, `where`
@@ -60,6 +61,12 @@ A blank line, or one starting `#`, does nothing; an unknown word prints the list
   Evaluate the C expression <expr> in the chosen frame and print `=` and its value (see {expressions|#expressions}).
 : `regs`
   Print the current thread's registers, its `regs.ndb` file.
+: `xregs`
+  Print the current thread's FP/SIMD state (M6 step 6d6a): on x86_64, from its XSAVE image, MXCSR, which components are in use, `ymm0` to `ymm15` (or `xmm` without AVX), AVX-512's `k0` to `k7`, and `pkru`, the thread's protection-key rights; on aarch64, FPCR, FPSR and `v0` to `v31`.
+: `threads`
+  List the process's threads, the current one marked `*`: each one's id, state (`running`, `blocked`, `stopped` at an event, or `frozen`), why it stopped, and where; then how many there are and how many are stopped or frozen.
+: `thread` <n>
+  Make thread <n> the current one, the one `bt`, `print`, `regs`, `xregs` and `step` act on, and say where it is.
 : `info`
   Print the process's images and mappings, its `images` and `maps` files.
 : `kill`
@@ -159,6 +166,7 @@ The ELF is read and indexed each time `dbg` starts, and must be at most 8 MiB; s
 A crash directory is recognised only by its path's starting `/tmp/crash/`, and is opened at its thread 1, whichever thread faulted.
 
 There is no `stop`: an attached process can be stopped only by a breakpoint.
+`step` steps only a thread stopped at an event; the rest stay stopped meanwhile, frozen by procfs(4), and a thread one made while they were stopped runs.
 After a launched program ends, `run` refuses to start it again.
 `dbg` prints no exit string for an attached process that ends, since it has no wait record for it.
 

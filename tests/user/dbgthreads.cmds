@@ -1,0 +1,46 @@
+# What dbg -c does to dbgthreads (tests/qemu/dbgthreads.ndb): each of its 32
+# threads stopped at marked in turn, then the counting one at hit_me with
+# every other thread stopped; another thread's stack and registers.
+break marked
+run
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+cont
+break hit_me
+cont
+threads
+step
+threads
+thread 20
+bt
+xregs
+cont
+quit

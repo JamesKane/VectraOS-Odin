@@ -1,9 +1,9 @@
 // lib/vx-rt/rt.c: a stand-in for upstream's C runtime of the same path,
-// which this tree does not have and does not copy (ADR-0002). One file
-// includes it: tests/user/dbgdemo.c, the debugger's fixture, kept
-// byte-identical to upstream's because dbg prints its source lines
-// (ADR-0007). This gives that program exactly what it uses of upstream's
-// runtime, on musl (the POSIX personality), and nothing more:
+// which this tree does not have and does not copy (ADR-0002). The debugger's
+// fixtures include it, tests/user/dbgdemo.c and dbgthreads.c, kept
+// byte-identical to upstream's because dbg prints their source lines
+// (ADR-0007). This gives them exactly what they use of upstream's runtime,
+// on musl (the POSIX personality), and nothing more (threads: at the end):
 //
 //   vx_str, VX_STR   a string as a pointer and a length
 //   vx_cstr          a NUL-terminated string as a vx_str
@@ -58,3 +58,41 @@ int main(int argc, char **argv) {
   fprintf(stderr, "%s\n", why);
   return 1;
 }
+
+// dbgthreads's threads (upstream's M6 step 6d6a), after main so dbgdemo's
+// lines stay where they were:
+//
+//   vx_status, VX_OK   a call's result, and success
+//   vx_thread          a thread vx_thread_spawn made, for vx_thread_join:
+//                      musl's pthread, with the stack size asked for
+//   <stdatomic.h>      which upstream's runtime includes for its programs
+
+#include <pthread.h>
+#include <stdatomic.h>
+
+typedef int32_t vx_status;
+enum { VX_OK = 0, VX_ERR_NO_MEMORY = -6 }; // abi/vx/status.def's
+
+typedef struct vx_thread {
+  pthread_t thread;
+  void (*fn)(void *);
+  void *arg;
+} vx_thread;
+
+[[maybe_unused]] static void *vx_shim_thread(void *t) {
+  ((vx_thread *)t)->fn(((vx_thread *)t)->arg);
+  return nullptr;
+}
+
+// fn(arg) on a thread of its own, with a stack of stack bytes (0: musl's).
+[[maybe_unused]] static vx_status vx_thread_spawn(vx_thread *t, void (*fn)(void *), void *arg, uint64_t stack) {
+  pthread_attr_t a;
+  pthread_attr_init(&a);
+  if (stack) pthread_attr_setstacksize(&a, stack);
+  t->fn = fn, t->arg = arg;
+  int e = pthread_create(&t->thread, &a, vx_shim_thread, t);
+  pthread_attr_destroy(&a);
+  return e ? VX_ERR_NO_MEMORY : VX_OK;
+}
+
+[[maybe_unused]] static void vx_thread_join(vx_thread *t) { pthread_join(t->thread, nullptr); }

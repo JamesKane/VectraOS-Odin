@@ -92,6 +92,7 @@ svcd, the root, refuses every verb that would stop, kill or change it with `perm
   Stopping a process already stopped does nothing.
 : `start`
   Lets go every thread held at a debug event, and continues a stopped process; its parent hears that it continued.
+  While an event is waiting to be read from `events`, it lets nothing go (M6 step 6d6a): a debugger that continues after one thread's stop reads the stop another thread made at the same time first, as gdb reports one before resuming.
 : `setsid`
   Gives the process a session and a note group of its own, both named by its pid.
   It is refused with `permission denied` if any process's note group is already that pid, as POSIX refuses a group leader.
@@ -139,6 +140,12 @@ procfs then writes the trap instruction (`int3` on x86_64, `brk #0` on aarch64) 
 A thread that reaches a breakpoint stays stopped, with an event, until `ctl`'s `start` or its own `resume` or `step`.
 procfs then puts the code back, steps the thread over it and puts the trap back.
 A breakpoint whose condition is false, or that is within its `after` count, is stepped over at once, with no event and no round trip to the debugger.
+
+When a thread stops with an event, procfs freezes every other thread of the process, each with its own `thread_suspend`, so a `freeze` the debugger made outlasts it, and thaws them when the stopped thread is let go (M6 step 6d6a: all-stop).
+A `step` of the stopped thread leaves the others frozen.
+While any thread steps over a breakpoint or a watchpoint, with its trap out, the others are frozen too, even for a breakpoint whose condition let it go on, so none runs past it meanwhile.
+A thread frozen so that stops at an exception of its own meanwhile is thawed, held at it with an event.
+Any number of threads are followed.
 A fault stops the faulting thread with an event; letting it go passes the fault on to the program's handler, else to procfs's crash handler.
 A trap instruction the program has itself stops the thread with `event=trap`, and letting it go passes it to the program in the same way.
 A note is passed on to the program without stopping it.
