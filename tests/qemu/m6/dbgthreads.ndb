@@ -1,0 +1,24 @@
+# tests/qemu/dbgthreads.ndb: the debugger and threads (M6 step 6d6a): dbg -c
+# stops each of dbgthreads's 32 threads at a breakpoint in turn, more than the
+# 16 procfs followed before; then one at another, with the other 32 seen
+# stopped, before and after it steps; another thread's call stack and its
+# FP/SIMD registers; and the program goes on to its end.
+
+scenario=dbgthreads timeout=120 with=dbgthreads cmdline=vx.skip=rc
+expect="dbg: /boot/bin/dbgthreads: "
+expect="dbg: stopped: break at marked (tests/user/dbgthreads.c:"
+expect="dbg: stopped: break at hit_me (tests/user/dbgthreads.c:"
+line="dbg: 33 threads, 33 stopped"
+expect="dbg: stopped: step at hit_me (tests/user/dbgthreads.c:"
+line="dbg: 33 threads, 33 stopped"
+expect="dbg: thread 20 at "
+expect=" in worker (tests/user/dbgthreads.c:"
+expect="0x"
+expect="dbgthreads: done"
+expect="dbg: dbgthreads exited"
+line="svcd: dbgthreads exited"
+fail="vx: panic"
+fail="svcd: dbgthreads exited: "
+fail=") killed: "
+fail="dbg: cannot"
+fail="sys: trap"

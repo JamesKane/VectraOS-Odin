@@ -36,10 +36,21 @@
 //
 // Reading registers needs the thread held still: stopped at an event, or
 // frozen (thread_suspend, as ctl's stop does to every thread).
+//
+// All-stop (upstream's M6 step 6d6a), as a debugger expects: when a thread
+// stops with an event, procfs suspends every other thread of the task (each
+// by its own thread_suspend, which counts, so a freeze of the debugger's own
+// outlasts it), and starts them again when the stopped one is let go (its
+// resume, ctl's start); a step of the stopped one leaves them stopped. While
+// a thread steps over a breakpoint, its trap taken out, the others stay
+// stopped too, even for a breakpoint whose condition let it go on, so none
+// runs past the trap while it is out. A thread made while the others are
+// stopped runs. Any number of threads are followed: the tables grow.
 package procfs
 
 import "base:intrinsics"
 import vx "abi:vx"
+import "vx:memory"
 import "vx:ndb"
 import "vx:rt"
 import "vx:str"
@@ -50,7 +61,9 @@ DBG_EVENTS :: 32
 @(private="file")
 DBG_EVENT_LEN :: 160
 @(private="file")
-DBG_THREADS :: 16
+DBG_FIRST_THREADS :: 16 // the thread tables' first size; they double from there
+@(private="file")
+DBG_FIRST_PAUSED :: 64
 
 @(private="file")
 Cmp_Op :: enum u8 {
@@ -114,10 +127,20 @@ Passed :: struct {
 @(private)
 Debugger :: struct {
 	bound:    bool, // procfs's port takes the task's exceptions first
-	passed:   [DBG_THREADS]Passed,
 	bp:       [DBG_BREAKS]Breakpoint,
 	watches:  vx.Watches, // the task's watchpoints, as procfs set them
-	threads:  [DBG_THREADS]Held,
+	// The threads followed, and the faults passed on: in memory of their own
+	// (table_grow), freed when the debugger is forgotten. Each table grows
+	// alone, so growing the faults' never moves a Held a caller holds.
+	threads:  []Held,
+	passed:   []Passed,
+	// All-stop: the threads procfs suspended for an event or a step over
+	// (paused[:npaused]), and whether the debugger has let the task go on
+	// since its last event.
+	paused:   []u32,
+	npaused:  int,
+	pausing:  bool,
+	stopped:  bool,
 	events:   [DBG_EVENTS][dynamic; DBG_EVENT_LEN]u8,
 	ev_head:  u32,
 	ev_count: u32,
@@ -329,6 +352,44 @@ dbg_bind :: proc "contextless" (p: ^Proc) -> vx.Status {
 	return st
 }
 
+// The bytes a table of n Ts takes: whole pages.
+@(private="file")
+table_bytes :: proc "contextless" ($T: typeid, n: int) -> u64 {
+	size, _ := memory.page_round(u64(n) * size_of(T))
+	return size
+}
+
+// A table twice as big as old (or first long, if there is none), in a VMO of
+// its own, mapped: old's entries copied, the rest zero, old let go. ok is
+// false if there is no memory, old then kept.
+@(private="file")
+table_grow :: proc "contextless" (old: []$T, first: int) -> (table: []T, ok: bool) {
+	n := len(old) == 0 ? first : 2 * len(old)
+	size := table_bytes(T, n)
+	vmo, st := rt.vmo_create(size)
+	if st != .Ok {
+		return old, false
+	}
+	at: u64
+	at, st = rt.as_map(rt.self, vmo, 0, size, {.Write})
+	_ = rt.handle_close(vmo) // the mapping keeps it
+	if st != .Ok {
+		return old, false
+	}
+	table = ([^]T)(uintptr(at))[:n]
+	intrinsics.mem_zero(raw_data(table), int(size))
+	copy(table, old)
+	table_free(old)
+	return table, true
+}
+
+@(private="file")
+table_free :: proc "contextless" (table: []$T) {
+	if len(table) != 0 {
+		_ = rt.as_unmap(rt.self, u64(uintptr(raw_data(table))), table_bytes(T, len(table)))
+	}
+}
+
 @(private)
 held_of :: proc "contextless" (p: ^Proc, tid: u32, make: bool) -> ^Held {
 	d := dbg_of(p)
@@ -341,11 +402,103 @@ held_of :: proc "contextless" (p: ^Proc, tid: u32, make: bool) -> ^Held {
 			free_slot = &h
 		}
 	}
-	if !make || free_slot == nil {
+	if !make {
 		return nil
+	}
+	if free_slot == nil { // the new half is free
+		at := len(d.threads)
+		ok: bool
+		if d.threads, ok = table_grow(d.threads, DBG_FIRST_THREADS); !ok {
+			return nil
+		}
+		free_slot = &d.threads[at]
 	}
 	free_slot^ = {tid = tid}
 	return free_slot
+}
+
+// --- All-stop (see the top) ---
+
+@(private="file")
+is_paused :: proc "contextless" (d: ^Debugger, tid: u32) -> bool {
+	for t in d.paused[:d.npaused] {
+		if t == tid {
+			return true
+		}
+	}
+	return false
+}
+
+// Every other thread of p suspended: those paused already stay so, and
+// threads made since are paused too; one held at an exception of its own
+// is not, as it is stopped already and must be able to step when let go.
+@(private="file")
+pause_others :: proc "contextless" (p: ^Proc, tid: u32) {
+	d := dbg_of(p)
+	d.pausing = true
+	ti: vx.Thread_Info
+	for rt.thread_state(p.task, ti.id, .Next_Thread, &ti) == .Ok {
+		if ti.id == tid || is_paused(d, ti.id) {
+			continue
+		}
+		if h := held_of(p, ti.id, false); h != nil && h.why != .None {
+			continue
+		}
+		if d.npaused == len(d.paused) {
+			ok: bool
+			if d.paused, ok = table_grow(d.paused, DBG_FIRST_PAUSED); !ok {
+				break // the rest run: no memory to keep them
+			}
+		}
+		if rt.thread_suspend(p.task, ti.id) == .Ok {
+			d.paused[d.npaused] = ti.id
+			d.npaused += 1
+		}
+	}
+}
+
+// A thread whose exception came while procfs had it paused (it stopped at
+// the same time as the one that paused it): not paused any more, as it is
+// held at its exception, and a suspended thread could not step over a
+// breakpoint when let go.
+@(private="file")
+unpause_one :: proc "contextless" (p: ^Proc, tid: u32) {
+	d := dbg_of(p)
+	for &t in d.paused[:d.npaused] {
+		if t == tid {
+			_ = rt.thread_resume(p.task, tid)
+			d.npaused -= 1
+			t = d.paused[d.npaused]
+			return
+		}
+	}
+}
+
+// The paused threads started again, if the debugger has let the task go on
+// and no thread is stepping over a breakpoint or a watchpoint on its own.
+@(private="file")
+maybe_unpause :: proc "contextless" (p: ^Proc) {
+	d := dbg_of(p)
+	if !d.pausing || d.stopped {
+		return
+	}
+	for &h in d.threads {
+		if h.tid != 0 && (h.why == .Over || h.why == .Wover) && !h.user_step {
+			return
+		}
+	}
+	for t in d.paused[:d.npaused] {
+		_ = rt.thread_resume(p.task, t) // gone, it may be
+	}
+	d.npaused = 0
+	d.pausing = false
+}
+
+// An event reported: the task stays stopped until the debugger lets it go.
+@(private="file")
+stop_all :: proc "contextless" (p: ^Proc, tid: u32) {
+	dbg_of(p).stopped = true
+	pause_others(p, tid)
 }
 
 @(private="file")
@@ -393,6 +546,7 @@ bp_condition :: proc "contextless" (p: ^Proc, b: ^Breakpoint, r: ^vx.Regs) -> bo
 // instruction, then the trap again (dbg_exception, at the .Step).
 @(private="file", require_results)
 step_over :: proc "contextless" (p: ^Proc, h: ^Held, user_step: bool) -> vx.Status {
+	pause_others(p, h.tid) // none runs past the breakpoint while its trap is out
 	i, ok := h.bp.?
 	if !ok {
 		return .Err_Bad_State
@@ -416,6 +570,7 @@ set_watches :: proc "contextless" (p: ^Proc, off: bool) -> vx.Status {
 // one instruction (dbg_exception puts them back, at the .Step).
 @(private="file", require_results)
 watch_over :: proc "contextless" (p: ^Proc, h: ^Held, user_step: bool) -> vx.Status {
+	pause_others(p, h.tid) // none passes the watchpoint while they are off
 	set_watches(p, true) or_return
 	h.why = .Wover
 	h.user_step = user_step
@@ -442,6 +597,16 @@ release :: proc "contextless" (p: ^Proc, h: ^Held) -> vx.Status {
 	return st
 }
 
+// A held thread let go by the debugger: the others with it, once it is past
+// its breakpoint.
+@(private="file", require_results)
+let_go :: proc "contextless" (p: ^Proc, h: ^Held) -> vx.Status {
+	dbg_of(p).stopped = false
+	st := release(p, h)
+	maybe_unpause(p)
+	return st
+}
+
 // Notes the fault a held thread is let go past, for dbg_exception.
 @(private="file")
 remember_pass :: proc "contextless" (p: ^Proc, h: ^Held) {
@@ -450,8 +615,8 @@ remember_pass :: proc "contextless" (p: ^Proc, h: ^Held) {
 	if rt.thread_state(p.task, h.tid, .Get_Exception, &e) != .Ok {
 		return
 	}
-	// The thread's place, or a free one; neither (more threads than procfs
-	// follows): it is then stopped again, as upstream's.
+	// The thread's place, or a free one, the table grown for it if need be;
+	// none (no memory for more): it is then stopped again, as upstream's.
 	slot: ^Passed
 	for &q in d.passed {
 		if q.tid == h.tid {
@@ -460,6 +625,13 @@ remember_pass :: proc "contextless" (p: ^Proc, h: ^Held) {
 		}
 		if q.tid == 0 && slot == nil {
 			slot = &q
+		}
+	}
+	if slot == nil { // the new half is free
+		at := len(d.passed)
+		ok: bool
+		if d.passed, ok = table_grow(d.passed, DBG_FIRST_THREADS); ok {
+			slot = &d.passed[at]
 		}
 	}
 	if slot != nil {
@@ -557,8 +729,9 @@ dbg_exception :: proc "contextless" (p: ^Proc, tid: u32) {
 		_ = rt.exception_resume(p.task, tid, go)
 		return
 	}
+	unpause_one(p, tid)
 	h := held_of(p, tid, true)
-	if h == nil { // more threads stopped than procfs follows: let it go
+	if h == nil { // no memory to follow it: let it go
 		_ = rt.exception_resume(p.task, tid, .Pass)
 		return
 	}
@@ -566,24 +739,31 @@ dbg_exception :: proc "contextless" (p: ^Proc, tid: u32) {
 	extra: [64]u8
 	#partial switch e.kind {
 	case .Step:
-		if i, ok := h.bp.?; h.why == .Over && ok && d.bp[i].used {
+		// The trap or the watchpoints back, once the last thread stepping
+		// past them is: two threads let go at one breakpoint together (ctl's
+		// start) step over it together, and the first back must not put the
+		// trap in the second's way (UPSTREAM-FINDINGS).
+		if i, ok := h.bp.?; h.why == .Over && ok && d.bp[i].used && !stepping_past(d, tid, .Over, i) {
 			_ = mem_rw(p, d.bp[i].addr, trap_bytes[:], true) // the trap, back
 		}
-		if h.why == .Wover {
+		if h.why == .Wover && !stepping_past(d, tid, .Wover, -1) {
 			_ = set_watches(p, false) // the watchpoints, back
 		}
 		if (h.why == .Over || h.why == .Wover) && !h.user_step { // past it, on the way on
 			h^ = {}
 			_ = rt.exception_resume(p.task, tid, .Continue)
+			maybe_unpause(p) // the others with it, unless the debugger holds them
 			return
 		}
 		h^ = {tid = tid, why = .Step, pc = pc}
+		stop_all(p, tid)
 		dbg_event(p, "step", tid, pc)
 	case .Breakpoint:
 		addr := trap_addr(pc)
 		i, ok := bp_at(d, addr)
 		if !ok { // the program's own
 			h^ = {tid = tid, why = .Trap, pc = pc}
+			stop_all(p, tid)
 			dbg_event(p, "trap", tid, pc)
 			return
 		}
@@ -596,10 +776,12 @@ dbg_exception :: proc "contextless" (p: ^Proc, tid: u32) {
 			_ = step_over(p, h, false)
 			return
 		}
+		stop_all(p, tid)
 		dbg_event(p, "break", tid, addr)
 	case .Watchpoint:
 		h^ = {tid = tid, why = .Watch, pc = pc}
 		w := &d.watches.slot[e.code < vx.WATCH_MAX ? e.code : 0]
+		stop_all(p, tid)
 		dbg_event(p, "watch", tid, pc, addr_extra(e.address, w.kind == .Write ? " access=write" : " access=rw", &extra))
 	case .Interrupt: // a note, not a fault: to the program's handler
 		h^ = {}
@@ -611,18 +793,48 @@ dbg_exception :: proc "contextless" (p: ^Proc, tid: u32) {
 			return
 		}
 		h^ = {tid = tid, why = .Fault, pc = pc}
+		stop_all(p, tid)
 		dbg_event(p, "fault", tid, pc, addr_extra(e.address, fault_access(&e), &extra))
 	}
 }
 
-// Every held thread let go: ctl's start.
+// Whether an event is waiting to be read: then ctl's start lets nothing go
+// (upstream's M6 step 6d6a), so a debugger that continues after one
+// thread's stop sees the stop another thread made at the same time before
+// anything runs on.
+@(private)
+dbg_pending :: proc "contextless" (p: ^Proc) -> bool {
+	return dbg_of(p).ev_count > 0
+}
+
+// Whether a thread other than tid is stepping past breakpoint bp (why .Over)
+// or a watchpoint (.Wover, bp -1).
+@(private="file")
+stepping_past :: proc "contextless" (d: ^Debugger, tid: u32, why: Why, bp: int) -> bool {
+	for &o in d.threads {
+		if o.tid == 0 || o.tid == tid || o.why != why {
+			continue
+		}
+		i, ok := o.bp.?
+		if why == .Wover || (ok && i == bp) {
+			return true
+		}
+	}
+	return false
+}
+
+// Every held thread let go: ctl's start. (release may grow the faults'
+// table, never the threads': the loop's slice stays the table.)
 @(private)
 release_all :: proc "contextless" (p: ^Proc) {
-	for &h in dbg_of(p).threads {
+	d := dbg_of(p)
+	d.stopped = false
+	for &h in d.threads {
 		if h.tid != 0 {
 			_ = release(p, &h)
 		}
 	}
+	maybe_unpause(p)
 }
 
 // --- ctl ---
@@ -809,7 +1021,11 @@ detach :: proc "contextless" (p: ^Proc) {
 	if d.bound {
 		_ = rt.exception_bind(p.task, vx.HANDLE_NONE, 0, {.First_Chance})
 	}
-	d^ = {}
+	d.stopped = false
+	for t in d.paused[:d.npaused] {
+		_ = rt.thread_resume(p.task, t) // whatever is in flight
+	}
+	dbg_forget(p)
 }
 
 // ctl's debug verbs; Err_Not_Found for any other.
@@ -866,7 +1082,7 @@ thread_ctl :: proc "contextless" (p: ^Proc, tid: u32, cmd: string) -> vx.Status 
 		return rt.thread_resume(p.task, tid)
 	case "resume":
 		h := held_of(p, tid, false)
-		return h != nil ? release(p, h) : .Err_Bad_State
+		return h != nil ? let_go(p, h) : .Err_Bad_State
 	}
 	return .Err_Invalid
 }
@@ -1011,11 +1227,14 @@ thread_status_text :: proc "contextless" (p: ^Proc, tid: u32, buf: []u8) -> int 
 		return 0
 	}
 	w := ndb.Writer{buf = buf}
+	// Suspended while blocked in a call: frozen, as it runs no more when the
+	// call returns (upstream's 6d6a).
+	run := ti.state == .Blocked && ti.suspend_count != 0 ? vx.Thread_Run_State.Suspended : ti.state
 	state := "unknown"
-	if u32(ti.state) == 0 {
+	if u32(run) == 0 {
 		state = ""
-	} else if ti.state <= .Suspended {
-		state = RUN_STATES[ti.state]
+	} else if run <= .Suspended {
+		state = RUN_STATES[run]
 	}
 	ndb.put(&w, "state", state)
 	if h := held_of(p, tid, false); h != nil && h.why != .None {
@@ -1081,5 +1300,9 @@ regs_ndb_write :: proc "contextless" (p: ^Proc, tid: u32, s: string) -> vx.Statu
 // A process ended, or its slot is reused: nothing of its debugging is left.
 @(private)
 dbg_forget :: proc "contextless" (p: ^Proc) {
-	dbg_of(p)^ = {}
+	d := dbg_of(p)
+	table_free(d.threads)
+	table_free(d.passed)
+	table_free(d.paused)
+	d^ = {}
 }

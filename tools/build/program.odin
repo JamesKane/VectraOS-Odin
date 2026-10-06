@@ -95,6 +95,9 @@ PROGRAMS := []Program {
 	// functions are optnone, and the house flags give -g and frame pointers.
 	// Its lib/vx-rt/rt.c is this tree's stand-in for upstream's runtime.
 	{name = "dbgdemo", source = "tests/user/dbgdemo.c", place = .Tests, kind = .C},
+	// The debugger's thread test's fixture (upstream's 6d6a), the same way:
+	// its threads are musl's pthreads, through the shim's vx_thread_spawn.
+	{name = "dbgthreads", source = "tests/user/dbgthreads.c", place = .Tests, kind = .C},
 	{name = "schedtest", dir = "tests/user/schedtest", place = .Tests},
 }
 

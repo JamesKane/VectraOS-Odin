@@ -9,6 +9,7 @@ package procfs_test
 
 import vx "abi:vx"
 import "vx:ns"
+import "vx:prof"
 import procfs "../../../servers/procfs"
 
 TASKS :: vx.Handle(0x101) // the "tasks" handle the fake spawn message gives: svcd's task
@@ -17,6 +18,7 @@ PORT :: vx.Handle(0x103)
 NSD :: vx.Handle(0x104)
 RING_VMO :: vx.Handle(0x105) // a profiling ring's VMO, which the fake maps at ring's address
 TASK_HANDLE :: vx.Handle(0x200) // plus a task's id: a handle to it
+VMO_HANDLE :: vx.Handle(0x400) // plus n: the nth VMO procfs made (its debugger's tables)
 
 Fake_Thread :: struct {
 	id:          u32,
@@ -25,6 +27,7 @@ Fake_Thread :: struct {
 	exception:   vx.Exception, // while stopped at a port
 	resumed:     vx.Resume_Action, // how it was last resumed (0: not since it stopped)
 	resumes:     int,
+	suspends:    int, // thread_suspend(task, id) less thread_resume(task, id)
 	xstate:      [FAKE_XSTATE_SIZE]u8, // .Get_Xstate's and .Set_Xstate's
 }
 
@@ -44,7 +47,7 @@ Fake_Task :: struct {
 	blocked:     u32,
 	mapped:      u64,
 	exit:        [dynamic; vx.ERRMAX]u8, // its exit string, once killed
-	threads:     [dynamic; 4]Fake_Thread,
+	threads:     [dynamic; 20]Fake_Thread,
 	maps:        [dynamic; 4]Fake_Map,
 	watches:     vx.Watches,
 	suspends:    int, // thread_suspend(task, 0) less thread_resume(task, 0)
@@ -69,7 +72,14 @@ NS_TEXT :: "mount -a /srv/bootfs /\nbind /boot /n\n"
 
 // The host memory a profiling ring lives in, mapped by both procfs and the
 // process that gives it.
-ring_words: [64 * 1024 / 8]u64 // u64s, for the header's alignment
+ring_words: [prof.RING / 8]u64 // u64s, for the header's alignment
+
+// The VMOs procfs makes for its debugger's tables (6d6a), each mapped once,
+// from a pool of host memory: their sizes, and the bytes unmapped since.
+vmo_sizes: [dynamic; 64]u64
+vmo_pool: [256 * 4096 / 8]u64
+vmo_pool_used: u64
+vmo_unmapped: u64
 
 ring_mem :: proc "contextless" () -> []u8 {
 	return ([^]u8)(&ring_words)[:size_of(ring_words)]
@@ -215,9 +225,16 @@ fake_syscall :: proc "c" (nr: vx.Syscall, a0, a1, a2, a3, a4, a5: u64) -> i64 {
 		if t == nil {
 			return ERR(.Err_Bad_Handle)
 		}
+		delta := nr == .Thread_Suspend ? 1 : -1
 		if a1 == 0 {
-			t.suspends += nr == .Thread_Suspend ? 1 : -1
+			t.suspends += delta
+			return 0
 		}
+		th := thread_of(t, u32(a1))
+		if th == nil {
+			return ERR(.Err_Not_Found)
+		}
+		th.suspends += delta
 		return 0
 	case .Thread_State: // (task, thread, op, buffer, size)
 		return thread_state(task_of(vx.Handle(a0)), u32(a1), vx.Thread_State_Op(a2), a3, a4)
@@ -248,13 +265,31 @@ fake_syscall :: proc "c" (nr: vx.Syscall, a0, a1, a2, a3, a4, a5: u64) -> i64 {
 			}
 		}
 		return ERR(.Err_Not_Found)
-	case .As_Map: // (task, vmo, offset, size, flags, &address): procfs maps a ring
-		if vx.Handle(a1) != RING_VMO {
+	case .Vmo_Create: // (size, options, &handle)
+		if append(&vmo_sizes, a0) == 0 {
+			return ERR(.Err_No_Memory)
+		}
+		ptr(vx.Handle, a2)^ = VMO_HANDLE + vx.Handle(len(vmo_sizes))
+		return 0
+	case .As_Map: // (task, vmo, offset, size, flags, &address): procfs maps a ring, or a table
+		h := vx.Handle(a1)
+		if h > VMO_HANDLE && h <= VMO_HANDLE + vx.Handle(len(vmo_sizes)) {
+			if a3 != vmo_sizes[h - VMO_HANDLE - 1] || a3 > size_of(vmo_pool) - vmo_pool_used {
+				return ERR(.Err_No_Memory)
+			}
+			ptr(u64, a5)^ = u64(uintptr(&vmo_pool)) + vmo_pool_used
+			vmo_pool_used += a3
+			return 0
+		}
+		if h != RING_VMO {
 			return ERR(.Err_Bad_Handle)
 		}
 		ptr(u64, a5)^ = u64(uintptr(&ring_words))
 		return 0
-	case .As_Unmap:
+	case .As_Unmap: // (task, address, size)
+		if a1 >= u64(uintptr(&vmo_pool)) && a1 < u64(uintptr(&vmo_pool)) + size_of(vmo_pool) {
+			vmo_unmapped += a2
+		}
 		return 0
 	case .Channel_Write: // (channel, bytes, len, handles, count)
 		if vx.Handle(a0) != LISTEN {
@@ -301,7 +336,7 @@ thread_state :: proc "contextless" (t: ^Fake_Task, tid: u32, op: vx.Thread_State
 	case .Next_Thread:
 		for &th in t.threads { // in id order
 			if th.id > tid {
-				ptr(vx.Thread_Info, buf)^ = {id = th.id, state = th.state}
+				ptr(vx.Thread_Info, buf)^ = {id = th.id, state = th.state, suspend_count = u32(max(th.suspends, 0))}
 				return 0
 			}
 		}

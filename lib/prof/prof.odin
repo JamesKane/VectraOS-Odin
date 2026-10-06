@@ -7,10 +7,14 @@
 //	prof.end(&work, t)
 //
 // Each zone that ends writes a record (its start and end on the cycle
-// counter, its zone, its thread) into a ring in a VMO the process shares with
-// procfs. Zones are off until a reader writes "zones on" to /proc/N/prof/ctl;
-// off, a zone costs one predictable branch. /proc/N/prof/zones reads the
-// ring: a Header, the zones' names, then the records, oldest first.
+// counter, its zone, its thread) into the ring of the thread it ran on, in a
+// VMO the process shares with procfs (upstream's M6 step 6d6b): a thread
+// claims a ring of its own the first time it records, and writes it alone,
+// so threads share no ring and no counter; past THREADS of them, the rest
+// share ring 0, which counts its records atomically. Zones are off until a
+// reader writes "zones on" to /proc/N/prof/ctl; off, a zone costs one
+// predictable branch. /proc/N/prof/zones reads them: a Header, the zones'
+// names, then every ring's records, merged oldest first by their end.
 // /sys/clock/info's frequency (in the header too) turns cycles into time.
 //
 // init(connector) makes the ring and gives it to procfs, through its listen
@@ -27,45 +31,82 @@ import "vx:rt"
 MAGIC :: u32(0x666f_7270) // "prof"
 ZONES :: 64
 NAME :: 32
-RING :: u64(64 * 1024)
+// The VMO: the header's page, then rings: ring 0, shared, then one each for
+// the first THREADS threads that record.
+THREADS :: 32
+RING_BYTES :: u64(32 * 1024)
+HEADER_BYTES :: u64(4096)
+RING :: HEADER_BYTES + (THREADS + 1) * RING_BYTES
 
 Record :: struct {
 	start, end: u64, // on the cycle counter
 	zone:       u32, // from 1: names[zone - 1]
-	thread:     u32,
+	thread:     u32, // the kernel's id for it (/proc/N/threads)
 }
 
 #assert(size_of(Record) == 24)
 
-// The start of the shared ring, and of what /proc/N/prof/zones reads.
-// enabled, nzones and head are read and written atomically.
+// The start of the shared VMO, and of what /proc/N/prof/zones reads, where
+// head and cap say how many records follow. enabled, nzones and head are
+// read and written atomically.
 Header :: struct {
 	magic, version: u32,
 	counter_hz:     u64, // /sys/clock/info's
 	nonce:          u64, // procfs's challenge, read back through the task's memory
 	enabled:        u32, // set by procfs: ctl's "zones on"
 	nzones:         u32,
-	head:           u64, // records written, ever: the ring holds the last `cap` of them
-	cap, reserved:  u32,
+	head:           u64, // in the VMO, rings claimed; in the file, the records that follow
+	cap, rings:     u32, // records each ring holds; rings (in the file: records, and 0)
 	names:          [ZONES][NAME]u8,
 }
 
 #assert(size_of(Header) == 48 + ZONES * NAME)
 #assert(offset_of(Header, head) == 32)
 #assert(offset_of(Header, names) == 48)
+#assert(size_of(Header) <= HEADER_BYTES)
+
+// A ring, then its records: written by its thread alone (head stored after
+// each record; a reader takes what head says, less any it may have been
+// overwriting meanwhile), or, ring 0, by any (head counted atomically).
+// thread and head are read and written atomically.
+Ring :: struct {
+	thread:   u32, // its owner's id; 0 for ring 0
+	reserved: u32,
+	head:     u64, // records written, ever: it holds the last CAP of them
+}
+
+#assert(size_of(Ring) == 16)
+
+// The records a ring holds.
+CAP :: u32((RING_BYTES - size_of(Ring)) / size_of(Record))
 
 Zone :: struct {
 	name: string,
 	id:   u32, // from 1, once it has a name in the ring
 }
 
-// The process's ring, once procfs has taken it.
+// The process's VMO, once procfs has taken it.
 @(private="file")
 ring: ^Header
+// This thread's ring, once it has one, and its id.
+@(private="file", thread_local)
+mine: ^Ring
+@(private="file", thread_local)
+my_id: u32
 
-// The records that follow h in a ring of RING bytes.
-records :: proc "contextless" (h: ^Header) -> []Record {
-	return ([^]Record)(intrinsics.ptr_offset(h, 1))[:h.cap]
+// The process's VMO, once procfs has taken it (init); nil before.
+header :: proc "contextless" () -> ^Header {
+	return ring
+}
+
+// Ring i (0 ..= THREADS) of the VMO of RING bytes h starts.
+ring_at :: proc "contextless" (h: ^Header, i: u32) -> ^Ring {
+	return (^Ring)(uintptr(h) + uintptr(HEADER_BYTES + u64(min(i, THREADS)) * RING_BYTES))
+}
+
+// The records that follow r in its ring.
+ring_records :: proc "contextless" (r: ^Ring) -> []Record {
+	return ([^]Record)(intrinsics.ptr_offset(r, 1))[:CAP]
 }
 
 // Writes a fresh header at the start of a ring of RING bytes.
@@ -73,9 +114,10 @@ records :: proc "contextless" (h: ^Header) -> []Record {
 format :: proc "contextless" (h: ^Header, counter_hz: u64) {
 	h^ = {
 		magic      = MAGIC,
-		version    = 1,
+		version    = 2,
 		counter_hz = counter_hz,
-		cap        = u32((RING - size_of(Header)) / size_of(Record)),
+		cap        = CAP,
+		rings      = THREADS + 1,
 	}
 }
 
@@ -142,6 +184,22 @@ begin :: #force_inline proc "contextless" (z: ^Zone) -> u64 {
 	return u64(intrinsics.read_cycle_counter())
 }
 
+// This thread's ring: claimed the first time, or ring 0 if none is left.
+@(private="file")
+ring_of_thread :: proc "contextless" () -> ^Ring {
+	if mine != nil {
+		return mine
+	}
+	my_id = rt.thread_self_id()
+	n := intrinsics.atomic_add_explicit(&ring.head, 1, .Relaxed)
+	r := ring_at(ring, n < THREADS ? u32(n) + 1 : 0)
+	if n < THREADS {
+		intrinsics.atomic_store_explicit(&r.thread, my_id, .Release)
+	}
+	mine = r
+	return r
+}
+
 // A zone ends: its record, if it started with zones on.
 end :: #force_inline proc "contextless" (z: ^Zone, start: u64) {
 	if intrinsics.expect(start == 0, true) {
@@ -152,11 +210,19 @@ end :: #force_inline proc "contextless" (z: ^Zone, start: u64) {
 	if id == 0 {
 		return
 	}
-	slot := intrinsics.atomic_add_explicit(&ring.head, 1, .Release)
-	records(ring)[slot % u64(ring.cap)] = {
+	r := ring_of_thread()
+	rec := Record {
 		start  = start,
 		end    = stop,
 		zone   = id,
-		thread = 1,
+		thread = my_id,
 	}
+	if r == ring_at(ring, 0) { // shared: a slot of its own, counted
+		slot := intrinsics.atomic_add_explicit(&r.head, 1, .Acq_Rel)
+		ring_records(r)[slot % u64(CAP)] = rec
+		return
+	}
+	head := intrinsics.atomic_load_explicit(&r.head, .Relaxed) // its own: no one else writes it
+	ring_records(r)[head % u64(CAP)] = rec
+	intrinsics.atomic_store_explicit(&r.head, head + 1, .Release)
 }

@@ -408,11 +408,12 @@ build_backend :: proc(musl: ^Port, a: ^Arch, mode: Mode, override: string) -> (b
 		// vx:rt's assembly (its system call, its note entry), which the
 		// package's own programs get from build_program.
 		rt_asm := tree_files(fmt.tprintf("lib/rt/arch/%s", a.name)) or_return
+		prefix_map := file_prefix_map() or_return // the repository root as /src, as everywhere else
 		cc := make([dynamic][]string, context.temp_allocator)
 		for s in rt_asm {
 			if strings.has_suffix(s, ".S") {
 				o := fmt.tprintf("%s/pkg/obj/rt_%s_S.o", out, filepath.stem(s))
-				append(&cc, cmd_make(CLANG, fmt.tprintf("--target=%s", a.clang_target), "-g", "-c", s, "-o", o)[:])
+				append(&cc, cmd_make(CLANG, fmt.tprintf("--target=%s", a.clang_target), "-g", prefix_map, "-c", s, "-o", o)[:])
 				append(&objs, o)
 			}
 		}

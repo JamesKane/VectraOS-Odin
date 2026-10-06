@@ -732,7 +732,7 @@ test_dbg :: proc(t: ^testing.T) {
 	append(&want, "(dbg) break", "dbg: no such function or line")
 	append(&want, "(dbg) cont", "dbg: not running", "(dbg) step", "dbg: not running", "(dbg) bt", "dbg: no stack")
 	append(&want, "(dbg) frame 0", "dbg: no such frame", "(dbg) print n", "dbg: not stopped", "(dbg) kill")
-	append(&want, "(dbg) frobnicate", "dbg: break, run, cont, step, bt, frame, print, regs, info, kill, quit")
+	append(&want, "(dbg) frobnicate", "dbg: break, run, cont, step, bt, frame, print, regs, xregs, threads, thread, info, kill, quit")
 	append(&want, "(dbg) # a comment", "(dbg) ", "(dbg) where", "dbg: no stack", "(dbg) p n", "dbg: not stopped")
 	for i in 0 ..< 30 {
 		append(&want, "(dbg) break leaf")

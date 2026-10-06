@@ -16,13 +16,20 @@
 //   frame N                            choose frame N for print
 //   print EXPR                         a C expression at that frame (05 §6.2)
 //   regs, info                         the thread's registers; the process's maps and images
+//   threads                            every thread: its state, why it stopped, where (M6 step 6d6a)
+//   thread N                           make thread N the one commands act on
+//   xregs                              the thread's FP/SIMD state: x86_64's XSAVE image, PKRU
+//                                      among it; aarch64's V registers
 //   kill, quit
+//
+// When a thread stops with an event, procfs stops the program's other threads
+// too, and starts them again with it (all-stop, procfs's debug.odin).
 //
 // A launched program that crashes leaves a crash directory (procfs saves it,
 // 05 §5); dbg then turns to it, so bt and print go on working on the dead
 // program, with the same code a live one uses.
 //
-// Behaviour is upstream's cmd/dbg.c at 002a9a8, byte for byte on the
+// Behaviour is upstream's cmd/dbg.c at dfbbe4b, byte for byte on the
 // console. tests/host/dbg drives `session` against a recorded procfs.
 package dbg
 
@@ -351,6 +358,15 @@ thread_file :: proc "contextless" (file: string) -> string {
 	return str.to_string(&b)
 }
 
+@(private="file")
+regs_pc :: proc "contextless" () -> u64 {
+	when ODIN_ARCH == .amd64 {
+		return state.regs.rip
+	} else {
+		return state.regs.pc
+	}
+}
+
 // The thread's registers and the call stack, as it stopped.
 @(private="file")
 refresh :: proc() {
@@ -633,6 +649,163 @@ print :: proc(expr: string) {
 	rt.print("= ", debug.format(&s, v, out[:]), "\n")
 }
 
+// threads/N/status's record, for thread n, into buf: its text, or "".
+@(private="file")
+thread_status :: proc "contextless" (n: u64, buf: []u8) -> string {
+	path: [48]u8
+	b := str.Buf{buf = path[:len(path) - 1]}
+	str.write_string(&b, "threads/")
+	str.write_u64(&b, n)
+	str.write_string(&b, "/status")
+	got, st := read_file(target_path(str.to_string(&b)), buf)
+	return string(buf[:got if st == .Ok && got > 0 else 0])
+}
+
+@(private="file")
+threads :: proc() {
+	d: ns.File
+	if ns.open(&space, target_path("threads"), p9.OREAD, &d) != .Ok {
+		rt.print("dbg: no threads\n")
+		return
+	}
+	@(static) dir: [8192]u8
+	all, stopped: u64
+	for {
+		n, st := ns.read(&d, dir[:])
+		if st != .Ok || n <= 0 {
+			break
+		}
+		it := p9.Dir_Entries {
+			buf = dir[:n],
+		}
+		for e in p9.next_entry(&it) {
+			tid := parse_num(e.name)
+			rec: [256]u8
+			r := thread_status(tid, rec[:])
+			state_word, reason := field(r, "state"), field(r, "reason")
+			all += 1
+			if state_word == "stopped" || state_word == "frozen" {
+				stopped += 1
+			}
+			rt.print(tid == u64(max(state.thread, 1)) ? " *" : "  ", tid, " ", state_word)
+			if len(reason) > 0 {
+				rt.print(" ", reason)
+			}
+			if pc := parse_num(field(r, "pc")); pc != 0 {
+				rt.print(" at ")
+				say_where(pc)
+			}
+			rt.print("\n")
+		}
+	}
+	ns.close(&d)
+	rt.print("dbg: ", all, " threads, ", stopped, " stopped\n")
+}
+
+// As one number, the last byte first.
+@(private="file")
+say_bytes :: proc "contextless" (p: []u8) {
+	DIGITS := "0123456789abcdef"
+	out: [130]u8
+	k := 0
+	for i := len(p) - 1; i >= 0 && k + 2 < len(out); i -= 1 {
+		out[k], out[k + 1] = DIGITS[p[i] >> 4], DIGITS[p[i] & 15]
+		k += 2
+	}
+	rt.print("0x", string(out[:k]))
+}
+
+@(private="file")
+say_reg :: proc "contextless" (name: string, i: u32, p: []u8) {
+	rt.print(name, u64(i), "=")
+	say_bytes(p)
+	rt.print("\n")
+}
+
+// A little-endian T at off in b, which holds it.
+@(private="file")
+load_le :: proc "contextless" ($T: typeid, b: []u8, off: int) -> T {
+	return intrinsics.unaligned_load((^T)(raw_data(b[off:][:size_of(T)])))
+}
+
+when ODIN_ARCH == .amd64 {
+	// Where XSAVE's standard image keeps component c (CPUID leaf 0xD).
+	@(private="file")
+	xsave_offset :: proc "contextless" (c: u32) -> int {
+		_, b, _, _ := intrinsics.x86_cpuid(0xd, c)
+		return int(b)
+	}
+}
+
+// The thread's whole FP/SIMD state (threads/N/xregs, ADR-0035).
+@(private="file")
+xregs :: proc() {
+	@(static) xs: [64 * 1024]u8
+	n, st := read_file(target_path(thread_file("xregs")), xs[:])
+	if st != .Ok || n <= 0 {
+		rt.print("dbg: no state: is the thread stopped?\n")
+		return
+	}
+	x := xs[:n]
+	when ODIN_ARCH == .amd64 {
+		if n < 576 {
+			rt.print("dbg: a short XSAVE image\n")
+			return
+		}
+		mxcsr, bv, features := load_le(u32, x, 24), load_le(u64, x, 512), rt.cpu().xfeatures
+		rt.print("mxcsr=")
+		say_hex(u64(mxcsr))
+		rt.print(" xstate_bv=")
+		say_hex(bv)
+		rt.print(" xcr0=")
+		say_hex(features)
+		rt.print("\n")
+		ymm := features & 4 != 0 ? xsave_offset(2) : 0
+		for i in 0 ..< 16 {
+			v: [32]u8
+			copy(v[:16], x[160 + 16 * i:][:16])
+			if ymm != 0 && ymm + 16 * (i + 1) <= n {
+				copy(v[16:], x[ymm + 16 * i:][:16])
+			}
+			say_reg(ymm != 0 ? "ymm" : "xmm", u32(i), v[:ymm != 0 ? 32 : 16])
+		}
+		if features & 0x20 != 0 { // AVX-512's opmasks
+			k := xsave_offset(5)
+			for i := 0; i < 8 && k + 8 * (i + 1) <= n; i += 1 {
+				say_reg("k", u32(i), x[k + 8 * i:][:8])
+			}
+		}
+		if features & 0x200 != 0 { // PKRU: the thread's protection-key rights (ADR-0035)
+			at := xsave_offset(9)
+			pkru: u32 // not in use: its first value, 0
+			if bv & 0x200 != 0 && at + 4 <= n {
+				pkru = load_le(u32, x, at)
+			}
+			rt.print("pkru=")
+			say_hex(u64(pkru))
+			rt.print("\n")
+		} else {
+			rt.print("pkru: none (no protection keys)\n")
+		}
+	} else {
+		if n < size_of(vx.Fpregs) {
+			rt.print("dbg: a short state\n")
+			return
+		}
+		f: vx.Fpregs
+		copy(memory.ptr_to_bytes(&f), x)
+		rt.print("fpcr=")
+		say_hex(f.fpcr)
+		rt.print(" fpsr=")
+		say_hex(f.fpsr)
+		rt.print("\n")
+		for &v, i in f.v {
+			say_reg("v", u32(i), v[:])
+		}
+		rt.print("por_el0: none (no protection keys)\n")
+	}
+}
+
 @(private="file")
 show :: proc(file: string) {
 	@(static) text: [4096]u8
@@ -722,6 +895,25 @@ command :: proc(line_in: string) -> bool {
 		print(rest)
 	case "regs":
 		show(thread_file("regs.ndb"))
+	case "xregs":
+		xregs()
+	case "threads":
+		threads()
+	case "thread":
+		n := parse_num(rest)
+		rec: [256]u8
+		if n == 0 || thread_status(n, rec[:]) == "" {
+			rt.print("dbg: no such thread\n")
+			return true
+		}
+		state.thread = u32(n)
+		refresh()
+		rt.print("dbg: thread ", n)
+		if state.have_regs {
+			rt.print(" at ")
+			say_where(regs_pc())
+		}
+		rt.print("\n")
 	case "info":
 		show("images")
 		show("maps")
@@ -731,7 +923,7 @@ command :: proc(line_in: string) -> bool {
 			wait_event()
 		}
 	case:
-		rt.print("dbg: break, run, cont, step, bt, frame, print, regs, info, kill, quit\n")
+		rt.print("dbg: break, run, cont, step, bt, frame, print, regs, xregs, threads, thread, info, kill, quit\n")
 	}
 	return true
 }

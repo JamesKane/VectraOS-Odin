@@ -20,6 +20,10 @@ M4's POSIX personality is musl with a VectraOS back end: programs see musl's API
 - **One thread-local record.** The back end keeps each thread's own state (its lock depth, signal mask and depth, the signals aimed at it, its call's deadline, its id and ctid) in an Odin `@(thread_local)` record, as upstream's C keeps it in a `thread_local` one. It is in the program's PT_TLS segment, which musl lays out for each thread (variant II on x86_64, variant I on aarch64, as ld.lld resolves the offsets), so musl's thread pointer stays musl's. Until musl's first thread has its TLS (`set_tid_address`, musl's last step of it), the record is a static copy, moved then. The back end is otherwise built with the hygiene above: no Odin runtime, allocator or init, every procedure contextless or C.
 - **Two more exports:** `__clone`, pthread_create's thread (musl's generic `src/thread/clone.c` excluded, as its arch `clone.s` was), and `__unmapself`, a detached thread's end (`src/thread/__unmapself.c` excluded). `__clone` is variadic in C; its three variadic pointers are named parameters here, which both targets' C ABIs pass in the same places.
 
+## Amended 2026-10-06: the debugger's thread fixture (upstream's M6 step 6d6a)
+
+- **`tests/user/dbgthreads.c` is a fixture like `dbgdemo.c`**, copied unchanged and built against musl, as its scenario expects `dbg` to name `tests/user/dbgthreads.c`. The shim gives it what it uses besides dbgdemo's: `vx_status` and `VX_OK`, `<stdatomic.h>`, and `vx_thread`, `vx_thread_spawn` (pthread_create, with the stack size asked for) and `vx_thread_join`, after `main`, so dbgdemo's lines stay where they were. Its 32 workers are musl's pthreads, kernel threads of its task as upstream's are; `dbg`'s `bt` of one shows the shim's `vx_shim_thread` and the back end's `clone_entry` below `worker`, where upstream's shows its runtime's thread entry.
+
 ## Consequences
 
 - Only the back end is first-party in a POSIX program; musl, compiler-rt, Lua and sbase are vendored C, each with its own ADR and review.

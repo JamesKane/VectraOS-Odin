@@ -894,6 +894,9 @@ ctl :: proc "contextless" (p: ^Proc, cmd: string) -> vx.Status {
 		}
 		return p.root ? .Err_Access : stop(p, u8(sig))
 	case cmd == "start":
+		if dbg_pending(p) {
+			return .Ok // a stop not yet read: it is the next to be (as gdb reports one first)
+		}
 		release_all(p) // threads held at events, and those stopped
 		return cont(p)
 	case cmd == "setsid":

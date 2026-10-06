@@ -14,6 +14,7 @@
 package procfs_test
 
 import vx "abi:vx"
+import "core:fmt"
 import "core:strings"
 import "core:testing"
 import "vx:p9"
@@ -531,7 +532,7 @@ test_procfs :: proc(t: ^testing.T) {
 
 	// maps, images and info, byte for byte.
 	text, _ = read_file(&c, root, "9/maps", buf[:])
-	testing.expect_value(t, text, "base=0x400000 size=0x1000 prot=r-x offset=0x0\nbase=0x600000 size=0x2000 prot=rw- offset=0x1000\nbase=0x700000 size=0x10000 prot=rw- offset=0x0\n")
+	testing.expect_value(t, text, "base=0x400000 size=0x1000 prot=r-x offset=0x0\nbase=0x600000 size=0x2000 prot=rw- offset=0x1000\nbase=0x700000 size=0x109000 prot=rw- offset=0x0\n")
 	text, _ = read_file(&c, root, "9/images", buf[:])
 	testing.expect_value(t, text, "name=ls base=0x400000 build-id=" + BUILD_ID + "\n")
 	text, _ = read_file(&c, root, "9/info", buf[:])
@@ -771,6 +772,98 @@ test_procfs :: proc(t: ^testing.T) {
 		testing.expect_value(t, task_by_id(1).debug_key, 0) // not svcd's
 	}
 
+	// --- All-stop (upstream's 6d6a) ---
+	// When a thread stops with an event, every other thread of the task is
+	// frozen, each by its own thread_suspend, and thawed when the stopped one
+	// is let go. Here with 18 threads, more than the 16 procfs followed
+	// before, the last blocked in a call.
+	many := add_task({id = 16, name = "many", state = .Running})
+	_ = append(&many.maps, Fake_Map{base = 0x400000, flags = {.Exec}, bytes = code_mem[:]})
+	for i in u32(1) ..= 18 {
+		_ = append(&many.threads, Fake_Thread{id = i, state = i == 18 ? .Blocked : .Running})
+	}
+	testing.expect_value(t, register(t, 16, 1, {.No_Wait}), vx.Status.Ok)
+	frozen :: proc(task: ^Fake_Task) -> (n: int) {
+		for th in task.threads {
+			n += th.suspends > 0 ? 1 : 0
+		}
+		return
+	}
+	ABP :: 0x400180
+	orig_180 := code_mem[0x180]
+	_, e = write_file(&c, root, "16/ctl", "break 0x400180")
+	testing.expect_value(t, e, vx.Status.Ok)
+	// Each thread stops at it in turn: the others frozen while it is held,
+	// and while it steps over the breakpoint; all thawed once it is past.
+	for i in u32(1) ..= 17 {
+		th := thread_of(many, i)
+		fire_exception(many, i, exception(.Breakpoint, trap_pc(ABP)))
+		testing.expectf(t, frozen(many) == 17 && th.suspends == 0, "thread %d: %d others frozen", i, frozen(many))
+		text, _ = fs_read(16, .Events, buf[:])
+		testing.expect_value(t, text, fmt.tprintf("event=break thread=%d pc=0x400180\n", i))
+		_, e = write_file(&c, root, "16/ctl", "start")
+		testing.expect_value(t, th.resumed, vx.Resume_Action.Step)
+		testing.expect_value(t, frozen(many), 17) // none runs past it while its trap is out
+		fire_exception(many, i, exception(.Step, ABP + 4))
+		testing.expect_value(t, th.resumed, vx.Resume_Action.Continue)
+		testing.expect_value(t, frozen(many), 0)
+	}
+	// Two threads stopped at once: the second's exception came while it was
+	// frozen, so it is thawed and held; ctl's start lets nothing go while its
+	// event is unread, then lets both go, the others thawed once both are past.
+	fire_exception(many, 3, exception(.Breakpoint, trap_pc(ABP)))
+	fire_exception(many, 5, exception(.Breakpoint, trap_pc(ABP)))
+	testing.expect_value(t, thread_of(many, 5).suspends, 0)
+	testing.expect_value(t, frozen(many), 16)
+	text, _ = read_file(&c, root, "16/threads/18/status", buf[:])
+	testing.expect_value(t, text, "state=frozen\n") // suspended while blocked in a call
+	text, _ = fs_read(16, .Events, buf[:])
+	testing.expect_value(t, text, "event=break thread=3 pc=0x400180\n")
+	_, e = write_file(&c, root, "16/ctl", "start")
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect_value(t, thread_of(many, 3).resumed, vx.Resume_Action(0)) // 5's stop first
+	text, _ = fs_read(16, .Events, buf[:])
+	testing.expect_value(t, text, "event=break thread=5 pc=0x400180\n")
+	_, e = write_file(&c, root, "16/ctl", "start")
+	testing.expect_value(t, thread_of(many, 3).resumed, vx.Resume_Action.Step)
+	testing.expect_value(t, thread_of(many, 5).resumed, vx.Resume_Action.Step)
+	fire_exception(many, 3, exception(.Step, ABP + 4))
+	testing.expect_value(t, frozen(many), 16) // 5 still has the trap out
+	testing.expect_value(t, code_mem[0x180], orig_180) // not back in 5's way
+	fire_exception(many, 5, exception(.Step, ABP + 4))
+	testing.expect_value(t, frozen(many), 0)
+	testing.expect_value(t, string(code_mem[0x180:][:len(TRAP)]), TRAP) // back, both past it
+	// A step of the stopped thread leaves the others frozen; its resume
+	// thaws them. A freeze of the debugger's own outlasts all-stop's.
+	_, e = write_file(&c, root, "16/ctl", "freeze 7")
+	testing.expect_value(t, e, vx.Status.Ok)
+	fire_exception(many, 2, exception(.Breakpoint, trap_pc(ABP)))
+	_, _ = fs_read(16, .Events, buf[:])
+	testing.expect_value(t, thread_of(many, 7).suspends, 2)
+	_, e = write_file(&c, root, "16/threads/2/ctl", "step")
+	testing.expect_value(t, e, vx.Status.Ok)
+	fire_exception(many, 2, exception(.Step, ABP + 4))
+	text, _ = fs_read(16, .Events, buf[:])
+	testing.expect_value(t, text, "event=step thread=2 pc=0x400184\n")
+	testing.expect_value(t, frozen(many), 17)
+	_, e = write_file(&c, root, "16/threads/2/ctl", "resume")
+	testing.expect_value(t, thread_of(many, 2).resumed, vx.Resume_Action.Continue)
+	testing.expect_value(t, frozen(many), 1)
+	testing.expect_value(t, thread_of(many, 7).suspends, 1) // its own freeze
+	_, e = write_file(&c, root, "16/ctl", "thaw 7")
+	testing.expect_value(t, frozen(many), 0)
+	// detach with a thread held: it and the others go on, and the
+	// debugger's tables are let go.
+	fire_exception(many, 4, exception(.Breakpoint, trap_pc(ABP)))
+	testing.expect_value(t, frozen(many), 17)
+	_, e = write_file(&c, root, "16/ctl", "detach")
+	testing.expect_value(t, e, vx.Status.Ok)
+	testing.expect_value(t, frozen(many), 0)
+	testing.expect_value(t, thread_of(many, 4).resumed, vx.Resume_Action.Continue)
+	testing.expect_value(t, vmo_unmapped, vmo_pool_used)
+	_, e = write_file(&c, root, "16/ctl", "kill")
+	fire_exit(many)
+
 	// --- Profiling zones ---
 
 	// A ring given in another's name: procfs's challenge does not show at
@@ -794,41 +887,72 @@ test_procfs :: proc(t: ^testing.T) {
 	testing.expect_value(t, e, vx.Status.Err_Invalid)
 	_, e = write_file(&c, root, "9/prof/ctl", "zones off")
 	testing.expect_value(t, hdr.enabled, 0)
-	// zones: the header, its cap held to the ring's size, then the records
-	// held, oldest first.
-	records := ([^]prof.Record)(&ring_mem()[size_of(prof.Header)])
-	slots := u32((prof.RING - size_of(prof.Header)) / size_of(prof.Record))
-	for i in u64(0) ..< 5 {
-		records[i] = {start = 100 * (i + 1), end = 100 * (i + 1) + 50, zone = 1, thread = 1}
+	// zones (upstream's 6d6b): the header, whose head and cap say how many
+	// records follow, then every ring's records merged oldest first by their
+	// end. What the header says of the VMO is not believed: a lie about its
+	// size changes nothing.
+	ring_put :: proc(i: u32, owner: u32, ends: []u64) {
+		r := prof.ring_at((^prof.Header)(&ring_words), i)
+		r.thread = owner
+		for e, k in ends {
+			prof.ring_records(r)[k] = {start = e - 10, end = e, zone = 1, thread = owner}
+		}
+		r.head = u64(len(ends))
 	}
-	hdr.cap, hdr.head = 0xffff_ffff, 3 // a header that lies about its size
-	{
-		f, _ := p9.client_walk(&c, root, "9/prof/zones")
-		_ = p9.client_open(&c, f, p9.OREAD)
-		got: [dynamic; 4096]u8
-		for {
-			n, e = p9.client_read(&c, f, u64(len(got)), buf[:512])
+	zones :: proc(c: ^p9.Client, root: p9.Fid, out: []u8) -> []u8 {
+		f, _ := p9.client_walk(c, root, "9/prof/zones")
+		_ = p9.client_open(c, f, p9.OREAD)
+		got := 0
+		for got < len(out) {
+			n, e := p9.client_read(c, f, u64(got), out[got:][:min(len(out) - got, 4096)])
 			if e != .Ok || n == 0 {
 				break
 			}
-			_ = append(&got, ..buf[:n])
+			got += n
 		}
-		_ = p9.client_clunk(&c, f)
-		testing.expect_value(t, len(got), size_of(prof.Header) + 3 * size_of(prof.Record))
-		snap := (^prof.Header)(&got[0])
-		testing.expect_value(t, snap.cap, slots)
-		testing.expect_value(t, snap.magic, prof.MAGIC)
-		recs := ([^]prof.Record)(&got[size_of(prof.Header)])[:3]
-		testing.expect_value(t, recs[0].start, 100)
-		testing.expect_value(t, recs[2].start, 300)
+		_ = p9.client_clunk(c, f)
+		return out[:got]
 	}
-	hdr.cap, hdr.head = 2, 5 // the ring has wrapped: the last two, oldest first
-	text, _ = read_file(&c, root, "9/prof/zones", buf[:])
-	testing.expect_value(t, len(text), size_of(prof.Header) + 2 * size_of(prof.Record))
+	ring_put(0, 0, {50}) // shared: a thread past the first 32
+	ring_put(1, 3, {150, 350, 550})
+	ring_put(2, 4, {250, 450})
+	hdr.cap, hdr.head = 0xffff_ffff, 1 << 40 // a header that lies about its size
+	@(static) merged: [size_of(prof.Header) + 2 * prof.CAP * size_of(prof.Record)]u8
 	{
-		recs := ([^]prof.Record)(raw_data(text[size_of(prof.Header):]))[:2]
-		testing.expect_value(t, recs[0].start, 200) // record 3 of 5, in slot 3 % 2 = 1
-		testing.expect_value(t, recs[1].start, 100) // record 4, in slot 0
+		got := zones(&c, root, merged[:])
+		testing.expect_value(t, len(got), size_of(prof.Header) + 6 * size_of(prof.Record))
+		snap := (^prof.Header)(&got[0])
+		testing.expect_value(t, snap.magic, prof.MAGIC)
+		testing.expect_value(t, snap.head, 6)
+		testing.expect_value(t, snap.cap, 6)
+		testing.expect_value(t, snap.rings, 0)
+		recs := ([^]prof.Record)(&got[size_of(prof.Header)])[:6]
+		ENDS := [6]u64{50, 150, 250, 350, 450, 550}
+		OWNERS := [6]u32{0, 3, 4, 3, 4, 3}
+		for r, i in recs {
+			testing.expectf(t, r.end == ENDS[i] && r.thread == OWNERS[i], "record %d: end %d of thread %d", i, r.end, r.thread)
+		}
+	}
+	// A ring that has wrapped: its last CAP records, oldest first, the
+	// newest in its first slot.
+	{
+		r := prof.ring_at(hdr, 2)
+		for &rec, k in prof.ring_records(r) {
+			rec = {start = 1, end = 600 + u64(k), zone = 1, thread = 4}
+		}
+		prof.ring_records(r)[0].end = 600 + u64(prof.CAP)
+		r.head = u64(prof.CAP) + 1
+		got := zones(&c, root, merged[:])
+		nrec := (len(got) - size_of(prof.Header)) / size_of(prof.Record)
+		testing.expect_value(t, nrec, 4 + int(prof.CAP))
+		recs := ([^]prof.Record)(&got[size_of(prof.Header)])[:nrec]
+		testing.expect_value(t, recs[4].end, 601) // 50, 150, 350, 550, then ring 2's oldest
+		testing.expect_value(t, recs[nrec - 1].end, 600 + u64(prof.CAP))
+		by_end := true
+		for i in 1 ..< nrec {
+			by_end = by_end && recs[i].end >= recs[i - 1].end
+		}
+		testing.expect_value(t, by_end, true)
 	}
 	text, _ = read_file(&c, root, "7/prof/zones", buf[:])
 	testing.expect_value(t, text, "")

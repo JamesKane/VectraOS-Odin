@@ -1,0 +1,12 @@
+# tests/user/dbgthreads.ndb: the debugger's thread test (tests/qemu/dbgthreads.ndb):
+# svcd runs dbg -c, which launches /boot/bin/dbgthreads under its script.
+
+service=dbgthreads program=/boot/bin/dbg console
+arg=-c
+arg=-x
+arg=/boot/tests/dbgthreads.cmds
+arg=/boot/bin/dbgthreads
+mount=/ srv=bootfs
+mount=/proc srv=proc
+mount=/tmp srv=tmpfs
+connect=nsd
