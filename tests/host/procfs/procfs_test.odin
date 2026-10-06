@@ -790,6 +790,7 @@ test_procfs :: proc(t: ^testing.T) {
 		return
 	}
 	ABP :: 0x400180
+	orig_180 := code_mem[0x180]
 	_, e = write_file(&c, root, "16/ctl", "break 0x400180")
 	testing.expect_value(t, e, vx.Status.Ok)
 	// Each thread stops at it in turn: the others frozen while it is held,
@@ -828,8 +829,10 @@ test_procfs :: proc(t: ^testing.T) {
 	testing.expect_value(t, thread_of(many, 5).resumed, vx.Resume_Action.Step)
 	fire_exception(many, 3, exception(.Step, ABP + 4))
 	testing.expect_value(t, frozen(many), 16) // 5 still has the trap out
+	testing.expect_value(t, code_mem[0x180], orig_180) // not back in 5's way
 	fire_exception(many, 5, exception(.Step, ABP + 4))
 	testing.expect_value(t, frozen(many), 0)
+	testing.expect_value(t, string(code_mem[0x180:][:len(TRAP)]), TRAP) // back, both past it
 	// A step of the stopped thread leaves the others frozen; its resume
 	// thaws them. A freeze of the debugger's own outlasts all-stop's.
 	_, e = write_file(&c, root, "16/ctl", "freeze 7")

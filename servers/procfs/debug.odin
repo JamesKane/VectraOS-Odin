@@ -739,10 +739,14 @@ dbg_exception :: proc "contextless" (p: ^Proc, tid: u32) {
 	extra: [64]u8
 	#partial switch e.kind {
 	case .Step:
-		if i, ok := h.bp.?; h.why == .Over && ok && d.bp[i].used {
+		// The trap or the watchpoints back, once the last thread stepping
+		// past them is: two threads let go at one breakpoint together (ctl's
+		// start) step over it together, and the first back must not put the
+		// trap in the second's way (UPSTREAM-FINDINGS).
+		if i, ok := h.bp.?; h.why == .Over && ok && d.bp[i].used && !stepping_past(d, tid, .Over, i) {
 			_ = mem_rw(p, d.bp[i].addr, trap_bytes[:], true) // the trap, back
 		}
-		if h.why == .Wover {
+		if h.why == .Wover && !stepping_past(d, tid, .Wover, -1) {
 			_ = set_watches(p, false) // the watchpoints, back
 		}
 		if (h.why == .Over || h.why == .Wover) && !h.user_step { // past it, on the way on
@@ -801,6 +805,22 @@ dbg_exception :: proc "contextless" (p: ^Proc, tid: u32) {
 @(private)
 dbg_pending :: proc "contextless" (p: ^Proc) -> bool {
 	return dbg_of(p).ev_count > 0
+}
+
+// Whether a thread other than tid is stepping past breakpoint bp (why .Over)
+// or a watchpoint (.Wover, bp -1).
+@(private="file")
+stepping_past :: proc "contextless" (d: ^Debugger, tid: u32, why: Why, bp: int) -> bool {
+	for &o in d.threads {
+		if o.tid == 0 || o.tid == tid || o.why != why {
+			continue
+		}
+		i, ok := o.bp.?
+		if why == .Wover || (ok && i == bp) {
+			return true
+		}
+	}
+	return false
 }
 
 // Every held thread let go: ctl's start. (release may grow the faults'
