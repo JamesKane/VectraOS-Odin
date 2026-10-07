@@ -148,6 +148,9 @@ exception_raise :: proc "contextless" (f: ^Trap_Frame, kind: ^vx.Exception_Kind,
 		case .Timeout:
 			kind^, address^ = .Pager_Timeout, address^ &~ (PAGE_SIZE - 1)
 		case .Not_Mine:
+			if task_revoked_at(t, address^) {
+				kind^ = .Revoked // a revoked lease's page (ADR-0021)
+			}
 		}
 	}
 	e_kind, e_address := kind^, address^
@@ -888,6 +891,9 @@ sys_thread_suspend :: proc "contextless" (h: vx.Handle, id: u64, resume: bool) -
 // old translations are shot down.
 @(private="file", require_results)
 mapping_privatize :: proc "contextless" (t: ^Task, m: ^Mapping) -> (old: ^Vmo, st: vx.Status) {
+	if m.vmo.lease_of != nil {
+		return nil, .Err_Unsupported // a copy would outlive a revoke (ADR-0021)
+	}
 	dup := vmo_create(m.size) or_return
 	mf := user_map_flags(m.flags, false)
 	v := m.vmo
@@ -962,7 +968,9 @@ mem_op :: proc "contextless" (t: ^Task, op: ^vx.Mem_Op, shoot: ^bool, released: 
 		}
 		pa := vmo_page_in(v, (m.offset + u64(Uva(at) - m.va)) / PAGE_SIZE)
 		st := vx.Status.Ok
-		if pa == 0 {
+		if vmo_revoked(v) {
+			st = .Err_Revoked
+		} else if pa == 0 {
 			st = .Err_Invalid // past its end
 		} else {
 			page := page_bytes(pa)[at % PAGE_SIZE:][:n]
@@ -1023,12 +1031,27 @@ sys_vmo_clone :: proc "contextless" (h: vx.Handle, offset, size, options: u64, o
 	switch {
 	case src.physical || src.pager != nil: // device memory, or pages a pager has not all supplied
 		return .Err_Unsupported
+	case vmo_revoked(src):
+		return .Err_Revoked
 	case size == 0 || (offset | size) & (PAGE_SIZE - 1) != 0 || overflow || end > src.size:
 		return .Err_Range
 	}
 	dup := vmo_create(size) or_return
-	for i in 0 ..< size / PAGE_SIZE {
-		page_copy(vmo_page(dup, i), vmo_page(src, offset / PAGE_SIZE + i))
+	if src.resizable {
+		spin_lock(&src.lock) // a shrink frees pages (ADR-0020)
+	}
+	shrunk := end > src.size // since the check above
+	if !shrunk {
+		for i in 0 ..< size / PAGE_SIZE {
+			page_copy(vmo_page(dup, i), vmo_page(src, offset / PAGE_SIZE + i))
+		}
+	}
+	if src.resizable {
+		spin_unlock(&src.lock)
+	}
+	if shrunk {
+		object_release(&dup.obj)
+		return .Err_Range
 	}
 	return return_handle(&dup.obj, vx.ALL_RIGHTS - {.Debug}, out) // as vmo_create
 }

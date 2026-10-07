@@ -407,10 +407,76 @@ sys_vmo_op :: proc "contextless" (h: vx.Handle, op, arg: u64) -> vx.Status {
 	}
 	v := handle_get_as(current_task(), h, Vmo, {.Write}) or_return
 	defer object_release(&v.obj)
-	if v.pager != nil {
-		return .Err_Access
+	switch {
+	case v.pager != nil || vmo_sealed(v):
+		return .Err_Access // its pager's to resize; sealed: no change at all (ADR-0021)
+	case v.lease_of != nil:
+		return vmo_revoked(v) ? .Err_Revoked : .Err_Unsupported // a lease's size is its parent's
 	}
 	return vmo_resize(v, arg)
+}
+
+// vmo_seal(vmo), with WRITE (ADR-0021): sealed first, then every task looked
+// at for a writable mapping of it or a lease of it; one found unseals it and
+// fails. A map in between checks the seal under its task's lock, which the
+// look takes, so none slips past.
+@(private="file", require_results)
+sys_vmo_seal :: proc "contextless" (h: vx.Handle) -> vx.Status {
+	v := handle_get_as(current_task(), h, Vmo, {.Write}) or_return
+	defer object_release(&v.obj)
+	switch {
+	case v.physical || v.pager != nil:
+		return .Err_Unsupported
+	case v.lease_of != nil:
+		return .Err_Invalid // the parent's holder seals it
+	}
+	if !intrinsics.atomic_exchange(&v.sealed, true) && vmo_mapped_writable(v) {
+		intrinsics.atomic_store(&v.sealed, false)
+		return .Err_Bad_State
+	}
+	return .Ok
+}
+
+// vmo_lease(vmo, &lease) (ADR-0021): a lease with the caller's rights and
+// MANAGE, which revokes it.
+@(private="file", require_results)
+sys_vmo_lease :: proc "contextless" (h: vx.Handle, out: Uva) -> vx.Status {
+	if !user_range_ok(out, size_of(vx.Handle), true) {
+		return .Err_Invalid
+	}
+	o, rights := handle_get_rights(current_task(), h, .Vmo, {.Read}) or_return
+	v := cast(^Vmo)o
+	lease: ^Vmo
+	st := vx.Status.Err_Revoked
+	if !vmo_revoked(v) {
+		lease, st = vmo_lease_create(v)
+	}
+	object_release(&v.obj)
+	if st != .Ok {
+		return st
+	}
+	return return_handle(&lease.obj, rights + {.Manage}, out)
+}
+
+// Ends a lease: its mappings lose their pages everywhere, and every use of
+// it from now on is .Err_Revoked. Again is nothing.
+@(private="file")
+lease_revoke :: proc "contextless" (v: ^Vmo) {
+	if !intrinsics.atomic_exchange(&v.revoked, true) {
+		vmo_unmap_everywhere(v, 0, v.size / PAGE_SIZE)
+	}
+}
+
+// vmo_revoke(lease), with MANAGE.
+@(private="file", require_results)
+sys_vmo_revoke :: proc "contextless" (h: vx.Handle) -> vx.Status {
+	v := handle_get_as(current_task(), h, Vmo, {.Manage}) or_return
+	defer object_release(&v.obj)
+	if v.lease_of == nil {
+		return .Err_Invalid
+	}
+	lease_revoke(v)
+	return .Ok
 }
 
 // clock_set(resource, utc): the wall clock, with the root Resource's .Manage.
@@ -1304,6 +1370,7 @@ sys_vmo_rw :: proc "contextless" (h: vx.Handle, op, offset: u64, buf: Uva, size:
 	}
 	// Through the fault-safe copies: another thread may unmap the buffer meanwhile.
 	for done := u64(0); done < size; {
+		vmo_rw_allowed(v, reading) or_return
 		at := offset + done
 		page := page_bytes(vmo_page(v, at / PAGE_SIZE))[at % PAGE_SIZE:]
 		n := min(u64(len(page)), size - done)
@@ -1326,6 +1393,7 @@ sys_vmo_rw :: proc "contextless" (h: vx.Handle, op, offset: u64, buf: Uva, size:
 @(private="file", require_results)
 locked_vmo_rw :: proc "contextless" (v: ^Vmo, reading: bool, offset: u64, buf: Uva, size: u64) -> vx.Status {
 	for done := u64(0); done < size; {
+		vmo_rw_allowed(v, reading) or_return
 		at := offset + done
 		bounce: [256]u8
 		n := min(PAGE_SIZE - at % PAGE_SIZE, size - done, len(bounce))
@@ -1356,6 +1424,19 @@ locked_vmo_rw :: proc "contextless" (v: ^Vmo, reading: bool, offset: u64, buf: U
 			copy_to_user(user, &bounce, n) or_return
 		}
 		done += n
+	}
+	return .Ok
+}
+
+// Whether vmo_rw may go on, looked at page by page: a revoke stops a long
+// copy, and a seal a write (ADR-0021).
+@(private="file", require_results)
+vmo_rw_allowed :: proc "contextless" (v: ^Vmo, reading: bool) -> vx.Status {
+	if vmo_revoked(v) {
+		return .Err_Revoked
+	}
+	if !reading && vmo_sealed(v) {
+		return .Err_Access
 	}
 	return .Ok
 }
@@ -1475,6 +1556,12 @@ syscall_dispatch :: proc "contextless" (nr: u64, a: [6]u64) -> i64 {
 		return i64(sys_iorange_create(vx.Handle(a[0]), a[1], a[2], Uva(a[3])))
 	case .Vmo_Rw:
 		return i64(sys_vmo_rw(vx.Handle(a[0]), a[1], a[2], Uva(a[3]), a[4]))
+	case .Vmo_Seal:
+		return i64(sys_vmo_seal(vx.Handle(a[0])))
+	case .Vmo_Lease:
+		return i64(sys_vmo_lease(vx.Handle(a[0]), Uva(a[1])))
+	case .Vmo_Revoke:
+		return i64(sys_vmo_revoke(vx.Handle(a[0])))
 	case .As_Reserve:
 		return i64(sys_as_reserve(vx.Handle(a[0]), a[1], a[2], a[3], Uva(a[4])))
 	case .As_Map:

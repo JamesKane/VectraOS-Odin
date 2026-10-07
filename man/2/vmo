@@ -19,6 +19,10 @@ vx_status vx_vmo_rw(vx_handle vmo, enum vx_vmo_op op, uint64_t offset,
                     void *buf, uint64_t size);
 
 vx_status vx_vmo_resize(vx_handle vmo, uint64_t size);
+
+vx_status vx_vmo_seal(vx_handle vmo);
+vx_status vx_vmo_lease(vx_handle vmo, vx_handle *lease);
+vx_status vx_vmo_revoke(vx_handle lease);
 ```
 
 # DESCRIPTION
@@ -66,16 +70,19 @@ Any other anonymous VMO, and a physical one, is not resized.
 A pager-backed one is its pager's to resize, with `pager_op` (see pager(2)), since everyone who maps it shares its size: `vmo_op` on one is refused.
 `VX_VMO_RESIZE` is the only operation `vmo_op` has.
 
-## Reserved calls
+## Seals and leases
 
-Three calls in `abi/vx/syscalls.def` are reserved, and have no vx-rt function; made directly, as `vx_syscall(VX_SYS_vmo_seal, ...)` and so on, each returns `VX_ERR_UNSUPPORTED`:
+`vx_vmo_seal` makes <vmo> unwritable for good, by anyone through any handle, mapping or lease, so its bytes cannot change under a reader that checked them (01 §6.6, ADR-0043): from then on `vx_vmo_rw` writes, `as_map` and `as_protect` with `VX_MAP_WRITE`, and a resize are refused with `VX_ERR_ACCESS`.
+As Linux's `memfd` seals, it is refused with `VX_ERR_BAD_STATE` while any task maps <vmo>, or a lease of it, writable: the writer unmaps first.
+It needs `VX_RIGHT_WRITE`; sealing again succeeds; a physical or pager-backed VMO is not sealed (`VX_ERR_UNSUPPORTED`), nor a lease (`VX_ERR_INVALID`: its parent's holder seals that).
 
-: `vmo_seal`
-  Will make a VMO read-only for all who hold it, so its bytes cannot change under a reader that checks them (01 §4.3, §6.6).
-: `vmo_lease`
-  Will make a revocable handle derived from a VMO's, to share memory that can be taken back (01 §3).
-: `vmo_revoke`
-  Will revoke a lease: the memory is unmapped from every task that maps it through the lease, and its DMA mappings are torn down.
+`vx_vmo_lease` makes a lease of <vmo>: a VMO handle on the same pages, with the rights the caller's handle has and `VX_RIGHT_MANAGE`, which `vx_vmo_revoke` needs.
+The caller gives a reader a duplicate without `VX_RIGHT_MANAGE` (handle_dup), and keeps the lease to revoke.
+Only a plain anonymous VMO is leased (`VX_ERR_UNSUPPORTED` for a physical, pager-backed, resizable or ring VMO), and a lease is not leased again (`VX_ERR_INVALID`).
+
+`vx_vmo_revoke` ends a lease: every mapping of it, in every task, loses its pages, so the next touch raises `VX_EXCEPTION_REVOKED` (exception(2)), and `vx_vmo_rw`, `as_map` and `vx_vmo_clone` through it answer `VX_ERR_REVOKED`.
+A mapping of a lease is never copied into a forked task, which maps the lease itself, so a revoke reaches it too, and a debugger is not given a private copy of one to write.
+Revoking again succeeds; revoking a VMO that is not a lease is `VX_ERR_INVALID`.
 
 # EXAMPLES
 
@@ -157,8 +164,6 @@ pager(2), as_map(2), dma_map(2), handle_dup(2), intro(2)
   <vmo> lacks `VX_RIGHT_WRITE`, or is pager-backed.
 : `VX_ERR_UNSUPPORTED`
   <vmo> was not made `VX_VMO_RESIZABLE`, or is physical.
-
-`vmo_seal`, `vmo_lease` and `vmo_revoke` return `VX_ERR_UNSUPPORTED`.
 
 # BUGS
 

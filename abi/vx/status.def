@@ -23,3 +23,4 @@ VX_STATUS(ERR_INTERRUPTED,-17)  // thread_interrupt woke the call; the interrupt
 VX_STATUS(ERR_NO_CHILD,  -18)   // a wait with no child to wait for: Plan 9's "no living children"
 VX_STATUS(ERR_IO,        -19)   // the device reported an error: a sector that cannot be read, a failed write
 VX_STATUS(ERR_NO_SPACE,  -20)   // the volume is full: nothing was changed
+VX_STATUS(ERR_REVOKED,   -21)   // the lease it was reached through has been revoked (ADR-0043)

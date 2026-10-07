@@ -248,8 +248,9 @@ pager_supply :: proc "contextless" (g: ^Pager, v: ^Vmo, offset, size: u64, src: 
 // --- Taking pages out of mappings ---
 
 // Pages [first, first + count) of v, out of every task's mappings of it, and
-// out of every CPU's TLB: the next touch faults (pager_fault).
-@(private="file")
+// out of every CPU's TLB: the next touch faults (pager_fault). A revoked
+// lease's too (vmo_revoke, ADR-0021).
+@(private)
 vmo_unmap_everywhere :: proc "contextless" (v: ^Vmo, first, count: u64) {
 	Span :: struct {
 		va:   Uva,
@@ -306,6 +307,48 @@ vmo_unmap_everywhere :: proc "contextless" (v: ^Vmo, first, count: u64) {
 			}
 		}
 		object_release(&t.obj)
+	}
+}
+
+// Whether any task maps v, or a lease of it, writable (vmo_seal, ADR-0021):
+// task by task in id order, as vmo_unmap_everywhere goes, each held while
+// its mappings are looked at.
+vmo_mapped_writable :: proc "contextless" (v: ^Vmo) -> bool {
+	last_id: u64
+	for {
+		t: ^Task // the task with the next id
+		held := false
+		{
+			spin_guard(&all_tasks_lock)
+			for c := all_tasks; c != nil; c = c.all_next {
+				if c.id > last_id && (t == nil || c.id < t.id) {
+					t = c
+				}
+			}
+			if t == nil {
+				return false
+			}
+			held = object_tryref(&t.obj)
+			last_id = t.id
+		}
+		if !held {
+			continue
+		}
+		found := false
+		spin_lock(&t.lock)
+		if t.maps != nil {
+			for m in t.maps {
+				if m.size != 0 && .Write in m.flags && vmo_root(m.vmo) == v {
+					found = true
+					break
+				}
+			}
+		}
+		spin_unlock(&t.lock)
+		object_release(&t.obj)
+		if found {
+			return true
+		}
 	}
 }
 

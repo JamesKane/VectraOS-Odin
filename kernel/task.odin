@@ -238,17 +238,24 @@ handle_add :: proc "contextless" (t: ^Task, obj: ^Object, rights: vx.Rights) -> 
 // of the given type and the handle has every right asked for.
 @(require_results)
 handle_get :: proc "contextless" (t: ^Task, h: vx.Handle, type: Obj_Type, rights: vx.Rights) -> (^Object, vx.Status) {
+	obj, _, st := handle_get_rights(t, h, type, rights)
+	return obj, st
+}
+
+// handle_get, and the rights the handle has.
+@(require_results)
+handle_get_rights :: proc "contextless" (t: ^Task, h: vx.Handle, type: Obj_Type, rights: vx.Rights) -> (^Object, vx.Rights, vx.Status) {
 	spin_lock(&t.lock)
 	defer spin_unlock(&t.lock)
 	e := entry_for(t, h)
 	if e == nil || e.obj.type != type {
-		return nil, .Err_Bad_Handle
+		return nil, {}, .Err_Bad_Handle
 	}
 	if rights - e.rights != {} {
-		return nil, .Err_Access
+		return nil, {}, .Err_Access
 	}
 	object_ref(e.obj)
-	return e.obj, .Ok
+	return e.obj, e.rights, .Ok
 }
 
 // A second handle to h's object, with h's rights or, if `rights` is given,
@@ -665,6 +672,10 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 		st = .Err_Range
 	case task_maps_in(t, at, end):
 		st = .Err_Exists // checked against the mappings, not the page tables: a no-access one has no pages
+	case vmo_revoked(v):
+		st = .Err_Revoked // checked under the lock: a revoke after it finds this mapping (ADR-0021)
+	case .Write in flags && vmo_sealed(v):
+		st = .Err_Access // under the lock too: vmo_seal looks for writable mappings after it seals
 	case slot == nil:
 		st = .Err_No_Memory
 	}
@@ -727,7 +738,8 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 //     handle to the parent itself becomes one to the child.
 //   - A pager's VMO is shared, not copied: the child maps the same one, as
 //     a file mapped MAP_SHARED is in both; so is a mapping made .Shared
-//     (ADR-0020), MAP_SHARED anonymous memory.
+//     (ADR-0020), MAP_SHARED anonymous memory, and a lease's (ADR-0021), so
+//     no copy outlives a revoke.
 //   - Its reservations are the parent's.
 //   - The in-task fault handler is the parent's (signal handlers are
 //     inherited); exception ports, a debugger and I/O ports are not.
@@ -743,7 +755,9 @@ task_fork_copy :: proc "contextless" (parent, child: ^Task) -> vx.Status {
 		if m.size == 0 || m.vmo.physical || m.vmo.ring {
 			continue
 		}
-		if m.vmo.pager != nil || .Shared in m.flags { // the same VMO: a file's pages, MAP_SHARED memory
+		// The same VMO: a file's pages, MAP_SHARED memory, a lease (a revoke
+		// reaches the child).
+		if m.vmo.pager != nil || .Shared in m.flags || m.vmo.lease_of != nil {
 			_ = task_map(child, m.vmo, m.offset, m.size, m.flags, m.va, m.key, m.allowed) or_return
 			continue
 		}
@@ -901,6 +915,9 @@ task_protect :: proc "contextless" (t: ^Task, va: Uva, size: u64, flags: vx.Map_
 			if flags & {.Write, .Exec} - m.allowed != {} {
 				return .Err_Access // more than its handle gave
 			}
+			if .Write in flags && vmo_sealed(m.vmo) {
+				return .Err_Access // ADR-0021
+			}
 			covered += u64(min(m_end, end) - max(m.va, va))
 			cuts += int(m.va < va) + int(m_end > end)
 		}
@@ -942,7 +959,7 @@ task_protect :: proc "contextless" (t: ^Task, va: Uva, size: u64, flags: vx.Map_
 			}
 			for off := u64(0); off < m.size && st == .Ok; off += PAGE_SIZE {
 				index := (m.offset + off) / PAGE_SIZE
-				pa := .No_Access in flags ? 0 : vmo_page_in(v, index)
+				pa := .No_Access in flags || vmo_revoked(v) ? 0 : vmo_page_in(v, index)
 				unmap_page(t.root, u64(m.va) + off)
 				if pa != 0 && !map_range(t.root, u64(m.va) + off, pa, PAGE_SIZE, page_map_flags(v, m.flags, v.pages[index]), m.key) {
 					st = .Err_No_Memory
@@ -1065,6 +1082,21 @@ task_reserve :: proc "contextless" (t: ^Task, size, align_in: u64, flags: vx.As_
 	slot^ = {va = at, size = size}
 	va^ = at
 	return .Ok
+}
+
+// Whether addr lies in a mapping of a revoked lease: its page fault is
+// .Revoked (ADR-0021).
+task_revoked_at :: proc "contextless" (t: ^Task, addr: u64) -> bool {
+	spin_guard(&t.lock)
+	if t.maps == nil {
+		return false
+	}
+	for m in t.maps {
+		if m.size != 0 && Uva(addr) >= m.va && Uva(addr) - m.va < Uva(m.size) {
+			return vmo_revoked(m.vmo)
+		}
+	}
+	return false
 }
 
 // The protection key of the mapping holding addr (0 if none): a

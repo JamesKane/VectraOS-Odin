@@ -233,6 +233,26 @@ vmo_create :: proc "contextless" (size: u64, options: vx.Vmo_Options = {}) -> (v
 	return h, st
 }
 
+// vmo_seal, vmo_lease and vmo_revoke (ADR-0021): the VMO written by no one
+// again; a lease of it, with the handle's rights and .Manage, to give away
+// (duplicated without .Manage); the lease ended, for every task that maps it.
+@(require_results)
+vmo_seal :: proc "contextless" (vmo: vx.Handle) -> vx.Status {
+	return status(vx_syscall(.Vmo_Seal, u64(vmo)))
+}
+
+@(require_results)
+vmo_lease :: proc "contextless" (vmo: vx.Handle) -> (vx.Handle, vx.Status) {
+	h: vx.Handle
+	st := status(vx_syscall(.Vmo_Lease, u64(vmo), addr(&h)))
+	return h, st
+}
+
+@(require_results)
+vmo_revoke :: proc "contextless" (lease: vx.Handle) -> vx.Status {
+	return status(vx_syscall(.Vmo_Revoke, u64(lease)))
+}
+
 // A reservation of size bytes of the task's address space, aligned to align
 // (0: a page), at a random base or, with .Fixed, at `at`; with .Release, the
 // one at `at` given back (ADR-0020). The address comes back, or with

@@ -399,6 +399,22 @@ Vmo_Options :: bit_set[Vmo_Option; u32]
 
 #assert(u32(Vmo_Option.Physical) == 0 && u32(Vmo_Option.Pager) == 1 && u32(Vmo_Option.Resizable) == 2)
 
+// vmo_seal(vmo) (ADR-0021, upstream's ADR-0043; 01 §6.6), with WRITE: no one
+//     writes the VMO again, through any handle, mapping or lease (vmo_rw,
+//     as_map and as_protect with .Write, a resize: .Err_Access).
+//     .Err_Bad_State while any writable mapping of it exists, as memfd's
+//     F_SEAL_WRITE; .Err_Unsupported for a physical or pager-backed VMO.
+//     Sealing again is .Ok.
+// vmo_lease(vmo, &lease): a lease, a VMO handle on the same pages with the
+//     caller's rights and MANAGE, to give away (duplicated without MANAGE);
+//     vmo_revoke(lease), with MANAGE: from then on no one reaches the pages
+//     through it. Its mappings, in every task, lose their pages, and a touch
+//     raises a .Revoked exception; vmo_rw, as_map and vmo_clone through it
+//     answer .Err_Revoked. A forked task maps a lease's mapping as it is,
+//     never a copy, so a revoke reaches it too. Only a plain anonymous VMO is
+//     leased (.Err_Unsupported otherwise), and a lease is not leased again
+//     (.Err_Invalid).
+
 Pager_Op :: enum u32 { // pager_op
 	Dirty = 1,
 	Clean,
@@ -740,6 +756,9 @@ Exception_Kind :: enum u32 {
 	// code: read 0, write 1, key: the mapping's (ADR-0035; SIGSEGV,
 	// SEGV_PKUERR).
 	Protection_Key,
+	// A page of a lease that was revoked (ADR-0021); address: what was
+	// touched, code: read 0, write 1, execute 2 (POSIX's SIGBUS).
+	Revoked,
 }
 
 Exception :: struct {

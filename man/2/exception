@@ -23,6 +23,7 @@ It goes to whoever is bound to take it, in this order (see the kernel's design, 
 - the default: the kernel reports the fault on the console and kills the task, its exit string the trap in Plan 9's words, such as `sys: trap: fault read addr=0x0 pc=0x401000`.
 
 A page fault on memory a pager supplies is first given to the pager; if the page does not come by the pager's deadline, the exception is `VX_EXCEPTION_PAGER_TIMEOUT`, and a task no one handles it for ends with `sys: trap: page not supplied`.
+A touch of a page of a lease that was revoked (vmo(2), ADR-0043) is `VX_EXCEPTION_REVOKED`, its <code> 0 for a read, 1 for a write and 2 for an execute; unhandled, the task ends with `sys: trap: lease revoked addr=`<a> (`SIGBUS` under POSIX).
 A load or store that the thread's protection-key rights deny is `VX_EXCEPTION_PROTECTION_KEY`, its <code> 0 for a read and 1 for a write, the mapping's key in <key> (as(2)'s protection keys); unhandled, `sys: trap: protection key write addr=`<a>.
 A note posted by `thread_interrupt` (thread(2)) is an exception too, of kind `VX_EXCEPTION_INTERRUPT`, but goes only to the in-task handler.
 

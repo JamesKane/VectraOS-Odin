@@ -34,6 +34,7 @@ A VectraOS server's operations fail with a `vx_status` (see intro(2)), and the s
 | `VX_ERR_NO_CHILD` | `no living children` |
 | `VX_ERR_IO` | `i/o error` |
 | `VX_ERR_NO_SPACE` | `file system full` |
+| `VX_ERR_REVOKED` | `lease revoked` |
 | `VX_ERR_INVALID` | `bad message` |
 
 Any other status, such as `VX_ERR_KILLED`, is sent as `i/o error`.

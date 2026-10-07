@@ -30,6 +30,12 @@ Vmo :: struct {
 	waiters:    ^Page_Waiter,
 	resizing:   bool, // a resize under way (pager.odin), which drops the lock between its steps
 	resizable:  bool, // anonymous, made {.Resizable} (ADR-0020): its page list under its lock too
+	// ADR-0021: a sealed VMO is written by no one again; a lease is a VMO on
+	// its parent's pages (pages and list are the parent's), which it holds,
+	// until it is revoked. sealed and revoked are atomic.
+	sealed:     bool,
+	lease_of:   ^Vmo,
+	revoked:    bool,
 }
 
 #assert(offset_of(Vmo, obj) == 0) // objects are cast from ^Object
@@ -65,6 +71,19 @@ vmo_locked :: #force_inline proc "contextless" (v: ^Vmo) -> bool {
 // one's, shrunk) or not supplied. Under v's lock, for one vmo_locked says is.
 vmo_page_in :: proc "contextless" (v: ^Vmo, i: u64) -> Paddr {
 	return i < v.size / PAGE_SIZE ? vmo_page(v, i) : 0
+}
+
+// The VMO whose pages v shows: its parent, for a lease.
+vmo_root :: #force_inline proc "contextless" (v: ^Vmo) -> ^Vmo {
+	return v.lease_of != nil ? v.lease_of : v
+}
+
+vmo_sealed :: proc "contextless" (v: ^Vmo) -> bool {
+	return intrinsics.atomic_load(&vmo_root(v).sealed)
+}
+
+vmo_revoked :: proc "contextless" (v: ^Vmo) -> bool {
+	return v.lease_of != nil && intrinsics.atomic_load(&v.revoked)
 }
 
 vmo_pool: Pool(Vmo)
@@ -117,7 +136,36 @@ vmo_create :: proc "contextless" (want: u64) -> (vmo: ^Vmo, st: vx.Status) {
 	return v, .Ok
 }
 
+// vmo_lease (ADR-0021): a VMO on parent's pages, holding it. Only a plain
+// anonymous VMO, whose page list never changes, is leased.
+@(require_results)
+vmo_lease_create :: proc "contextless" (parent: ^Vmo) -> (lease: ^Vmo, st: vx.Status) {
+	if parent.lease_of != nil {
+		return nil, .Err_Invalid // one level
+	}
+	if parent.physical || parent.pager != nil || parent.resizable || parent.ring {
+		return nil, .Err_Unsupported
+	}
+	v := pool_alloc(&vmo_pool)
+	if v == nil {
+		return nil, .Err_No_Memory
+	}
+	object_init(&v.obj, .Vmo)
+	object_ref(&parent.obj)
+	v.lease_of = parent
+	v.size = parent.size
+	v.pages = parent.pages
+	v.list_order = parent.list_order
+	return v, .Ok
+}
+
 vmo_destroy :: proc "contextless" (v: ^Vmo) {
+	if v.lease_of != nil { // its pages are its parent's
+		parent := v.lease_of
+		pool_free(&vmo_pool, v)
+		object_drop(&parent.obj) // the drain that destroys this destroys it too, if it was the last
+		return
+	}
 	if !v.physical {
 		for i in 0 ..< u64(len(v.pages)) {
 			if pa := vmo_page(v, i); pa != 0 {

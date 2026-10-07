@@ -1491,6 +1491,11 @@ handler :: proc "c" (e: ^vx.Exception) -> ! {
 		e.rights &~= 3 << (2 * u64(e.key))
 	case .Pager_Timeout: // the page, late: supplied now, and the access made again
 		_ = rt.pager_supply(late.pager, late.vmo, 0, 4096, late.src, 0)
+	case .Revoked: // the lease's page swapped for a spare: the load made again
+		at := e.address &~ 4095
+		intrinsics.atomic_store(&revoked_at, e.address)
+		_ = rt.as_unmap(rt.self, at, 4096)
+		_, _ = rt.as_map(rt.self, revoked_spare, 0, 4096, {}, at)
 	case .Page_Fault:
 		if guard_at != 0 && e.address &~ 4095 == guard_at {
 			intrinsics.atomic_add(&guard_faults, 1) // a no-access page touched: opened, and the access made again
@@ -2734,6 +2739,72 @@ test_address_space :: proc "contextless" () {
 	rt.close_all(sv, port)
 }
 
+// --- Seals and leases (ADR-0021) ---
+
+revoked_spare: vx.Handle // what the handler maps where a revoked lease was (test_leases)
+revoked_at: u64
+
+// vmo_lease's status alone.
+lease_status :: proc "contextless" (h: vx.Handle) -> vx.Status {
+	_, st := rt.vmo_lease(h)
+	return st
+}
+
+test_leases :: proc "contextless" () {
+	// A seal: refused while mapped writable, then no write by anyone.
+	value, got := u64(0x5eed), u64(0)
+	v, st := rt.vmo_create(4096)
+	check(st == .Ok && rt.vmo_write(v, 0, memory.ptr_to_bytes(&value)) == .Ok)
+	at: u64
+	at, st = rt.as_map(rt.self, v, 0, 4096, {.Write})
+	check(st == .Ok)
+	check(rt.vmo_seal(v) == .Err_Bad_State) // a writable mapping: as memfd's F_SEAL_WRITE
+	check(rt.as_unmap(rt.self, at, 4096) == .Ok && rt.vmo_seal(v) == .Ok && rt.vmo_seal(v) == .Ok)
+	check(rt.vmo_write(v, 0, memory.ptr_to_bytes(&value)) == .Err_Access)
+	_, st = rt.as_map(rt.self, v, 0, 4096, {.Write})
+	check(st == .Err_Access)
+	at, st = rt.as_map(rt.self, v, 0, 4096, {})
+	check(st == .Ok && intrinsics.volatile_load(cast(^u64)uintptr(at)) == 0x5eed)
+	check(rt.as_protect(rt.self, at, 4096, {.Write}) == .Err_Access && rt.as_unmap(rt.self, at, 4096) == .Ok)
+	rv, rst := rt.vmo_create(4096, {.Resizable})
+	check(rst == .Ok && rt.vmo_seal(rv) == .Ok && rt.vmo_resize(rv, 8192) == .Err_Access)
+	_ = rt.handle_close(rv)
+
+	// A lease: the same pages, read through it; one without .Manage cannot
+	// revoke; revoked, a touch is .Revoked and every use of it too.
+	w, wst := rt.vmo_create(2 * 4096)
+	check(wst == .Ok && rt.vmo_write(w, 4096, memory.ptr_to_bytes(&value)) == .Ok)
+	lease, lst := rt.vmo_lease(w)
+	check(lst == .Ok)
+	given, gst := rt.handle_dup(lease, {.Read, .Map}) // what a reader is given
+	check(gst == .Ok)
+	la, mst := rt.as_map(rt.self, given, 0, 2 * 4096, {})
+	check(mst == .Ok && intrinsics.volatile_load(cast(^u64)uintptr(la + 4096)) == 0x5eed)
+	value = 0x1111
+	check(rt.vmo_write(w, 4096, memory.ptr_to_bytes(&value)) == .Ok && intrinsics.volatile_load(cast(^u64)uintptr(la + 4096)) == 0x1111)
+	check(rt.vmo_revoke(given) == .Err_Access && lease_status(given) == .Err_Invalid)
+	check(rt.vmo_revoke(w) == .Err_Invalid) // not a lease
+	check(rt.vmo_revoke(lease) == .Ok && rt.vmo_revoke(lease) == .Ok)
+	revoked_spare, st = rt.vmo_create(4096)
+	check(st == .Ok)
+	check(rt.exception_bind(rt.self, vx.HANDLE_NONE, u64(uintptr(rawptr(handler))), {.In_Task}) == .Ok)
+	got = intrinsics.volatile_load(cast(^u64)uintptr(la + 4096 + 8)) // revoked: the handler puts a spare there
+	check(rt.exception_bind(rt.self, vx.HANDLE_NONE, 0, {.In_Task}) == .Ok)
+	check(intrinsics.atomic_load(&in_task.handled[.Revoked]) == 1 && intrinsics.atomic_load(&revoked_at) == la + 4096 + 8 && got == 0)
+	check(rt.vmo_read(given, 0, memory.ptr_to_bytes(&got)) == .Err_Revoked)
+	_, st = rt.as_map(rt.self, given, 0, 4096, {})
+	check(st == .Err_Revoked)
+	_, st = rt.vmo_clone(given, 0, 4096)
+	check(st == .Err_Revoked)
+	check(rt.vmo_read(w, 4096, memory.ptr_to_bytes(&got)) == .Ok && got == 0x1111) // the parent's are its own
+	check(rt.as_unmap(rt.self, la, 2 * 4096) == .Ok)
+	rt.close_all(given, lease, revoked_spare)
+	// Only plain anonymous memory is leased.
+	rv, rst = rt.vmo_create(4096, {.Resizable})
+	check(rst == .Ok && lease_status(rv) == .Err_Unsupported)
+	rt.close_all(rv, w, v)
+}
+
 // --- task_exec (ADR-0012) ---
 
 // The program a forked child execs: it closes `probe`, a handle the child
@@ -3033,6 +3104,7 @@ vx_main :: proc() -> int {
 	test_robust()
 	test_vmo_clone()
 	test_address_space()
+	test_leases()
 	test_debugger()
 	test_tls()
 	test_fork()

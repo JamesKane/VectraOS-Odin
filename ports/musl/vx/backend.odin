@@ -70,6 +70,8 @@ errno_of :: proc "contextless" (st: vx.Status) -> int {
 		return fail(.EIO)
 	case .Err_No_Space:
 		return fail(.ENOSPC)
+	case .Err_Revoked:
+		return fail(.EFAULT) // a lease taken back (ADR-0021)
 	case .Err_Not_Found:
 		return fail(.ENOENT)
 	case .Err_Exists:
