@@ -289,12 +289,24 @@ Entry :: struct {
 	at_index:             u64,
 }
 
+// A name and an alias end at a NUL, as upstream's C strings do: a short name
+// on a damaged volume may hold one (found by tests/host/mount, M6 step 6d10).
 entry_name :: proc "contextless" (e: ^Entry) -> string {
-	return string(e.name[:])
+	return before_nul(e.name[:])
 }
 
 entry_alias :: proc "contextless" (e: ^Entry) -> string {
-	return string(e.alias[:])
+	return before_nul(e.alias[:])
+}
+
+@(private="file")
+before_nul :: proc "contextless" (b: []u8) -> string {
+	for c, i in b {
+		if c == 0 {
+			return string(b[:i])
+		}
+	}
+	return string(b)
 }
 
 // A sector, through the cache: ok is false if the device fails. The bytes

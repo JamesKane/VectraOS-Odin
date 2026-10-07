@@ -1235,10 +1235,9 @@ mount_repair :: proc "contextless" (v: ^Vol, good_sb: ^[BLKSZ]u8, other_sb: Addr
 
 // Mounts the volume on the device: the newer of its two good superblocks, or
 // the older if the newer's arenas will not load; the other copies made its
-// again; and the frees of the commit it describes done again. Unmount it
-// whatever this returns.
-@(require_results)
-mount :: proc "contextless" (v: ^Vol, dev: Dev, mem: Mem, cache: u32) -> vx.Status {
+// again; and the frees of the commit it describes done again.
+@(private = "file", require_results)
+mount_volume :: proc "contextless" (v: ^Vol, dev: Dev, mem: Mem, cache: u32) -> vx.Status {
 	v^ = {}
 	fs := &v.fs
 	if dev.size < 10 * BLKSZ {
@@ -1304,4 +1303,18 @@ mount :: proc "contextless" (v: ^Vol, dev: Dev, mem: Mem, cache: u32) -> vx.Stat
 		fs.deferred.n = 0
 	}
 	return .Ok
+}
+
+// mount_volume, and on a failure everything it took let go (found by
+// upstream's M6 step 6d10 mount_fuzz: callers, fsd and host/vxfs among them,
+// give up on a volume that will not mount, and leaked what the attempt
+// allocated). A volume that failed to mount is left zero; unmounting it
+// again is harmless.
+@(require_results)
+mount :: proc "contextless" (v: ^Vol, dev: Dev, mem: Mem, cache: u32) -> vx.Status {
+	st := mount_volume(v, dev, mem, cache)
+	if st != .Ok {
+		unmount(v)
+	}
+	return st
 }
