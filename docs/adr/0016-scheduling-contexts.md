@@ -1,6 +1,6 @@
 # ADR-0016: Scheduling contexts, as upstream's ADR-0038
 
-Status: proposed, 2026-10-06: upstream's ADR-0038 (proposed upstream the same day, `bf794b7`, its M6 step 6d6c; amended for 6d6c2, `a4f97bd`; still proposed at `65ff2b3`), followed here.
+Status: accepted, 2026-10-06 (proposed the same day): upstream's ADR-0038 (proposed upstream 2026-10-06, `bf794b7`, its M6 step 6d6c; amended for 6d6c2, `a4f97bd`; accepted upstream the same day, `d3f7de5`), followed here.
 
 ## Context
 
