@@ -1326,12 +1326,12 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 			if t.type == .Topen && .Srv in s.extensions && s.fs.open_handle != nil {
 				h: vx.Handle // srv: the reply carries it (a connector); none, for a file with none to give
 				if h, e = s.fs.open_handle(s.fs.ctx, f.node, t.mode); e != .Ok {
-					if s.fs.clunk != nil {
-						s.fs.clunk(s.fs.ctx, f.node, true)
-					}
-					if f.file != nil { // its open file was never anyone's
+					if f.file != nil { // its open file, given back: it was never anyone's
 						f.file.used = false
 						f.file = nil
+					}
+					if s.fs.clunk != nil {
+						s.fs.clunk(s.fs.ctx, f.node, true)
 					}
 					break
 				}

@@ -199,31 +199,30 @@ field :: proc "contextless" (rec: string, key: string) -> string {
 	return ""
 }
 
-// A number: 0x and hex digits, or decimal digits up to the first other
-// character. Overflow wraps, and a character that is not a hex digit after
-// 0x counts as 16, as upstream's parse_num has it.
+// A number, the whole of s: decimal, or 0x and up to 16 hex digits; 0 for
+// anything else, which callers take as none (`break 0x40102g` set a
+// breakpoint at a wrong address, and said so: the Rust port's finding,
+// upstream's 5c1bbc9).
 @(private="file")
 parse_num :: proc "contextless" (s: string) -> (v: u64) {
-	if len(s) > 2 && s[0] == '0' && s[1] == 'x' {
-		for c in transmute([]u8)s[2:] {
-			d: u64 = 16
-			switch c {
-			case '0' ..= '9':
-				d = u64(c - '0')
-			case 'a' ..= 'f':
-				d = u64(c - 'a') + 10
-			case 'A' ..= 'F':
-				d = u64(c - 'A') + 10
-			}
-			v = v << 4 | d
-		}
-		return v
+	hex := len(s) > 2 && s[0] == '0' && s[1] == 'x'
+	if len(s) == 0 || (hex && len(s) > 18) {
+		return 0
 	}
-	for c in transmute([]u8)s {
-		if c < '0' || c > '9' {
-			break
+	for c in transmute([]u8)s[2 if hex else 0:] {
+		d: u64 = 16
+		switch c {
+		case '0' ..= '9':
+			d = u64(c - '0')
+		case 'a' ..= 'f':
+			d = hex ? u64(c - 'a') + 10 : 16
+		case 'A' ..= 'F':
+			d = hex ? u64(c - 'A') + 10 : 16
 		}
-		v = v * 10 + u64(c - '0')
+		if d >= (hex ? 16 : 10) || (!hex && v > (max(u64) - d) / 10) {
+			return 0
+		}
+		v = hex ? v << 4 | d : v * 10 + d
 	}
 	return v
 }
@@ -422,6 +421,7 @@ ended :: proc() {
 		return
 	}
 	rt.print("dbg: crash directory ", string(state.crash_dir[:]), "\n")
+	fault_thread()
 	refresh()
 }
 
@@ -529,6 +529,7 @@ start_program :: proc() {
 	base := string(state.program[:])
 	base = base[str.last_index_byte(base, '/') + 1:]
 	if !launch(base, handles[:count], names[:count], ndb.written(&rec)) {
+		state.pid = 0 // set_breaks may have named it: not a program, then
 		rt.print("dbg: cannot start the program\n")
 		return
 	}
@@ -659,6 +660,35 @@ thread_status :: proc "contextless" (n: u64, buf: []u8) -> string {
 	str.write_string(&b, "/status")
 	got, st := read_file(target_path(str.to_string(&b)), buf)
 	return string(buf[:got if st == .Ok && got > 0 else 0])
+}
+
+// The thread that faulted, in a crash directory (its status's reason=fault),
+// for the commands to act on, not thread 1 (the Rust port's finding,
+// upstream's 5c1bbc9).
+@(private="file")
+fault_thread :: proc() {
+	d: ns.File
+	if ns.open(&space, target_path("threads"), p9.OREAD, &d) != .Ok {
+		return
+	}
+	defer ns.close(&d)
+	@(static) dir: [8192]u8
+	for {
+		n, st := ns.read(&d, dir[:])
+		if st != .Ok || n <= 0 {
+			break
+		}
+		it := p9.Dir_Entries {
+			buf = dir[:n],
+		}
+		for e in p9.next_entry(&it) {
+			tid := parse_num(e.name)
+			rec: [256]u8
+			if tid != 0 && field(thread_status(tid, rec[:]), "reason") == "fault" {
+				state.thread = u32(tid)
+			}
+		}
+	}
 }
 
 @(private="file")
@@ -1024,6 +1054,7 @@ session :: proc(argv: []string) -> string {
 		append(&state.crash_dir, target_arg)
 		ok = load_named()
 		if ok {
+			fault_thread()
 			refresh()
 		}
 	case: // a program to launch

@@ -507,9 +507,10 @@ sched_ctx_set :: proc "contextless" (x: ^Sched_Ctx, p: ^vx.Sched_Params) -> vx.S
 	}
 	sched.admitted_ppm = sched.admitted_ppm - x.ppm + ppm
 	ctx_apply(x, p, ppm, clock_now())
-	// Filled at once. Upstream leaves a spent context on the throttled list
-	// for the next refill, which never comes if it is no longer realtime
-	// (UPSTREAM-FINDINGS): its threads may run again now.
+	// Filled, whatever its intent now. Spent, it is let go at once: a refill
+	// fills only a realtime one, so one reconfigured to another intent would
+	// stay throttled for ever (UPSTREAM-FINDINGS; upstream's 6319e48 fixed it
+	// so).
 	if x.throttled {
 		x.throttled = false
 		unlink(&sched.throttled, x, "th_next")

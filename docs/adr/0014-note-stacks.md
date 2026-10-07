@@ -1,6 +1,6 @@
 # ADR-0014: Note stacks, as upstream's ADR-0036
 
-Status: proposed, 2026-10-05: upstream's ADR-0036 (proposed upstream the same day, `cfd25d8`, its M6 step 6d2b; still proposed at `d26fbc7`), followed here.
+Status: accepted, 2026-10-06 (proposed 2026-10-05): upstream's ADR-0036 (proposed upstream 2026-10-05, `cfd25d8`, its M6 step 6d2b; accepted upstream 2026-10-06, `d3f7de5`), followed here.
 
 ## Context
 

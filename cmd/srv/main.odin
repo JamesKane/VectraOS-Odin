@@ -101,14 +101,18 @@ run :: proc() -> string {
 			case 's':
 				i += 1
 				if i == len(args) {
-					return usage.TEXT
+					rt.eprint(usage.TEXT, "\n")
+					return "usage"
 				}
-				for c in transmute([]u8)args[i] {
-					sleeptime = sleeptime * 10 + (u64(c) - '0') // as upstream's, unchecked (docs/UPSTREAM-FINDINGS.md)
+				for c in transmute([]u8)args[i] { // as atoi reads it: to the first byte not a digit
+					if c < '0' || c > '9' {
+						break
+					}
+					sleeptime = sleeptime * 10 + (u64(c) - '0')
 				}
 				j = len(a)
 			case:
-				rt.eprint(usage.TEXT)
+				rt.eprint(usage.TEXT, "\n")
 				return "usage"
 			}
 		}
@@ -118,7 +122,7 @@ run :: proc() -> string {
 		n = 0
 	}
 	if n < 1 || n > 3 {
-		rt.eprint(usage.TEXT)
+		rt.eprint(usage.TEXT, "\n")
 		return "usage"
 	}
 	dest := args[i]

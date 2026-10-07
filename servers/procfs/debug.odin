@@ -1035,12 +1035,12 @@ dbg_ctl :: proc "contextless" (p: ^Proc, cmd: string) -> vx.Status {
 	verb := next_word(&args)
 	switch verb {
 	case "break":
-		return p.root ? .Err_Access : set_break(p, args)
+		return untouchable(p) ? .Err_Access : set_break(p, args)
 	case "unbreak":
 		n, ok := parse_num(next_word(&args))
 		return ok ? clear_break(p, n) : .Err_Invalid
 	case "watch":
-		return p.root ? .Err_Access : set_watch(p, args)
+		return untouchable(p) ? .Err_Access : set_watch(p, args)
 	case "unwatch":
 		n, ok := parse_num(next_word(&args))
 		return ok ? clear_watch(p, n) : .Err_Invalid
@@ -1055,7 +1055,7 @@ dbg_ctl :: proc "contextless" (p: ^Proc, cmd: string) -> vx.Status {
 	if !ok || n == 0 || n > u64(max(u32)) {
 		return .Err_Invalid
 	}
-	if p.root {
+	if untouchable(p) {
 		return .Err_Access
 	}
 	switch verb {
@@ -1070,7 +1070,7 @@ dbg_ctl :: proc "contextless" (p: ^Proc, cmd: string) -> vx.Status {
 // A thread's ctl: step · resume · freeze · thaw.
 @(private, require_results)
 thread_ctl :: proc "contextless" (p: ^Proc, tid: u32, cmd: string) -> vx.Status {
-	if p.root {
+	if untouchable(p) {
 		return .Err_Access
 	}
 	switch cmd {

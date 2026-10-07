@@ -67,6 +67,7 @@ test_users :: proc(t: ^testing.T) {
 	testing.expect_value(t, users.named(live, "alice"), 4)
 	testing.expect_value(t, len(live.users), 5)
 	testing.expect_value(t, users.named(live, "glenda"), live.none)
+	testing.expect_value(t, users.named(live, ""), live.none) // not the gone place, whose name is empty (Odin's finding)
 	many: strings.Builder
 	strings.builder_init(&many, context.temp_allocator)
 	for i in 0 ..< 126 { // 126 new ones, with the 5 places taken: more than 128

@@ -147,7 +147,7 @@ Thread :: struct {
 	exc_action:        Maybe(vx.Resume_Action), // what exception_resume said
 	suspend_count:     u32, // thread_suspend, less thread_resume
 	parked:            bool, // stopped on its way to user mode while suspended
-	stepping:          bool, // a debugger asked for one instruction (arch_frame_step): aarch64 keeps MDSCR_EL1.SS on
+	stepping:          bool, // a debugger asked for one instruction (arch_frame_step): aarch64's MDSCR_EL1.SS, x86_64's TF
 	tls:               u64, // its user thread pointer while it is not running (sched.odin's user_switch)
 	// Its protection-key rights (PKRU) while it is not running, loaded as it
 	// next runs (user_switch); a new thread's first (ADR-0035).

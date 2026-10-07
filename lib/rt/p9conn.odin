@@ -679,7 +679,15 @@ slots_unmap :: proc "contextless" (k: ^Conn) {
 // and dref extensions where the server has them. The connection is ready to
 // attach.
 @(require_results)
-p9_connect :: proc "contextless" (connector: vx.Handle, k: ^Conn) -> (st: vx.Status) {
+p9_connect :: proc "contextless" (connector: vx.Handle, k: ^Conn) -> vx.Status {
+	return p9_connect_within(connector, k, 5_000_000_000)
+}
+
+// p9_connect, waiting at most `wait` for the server to take it and answer
+// its version (a console reconnecting while its driver restarts waits less:
+// the Rust port's finding, upstream's 5c1bbc9).
+@(require_results)
+p9_connect_within :: proc "contextless" (connector: vx.Handle, k: ^Conn, wait: vx.Duration) -> (st: vx.Status) {
 	k^ = {}
 	defer if st != .Ok {
 		p9_disconnect(k)
@@ -695,7 +703,7 @@ p9_connect :: proc "contextless" (connector: vx.Handle, k: ^Conn) -> (st: vx.Sta
 		rd_handles   = &got[0],
 		rd_count_cap = 2,
 	}
-	st = channel_call(connector, &call, clock_read() + 5_000_000_000)
+	st = channel_call(connector, &call, clock_read() + vx.Instant(wait))
 	if st == .Ok && call.actual.handles != 2 {
 		st = .Err_Invalid
 	}
@@ -714,7 +722,14 @@ p9_connect :: proc "contextless" (connector: vx.Handle, k: ^Conn) -> (st: vx.Sta
 		pipe = &ring_pipe,
 		ctx  = k,
 	}
-	return p9.client_version(&k.c, MSIZE, {.Posix, .Xattr, .Map, .Dref, .Srv}) // what the server has of them
+	// The version as the connect, within its wait: a server that answers
+	// nothing (one waiting on its caller, as tmpfs on procfs's crash) does not
+	// hold the caller for ever (the Rust port's finding); the caller's own
+	// limit, if any, after.
+	k.timeout = wait
+	st = p9.client_version(&k.c, MSIZE, {.Posix, .Xattr, .Map, .Dref, .Srv}) // what the server has of them
+	k.timeout = 0
+	return st
 }
 
 // Ends the connection: its ring's memory and its slots' buffers are
