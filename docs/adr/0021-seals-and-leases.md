@@ -1,0 +1,24 @@
+# ADR-0021: Seals and leases, as upstream's ADR-0043
+
+Status: proposed, 2026-10-07: upstream's ADR-0043 (proposed upstream the same day, `523eb8e`, its M6 step 6e1b1; still proposed at `a6f0916`), followed here.
+
+## Context
+
+Upstream's M6 step 6e1b (split in three: 6e1b1 seals and leases, 6e1b2 leases lent for one call, 6e1b3 `<vx/shared.h>` and the host and plugin scenario) gives `vmo_seal`, `vmo_lease` and `vmo_revoke`, reserved since M1, their meaning under its ADR-0043, and adds `VX_EXCEPTION_REVOKED`, `VX_ERR_REVOKED` and a `vx_call`'s lent handles to the ABI. Its 01 §13 question 8 left two things to that ADR: how a handle is marked lent in a `vx_call`, and what a server sees when a lease ends while it reads. The ABI and `abi/vx/status.def` are contracts this tree copies (ADR-0002), as are the error strings (`lease revoked`, 9P's text and `Rlerror`'s 14) and the manual's pages (`man/2/vmo`, `man/2/exception`, `man/2/channel`, `man/2/shared`, `man/5/error`).
+
+## Decision
+
+This tree follows upstream's ADR-0043 as written, in Odin's terms:
+
+1. **`vmo_seal(vmo)`** (`rt.vmo_seal`), with WRITE: no one writes the VMO again, through any handle, mapping or lease of it: `vmo_rw` writes (looked at page by page), `as_map` and `as_protect` with `.Write`, and a resize are `.Err_Access`. As memfd's `F_SEAL_WRITE`, it is `.Err_Bad_State` while any task maps the VMO or a lease of it writable: the kernel sets `Vmo.sealed` first and then looks (`vmo_mapped_writable`, task by task in id order as `vmo_unmap_everywhere` goes), and `task_map` checks the seal under its task's lock, which the look takes, so none slips between. Physical and pager-backed VMOs are not sealed (`.Err_Unsupported`); a lease is not (`.Err_Invalid`: its parent is).
+2. **`vmo_lease(vmo, &lease)`** (`rt.vmo_lease`): a `Vmo` with `lease_of` its parent, whose page list it shows and which it holds (`vmo_lease_create`), with the caller's rights and `.Manage` (`handle_get_rights`). Only a plain anonymous VMO is leased, as its page list never changes (`.Err_Unsupported` for a physical, pager-backed, resizable or ring VMO); a lease is not leased again (`.Err_Invalid`). A lease's last reference drops its parent's (`object_drop`, so destruction stays without recursion).
+3. **`vmo_revoke(lease)`** (`rt.vmo_revoke`), with `.Manage`: `Vmo.revoked` set, and every mapping of the lease, in every task, loses its pages (`vmo_unmap_everywhere`); a touch is then a **`.Revoked`** exception (`exception_raise`, when the pager does not claim the fault and `task_revoked_at` finds the mapping's VMO revoked; code read 0, write 1, execute 2; POSIX's `SIGBUS`, `BUS_ADRERR`; unhandled, `sys: trap: lease revoked addr=...`). `vmo_rw` (page by page), `as_map`, `vmo_clone`, `vmo_lease`, `vmo_op` and the debugger's `task_mem_rw` through it answer **`.Err_Revoked`** (9P's `lease revoked`, errno `EFAULT`). A forked task maps a lease's mapping as it is, never a copy (a revoked one as a no-access placeholder, where a touch is still `.Revoked`), and a debugger's write never privatizes one (`.Err_Unsupported`), so no copy outlives a revoke. Revoking again is `.Ok`; a VMO that is not a lease is `.Err_Invalid`.
+4. **Lent for one call** (6e1b2): `vx.Call.lent`, a bit for each of the request's handles (`.Err_Invalid` for a bit past `wr_count`). A lent handle must be a VMO (`.Err_Bad_Handle`), not a lease (`.Err_Invalid`); the caller keeps it, and `lend_handles` puts a new lease of it in the caller's table, with that handle's rights but `.Manage` and with `.Transfer`, whose value takes the lent one's place in the request. `revoke_leases` ends every one at the call's single exit, however the call ended: a reply, the deadline, an interrupt, the server's end closed, the caller killed. A failure before the send closes only the leases made, never the caller's own handles. The caller keeps no list of what to revoke.
+
+## Consequences
+
+- A host shares a structure read-only, seals a plugin's result before trusting its checks, and takes a view back whenever it chooses, or at the end of a call, with the reader's mappings emptied in every task.
+- A reader of a lease is prepared for `.Revoked` (an in-task handler, `rt.notify`, or `SIGBUS` with `siglongjmp`), or dies when its lease ends.
+- A lease of a pager-backed, resizable or physical VMO is not there yet.
+- ktest's `test_leases` and `test_lent` (a server that replies, one that closes its end and one that hangs past the deadline) test it, and the plugin scenario end to end (6e1b3: plugintest, its reader's checks through `vx:shared`, upstream's `<vx/shared.h>`, tested on the host by tests/host/shared).
+- Upstream's `docs/adr/0043-seals-and-leases.md` is the reference for the rest: Hubris's leases and Linux's memfd seals.

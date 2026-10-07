@@ -116,7 +116,7 @@ pager_fault :: proc "contextless" (address: u64, access: u32) -> Pager_Result {
 	for {
 		spin_lock(&t.lock)
 		m := mapping_at(t, Uva(address))
-		if m == nil || m.vmo.pager == nil || (access == 1 && .Write not_in m.flags) || (access == 2 && .Exec not_in m.flags) {
+		if m == nil || m.vmo.pager == nil || .No_Access in m.flags || (access == 1 && .Write not_in m.flags) || (access == 2 && .Exec not_in m.flags) {
 			spin_unlock(&t.lock)
 			return .Not_Mine
 		}
@@ -248,8 +248,9 @@ pager_supply :: proc "contextless" (g: ^Pager, v: ^Vmo, offset, size: u64, src: 
 // --- Taking pages out of mappings ---
 
 // Pages [first, first + count) of v, out of every task's mappings of it, and
-// out of every CPU's TLB: the next touch faults (pager_fault).
-@(private="file")
+// out of every CPU's TLB: the next touch faults (pager_fault). A revoked
+// lease's too (vmo_revoke, ADR-0021).
+@(private)
 vmo_unmap_everywhere :: proc "contextless" (v: ^Vmo, first, count: u64) {
 	Span :: struct {
 		va:   Uva,
@@ -306,6 +307,48 @@ vmo_unmap_everywhere :: proc "contextless" (v: ^Vmo, first, count: u64) {
 			}
 		}
 		object_release(&t.obj)
+	}
+}
+
+// Whether any task maps v, or a lease of it, writable (vmo_seal, ADR-0021):
+// task by task in id order, as vmo_unmap_everywhere goes, each held while
+// its mappings are looked at.
+vmo_mapped_writable :: proc "contextless" (v: ^Vmo) -> bool {
+	last_id: u64
+	for {
+		t: ^Task // the task with the next id
+		held := false
+		{
+			spin_guard(&all_tasks_lock)
+			for c := all_tasks; c != nil; c = c.all_next {
+				if c.id > last_id && (t == nil || c.id < t.id) {
+					t = c
+				}
+			}
+			if t == nil {
+				return false
+			}
+			held = object_tryref(&t.obj)
+			last_id = t.id
+		}
+		if !held {
+			continue
+		}
+		found := false
+		spin_lock(&t.lock)
+		if t.maps != nil {
+			for m in t.maps {
+				if m.size != 0 && .Write in m.flags && vmo_root(m.vmo) == v {
+					found = true
+					break
+				}
+			}
+		}
+		spin_unlock(&t.lock)
+		object_release(&t.obj)
+		if found {
+			return true
+		}
 	}
 }
 
@@ -379,12 +422,13 @@ pager_evict :: proc "contextless" (v: ^Vmo, first, count: u64) {
 
 // --- Resizing ---
 
-// A pager-backed VMO's new size: pages past it out of the mappings and
-// freed; pages added absent. Its page list is made again if it outgrows it.
+// A pager-backed or resizable VMO's new size: pages past it out of the
+// mappings and freed; pages added absent (a pager's) or zero (a resizable
+// one's, ADR-0020). Its page list is made again if it outgrows it.
 @(require_results)
 vmo_resize :: proc "contextless" (v: ^Vmo, want: u64) -> vx.Status {
-	if v.pager == nil {
-		return .Err_Unsupported // anonymous memory is read without the lock: not yet
+	if !vmo_locked(v) {
+		return .Err_Unsupported // read without its lock: made {.Resizable} to resize
 	}
 	if want == 0 || want > VMO_MAX_SIZE {
 		return .Err_Range
@@ -439,13 +483,30 @@ vmo_resize :: proc "contextless" (v: ^Vmo, want: u64) -> vx.Status {
 		old_list = virt_to_phys(raw_data(v.pages))
 		v.list_order = order
 	}
-	v.pages = pages[:count] // the block holds it: entries past the old end are empty
-	v.size = size
+	v.pages = pages[:count] // the block holds it: entries past the old end are empty, or filled below
+	// A resizable VMO's new pages, zero; if memory runs out, it keeps the
+	// size it reached.
+	st := vx.Status.Ok
+	if v.resizable {
+		for i in old ..< count {
+			pa := phys_alloc_zeroed(0)
+			if pa == 0 {
+				v.pages = pages[:i]
+				size = i * PAGE_SIZE
+				st = .Err_No_Memory
+				break
+			}
+			v.pages[i] = page_of(pa)
+		}
+	}
+	if size > v.size || !v.resizable {
+		v.size = size
+	}
 	v.resizing = false
 	wake_waiters(v) // they look again: one whose page is now past the end faults as usual
 	spin_unlock(&v.lock)
 	if old_list != 0 {
 		phys_free(old_list, old_order)
 	}
-	return .Ok
+	return st
 }

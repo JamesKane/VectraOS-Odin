@@ -191,6 +191,14 @@ SPAWN :: u32(0x6e77_7073) // "spwn"
 // read waits on for the reply, so no answer is lost; the interrupt comes when
 // the call returns. A server that holds calls answers one before
 // interrupting its caller.
+//
+// lent (ADR-0021, upstream's ADR-0043): bit i lends wr_handles[i], a VMO
+// handle the caller keeps: the server is sent a lease of it, with that
+// handle's rights but .Manage, which the kernel revokes when the call
+// returns, however it ends (a reply, the deadline, an interrupt, the
+// server's end closed, the caller killed). A lent handle that is not a VMO,
+// or a lease, fails the call before it is sent (.Err_Bad_Handle,
+// .Err_Invalid).
 Call :: struct {
 	wr_bytes:     rawptr,
 	wr_handles:   [^]Handle,
@@ -201,7 +209,10 @@ Call :: struct {
 	rd_cap:       u32,
 	rd_count_cap: u32,
 	actual:       Msg_Size,
+	lent:         u64,
 }
+
+#assert(size_of(Call) == 64 && offset_of(Call, lent) == 56)
 
 // --- Rings ---
 //
@@ -385,16 +396,35 @@ Cqe :: struct #align (32) { // the generic completion entry, 32 bytes
 //       past it leave every mapping and are freed (a touch there is an
 //       ordinary fault), pages added absent. The pager's alone.
 //   vmo_op(vmo, .Resize, size)
-//       an anonymous VMO's new size: not yet (.Err_Unsupported). A
-//       pager-backed one is its pager's to resize (pager_op .Resize):
-//       .Err_Access
+//       a resizable anonymous VMO's new size (ADR-0020, upstream's
+//       ADR-0042): pages added are zero, pages past the end leave every
+//       mapping and are freed (a touch there faults). One made without
+//       .Resizable: .Err_Unsupported. A pager-backed one is its pager's to
+//       resize (pager_op .Resize): .Err_Access
 Vmo_Option :: enum u32 { // vmo_create
 	Physical,
 	Pager,
+	Resizable, // vmo_op .Resize may change its size (ADR-0020); its pages are read under its lock
 }
 Vmo_Options :: bit_set[Vmo_Option; u32]
 
-#assert(u32(Vmo_Option.Physical) == 0 && u32(Vmo_Option.Pager) == 1)
+#assert(u32(Vmo_Option.Physical) == 0 && u32(Vmo_Option.Pager) == 1 && u32(Vmo_Option.Resizable) == 2)
+
+// vmo_seal(vmo) (ADR-0021, upstream's ADR-0043; 01 §6.6), with WRITE: no one
+//     writes the VMO again, through any handle, mapping or lease (vmo_rw,
+//     as_map and as_protect with .Write, a resize: .Err_Access).
+//     .Err_Bad_State while any writable mapping of it exists, as memfd's
+//     F_SEAL_WRITE; .Err_Unsupported for a physical or pager-backed VMO.
+//     Sealing again is .Ok.
+// vmo_lease(vmo, &lease): a lease, a VMO handle on the same pages with the
+//     caller's rights and MANAGE, to give away (duplicated without MANAGE);
+//     vmo_revoke(lease), with MANAGE: from then on no one reaches the pages
+//     through it. Its mappings, in every task, lose their pages, and a touch
+//     raises a .Revoked exception; vmo_rw, as_map and vmo_clone through it
+//     answer .Err_Revoked. A forked task maps a lease's mapping as it is,
+//     never a copy, so a revoke reaches it too. Only a plain anonymous VMO is
+//     leased (.Err_Unsupported otherwise), and a lease is not leased again
+//     (.Err_Invalid).
 
 Pager_Op :: enum u32 { // pager_op
 	Dirty = 1,
@@ -530,14 +560,17 @@ Task_Info_Option :: enum u32 {
 }
 Task_Info_Options :: bit_set[Task_Info_Option; u32]
 
-Map_Option :: enum u32 { // as_map, as_protect; a mapping is always readable
+Map_Option :: enum u32 { // as_map, as_protect; a mapping is readable unless .No_Access
 	Write,
 	Exec,
+	No_Access, // ADR-0020: no access at all, a touch faults (PROT_NONE, guard pages); alone
+	Shared, // ADR-0020, as_map only: a forked task maps the same VMO here, not a copy
 }
 Map_Options :: bit_set[Map_Option; u32]
 
 // On the wire, an option set is the u32 whose bit i is the option with value i.
 #assert(u32(Map_Option.Write) == 0 && u32(Map_Option.Exec) == 1)
+#assert(u32(Map_Option.No_Access) == 2 && u32(Map_Option.Shared) == 3)
 
 // as_map's and as_protect's flags word, and as_query's: the options in its
 // low byte, and the mapping's protection key in bits 8-11 (upstream's
@@ -577,12 +610,31 @@ Key_Rights :: bit_set[Key_Right; u32]
 // pages of [address, address + size), every one mapped, within the rights
 // each mapping's VMO handle gave when it was mapped (.Err_Access past them);
 // a mapping cut by the range becomes two or three (ADR-0035).
+// as_reserve(task, size, align, flags, &address) (ADR-0020, upstream's
+// ADR-0042; 01 §5): a reservation, address space no mapping the kernel
+// places lands in, for the task's own as_map at addresses inside it;
+// as_unmap there leaves it reserved. align: 0 (a page), or a power of two
+// up to 2^39. Without .Fixed, at a random aligned base; with it, at
+// *address, or .Err_Exists with *address set to the start of the first
+// mapping or reservation in the way. .Release: the reservation starting at
+// *address of size bytes given back, what is mapped in it unmapped
+// (.Err_Not_Found if there is none). A mapping placed at an address must lie
+// wholly inside one reservation or outside every one (.Err_Range). At most
+// 32 reservations a task (.Err_No_Space).
 // as_key_alloc(task, &key) and as_key_free(task, key): a protection key of
 // the task's, 1 to Cpu_Info.keys (key 0 is every mapping's default), with
 // the task handle's MANAGE as as_map takes it; .Err_No_Space when none is
 // free, .Err_Unsupported where the CPU has none; a key a mapping still uses
 // is not freed (.Err_Bad_State). A thread's rights to each key are its own
 // (PKRU, POR_EL0), set with the unprivileged instruction (rt.keys_set).
+
+As_Option :: enum u32 { // as_reserve
+	Fixed,
+	Release,
+}
+As_Options :: bit_set[As_Option; u32]
+
+#assert(u32(As_Option.Fixed) == 0 && u32(As_Option.Release) == 1)
 
 // The longest exit string or note, in bytes: Plan 9's ERRMAX (ADR-0010).
 ERRMAX :: 128
@@ -715,6 +767,9 @@ Exception_Kind :: enum u32 {
 	// code: read 0, write 1, key: the mapping's (ADR-0035; SIGSEGV,
 	// SEGV_PKUERR).
 	Protection_Key,
+	// A page of a lease that was revoked (ADR-0021); address: what was
+	// touched, code: read 0, write 1, execute 2 (POSIX's SIGBUS).
+	Revoked,
 }
 
 Exception :: struct {
@@ -860,7 +915,7 @@ Thread_Info :: struct { // thread_state(.Next_Thread)
 Map_Info :: struct { // as_query
 	base, size: u64,
 	offset:     u64, // into the VMO mapped
-	flags:      Map_Flags, // its options (always readable) and key
+	flags:      Map_Flags, // its options (readable unless .No_Access) and key
 	reserved:   u32,
 }
 

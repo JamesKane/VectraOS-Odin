@@ -1,0 +1,13 @@
+# tests/qemu/plugin.ndb: a host and its plugins sharing structures in place
+# (01 §6.6, M6 step 6e1b3, ADR-0043; tests/user/plugintest.c): a plugin
+# killed while building publishes nothing; a sealed result does not change
+# under the host; an out-of-bounds link is refused; a lease revoked while
+# the plugin reads; a lent lease gone after the reply and after a plugin
+# that hangs past the deadline.
+
+scenario=plugin timeout=60 cmdline=vx.skip=rc with=plugintest
+expect="plugintest: 39 checks, 0 failed"
+line="svcd: plugintest exited"
+fail="vx: panic"
+fail="plugintest: FAILED"
+fail="svcd: plugintest exited: "

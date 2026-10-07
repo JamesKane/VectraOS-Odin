@@ -1,0 +1,66 @@
+page=shared sect=2 summary="read a structure shared in a VMO in place, each link checked"
+    names=vx_shared_at,vx_shared_array,vx_shared_follow,VX_SHARED_AT
+    src=lib/vx-shared/shared.h,tests/user/plugintest.c
+    keys=shared,structure,offset,link,bounds,plugin,seal,lease,twizzler
+
+# SYNOPSIS
+
+```c
+#include "lib/vx-shared/shared.h"
+
+typedef struct vx_shared { const uint8_t *base; uint64_t size; } vx_shared;
+const void *vx_shared_at(vx_shared s, uint64_t off, uint64_t len,
+                         uint64_t align);
+#define VX_SHARED_AT(s, off, T)
+const void *vx_shared_array(vx_shared s, uint64_t off, uint64_t n,
+                            uint64_t each, uint64_t align);
+const void *vx_shared_follow(vx_shared from, const vx_shared *views, uint32_t n,
+                             vx_shared_link link, uint64_t len, uint64_t align);
+```
+
+# DESCRIPTION
+
+A program can hand another a whole structure, a syntax tree, a symbol table, a scene graph, to read in place, with no encoding and no parse (the kernel's design, 01 §6.6): the writer builds it in a VMO of its own and sends the handle, and the send is the commit point, so a writer that dies while building has published nothing.
+Its links are offsets from the VMO's start, which work wherever each side maps it.
+This header is the reader's half: `libvx`'s `<vx/shared.h>`, in `lib/vx-shared` until `libvx` exists.
+
+A `vx_shared` is a VMO as the reader mapped it, its <base> and <size>.
+`vx_shared_at` gives the <len> bytes at <off> if they lie wholly inside it and <off> is a multiple of <align> (a power of two, or 0 for none), and null otherwise; no sum it makes can wrap.
+`VX_SHARED_AT(`<s>`, `<off>`, `<T>`)` is a `const T *` checked the same way, and `vx_shared_array` checks an array of <n> items of <each> bytes whole.
+
+A link into another VMO of the same message is a `vx_shared_link`, a <slot> and an <offset>.
+The slot indexes the table at the head of the VMO holding the link, a `vx_shared_table` of <count> positions, each naming one of the message's handles by its place in the message; the reader maps those handles once, in order, as <views>.
+`vx_shared_follow` checks the slot against the table, the position against the <n> views and the offset against the view it names, and reads the table's words once each.
+It is Twizzler's foreign object table, with positions in a message in place of global ids, which would be ambient authority.
+
+Trust follows the direction.
+From a trusted writer, a host giving a plugin its input, the reader may follow links unchecked, given a handle without `VX_RIGHT_WRITE`.
+From an untrusted one, a plugin's result, the writer seals the VMO before sending it (vmo(2)'s `vx_vmo_seal`), so its bytes cannot change after the checks, and the reader checks every link before following it, once, reading each word of shared memory once.
+To take a view back while the reader still runs, the host sends a lease and revokes it (vmo(2)); to lend one for one call, it marks the handle in `vx_call`'s <lent> (channel(2)).
+
+# EXAMPLES
+
+A sealed list from a plugin, walked by its host, from `tests/user/plugintest.c`:
+
+```c
+uint64_t sum = 0;
+const node *n = VX_SHARED_AT(s, 0, node);
+for (uint32_t hops = 0; n && hops < 64; hops++) {
+  sum += n->value;
+  uint64_t next = n->next; // read once
+  n = next ? VX_SHARED_AT(s, next, node) : nullptr;
+}
+```
+
+# SEE ALSO
+
+vmo(2), channel(2), as(2), exception(2); `tests/host/shared_test.c` and the plugin scenario, `tests/qemu/plugin.ndb`, in the repository
+
+# DIAGNOSTICS
+
+Each function returns a pointer into the mapping, or null for a link that is out of bounds, misaligned, past the table or past the message's handles.
+
+# BUGS
+
+`libvx` does not exist yet, so the header is included by its path in the tree, not as `<vx/shared.h>`.
+A cycle of links is the reader's to bound: nothing here counts hops.

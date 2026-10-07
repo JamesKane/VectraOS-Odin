@@ -6,6 +6,8 @@ page=as sect=2 summary="map memory objects into a task's address space, unmap an
 # SYNOPSIS
 
 ```c
+vx_status vx_as_reserve(vx_handle task, uint64_t size, uint64_t align,
+                        uint32_t flags, uint64_t *addr);
 vx_status vx_as_map(vx_handle task, vx_handle vmo, uint64_t offset,
                     uint64_t size, uint32_t flags, uint64_t *addr);
 vx_status vx_as_unmap(vx_handle task, uint64_t addr, uint64_t size);
@@ -26,12 +28,15 @@ Addresses, offsets and sizes are in bytes and are multiples of the page size, 40
 
 `vx_as_map` maps <size> bytes of <vmo>, starting <offset> bytes into it, into <task>.
 With `*`<addr> zero the kernel picks the address and writes it to `*`<addr>; otherwise the mapping goes at `*`<addr>, which must be page-aligned.
-<flags> is `VX_MAP_WRITE`, `VX_MAP_EXEC` or neither: a mapping is always readable, and is never both writable and executable, so a JIT writes code and then makes it executable with `vx_as_protect`, or maps one VMO twice, once each way.
+<flags> is `VX_MAP_WRITE`, `VX_MAP_EXEC` or neither: a mapping is readable, and is never both writable and executable, so a JIT writes code and then makes it executable with `vx_as_protect`, or maps one VMO twice, once each way.
+<flags> may instead be `VX_MAP_NOACCESS`, alone: the mapping holds its VMO and its place but maps no page, so any touch faults, as a guard page or `PROT_NONE` does (ADR-0042).
+`VX_MAP_SHARED`, beside the rest, makes a forked task map the same VMO at that place rather than a copy of it, as a POSIX `MAP_SHARED` mapping is kept; without it a fork copies an anonymous mapping.
 <flags> may also carry a protection key, `VX_MAP_KEY(`<k>`)`, one the task has allocated (below); without one a mapping has key 0.
 <task> needs `VX_RIGHT_MANAGE`; <vmo> needs `VX_RIGHT_MAP` and `VX_RIGHT_READ`, and `VX_RIGHT_WRITE` or `VX_RIGHT_EXEC` to match <flags>.
 The mapping holds a reference to the VMO, so the VMO's handle may be closed once it is mapped.
 A VMO of physical memory, a device's registers, is mapped as device memory; a pager's VMO is mapped as far as its pager has supplied the pages, the rest as they are touched, and a page of it is writable only once it is dirty.
-The kernel places mappings upward from `0x0000'1000'0000'0000`, leaving an unmapped guard page after each.
+The kernel places mappings upward from `0x0000'1000'0000'0000`, leaving an unmapped guard page after each, and past any reservation.
+A mapping at a named address lies wholly inside one reservation or outside every one.
 A task holds at most 102 mappings.
 
 On x86, <vmo> may instead be an IoRange with `VX_RIGHT_MAP`, and <offset>, <size> and <flags> zero: then `vx_as_map` lets <task> use that range of I/O ports, its threads from their next switch onto a CPU, and does not touch `*`<addr>.
@@ -44,15 +49,20 @@ When it returns, no CPU reaches those pages through those addresses, the kernel'
 A VMO is freed when its last mapping and its last handle are gone.
 <task> needs `VX_RIGHT_MANAGE`.
 
-`vx_as_query` fills `*`<info> with the first of <task>'s mappings that ends after <address>: its `base` and `size`, the `offset` into its VMO, and its `flags`, `VX_MAP_WRITE` and `VX_MAP_EXEC` and its key (`VX_MAP_KEY_MASK`).
+`vx_as_query` fills `*`<info> with the first of <task>'s mappings that ends after <address>: its `base` and `size`, the `offset` into its VMO, and its `flags`, `VX_MAP_WRITE`, `VX_MAP_EXEC`, `VX_MAP_NOACCESS` and `VX_MAP_SHARED` and its key (`VX_MAP_KEY_MASK`); reservations are not listed.
 Asking again from each mapping's end lists the address space, as a debugger or `/proc/N/maps` does.
 <task> needs `VX_RIGHT_INSPECT`.
 
-`as_reserve` is reserved.
-It is meant to reserve a range of address space with nothing committed, at a size and alignment the caller names and a random base, for `as_map` to fill (01 §5).
-It has no vx-rt wrapper, and `vx_syscall(VX_SYS_as_reserve, ...)` returns `VX_ERR_UNSUPPORTED` today.
+`vx_as_reserve` reserves <size> bytes of <task>'s address space with nothing mapped: the kernel's own placement never lands there, and the task maps inside it with `vx_as_map` at addresses it names (01 §5, ADR-0042).
+<align> is 0, a page, or a power of two up to 2^39.
+Without flags the base is random and a multiple of <align>, and is written to `*`<addr>.
+With `VX_AS_FIXED` the reservation is made at `*`<addr>; if a mapping or reservation is in the way the call fails with `VX_ERR_EXISTS` and writes the start of the first one there to `*`<addr>.
+With `VX_AS_RELEASE` the reservation starting at `*`<addr> of exactly <size> bytes is given back, and what is mapped in it unmapped.
+`vx_as_unmap` inside a reservation leaves the range reserved.
+A task holds at most 32 reservations; a forked task has its parent's, and `task_exec` gives the task the new program's.
+<task> needs `VX_RIGHT_MANAGE`.
 
-`vx_as_protect` changes the rights and the key of the pages of [<addr>, <addr> + <size>) to <flags>, as `vx_as_map` takes them (ADR-0035).
+`vx_as_protect` changes the rights and the key of the pages of [<addr>, <addr> + <size>) to <flags>, as `vx_as_map` takes them (ADR-0035), `VX_MAP_NOACCESS` included; `VX_MAP_SHARED` is `vx_as_map`'s alone, and a mapping keeps it.
 Every page of the range must be mapped, and <flags> may give each mapping no more than its VMO's handle gave when it was mapped: `VX_MAP_WRITE` only if that handle had `VX_RIGHT_WRITE`, `VX_MAP_EXEC` only with `VX_RIGHT_EXEC`; never both at once.
 A mapping the range cuts becomes two or three, as `vx_as_unmap` cuts them, so that needs free mapping slots.
 When it returns, no CPU reaches the pages with their old rights.
@@ -140,7 +150,7 @@ handle(2), intro(2)
 : `VX_ERR_ACCESS`
   <task> lacks `VX_RIGHT_MANAGE`, <flags> asks for both `VX_MAP_WRITE` and `VX_MAP_EXEC`, or for a right a mapping's handle did not give.
 : `VX_ERR_INVALID`
-  <flags> has an unknown bit, or a key <task> has not allocated.
+  <flags> has an unknown bit, `VX_MAP_NOACCESS` beside another right, `VX_MAP_SHARED`, or a key <task> has not allocated.
 : `VX_ERR_RANGE`
   <size> is zero, <addr> or <size> is not page-aligned, or the range runs past the user half.
 : `VX_ERR_NOT_FOUND`
@@ -151,13 +161,13 @@ handle(2), intro(2)
 `vx_as_key_alloc` returns `VX_OK`, `VX_ERR_NO_SPACE` when all its keys are taken, `VX_ERR_UNSUPPORTED` where there are none, or `VX_ERR_INVALID` for a <key> that is not writable memory of the caller's; `vx_as_key_free` returns `VX_OK`, `VX_ERR_INVALID` for a key that is not the task's, `VX_ERR_BAD_STATE` for one a mapping uses, or `VX_ERR_UNSUPPORTED`.
 `vx_keys_set` returns `VX_ERR_INVALID` for a key past `vx_cpu_info.keys` or unknown rights, and `VX_ERR_UNSUPPORTED` where there are no keys.
 
-`as_reserve` returns `VX_ERR_UNSUPPORTED`.
+`vx_as_reserve` returns `VX_OK`; `VX_ERR_EXISTS` with `VX_AS_FIXED`, as above; `VX_ERR_RANGE` for a <size> or <align> it cannot take, or a fixed base not aligned or past the user half; `VX_ERR_NO_SPACE` when the task holds 32; `VX_ERR_NO_MEMORY` when sixteen random bases all met something; `VX_ERR_NOT_FOUND` for a release that names no reservation; `VX_ERR_INVALID` for unknown flags or both.
 
 # BUGS
 
-There are no reservations yet, so `as_map` places a mapping anywhere free rather than inside one, and nothing keeps a range free between calls.
-The kernel's placement is not random: mappings go one after another from a fixed base, and space freed by `as_unmap` is never placed in again.
-A fixed address is checked page by page against the page tables, not against the task's mappings: an overlap with a mapped page fails with `VX_ERR_NO_MEMORY`, where the design says it fails and says what is there, and an overlap with a pager's pages not yet supplied is not noticed at all.
+`as_map`'s own placement is not random, as reservations' are: mappings go one after another from a fixed base, and space freed by `as_unmap` is never placed in again.
+The kernel's random generator is mixed once from the bootloader's entropy and the clock; without the bootloader's entropy, reservations' bases can be guessed.
+A fixed address that overlaps a mapping fails with `VX_ERR_EXISTS` but, unlike `vx_as_reserve`'s, does not say where the mapping starts.
 Large pages, which the design lets `as_map` ask for, are not offered, and a mapping is made of 4 KiB pages.
 An IoRange without `VX_RIGHT_MAP` is reported as `VX_ERR_BAD_HANDLE`, not `VX_ERR_ACCESS`.
 Mapping the same IoRange twice takes two of the task's 32 ranges.

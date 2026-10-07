@@ -12,7 +12,10 @@ import vx "abi:vx"
 // pager-backed VMO (pager.odin) starts with none: a page's entry is empty
 // until its pager is asked for it, .asked until it is supplied, and its
 // address from then on, .dirty once it has been written; its lock covers the
-// list and the threads waiting on it.
+// list and the threads waiting on it. A resizable one (vmo_create
+// {.Resizable}, ADR-0020) is anonymous memory whose list vmo_resize may
+// change, so it is read under the lock too; every other anonymous VMO's list
+// never changes, and is read without it.
 
 Vmo :: struct {
 	using obj:  Object,
@@ -23,9 +26,16 @@ Vmo :: struct {
 	ring:       bool, // a ring's memory (ring.odin), never copied into a forked task
 	pager:      ^Pager, // its pages' supplier (pager.odin), which it holds; or nil
 	pager_key:  u32, // what its page requests call it
-	lock:       Spinlock, // a pager-backed one's: its page list, and waiters
+	lock:       Spinlock, // a pager-backed or resizable one's: its page list, and waiters
 	waiters:    ^Page_Waiter,
 	resizing:   bool, // a resize under way (pager.odin), which drops the lock between its steps
+	resizable:  bool, // anonymous, made {.Resizable} (ADR-0020): its page list under its lock too
+	// ADR-0021: a sealed VMO is written by no one again; a lease is a VMO on
+	// its parent's pages (pages and list are the parent's), which it holds,
+	// until it is revoked. sealed and revoked are atomic.
+	sealed:     bool,
+	lease_of:   ^Vmo,
+	revoked:    bool,
 }
 
 #assert(offset_of(Vmo, obj) == 0) // objects are cast from ^Object
@@ -49,6 +59,31 @@ page_of :: #force_inline proc "contextless" (pa: Paddr) -> Page {
 // The address of page i, or 0 if a pager has not supplied it.
 vmo_page :: #force_inline proc "contextless" (v: ^Vmo, i: u64) -> Paddr {
 	return Paddr(v.pages[i].frame << 12)
+}
+
+// Whether v's page list may change under a reader (a pager's VMO, a
+// resizable one): read it under v's lock.
+vmo_locked :: #force_inline proc "contextless" (v: ^Vmo) -> bool {
+	return v.pager != nil || v.resizable
+}
+
+// The address of page i, or 0 if it is past the VMO's end (a resizable
+// one's, shrunk) or not supplied. Under v's lock, for one vmo_locked says is.
+vmo_page_in :: proc "contextless" (v: ^Vmo, i: u64) -> Paddr {
+	return i < v.size / PAGE_SIZE ? vmo_page(v, i) : 0
+}
+
+// The VMO whose pages v shows: its parent, for a lease.
+vmo_root :: #force_inline proc "contextless" (v: ^Vmo) -> ^Vmo {
+	return v.lease_of != nil ? v.lease_of : v
+}
+
+vmo_sealed :: proc "contextless" (v: ^Vmo) -> bool {
+	return intrinsics.atomic_load(&vmo_root(v).sealed)
+}
+
+vmo_revoked :: proc "contextless" (v: ^Vmo) -> bool {
+	return v.lease_of != nil && intrinsics.atomic_load(&v.revoked)
 }
 
 vmo_pool: Pool(Vmo)
@@ -101,7 +136,36 @@ vmo_create :: proc "contextless" (want: u64) -> (vmo: ^Vmo, st: vx.Status) {
 	return v, .Ok
 }
 
+// vmo_lease (ADR-0021): a VMO on parent's pages, holding it. Only a plain
+// anonymous VMO, whose page list never changes, is leased.
+@(require_results)
+vmo_lease_create :: proc "contextless" (parent: ^Vmo) -> (lease: ^Vmo, st: vx.Status) {
+	if parent.lease_of != nil {
+		return nil, .Err_Invalid // one level
+	}
+	if parent.physical || parent.pager != nil || parent.resizable || parent.ring {
+		return nil, .Err_Unsupported
+	}
+	v := pool_alloc(&vmo_pool)
+	if v == nil {
+		return nil, .Err_No_Memory
+	}
+	object_init(&v.obj, .Vmo)
+	object_ref(&parent.obj)
+	v.lease_of = parent
+	v.size = parent.size
+	v.pages = parent.pages
+	v.list_order = parent.list_order
+	return v, .Ok
+}
+
 vmo_destroy :: proc "contextless" (v: ^Vmo) {
+	if v.lease_of != nil { // its pages are its parent's
+		parent := v.lease_of
+		pool_free(&vmo_pool, v)
+		object_drop(&parent.obj) // the drain that destroys this destroys it too, if it was the last
+		return
+	}
 	if !v.physical {
 		for i in 0 ..< u64(len(v.pages)) {
 			if pa := vmo_page(v, i); pa != 0 {

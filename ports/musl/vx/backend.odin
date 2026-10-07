@@ -70,6 +70,8 @@ errno_of :: proc "contextless" (st: vx.Status) -> int {
 		return fail(.EIO)
 	case .Err_No_Space:
 		return fail(.ENOSPC)
+	case .Err_Revoked:
+		return fail(.EFAULT) // a lease taken back (ADR-0021)
 	case .Err_Not_Found:
 		return fail(.ENOENT)
 	case .Err_Exists:
@@ -228,9 +230,9 @@ dispatch :: proc "contextless" (n, a1, a2, a3, a4, a5, a6: int) -> int {
 	case .munmap:
 		return mem_unmap(uintptr(a1), uint(a2))
 	case .mremap:
-		return mem_remap(uintptr(a1), uint(a2), uint(a3), int(i32(a4)))
+		return mem_remap(uintptr(a1), uint(a2), uint(a3), int(i32(a4)), uintptr(a5))
 	case .mprotect:
-		return mem_protect()
+		return mem_protect(uintptr(a1), uint(a2), transmute(linux.Prot_Flags)i32(a3))
 	// Mapped files' writes reach fsd's page cache at once, and the volume
 	// within 10 s or at the file's next fsync: msync has nothing to start,
 	// and MS_SYNC does not yet wait (upstream's docs/milestones.md).

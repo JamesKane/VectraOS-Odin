@@ -972,6 +972,7 @@ ERRORS := [?]Error_Text {
 	{.Err_No_Child, "no living children"},
 	{.Err_Io, "i/o error"},
 	{.Err_No_Space, "file system full"},
+	{.Err_Revoked, "lease revoked"},
 	{.Err_Invalid, "bad message"},
 }
 
@@ -1017,6 +1018,7 @@ ERRNOS := [?]Errno {
 	{.Err_No_Child, 10},
 	{.Err_Io, 5},
 	{.Err_No_Space, 28},
+	{.Err_Revoked, 14},
 	{.Err_Should_Wait, 11},
 	{.Err_Invalid, 22},
 }

@@ -1491,8 +1491,18 @@ handler :: proc "c" (e: ^vx.Exception) -> ! {
 		e.rights &~= 3 << (2 * u64(e.key))
 	case .Pager_Timeout: // the page, late: supplied now, and the access made again
 		_ = rt.pager_supply(late.pager, late.vmo, 0, 4096, late.src, 0)
+	case .Revoked: // the lease's page swapped for a spare: the load made again
+		at := e.address &~ 4095
+		intrinsics.atomic_store(&revoked_at, e.address)
+		_ = rt.as_unmap(rt.self, at, 4096)
+		_, _ = rt.as_map(rt.self, revoked_spare, 0, 4096, {}, at)
 	case .Page_Fault:
-		_, _ = rt.as_map(rt.self, in_task.missing, 0, 4096, {}, e.address &~ 4095) // then the load is retried
+		if guard_at != 0 && e.address &~ 4095 == guard_at {
+			intrinsics.atomic_add(&guard_faults, 1) // a no-access page touched: opened, and the access made again
+			_ = rt.as_protect(rt.self, guard_at, 4096, {.Write})
+		} else {
+			_, _ = rt.as_map(rt.self, in_task.missing, 0, 4096, {}, e.address &~ 4095) // then the load is retried
+		}
 	case .Breakpoint:
 		when ODIN_ARCH == .arm64 {
 			e.regs.pc += 4 // brk stops at itself; int3 has already been stepped past
@@ -2531,6 +2541,7 @@ test_debugger :: proc "contextless" () {
 // --- fork ---
 
 fork_page: [512]u64
+fork_shared: u64 // a .Shared mapping the child writes to (test_address_space)
 fork_ring: u64 // where a ring's memory is mapped, in the parent
 
 // The forked child's first thread. Its exit string says what it found: "ok"
@@ -2547,6 +2558,9 @@ fork_child :: proc "c" (unused: vx.Handle, my_id: u64) -> ! {
 	}
 	if fork_ring != 0 {
 		_ = intrinsics.volatile_load(cast(^u64)uintptr(fork_ring)) // not there: a fault ends it
+	}
+	if fork_shared != 0 {
+		intrinsics.volatile_store(cast(^u64)uintptr(fork_shared), 0x7777) // the same VMO: the parent sees it
 	}
 	msg := [7]u8{'w', 'r', 'o', 'n', 'g', ' ', '0' + u8(wrong)}
 	_ = rt.task_kill(rt.self, wrong != 0 ? string(msg[:]) : "ok")
@@ -2606,6 +2620,322 @@ test_fork :: proc "contextless" () {
 	none := vx.HANDLE_NONE
 	check(rt.vx_syscall(.Task_Create, u64(uintptr(raw_data(string("x")))), 1, u64(uintptr(&none)), 2) == i64(vx.Status.Err_Invalid))
 	_ = rt.handle_close(port)
+}
+
+// --- Reservations, no-access, resizable and shared VMOs (ADR-0020) ---
+
+guard_at: u64 // a no-access page the handler opens when touched (test_address_space)
+guard_faults: u32
+
+inside :: proc "contextless" (a, base, size: u64) -> bool {
+	return a >= base && a < base + size
+}
+
+test_address_space :: proc "contextless" () {
+	// Reservations: random, aligned, distinct; nothing placed lands in one.
+	r1, st := rt.as_reserve(rt.self, 1 << 20, 1 << 16)
+	check(st == .Ok && r1 != 0 && r1 & 0xffff == 0)
+	r2, st2 := rt.as_reserve(rt.self, 1 << 20, 1 << 16)
+	check(st2 == .Ok && r2 != r1)
+	v, vst := rt.vmo_create(16 * 4096)
+	check(vst == .Ok)
+	for _ in 0 ..< 4 {
+		placed, pst := rt.as_map(rt.self, v, 0, 16 * 4096, {.Write})
+		check(pst == .Ok)
+		check(!inside(placed, r1, 1 << 20) && !inside(placed, r2, 1 << 20))
+		check(rt.as_unmap(rt.self, placed, 16 * 4096) == .Ok)
+	}
+	// A mapping at an address inside it; one across its edge refused; an
+	// unmap there leaves it reserved.
+	at, ast := rt.as_map(rt.self, v, 0, 4096, {.Write}, r1 + 4096)
+	check(ast == .Ok && at == r1 + 4096)
+	intrinsics.volatile_store(cast(^u64)uintptr(at), 42)
+	_, st = rt.as_map(rt.self, v, 0, 8192, {.Write}, r1 + (1 << 20) - 4096)
+	check(st == .Err_Range)
+	check(rt.as_unmap(rt.self, at, 4096) == .Ok)
+	in_way: u64
+	in_way, st = rt.as_reserve(rt.self, 4096, 0, {.Fixed}, r1)
+	check(st == .Err_Exists && in_way == r1) // still there
+	// .Fixed where a mapping is: .Err_Exists, naming where it starts.
+	placed, pst := rt.as_map(rt.self, v, 0, 4096, {})
+	check(pst == .Ok)
+	in_way, st = rt.as_reserve(rt.self, 8192, 0, {.Fixed}, placed - 4096)
+	check(st == .Err_Exists && in_way == placed)
+	check(rt.as_unmap(rt.self, placed, 4096) == .Ok)
+	// Released: what is mapped in it goes, and its range is free again.
+	_, st = rt.as_map(rt.self, v, 0, 4096, {}, r2)
+	check(st == .Ok)
+	_, st = rt.as_reserve(rt.self, 1 << 20, 0, {.Release}, r2)
+	check(st == .Ok)
+	mi, qst := rt.as_query(rt.self, r2)
+	check(qst != .Ok || mi.base >= r2 + (1 << 20))
+	_, st = rt.as_reserve(rt.self, 1 << 20, 0, {.Release}, r2)
+	check(st == .Err_Not_Found)
+	in_way, st = rt.as_reserve(rt.self, 1 << 20, 1 << 16, {.Fixed}, r2)
+	check(st == .Ok && in_way == r2)
+	_, st = rt.as_reserve(rt.self, 1 << 20, 0, {.Release}, in_way)
+	check(st == .Ok)
+	_, st = rt.as_reserve(rt.self, 1 << 20, 0, {.Release}, r1)
+	check(st == .Ok)
+	_, st = rt.as_reserve(rt.self, 4096, 3 * 4096, {}, in_way)
+	check(st == .Err_Range) // not a power of two
+
+	// No access: a guard page between two writable ones. A touch faults; the
+	// handler opens it, and the write is made again.
+	g, gst := rt.as_map(rt.self, v, 0, 3 * 4096, {.Write})
+	check(gst == .Ok)
+	check(rt.as_protect(rt.self, g + 4096, 4096, {.No_Access}) == .Ok)
+	mi, qst = rt.as_query(rt.self, g + 4096)
+	check(qst == .Ok && .No_Access in vx.map_options(mi.flags))
+	check(rt.as_protect(rt.self, g, 4096, {.No_Access, .Write}) == .Err_Invalid)
+	intrinsics.volatile_store(cast(^u64)uintptr(g), 1)
+	intrinsics.volatile_store(cast(^u64)uintptr(g + 8192), 3)
+	guard_at = g + 4096
+	check(rt.exception_bind(rt.self, vx.HANDLE_NONE, u64(uintptr(rawptr(handler))), {.In_Task}) == .Ok)
+	intrinsics.volatile_store(cast(^u64)uintptr(g + 4096), 2)
+	check(rt.exception_bind(rt.self, vx.HANDLE_NONE, 0, {.In_Task}) == .Ok)
+	guard_at = 0
+	check(intrinsics.atomic_load(&guard_faults) == 1 && intrinsics.volatile_load(cast(^u64)uintptr(g + 4096)) == 2)
+	check(rt.as_unmap(rt.self, g, 3 * 4096) == .Ok)
+	none, nst := rt.as_map(rt.self, v, 0, 4096, {.No_Access}) // mapped no-access from the start: a reservation's placeholder
+	check(nst == .Ok && rt.as_unmap(rt.self, none, 4096) == .Ok)
+	_ = rt.handle_close(v)
+
+	// A resizable VMO: grown with zero pages, shrunk back; one made without it
+	// is not resized.
+	value, got := u64(0x77), u64(1)
+	rv, rst := rt.vmo_create(4096, {.Resizable})
+	check(rst == .Ok && rt.vmo_write(rv, 0, memory.ptr_to_bytes(&value)) == .Ok)
+	check(rt.vmo_resize(rv, 3 * 4096) == .Ok)
+	ra, mst := rt.as_map(rt.self, rv, 0, 3 * 4096, {.Write})
+	check(mst == .Ok)
+	check(intrinsics.volatile_load(cast(^u64)uintptr(ra)) == 0x77 && intrinsics.volatile_load(cast(^u64)uintptr(ra + 8192)) == 0)
+	intrinsics.volatile_store(cast(^u64)uintptr(ra + 8192), 9)
+	check(rt.vmo_read(rv, 8192, memory.ptr_to_bytes(&got)) == .Ok && got == 9)
+	check(rt.as_unmap(rt.self, ra, 3 * 4096) == .Ok)
+	check(rt.vmo_resize(rv, 4096) == .Ok)
+	check(rt.vmo_read(rv, 8192, memory.ptr_to_bytes(&got)) == .Err_Range)
+	check(rt.vmo_read(rv, 0, memory.ptr_to_bytes(&got)) == .Ok && got == 0x77)
+	fixed, fst := rt.vmo_create(4096)
+	check(fst == .Ok && rt.vmo_resize(fixed, 8192) == .Err_Unsupported)
+	_, st = rt.vmo_create(4096, {.Resizable, .Pager})
+	check(st == .Err_Invalid)
+	rt.close_all(fixed, rv)
+
+	// .Shared: a forked child maps the same VMO, and its write is seen.
+	sp := new_stack()
+	port, pcst := rt.port_create()
+	sv, svst := rt.vmo_create(4096)
+	sa, sast := rt.as_map(rt.self, sv, 0, 4096, {.Write, .Shared})
+	check(sp != 0 && pcst == .Ok && svst == .Ok && sast == .Ok)
+	fork_shared = sa
+	fork_page[7] = 0x1234
+	exit, ok := run_fork(sp, port)
+	check(ok && exit == "ok")
+	fork_shared = 0
+	check(intrinsics.volatile_load(cast(^u64)uintptr(sa)) == 0x7777)
+	check(rt.as_protect(rt.self, sa, 4096, {.Shared}) == .Err_Invalid) // as_map's alone
+	check(rt.as_unmap(rt.self, sa, 4096) == .Ok)
+	rt.close_all(sv, port)
+}
+
+// --- Seals and leases (ADR-0021) ---
+
+revoked_spare: vx.Handle // what the handler maps where a revoked lease was (test_leases)
+revoked_at: u64
+
+// vmo_lease's status alone.
+lease_status :: proc "contextless" (h: vx.Handle) -> vx.Status {
+	_, st := rt.vmo_lease(h)
+	return st
+}
+
+test_leases :: proc "contextless" () {
+	// A seal: refused while mapped writable, then no write by anyone.
+	value, got := u64(0x5eed), u64(0)
+	v, st := rt.vmo_create(4096)
+	check(st == .Ok && rt.vmo_write(v, 0, memory.ptr_to_bytes(&value)) == .Ok)
+	at: u64
+	at, st = rt.as_map(rt.self, v, 0, 4096, {.Write})
+	check(st == .Ok)
+	check(rt.vmo_seal(v) == .Err_Bad_State) // a writable mapping: as memfd's F_SEAL_WRITE
+	check(rt.as_unmap(rt.self, at, 4096) == .Ok && rt.vmo_seal(v) == .Ok && rt.vmo_seal(v) == .Ok)
+	check(rt.vmo_write(v, 0, memory.ptr_to_bytes(&value)) == .Err_Access)
+	_, st = rt.as_map(rt.self, v, 0, 4096, {.Write})
+	check(st == .Err_Access)
+	at, st = rt.as_map(rt.self, v, 0, 4096, {})
+	check(st == .Ok && intrinsics.volatile_load(cast(^u64)uintptr(at)) == 0x5eed)
+	check(rt.as_protect(rt.self, at, 4096, {.Write}) == .Err_Access && rt.as_unmap(rt.self, at, 4096) == .Ok)
+	rv, rst := rt.vmo_create(4096, {.Resizable})
+	check(rst == .Ok && rt.vmo_seal(rv) == .Ok && rt.vmo_resize(rv, 8192) == .Err_Access)
+	_ = rt.handle_close(rv)
+
+	// A lease: the same pages, read through it; one without .Manage cannot
+	// revoke; revoked, a touch is .Revoked and every use of it too.
+	w, wst := rt.vmo_create(2 * 4096)
+	check(wst == .Ok && rt.vmo_write(w, 4096, memory.ptr_to_bytes(&value)) == .Ok)
+	lease, lst := rt.vmo_lease(w)
+	check(lst == .Ok)
+	given, gst := rt.handle_dup(lease, {.Read, .Map}) // what a reader is given
+	check(gst == .Ok)
+	la, mst := rt.as_map(rt.self, given, 0, 2 * 4096, {})
+	check(mst == .Ok && intrinsics.volatile_load(cast(^u64)uintptr(la + 4096)) == 0x5eed)
+	value = 0x1111
+	check(rt.vmo_write(w, 4096, memory.ptr_to_bytes(&value)) == .Ok && intrinsics.volatile_load(cast(^u64)uintptr(la + 4096)) == 0x1111)
+	check(rt.vmo_revoke(given) == .Err_Access && lease_status(given) == .Err_Invalid)
+	check(rt.vmo_revoke(w) == .Err_Invalid) // not a lease
+	check(rt.vmo_revoke(lease) == .Ok && rt.vmo_revoke(lease) == .Ok)
+	revoked_spare, st = rt.vmo_create(4096)
+	check(st == .Ok)
+	check(rt.exception_bind(rt.self, vx.HANDLE_NONE, u64(uintptr(rawptr(handler))), {.In_Task}) == .Ok)
+	got = intrinsics.volatile_load(cast(^u64)uintptr(la + 4096 + 8)) // revoked: the handler puts a spare there
+	check(rt.exception_bind(rt.self, vx.HANDLE_NONE, 0, {.In_Task}) == .Ok)
+	check(intrinsics.atomic_load(&in_task.handled[.Revoked]) == 1 && intrinsics.atomic_load(&revoked_at) == la + 4096 + 8 && got == 0)
+	check(rt.vmo_read(given, 0, memory.ptr_to_bytes(&got)) == .Err_Revoked)
+	_, st = rt.as_map(rt.self, given, 0, 4096, {})
+	check(st == .Err_Revoked)
+	_, st = rt.vmo_clone(given, 0, 4096)
+	check(st == .Err_Revoked)
+	check(rt.vmo_read(w, 4096, memory.ptr_to_bytes(&got)) == .Ok && got == 0x1111) // the parent's are its own
+	check(rt.as_unmap(rt.self, la, 2 * 4096) == .Ok)
+	rt.close_all(given, lease, revoked_spare)
+	// Only plain anonymous memory is leased.
+	rv, rst = rt.vmo_create(4096, {.Resizable})
+	check(rst == .Ok && lease_status(rv) == .Err_Unsupported)
+	rt.close_all(rv, w, v)
+}
+
+// --- Leases lent for one call (ADR-0021) ---
+
+Lent_Mode :: enum {
+	Reply,
+	Hang,
+	Close,
+}
+
+Lent_Server :: struct {
+	end:   vx.Handle,
+	mode:  Lent_Mode,
+	value: u64, // what it read through the lent memory
+	lease: vx.Handle, // the lease it was sent
+	done:  u32,
+}
+
+// Reads one request, maps its handle and reads it; then replies, or never
+// does, or closes its end without a reply.
+lent_worker :: proc "c" (unused: vx.Handle, arg: u64) -> ! {
+	s := cast(^Lent_Server)uintptr(arg)
+	port, _ := rt.port_create()
+	_ = rt.port_bind(port, s.end, .Readable, 1)
+	pk: [1]vx.Packet
+	rq: Request
+	got: [1]vx.Handle
+	if n, _ := rt.port_wait(port, after_ms(2000), 0, pk[:]); n == 1 {
+		if size, st := rt.channel_read(s.end, memory.ptr_to_bytes(&rq), got[:]); st == .Ok && size.handles == 1 {
+			if at, mst := rt.as_map(rt.self, got[0], 0, 4096, {}); mst == .Ok {
+				intrinsics.atomic_store(&s.value, intrinsics.volatile_load(cast(^u64)uintptr(at)))
+			}
+			intrinsics.atomic_store(&s.lease, got[0])
+			switch s.mode {
+			case .Reply:
+				_ = rt.channel_write(s.end, memory.ptr_to_bytes(&rq))
+			case .Close:
+				_ = rt.handle_close(s.end)
+			case .Hang:
+			}
+		}
+	}
+	_ = rt.handle_close(port)
+	intrinsics.atomic_store(&s.done, 1)
+	rt.thread_exit()
+}
+
+// One call lending mem to a server in mode: the call's status, and the
+// server's lease after it.
+lend_once :: proc "contextless" (mem: vx.Handle, mode: Lent_Mode, s: ^Lent_Server, deadline: vx.Instant) -> vx.Status {
+	s^ = {mode = mode}
+	a, b, cst := rt.channel_create()
+	if cst != .Ok {
+		return .Err_No_Memory
+	}
+	s.end = b
+	sp := new_stack()
+	th, tst := rt.thread_create(rt.self)
+	if sp == 0 || tst != .Ok || rt.thread_start(th, u64(uintptr(rawptr(lent_worker))), sp, 0, u64(uintptr(s))) != .Ok {
+		return .Err_No_Memory
+	}
+	rq := Request{n = 1}
+	reply: Request
+	lent := [1]vx.Handle{mem}
+	call := vx.Call {
+		wr_bytes   = &rq,
+		wr_len     = size_of(rq),
+		wr_handles = raw_data(lent[:]),
+		wr_count   = 1,
+		rd_bytes   = &reply,
+		rd_cap     = size_of(reply),
+		lent       = 1,
+	}
+	st := rt.channel_call(a, &call, deadline)
+	for mode != .Hang && intrinsics.atomic_load(&s.done) == 0 {
+		_ = rt.futex_wait(&s.done, 0, after_ms(10))
+	}
+	_ = rt.handle_close(a)
+	if mode != .Close {
+		_ = rt.handle_close(b)
+	}
+	_ = rt.handle_close(th)
+	return st
+}
+
+test_lent :: proc "contextless" () {
+	value, got := u64(0x1e47), u64(0)
+	mem, st := rt.vmo_create(4096)
+	check(st == .Ok && rt.vmo_write(mem, 0, memory.ptr_to_bytes(&value)) == .Ok)
+	@(static) s: Lent_Server
+	// A reply: the server read it through its lease, which is gone once the call returns.
+	check(lend_once(mem, .Reply, &s, after_ms(2000)) == .Ok)
+	check(intrinsics.atomic_load(&s.value) == 0x1e47 && intrinsics.atomic_load(&s.lease) != vx.HANDLE_NONE)
+	check(rt.vmo_read(intrinsics.atomic_load(&s.lease), 0, memory.ptr_to_bytes(&got)) == .Err_Revoked)
+	_, st = rt.as_map(rt.self, intrinsics.atomic_load(&s.lease), 0, 4096, {})
+	check(st == .Err_Revoked)
+	check(rt.vmo_revoke(intrinsics.atomic_load(&s.lease)) == .Err_Access) // the server's has no .Manage
+	_ = rt.handle_close(intrinsics.atomic_load(&s.lease))
+	check(rt.vmo_read(mem, 0, memory.ptr_to_bytes(&got)) == .Ok && got == 0x1e47) // the caller's handle stays
+	// The server's end closed with no reply: .Err_Peer_Closed, and revoked.
+	check(lend_once(mem, .Close, &s, after_ms(2000)) == .Err_Peer_Closed)
+	check(intrinsics.atomic_load(&s.value) == 0x1e47 && rt.vmo_read(intrinsics.atomic_load(&s.lease), 0, memory.ptr_to_bytes(&got)) == .Err_Revoked)
+	_ = rt.handle_close(intrinsics.atomic_load(&s.lease))
+	// A server that never replies: the deadline ends the call, and the lease.
+	check(lend_once(mem, .Hang, &s, after_ms(300)) == .Err_Timed_Out)
+	for intrinsics.atomic_load(&s.done) == 0 {
+		_ = rt.futex_wait(&s.done, 0, after_ms(10))
+	}
+	check(intrinsics.atomic_load(&s.value) == 0x1e47 && rt.vmo_read(intrinsics.atomic_load(&s.lease), 0, memory.ptr_to_bytes(&got)) == .Err_Revoked)
+	_ = rt.handle_close(intrinsics.atomic_load(&s.lease))
+	// A lent handle that is not a VMO, or a bit past the handles: refused before
+	// anything is sent, and the caller's handles stay.
+	a, b, cst := rt.channel_create()
+	check(cst == .Ok)
+	rq := Request{n = 1}
+	port, pst := rt.port_create()
+	check(pst == .Ok)
+	handles := [1]vx.Handle{port}
+	call := vx.Call {
+		wr_bytes   = &rq,
+		wr_len     = size_of(rq),
+		wr_handles = raw_data(handles[:]),
+		wr_count   = 1,
+		lent       = 1,
+	}
+	check(rt.channel_call(a, &call, after_ms(100)) == .Err_Bad_Handle)
+	handles[0] = mem
+	call.lent = 2
+	check(rt.channel_call(a, &call, after_ms(100)) == .Err_Invalid)
+	_, st = rt.channel_read(b, memory.ptr_to_bytes(&rq))
+	check(st == .Err_Should_Wait)
+	check(rt.vmo_read(mem, 0, memory.ptr_to_bytes(&got)) == .Ok && rt.handle_close(port) == .Ok)
+	rt.close_all(a, b, mem)
 }
 
 // --- task_exec (ADR-0012) ---
@@ -2906,6 +3236,9 @@ vx_main :: proc() -> int {
 	test_note_stack()
 	test_robust()
 	test_vmo_clone()
+	test_address_space()
+	test_leases()
+	test_lent()
 	test_debugger()
 	test_tls()
 	test_fork()

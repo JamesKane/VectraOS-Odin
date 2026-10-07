@@ -215,6 +215,7 @@ common_checks :: proc(out: ^[dynamic]Check) {
 		{"MAP_ANONYMOUS", linux.MAP_ANONYMOUS},
 		{"MAP_FIXED_NOREPLACE", linux.MAP_FIXED_NOREPLACE},
 		{"MREMAP_MAYMOVE", linux.MREMAP_MAYMOVE},
+		{"MREMAP_FIXED", linux.MREMAP_FIXED},
 		{"S_IFMT", linux.S_IFMT},
 		{"S_IFIFO", linux.S_IFIFO},
 		{"S_IFCHR", linux.S_IFCHR},

@@ -410,7 +410,7 @@ sig_note :: proc "contextless" (e: ^vx.Exception, text: string, fp: rawptr) -> r
 	#partial switch e.kind {
 	case .Alignment:
 		sig, code = linux.SIGBUS, linux.BUS_ADRALN
-	case .Pager_Timeout: // a mapped file's page that did not come
+	case .Pager_Timeout, .Revoked: // a mapped file's page that did not come; a lease taken back (ADR-0021)
 		sig, code = linux.SIGBUS, linux.BUS_ADRERR
 	case .Illegal, .Fp_Disabled:
 		sig, code = linux.SIGILL, linux.ILL_ILLOPC

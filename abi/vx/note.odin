@@ -33,6 +33,9 @@ trap_note :: proc "contextless" (kind: Exception_Kind, code: u32, address, pc: u
 	case .Protection_Key: // the thread's rights to the page's key deny it (ADR-0035)
 		note_put(&b, code == 1 ? "sys: trap: protection key write" : "sys: trap: protection key read")
 		has_address = true
+	case .Revoked: // a page of a lease taken back (ADR-0021)
+		note_put(&b, "sys: trap: lease revoked")
+		has_address = true
 	case .Pager_Timeout: // its pager did not supply the page in time
 		note_put(&b, "sys: trap: page not supplied")
 		has_address = true
