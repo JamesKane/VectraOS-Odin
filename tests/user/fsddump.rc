@@ -44,7 +44,7 @@ check not-yet '' `{ls /n/2027/0314/home | grep '^b.txt'}
 check later second `{cat /n/2027/0315/home/b.txt}
 check dotdot '0314 0315' `{ls /n/2027/0314/home/../..}
 check read-only refused `{refused touch /n/2027/0315/home/x}
-check rm-refused refused `{refused rm /n/2027/0315/home/a.txt}
+check rm-refused refused `{refused rm /n/2027/0315/home/a.txt </dev/null} # no terminal: rm asks before removing a file access(2) says it may not write (6d9a)
 check kept first `{cat /n/2027/0315/home/a.txt}
 
 # A snapshot by its label, mounted on its own.
