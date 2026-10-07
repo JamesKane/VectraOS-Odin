@@ -14,10 +14,10 @@
 // the caller gives it (init), and makes no system call itself. Its sizes are
 // upstream's, so the heap runs out where upstream's does.
 //
-// Without fork, two things are narrower than rc's: each stage of a pipeline,
-// and a command run with &, must be a program (not a function, builtin or
-// block); and `{...} and @{...} run in the shell itself, so what they assign
-// is seen after (upstream docs/milestones.md, known gaps).
+// Without fork, what rc runs in a forked child that is not a program (a
+// stage, a command run with &, @'s and `{...}'s; upstream's M6 step 6d7b1)
+// is given to the host as a Command with child set: its text and $*, which
+// the host runs in a child interpreter given the shell's state.
 //
 // A host drives it like this (upstream's shell's shape, 9front's start):
 //
@@ -103,9 +103,10 @@ Fd_Here :: struct {
 // A program to run: its words, and its descriptors after redirections (a
 // pipeline's stages are joined by the host).
 Command :: struct {
-	argv: ^Word,
-	argc: u32,
-	fds:  [FDS]Fd,
+	argv:  ^Word, // the words; for a child, its code, then its $*
+	argc:  u32,
+	child: bool, // rc code: the host runs it in a child rc, as 9front's rc forks for it (upstream's 6d7b1)
+	fds:   [FDS]Fd,
 }
 
 // The host: what runs commands, and the files and directories the language
@@ -272,7 +273,10 @@ Pending_Close :: struct {
 	close:         bool, // the host has a close for it
 }
 
-MIN_HEAP :: 32 * 1024
+// Upstream's rc_new takes 64 KiB at least, its interpreter (about 40 KiB
+// since its 6d7b1 keeps a pipeline's stages there) among them; this
+// interpreter is apart from its heap.
+MIN_HEAP :: 16 * 1024
 
 // Makes r an interpreter whose words, variables and code live in heap, with
 // host's callbacks. False if heap is too small.

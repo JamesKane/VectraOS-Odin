@@ -114,7 +114,7 @@ Each of these is an argument:
 : `` `split{command} ``
   `rc` runs the command, capturing its standard output, and splits what it wrote into arguments at the characters of `$ifs`, or of <split> in the second form.
   With `ifs=()` the output is one argument.
-  The command runs in the shell itself, so what it assigns is seen after.
+  The command runs in a child (see below), so what it assigns, and a `cd` in it, are not seen after.
 : <argument>`^`<argument>
   The concatenation of the two.
   Lists of one length are joined pairwise; otherwise one must have one element, which is joined to each of the other's.
@@ -165,7 +165,10 @@ Descriptors 3 to 9 can be redirected, but a program is given only 0, 1 and 2.
 Two commands with `|` between them are a command: the standard output of the left goes through a pipe to the standard input of the right.
 `|[`<fd>`]` pipes the left's descriptor <fd> instead of 1, and `|[`<fd0>`=`<fd1>`]` the left's <fd0> into the right's <fd1>.
 `rc` starts every stage at once and waits for all of them; `$status` is their statuses joined by `|`, the `|` left out while what comes before it is empty, as 9front's `concstatus` does.
-Each stage must be a program: a block as a stage is refused when the line is compiled, and a function when the pipeline runs, `rc: a pipeline's stages must be programs (for now)`; a builtin is looked for as a program.
+A stage that is not a program, a function, a builtin, a block or any other command, runs in a child.
+
+What 9front's `rc` runs in a forked child, a stage, a command run with `&`, `@`'s and `` `{...} ``'s, that is not a program runs in a child `rc`: a new one, given this one's flags, variables (`$status` and `$pid` among them), functions and `$*`, its namespace and its current directory, which runs the command's text and exits; it runs neither `rcmain` nor `sigexit`.
+What it assigns, defines or changes (its directory too) is its own, never this shell's.
 
 Two commands with `&&` or `||` between them are a command.
 The left runs and its status is examined: with `&&` the right runs if the status is true, with `||` if it is false.
@@ -176,7 +179,7 @@ The left runs and its status is examined: with `&&` the right runs if the status
 
 A status is true when its first word holds nothing but `0` and `|`: the empty string, a pipeline of successes, or `0`.
 
-`@` before a command runs it in a subshell in 9front's rc; here it runs in the shell itself, so what it assigns is seen after.
+`@` before a command runs it in a child, a subshell: what it assigns or changes is not seen after.
 
 Each of these is a command:
 
@@ -481,15 +484,10 @@ Input that ends inside a construct says `unexpected end of file`.
 
 # BUGS
 
-There is no `fork`, so what 9front's rc runs in a child is refused or differs:
-a pipeline's stages must be programs, not functions, builtins or blocks;
-`&` runs programs only, and refuses a function, `rc: a function run with & needs a child (for now)`, or a block;
-`@`, `{...}` and `` `{...} `` run in the shell, so what they assign is seen after;
-and there is no `<{...}`, `>{...}` or `rfork`.
+There is no `fork`: a child `rc` is given the shell's state by its spawn message, so a variable whose name a POSIX program could not read (not letters, digits and `_`), or one or a function past 32 KiB, does not reach it; and its code is the command's text, so a here document whose lines come after the line that text ends on is not in it: `{cat <<EOF} | wc` fails, `here document never ended`, where a block closed after the document's lines works.
+There is no `<{...}`, `>{...}` or `rfork` (M6 steps 6d7b2 and 6d7b3).
 
 A command run with `&` is given no file, here document or capture as a redirection, since `rc` does not serve them while it goes on; its standard input, unless redirected, reads nothing.
-
-A builtin followed by `&` runs in the foreground.
 
 A command run with `&` that has ended is let go when `rc` next starts a program, after which `wait` does not find it and leaves `$status` empty.
 

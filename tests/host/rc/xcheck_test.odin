@@ -11,15 +11,19 @@
 // upstream's heap sizes from 4 MiB down to 64 KiB, where scripts run out of
 // memory as they compile or run.
 //
-// The digests are those of upstream's rc.c at c4eb952 (unchanged since
-// 08cc12f), unpatched: its
-// ab83fe6 and f24356f fixed what this tree's findings said (a here
-// document's redirection closes nothing; a stage's paths and here document
-// are kept until it runs), so a stage's paths are logged and its here
-// document read, as the shell does. Its host has exists, read_line (its
+// The digests are those of upstream's rc.c at 62b8d5a (its 6d7b1),
+// unpatched: its ab83fe6 and f24356f fixed what this tree's findings said (a
+// here document's redirection closes nothing; a stage's paths and here
+// document are kept until it runs), so a stage's paths are logged and its
+// here document read, as the shell does. Its host has exists, read_line (its
 // standard input rctest's STDIN) and two builtins more: note N calls
 // rc_trap, and exportx lists the functions too; each callback is logged as
-// the others are, and a pipeline's statuses are joined by rc_concstatus.
+// the others are, and a pipeline's statuses are joined by rc_concstatus. A
+// child (a command with child set) is rc_test.c's: a second interpreter on
+// the host, 1 MiB with upstream's interpreter inside, given the parent's
+// variables, functions and step budget; a command run with & leaves
+// $status as it was. Upstream's interpreter is 41696 bytes since 6d7b1
+// (rctest.C_RC_SIZE), so the heaps are smaller by that much.
 package rc_test
 
 import "core:testing"
@@ -88,10 +92,10 @@ test_seeds :: proc(t: ^testing.T) {
 	defer rt.mutator_destroy(&m)
 	testing.expect_value(t, len(m.seeds), 209)
 	folds := []Fold {
-		{BIG_HEAP, false, 0xc2ff9b6e6bda7429},
-		{MID_HEAP, false, 0x7c1e48ad22d8733d},
-		{SMALL_HEAP, false, 0x3c4a54c404a65b45},
-		{SMALL_HEAP, true, 0x0b9261dc1bcf1476},
+		{BIG_HEAP, false, 0xb7b0edc0c7545841},
+		{MID_HEAP, false, 0x4fbc7c1292c56465},
+		{SMALL_HEAP, false, 0x247d817ac3b555f7},
+		{SMALL_HEAP, true, 0xa561a0e89428bf5b},
 	}
 	for f in folds {
 		b := rt.bench_make(f.heap, f.minimal)
@@ -112,11 +116,11 @@ test_mutated :: proc(t: ^testing.T) {
 	m := mutator()
 	defer rt.mutator_destroy(&m)
 	folds := []Fold {
-		{BIG_HEAP, false, 0x9c46d5040fcba12d},
-		{MID_HEAP, false, 0x818dfbcb8ad796e1},
-		{SMALL_HEAP, false, 0x98539cb2239468ef},
-		{FUZZ_HEAP, true, 0x777f1504a94fcfc4},
-		{SMALL_HEAP, true, 0x6b6f7547893479e8},
+		{BIG_HEAP, false, 0xa8402caf948a9ee2},
+		{MID_HEAP, false, 0x14a10f225227e3fe},
+		{SMALL_HEAP, false, 0xcdda011316481b04},
+		{FUZZ_HEAP, true, 0x755484b1607c1f44},
+		{SMALL_HEAP, true, 0xb4172849ead1186c},
 	}
 	text: [dynamic]u8
 	defer delete(text)

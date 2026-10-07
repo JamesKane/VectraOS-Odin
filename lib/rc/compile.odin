@@ -18,8 +18,8 @@ Op :: enum u8 {
 	Join, // their values joined by spaces, one word
 	Sub, // the top list subscripts the name in the one below: onto the list below that
 	Conc, // the top two lists concatenated, onto the one below
-	Simple, // f0: async. The top list is a command: run it
-	Stage, // f0/f1: the fds it pipes to the next/from the last; a: its redirections. The top list is a stage
+	Simple, // f0: async; f1: apart (a function or builtin in a child); b: child code. The top list is a command: run it
+	Stage, // f0/f1: the fds it pipes to the next/from the last; a: its redirections; b: child code. The top list is a stage
 	Pipeline, // a: stages, f0: async
 	Assign, // the top list names a variable, the one below its value
 	Local, // as Assign, a local of the frame, until Unlocal
@@ -95,6 +95,7 @@ Compiler :: struct {
 	line:  u32, // the line of the node being compiled
 	noe:   bool, // the item being compiled is in a condition: -e does not apply in it (rc's outcode(c, 0))
 	heres: []Here, // the here documents' texts, by a tag word's here (plus 1)
+	text:  string, // what was parsed: the nodes' text, for code a child runs
 }
 
 @(private)
@@ -107,6 +108,9 @@ Citem :: struct {
 	cur:           i32, // a list being walked
 	count:         u32,
 	noe:           bool, // a condition's: -e does not apply in it
+	apart:         bool, // a simple command whose function or builtin runs in a child: in @ or `{...} (upstream's 6d7b1)
+	child:         bool, // a command a child rc runs, from its text (6d7b1)
+	async:         bool, // a child's, run with &
 }
 
 @(private)
@@ -244,6 +248,97 @@ is_cmd :: proc "contextless" (k: Node_Kind) -> bool { // a command, not a word
 	return true
 }
 
+// Node n's text, then $*, a list: what a child rc runs (upstream's 6d7b1),
+// as 9front's rc forks for it.
+@(private = "file")
+emit_code :: proc "contextless" (c: ^Compiler, n: i32) -> bool {
+	t := n >= 0 ? &c.nodes[n] : nil
+	if t == nil || t.from == 0 || t.to <= t.from - 1 {
+		c.why = "no text for code run in a child"
+		return false
+	}
+	emit(c, .Mark)
+	emit_word(c, c.text[t.from - 1:t.to])
+	emit(c, .Mark)
+	emit_word(c, "*")
+	emit(c, .Dol)
+	return true
+}
+
+// A command a child rc runs, its text and $* the command's words: a stage,
+// or a command run now or with &. What it sets is the child's, never the
+// shell's.
+@(private = "file")
+emit_child :: proc "contextless" (c: ^Compiler, it: ^Citem) {
+	if !emit_code(c, it.node) {
+		return
+	}
+	if it.stage {
+		emit(c, .Stage, it.out_fd, it.in_fd, b = 1)
+	} else {
+		emit(c, .Simple, u8(it.async), b = 1)
+	}
+}
+
+// A command run apart from the shell, in @ or `{...}: a simple one as it is,
+// a function or builtin it names a child's; anything else a child's text.
+@(private = "file")
+apart :: proc "contextless" (c: ^Compiler, it: ^Citem) {
+	if c.nodes[it.node].kind == .Simple {
+		it.apart = true
+	} else {
+		it.child = true
+	}
+}
+
+// A pipeline's stages, after its item at its next phase (Pipeline's), onto
+// the stack, right to left so the leftmost compiles first, each told the
+// joints' descriptors it pipes on; a stage that is not a simple command is a
+// child's (upstream's 6d7b1).
+@(private = "file")
+push_stages :: proc "contextless" (c: ^Compiler, it: ^Citem, chain: i32, noe: bool, items: ^[CITEMS]Citem, ni: ^int) -> bool {
+	right: [32]i32 // the stages, right to left
+	fd0, fd1: [32]u8 // the joints' descriptors, right to left
+	n := 0
+	x := chain
+	for ; x != NONE && c.nodes[x].kind == .Pipe; x = c.nodes[x].a {
+		if n == 31 {
+			c.why = "pipeline too long"
+			return false
+		}
+		right[n], fd0[n], fd1[n] = c.nodes[x].b, c.nodes[x].fd0, c.nodes[x].fd1
+		n += 1
+	}
+	right[n] = x // the leftmost
+	n += 1
+	if ni^ + n + 1 > CITEMS {
+		c.why = "nested too deeply"
+		return false
+	}
+	it.count = u32(n)
+	it.phase = 1
+	items[ni^] = it^
+	ni^ += 1
+	for k in 0 ..< n {
+		node := right[k]
+		if node == NONE {
+			c.why = "syntax error"
+			return false
+		}
+		// Stage k from the right: it pipes out on joint k-1's fd0, in on joint k's fd1.
+		items[ni^] = Citem {
+			node   = node,
+			noe    = noe,
+			stage  = true,
+			child  = c.nodes[node].kind != .Simple, // a block, a loop, ...: a child's
+			out_fd = k > 0 ? fd0[k - 1] : NO_FD,
+			in_fd  = k + 1 < n ? fd1[k] : NO_FD,
+		}
+		ni^ += 1
+	}
+	return true
+}
+
 @(private = "file")
 compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 	items := &c.r.compiler.items
@@ -284,6 +379,14 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 		t := &c.nodes[it.node]
 		if t.line != 0 {
 			c.line = t.line
+		}
+		if it.child { // a command, whatever it is: its text, to a child
+			c.r.iflast = false
+			emit_child(c, &it)
+			if !it.stage {
+				eflag(c)
+			}
+			continue
 		}
 		// As rc's outcode: a command other than if not and a sequence clears
 		// iflast as it starts, and sets it, once compiled, to whether it was an if.
@@ -367,10 +470,13 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 					again(items, &ni, &it, 1)
 					push(c, items, &ni, t.b, 0) or_return
 				}
-			} else if it.phase == 1 {
+			} else if it.phase == 1 { // the body in a child, as rc's: a program as it is; anything else its text
 				emit(c, .Backq)
 				again(items, &ni, &it, 2)
-				push(c, items, &ni, t.a, 0) or_return
+				if t.a != NONE {
+					push(c, items, &ni, t.a, 0) or_return
+					apart(c, &items[ni - 1])
+				}
 			} else {
 				emit(c, .Backq_End)
 			}
@@ -412,7 +518,7 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 					if it.stage {
 						emit(c, .Stage, it.out_fd, it.in_fd, it.count)
 					} else {
-						emit(c, .Simple)
+						emit(c, .Simple, f1 = u8(it.apart))
 						eflag(c)
 					}
 					if it.count != 0 {
@@ -428,8 +534,14 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 		case .Seq:
 			push(c, items, &ni, t.b, 0) or_return
 			push(c, items, &ni, t.a, 0) or_return
-		case .Brace, .Subshell:
-			push(c, items, &ni, t.kind == .Brace ? t.a : t.b, 0) or_return
+		case .Brace:
+			push(c, items, &ni, t.a, 0) or_return
+		case .Subshell: // @ cmd: in a child, as rc's (a program as it is; anything else its text)
+			if t.b == NONE {
+				break
+			}
+			push(c, items, &ni, t.b, 0) or_return
+			apart(c, &items[ni - 1])
 		case .Async, .Pipe: // a pipeline of programs: each stage, leftmost first, then Pipeline
 			async := t.kind == .Async
 			chain := async ? t.a : it.node
@@ -447,42 +559,28 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 				}
 				break
 			}
-			if async && (chain == NONE || c.nodes[chain].kind != .Pipe) {
-				c.why = "& runs programs only, not blocks or functions (for now)"
+			if async && chain != NONE && c.nodes[chain].kind != .Pipe { // a block, a loop, ... &: a child
+				if ni == CITEMS {
+					c.why = "nested too deeply"
+					return false
+				}
+				items[ni] = Citem {
+					node  = chain,
+					child = true,
+					async = true,
+				}
+				ni += 1
+				break
+			}
+			if async && chain == NONE {
+				c.why = "syntax error"
 				return false
 			}
 			if it.phase == 1 {
 				emit(c, .Pipeline, u8(async), a = it.count)
 				break
 			}
-			right: [32]i32 // the stages, right to left
-			fd0, fd1: [32]u8 // the joints' descriptors, right to left
-			n := 0
-			x := chain
-			for ; x != NONE && c.nodes[x].kind == .Pipe; x = c.nodes[x].a {
-				if n == 31 {
-					c.why = "pipeline too long"
-					return false
-				}
-				right[n], fd0[n], fd1[n] = c.nodes[x].b, c.nodes[x].fd0, c.nodes[x].fd1
-				n += 1
-			}
-			right[n] = x // the leftmost
-			n += 1
-			it.count = u32(n)
-			again(items, &ni, &it, 1)
-			for k in 0 ..< n { // right to left onto the stack: the leftmost compiles first
-				node := right[k]
-				if node == NONE || c.nodes[node].kind != .Simple {
-					c.why = "a pipeline's stages must be programs, not blocks or functions (for now)"
-					return false
-				}
-				// Stage k from the right: it pipes out on joint k-1's fd0, in on joint k's fd1.
-				push(c, items, &ni, node, 0) or_return
-				items[ni - 1].stage = true
-				items[ni - 1].out_fd = k > 0 ? fd0[k - 1] : NO_FD
-				items[ni - 1].in_fd = k + 1 < n ? fd1[k] : NO_FD
-			}
+			push_stages(c, &it, chain, c.noe, items, &ni) or_return
 		case .And, .Or:
 			if it.phase == 0 {
 				again(items, &ni, &it, 1)
@@ -784,6 +882,7 @@ compile_text :: proc "contextless" (r: ^Rc, text: string, line: u32, incomplete:
 				r     = r,
 				nodes = p.nodes,
 				heres = p.lx.heres[:],
+				text  = text,
 			}
 			insts := nodes * 4 + 16
 			strs := scratch + 64

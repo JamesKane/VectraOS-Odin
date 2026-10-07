@@ -1,6 +1,7 @@
 // A host for vx:rc's tests: upstream's rc_test.c host (its programs echo,
 // cat, wc, true, false, exitwith and warn write into buffers, its files are in
-// memory, and its directory has a few names for globbing), with every
+// memory, its directory has a few names for globbing, and a child, code run
+// apart from the shell, is a second interpreter on the same host), with every
 // callback logged into a transcript; and the deterministic mutator the
 // cross-check shares with its C oracle, which runs upstream's rc.c with the
 // same host and transcript format.
@@ -19,7 +20,7 @@ import "vx:str"
 // Upstream's struct rc, which its heap holds too (rc_new takes it from the
 // front): a heap this much smaller is the same heap to the allocator, so the
 // port runs out of memory where upstream does.
-C_RC_SIZE :: 19152
+C_RC_SIZE :: 41696
 
 FILES :: 8
 
@@ -28,8 +29,28 @@ File :: struct {
 	data: [dynamic; 1024]u8,
 }
 
+// The children running (upstream's 6d7b1), innermost last: what each was
+// started with, so what one inherits is the stage's that started it.
+Child_Io :: struct {
+	parent: ^rc.Rc,
+	fds:    [rc.FDS]rc.Fd, // the stage's
+	input:  []u8, // its input
+	pipe:   ^[dynamic]u8, // where its output into a pipe goes
+}
+
+CHILDREN :: 4
+// Upstream's child heaps, 1 MiB each with the interpreter inside.
+CHILD_HEAP :: 1 << 20 - C_RC_SIZE
+
 Host :: struct {
 	sh:          ^rc.Rc,
+	// The children's interpreters and heaps, by depth (bench_make's), kept
+	// over a reset; children and nchildren, those running.
+	child_sh:    [CHILDREN]^rc.Rc,
+	child_heap:  [CHILDREN][]u8,
+	child_status: [CHILDREN][dynamic; 255]u8,
+	children:    [CHILDREN]Child_Io,
+	nchildren:   int,
 	files:       [FILES]File,
 	open_now:    [FILES]bool, // the files the shell has open, by handle
 	used_closed: bool, // a stage was given a file the shell had already closed
@@ -66,13 +87,15 @@ callbacks :: proc(h: ^Host) -> rc.Host {
 }
 
 reset :: proc(h: ^Host) {
-	sh := h.sh
+	sh, child_sh, child_heap := h.sh, h.child_sh, h.child_heap
 	delete(h.out)
 	delete(h.err)
 	delete(h.exported)
 	delete(h.log)
 	h^ = {
-		sh = sh,
+		sh         = sh,
+		child_sh   = child_sh,
+		child_heap = child_heap,
 	}
 }
 
@@ -160,22 +183,35 @@ file_of :: proc(h: ^Host, path: string, make: bool) -> int {
 	return -1
 }
 
-// Output to where fd goes: a file, the shell's capture, a pipe, or out/err.
-emit :: proc(h: ^Host, fds: ^[rc.FDS]rc.Fd, which: int, s: string, pipe: ^[dynamic]u8) {
+// Output to where fd goes: a file, the capture of the interpreter that has
+// it, a pipe, or out/err; a child's own descriptors are what the stage that
+// started it had.
+emit :: proc(h: ^Host, r: ^rc.Rc, fds: ^[rc.FDS]rc.Fd, which: int, s: string, pipe: ^[dynamic]u8) {
+	r, fds, pipe := r, fds, pipe
 	fd := fds[which]
-	for guard := 0; guard < 10; guard += 1 {
-		d, is := fd.(rc.Fd_Dup)
-		if !is || d.of >= rc.FDS {
+	for d, guard := h.nchildren, 0; guard < 20; guard += 1 {
+		for _ in 0 ..< 10 {
+			dup, is := fd.(rc.Fd_Dup)
+			if !is || dup.of >= rc.FDS {
+				break
+			}
+			fd = fds[dup.of]
+		}
+		own, is := fd.(rc.Fd_Inherit)
+		if !is || d == 0 {
 			break
 		}
-		fd = fds[d.of]
+		d -= 1
+		io := &h.children[d]
+		r, fds, pipe = io.parent, &io.fds, io.pipe
+		fd = fds[own.which]
 	}
 	switch v in fd {
 	case rc.Fd_Capture:
 		put(&h.log, "  k")
 		esc(&h.log, s)
 		put(&h.log, "\n")
-		rc.capture_write(h.sh, fd, s)
+		rc.capture_write(r, fd, s)
 		return
 	case rc.Fd_Pipe_Out:
 		put(&h.log, "  p")
@@ -215,6 +251,61 @@ emit :: proc(h: ^Host, fds: ^[rc.FDS]rc.Fd, which: int, s: string, pipe: ^[dynam
 // The most of a pipeline's $status the hosts keep.
 STATUS_MAX :: 8191
 
+// A child rc (upstream's 6d7b1), as 9front's rc forks one: a new interpreter
+// on this host, given the shell's variables and functions, its $* the words
+// after its code; its descriptors the stage's. Its status, its $status at the
+// end. Its steps are as limited as its parent's.
+run_child :: proc(h: ^Host, c: ^rc.Command, io: Child_Io) -> string {
+	putf(&h.log, "child %d ", h.nchildren)
+	esc(&h.log, rc.text(c.argv))
+	put(&h.log, "\n")
+	if h.nchildren == CHILDREN {
+		return "too deep"
+	}
+	d := h.nchildren
+	child := h.child_sh[d]
+	if child == nil || !rc.init(child, h.child_heap[d], callbacks(h)) {
+		return "no memory"
+	}
+	child.budget = io.parent.budget
+	vars := rc.vars(io.parent)
+	for name, val in rc.next_var(&vars) {
+		if name == "*" || (len(name) > 0 && name[0] >= '0' && name[0] <= '9') {
+			continue // the child's own
+		}
+		words: [dynamic; 64]string
+		for w := val; w != nil && len(words) < cap(words); w = w.next {
+			append(&words, rc.text(w))
+		}
+		rc.set_var(child, name, ..words[:])
+	}
+	fns := rc.fns(io.parent)
+	for name, src in rc.next_fn(&fns) {
+		fn_name, fn_src := c_str(name), c_str(src)
+		if 4 + len(fn_name) + len(fn_src) < 2048 { // upstream's text[2048]
+			buf: [2048]u8
+			_ = rc.run(child, fmt.bprintf(buf[:], "fn %s %s", fn_name, fn_src))
+		}
+	}
+	args: [dynamic; 64]string
+	for w := c.argv.next; w != nil && len(args) < cap(args); w = w.next {
+		append(&args, rc.text(w))
+	}
+	rc.set_var(child, "*", ..args[:])
+	h.children[h.nchildren] = io
+	h.nchildren += 1
+	_ = rc.run(child, rc.text(c.argv))
+	h.nchildren -= 1
+	st := rc.get_var(child, "status")
+	status := st != nil ? c_str(rc.text(st)) : ""
+	clear(&h.child_status[d])
+	append(&h.child_status[d], status[:min(len(status), cap(h.child_status[d]))])
+	put(&h.log, "  child status ")
+	esc(&h.log, string(h.child_status[d][:]))
+	put(&h.log, "\n")
+	return string(h.child_status[d][:])
+}
+
 // A pipeline, its stages run in turn; $status as the shell makes it, each stage's
 // joined by rc.concstatus.
 run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: bool) -> (pid: u64, ok: bool) {
@@ -239,6 +330,9 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 		for fd in fds {
 			fd_desc(&h.log, fd) // kept until the stage runs, upstream's as well since its ab83fe6
 		}
+		if c.child {
+			put(&h.log, " child")
+		}
 		put(&h.log, "\n")
 		for fd in fds {
 			if f, is := fd.(rc.Fd_File); is && f.kind != .Rdwr && (f.handle >= FILES || !h.open_now[f.handle]) {
@@ -258,6 +352,9 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 		if here, is := fds[0].(rc.Fd_Here); is {
 			input = transmute([]u8)here.text
 		}
+		if _, is := fds[0].(rc.Fd_Inherit); is && h.nchildren > 0 { // a child's: the stage's that started it
+			input = h.children[h.nchildren - 1].input
+		}
 		in_copy := make([]u8, len(input))
 		defer delete(in_copy)
 		copy(in_copy, input)
@@ -265,22 +362,31 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 		clear(mypipe)
 		name := c_str(rc.text(c.argv))
 		st := ""
+		if c.child {
+			name = "" // its code: run_child's, below
+		}
 		switch name {
+		case "":
+			if c.child {
+				st = run_child(h, &c, {parent = r, fds = c.fds, input = in_copy, pipe = mypipe})
+			} else {
+				st = "not found"
+			}
 		case "warn": // its words, on its standard error
 			for a := c.argv.next; a != nil; a = a.next {
-				emit(h, &fds, 2, rc.text(a), mypipe)
-				emit(h, &fds, 2, a.next != nil ? " " : "\n", mypipe)
+				emit(h, r, &fds, 2, rc.text(a), mypipe)
+				emit(h, r, &fds, 2, a.next != nil ? " " : "\n", mypipe)
 			}
 		case "echo":
 			for a := c.argv.next; a != nil; a = a.next {
-				emit(h, &fds, 1, rc.text(a), mypipe)
-				emit(h, &fds, 1, a.next != nil ? " " : "\n", mypipe)
+				emit(h, r, &fds, 1, rc.text(a), mypipe)
+				emit(h, r, &fds, 1, a.next != nil ? " " : "\n", mypipe)
 			}
 			if c.argv.next == nil {
-				emit(h, &fds, 1, "\n", mypipe)
+				emit(h, r, &fds, 1, "\n", mypipe)
 			}
 		case "cat":
-			emit(h, &fds, 1, string(in_copy), mypipe)
+			emit(h, r, &fds, 1, string(in_copy), mypipe)
 		case "wc": // words
 			words := 0
 			for k := 0; k < len(in_copy); {
@@ -295,7 +401,7 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 				}
 			}
 			buf: [16]u8
-			emit(h, &fds, 1, fmt.bprintf(buf[:], "%d\n", words), mypipe)
+			emit(h, r, &fds, 1, fmt.bprintf(buf[:], "%d\n", words), mypipe)
 		case "true":
 		case "false":
 			st = "false"
@@ -306,8 +412,9 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 		}
 		status_len = rc.concstatus(status_buf[:], status_len, st)
 	}
-	if async {
-		pid = 42
+	if async { // not waited for: $status as it was, as the shell's host leaves it
+		put(&h.log, "  async\n")
+		return 42, true
 	}
 	status := string(status_buf[:status_len])
 	put(&h.log, "  status ")
@@ -325,6 +432,13 @@ write_fd :: proc "contextless" (ctx: rawptr, fd: rc.Fd, which: u32, s: string) {
 	put(&h.log, " ")
 	esc(&h.log, s)
 	put(&h.log, "\n")
+	if own, is := fd.(rc.Fd_Inherit); is && h.nchildren > 0 { // a child's builtin: where the stage's descriptor goes
+		io := &h.children[h.nchildren - 1]
+		h.nchildren -= 1
+		emit(h, io.parent, &io.fds, own.which < rc.FDS ? int(own.which) : int(which), s, io.pipe)
+		h.nchildren += 1
+		return
+	}
 	if v, is := fd.(rc.Fd_Inherit); is && v.which == 2 {
 		append(&h.err, s)
 	} else {
@@ -563,10 +677,18 @@ bench_make :: proc(heap_size: int, minimal := false) -> ^Bench {
 	b.sh = new(rc.Rc)
 	b.heap, _ = mem.make_aligned([]u8, heap_size, 16)
 	b.host.sh = b.sh
+	for i in 0 ..< CHILDREN {
+		b.host.child_sh[i] = new(rc.Rc)
+		b.host.child_heap[i], _ = mem.make_aligned([]u8, CHILD_HEAP, 16)
+	}
 	return b
 }
 
 bench_destroy :: proc(b: ^Bench) {
+	for i in 0 ..< CHILDREN {
+		free(b.host.child_sh[i])
+		delete(b.host.child_heap[i])
+	}
 	destroy(&b.host)
 	delete(b.heap)
 	free(b.sh)

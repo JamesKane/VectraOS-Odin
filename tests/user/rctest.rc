@@ -96,8 +96,7 @@ echo 'echo $#* $2' > $dir/inner.rc
 check nested '2 b' `{rc $dir/inner.rc a b}
 
 # The current directory (6d7a, ADR-0039): cd, a relative name after each
-# change, and children, sbase's and native, starting in it. (A cd in `{...}
-# would move this shell: `{...} runs in it, a known gap.)
+# change, and children, sbase's and native, starting in it.
 check wd-start / `{pwd}
 check cdtest '24 checks, 0 failed' `{/boot/bin/cdtest | sed -n 's/^cdtest: //p'} # from C, a child of this shell's
 check wd-start-native / `{/boot/bin/pwd}
@@ -127,6 +126,30 @@ cd
 check cd-home $dir `{pwd}
 cd /
 check cd-root / `{pwd}
+
+# Code run in a child (6d7b1), as 9front's rc forks for it: a child rc, given
+# this shell's variables, functions, namespace and directory.
+fn twice { echo $1; echo $1 }
+check fn-stage 2 `{twice x | wc -l}
+check block-stage 3 `{{echo a; echo b; echo c} | wc -l}
+check block-middle 'HI THERE' `{echo hi | {cat; echo there} | tr a-z A-Z}
+x=outer
+@{x=inner; cd /boot}
+check subshell-var outer $x
+check subshell-cd / `{pwd}
+y=`{x=inner; cd /boot; pwd}
+check backq-var outer $x
+check backq-cd '/boot /' $y `{pwd}
+check backq-cd-child /boot `{cd /boot; /boot/bin/pwd}
+{echo bg $x > $dir/bg} &
+wait
+check block-async 'bg outer' `{cat $dir/bg}
+fn bgfn { echo fn $1 > $dir/bgfn }
+bgfn z &
+wait
+check fn-async 'fn z' `{cat $dir/bgfn}
+check child-status ok `{{exit 7} | true; if(~ $status 'rc '*': 7|') echo ok; if not echo $status}
+check child-local 'L q' `{fn inner { {echo $1 $x} | cat }; x=q inner L}
 
 rm -r $dir
 check cleaned no `{if(test -d $dir) echo yes; if not echo no}

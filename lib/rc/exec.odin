@@ -1071,10 +1071,68 @@ eval :: proc "contextless" (r: ^Rc, argv: ^Word) {
 	_ = push_reader(r, rd, nil)
 }
 
-// Runs a command whose words are argv: a function, a builtin (rc's, then the
-// host's), or a program.
+// $apid: what a command run with & started.
 @(private = "file")
-simple :: proc "contextless" (r: ^Rc, words: ^Word, async: bool) {
+set_apid :: proc "contextless" (r: ^Rc, pid: u64) {
+	digits: [str.U64_DIGITS]u8
+	set_var_words(r, "apid", new_word(r, str.format_u64(digits[:], pid)))
+}
+
+// Whether a command whose words are argv runs in the shell itself if it can:
+// a function or a builtin, which a child must run when it is apart from the
+// shell (a stage, run with &, in @ or `{...}). forced: `builtin` said so.
+@(private = "file")
+in_shell :: proc "contextless" (r: ^Rc, argv: ^Word, forced: bool) -> bool {
+	if argv == nil {
+		return false
+	}
+	name := text(argv)
+	v := forced ? nil : gvar_find(r, name, false)
+	return (v != nil && v.fn != nil) || is_builtin(r, name) || name == "." || name == "eval" || name == "builtin"
+}
+
+// argv for a child that runs the command whose words are argv (upstream's
+// 6d7b1): its code, `$*` (or `builtin $*`), then the words as the child's $*.
+// It takes argv; nil if there is no memory.
+@(private = "file")
+child_argv :: proc "contextless" (r: ^Rc, argv: ^Word, forced: bool) -> ^Word {
+	code := new_word(r, forced ? "builtin $*" : "$*")
+	if code == nil {
+		free_words(r, argv)
+		return nil
+	}
+	code.next = argv
+	return code
+}
+
+// A command a child runs (upstream's 6d7b1): argv its code, then its $*, as
+// rc's fork runs it, given to the host as a Command with child set. It takes
+// argv.
+@(private = "file")
+run_child :: proc "contextless" (r: ^Rc, argv: ^Word, async: bool) {
+	cmd := [1]Command{{argv = argv, argc = count_words(argv), child = true, fds = command_fds(r)}}
+	pid: u64
+	if r.host.run == nil {
+		set_status(r, "no way to run programs")
+	} else {
+		pid, _ = r.host.run(r.host.ctx, r, cmd[:], async)
+	}
+	if async {
+		set_apid(r, pid)
+	}
+	free_words(r, argv)
+}
+
+// Runs a command whose words are argv: a function, a builtin (rc's, then the
+// host's), or a program. Apart from the shell (async, or in @ or `{...}), a
+// function or a builtin runs in a child, as rc's fork runs it; child: argv is
+// already a child's, its code then its $* (upstream's 6d7b1).
+@(private = "file")
+simple :: proc "contextless" (r: ^Rc, words: ^Word, async, apart, child: bool) {
+	if child {
+		run_child(r, words, async)
+		return
+	}
 	argv := glob_list(r, words)
 	argc := count_words(argv)
 	if argc == 0 {
@@ -1103,13 +1161,13 @@ simple :: proc "contextless" (r: ^Rc, words: ^Word, async: bool) {
 		fail(r, "", "exec: empty argument list")
 		return
 	}
-	v := forced ? nil : gvar_find(r, text(argv), false)
-	if v != nil && v.fn != nil && async { // rc runs it in a child, which needs upstream's M6 step 6d: refused, not run in the foreground
-		shell_write(r, 2, "rc: a function run with & needs a child (for now)\n")
-		set_status(r, "async")
-		free_words(r, argv)
+	if (async || apart) && in_shell(r, argv, forced) {
+		if cargv := child_argv(r, argv, forced); cargv != nil {
+			run_child(r, cargv, async)
+		}
 		return
 	}
+	v := forced ? nil : gvar_find(r, text(argv), false)
 	if v != nil && v.fn != nil { // a function: $* the rest, in a frame of its own
 		star := new_local(r, "*", argv.next)
 		argv.next = nil
@@ -1141,8 +1199,7 @@ simple :: proc "contextless" (r: ^Rc, words: ^Word, async: bool) {
 		pid, _ = r.host.run(r.host.ctx, r, cmd[:], async)
 	}
 	if async {
-		digits: [str.U64_DIGITS]u8
-		set_var_words(r, "apid", new_word(r, str.format_u64(digits[:], pid)))
+		set_apid(r, pid)
 	}
 }
 
@@ -1567,18 +1624,33 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 				free_words(r, c)
 			}
 		case .Simple:
-			simple(r, pop_list(r), ins.f0 != 0)
-		case .Stage: // a: its own redirections, the top of the stack
-			argv := glob_list(r, pop_list(r))
+			simple(r, pop_list(r), ins.f0 != 0, ins.f1 != 0, ins.b != 0)
+		case .Stage: // a: its own redirections, the top of the stack; b: a child's code and $*
+			argv := ins.b != 0 ? pop_list(r) : glob_list(r, pop_list(r))
+			child := ins.b != 0
+			if !child && argv != nil { // a function or a builtin: a child runs it, as rc's fork does
+				forced := text(argv) == "builtin" && argv.next != nil
+				if forced {
+					b := argv
+					argv = argv.next
+					b.next = nil
+					free_words(r, b)
+				}
+				if in_shell(r, argv, forced) {
+					argv = child_argv(r, argv, forced)
+					child = true
+				}
+			}
 			if len(r.stages) == STAGES {
 				free_words(r, argv)
 				fail(r, "", "pipelines nested too deeply")
 				break
 			}
 			st := Command {
-				argv = argv,
-				argc = count_words(argv),
-				fds  = inherited(),
+				argv  = argv,
+				argc  = count_words(argv),
+				child = child,
+				fds   = inherited(),
 			}
 			// As rc does in the child: what encloses the pipeline, then the pipe
 			// ends, then the stage's own redirections, which may move them.
@@ -1599,13 +1671,10 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 			for &c in stages {
 				if c.argc == 0 {
 					ok = false
-				} else if v := gvar_find(r, text(c.argv), false); v != nil && v.fn != nil {
-					ok = false
 				}
 			}
 			if !ok {
-				shell_write(r, 2, "rc: a pipeline's stages must be programs (for now)\n")
-				set_status(r, "pipeline")
+				fail(r, "", "empty argument list")
 			} else if r.host.run != nil {
 				_, _ = r.host.run(r.host.ctx, r, stages, ins.f0 != 0)
 			}

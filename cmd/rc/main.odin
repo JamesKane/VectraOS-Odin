@@ -17,7 +17,9 @@
 // a file, a here document or `{...}'s capture. The shell waits for a
 // pipeline's commands, unless it ends with &, and $status is each one's wait
 // message (name pid: exit string) joined as rc's concstatus (ADR-0010).
-// Without fork, a pipeline's stages and & must be programs (vx:rc);
+// What 9front's rc runs in a forked child and is not a program (a stage that
+// is a function, builtin or block, &, @, `{...}) runs in a child rc: this
+// program, spawned with an rcchild= record (upstream's M6 step 6d7b1);
 // descriptors past 2 are not given to programs yet.
 //
 // rc's Host callbacks are contextless, so everything they reach is too; only
@@ -642,11 +644,17 @@ import_env :: proc "contextless" () {
 
 records: [vx.CHANNEL_MAX_BYTES - 4096]u8 // room left for spawn's own records
 
+// The shell itself, for what 9front's rc runs in a forked child (upstream's
+// 6d7b1).
+RC_SELF :: "/boot/bin/rc"
+
 // Spawns one program with its standard input, output and error (channel
-// ends, or HANDLE_NONE for the console), which are given away. With exec,
-// the program takes this task's place (task_exec, ADR-0012): it returns
-// only if it failed.
-spawn :: proc "contextless" (argv: ^rc.Word, io: [3]vx.Handle, exec := false) -> (task: vx.Handle, st: vx.Status) {
+// ends, or HANDLE_NONE for the console), which are given away. child: argv
+// is rc code and its $*, which a child rc runs (an rcchild= record,
+// run_child), given the shell's flags, variables, functions, namespace and
+// directory, as rc's fork gives them. With exec, the program takes this
+// task's place (task_exec, ADR-0012): it returns only if it failed.
+spawn :: proc "contextless" (argv: ^rc.Word, child: bool, io: [3]vx.Handle, exec := false) -> (task: vx.Handle, st: vx.Status) {
 	IO := [3]string{"stdin", "stdout", "stderr"}
 	io := io
 	handles: [vx.CHANNEL_MAX_HANDLES - 1]vx.Handle
@@ -657,12 +665,25 @@ spawn :: proc "contextless" (argv: ^rc.Word, io: [3]vx.Handle, exec := false) ->
 		rt.close_all(..handles[:count])
 		rt.close_all(..io[:])
 	}
-	size := load(rc.text(argv))
+	size := load(child ? RC_SELF : rc.text(argv))
 	if size == 0 {
 		return vx.HANDLE_NONE, .Err_Not_Found
 	}
 	rec := ndb.Writer{buf = records[:]}
 	args, exported := 0, 0
+	if child {
+		flags: [dynamic; 64]u8
+		for f in u8('A') ..= u8('z') {
+			if sh.flag[f] && f != 'c' && f != 'm' && len(flags) < cap(flags) {
+				append(&flags, f)
+			}
+		}
+		ndb.put(&rec, "rcchild", rc.text(argv)) // the code; its $* as the arguments
+		if len(flags) > 0 {
+			ndb.put(&rec, "flags", string(flags[:]))
+		}
+		_ = ndb.end(&rec)
+	}
 	for a := argv.next; a != nil; a = a.next {
 		ndb.put(&rec, "arg", rc.text(a))
 		_ = ndb.end(&rec)
@@ -698,7 +719,7 @@ spawn :: proc "contextless" (argv: ^rc.Word, io: [3]vx.Handle, exec := false) ->
 			count += 1
 		}
 	}
-	base := rc.text(argv) // the task's name: the program's, without its directory
+	base := child ? "rc" : rc.text(argv) // the task's name: the program's, without its directory
 	base = base[str.last_index_byte(base, '/') + 1:]
 	a := rt.Spawn_Args {
 		name         = base[:utf.cut(base, MAX_TASK_NAME)], // whole runes (ADR-0013)
@@ -918,7 +939,7 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 		rt.close_all(pipe_in, pipe[0])
 		pipe_in = pipe[1]
 		if st == .Ok {
-			tasks[s], st = spawn(c.argv, io)
+			tasks[s], st = spawn(c.argv, c.child, io)
 		} else {
 			rt.close_all(..io[:])
 		}
@@ -935,7 +956,7 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 					to = rc.Fd_Inherit{2}
 				}
 			}
-			for part in ([?]string{rc.text(c.argv), ": ", why, "\n"}) {
+			for part in ([?]string{c.child ? "rc" : rc.text(c.argv), ": ", why, "\n"}) {
 				write_out(nil, to, 2, part)
 			}
 			_ = append(&ends[s], why)
@@ -1086,7 +1107,7 @@ exec_builtin :: proc "contextless" (argv: ^rc.Word, fds: ^[rc.FDS]rc.Fd) -> bool
 		}
 	}
 	if st == .Ok {
-		_, st = spawn(argv.next, io, exec = true) // returns only if it failed
+		_, st = spawn(argv.next, false, io, exec = true) // returns only if it failed
 	}
 	why := p9.error_text(st)
 	say("", rc.text(argv.next), ": ")
@@ -1157,6 +1178,37 @@ on_note :: proc "contextless" (e: ^vx.Exception, note: string, fp: rawptr) -> rt
 // --- The shell ---
 
 heap: [4 << 20]u8
+
+child_code: [vx.CHANNEL_MAX_BYTES]u8
+child_args: [dynamic; CHILD_MAX_ARGS]string
+
+// A shell's child (upstream's 6d7b1): its code, run with the shell's state as
+// the spawn message gives it, its flags, $*, variables (its $status and $pid
+// the shell's) and functions; no rcmain, and no sigexit at its end, as
+// 9front's forked rc runs neither.
+run_child :: proc "contextless" (rec: ^ndb.Record) -> string {
+	c, _ := ndb.get(rec, "rcchild")
+	flags, _ := ndb.get(rec, "flags")
+	if len(c) > len(child_code) {
+		return "child code too long"
+	}
+	code := string(child_code[:copy(child_code[:], c)])
+	for f in transmute([]u8)flags {
+		if f < len(sh.flag) {
+			sh.flag[f] = true
+		}
+	}
+	clear(&child_args)
+	for a in rt.args() {
+		if append(&child_args, a) == 0 {
+			break
+		}
+	}
+	rc.set_var(&sh, "*", ..child_args[:])
+	import_fns()
+	_ = rc.run(&sh, code)
+	return exit_status()
+}
 
 // The last $status, as rc exits with it: its first word, or nothing when it
 // is true (0s and |s), as rc's Exit; cut to whole runes (ADR-0013).
@@ -1257,6 +1309,10 @@ shell :: proc() -> string {
 	}
 	import_env()
 	_ = rt.notify(on_note)
+	child: ndb.Record
+	if rt.spawn_record("rcchild", &child) {
+		return run_child(&child)
+	}
 
 	// The flags, as rc's getflags("srdiIlxebpvVc:1m:1").
 	args := rt.args()

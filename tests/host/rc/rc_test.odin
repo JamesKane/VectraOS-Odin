@@ -216,8 +216,7 @@ test_refusals :: proc(t: ^testing.T) {
 		expect_out(t, b, strings.to_string(text), "299\n")
 	}
 	expect_result(t, b, "x=() ; echo a^$x", .Failed)
-	expect_result(t, b, "fn f { echo }; f | wc", .Ok)
-	testing.expectf(t, strings.contains(string(b.host.err[:]), "pipeline"), "err %q", string(b.host.err[:]))
+	expect_out(t, b, "fn f { echo }; f | wc", "0\n") // a function as a stage: a child's
 	expect_result(t, b, "echo before; exit 'it failed'; echo after", .Exit)
 	testing.expect_value(t, string(b.host.out[:]), "before\n")
 	expect_out(t, b, "echo $status", "it failed\n")
@@ -301,9 +300,7 @@ test_9front :: proc(t: ^testing.T) {
 		// Functions are global: a local of the same name does not hide one.
 		{"fn f { echo F }; f=1 f", "F\n"},
 	})
-	expect_result(t, b, "fn g { echo G }; g &", .Ok)
-	testing.expect_value(t, string(b.host.out[:]), "")
-	testing.expect_value(t, status_now(b), "async")
+	expect_out(t, b, "fn g { echo G }; status=kept; g &; echo $status", "G\nkept\n") // in a child; $status unchanged
 	expect_cases(t, b, {
 		// Globbing: . and .. alone need an explicit dot; a plain name after a
 		// pattern must exist; ? and classes match runes; ranges either way round.
@@ -431,6 +428,33 @@ test_9front_reading :: proc(t: ^testing.T) {
 	expect_result(t, b, ". '#d/0'", .Failed)
 	testing.expect_value(t, string(b.host.out[:]), "s1\n")
 	b.host.stdin = ""
+}
+
+// What 9front's rc runs in a forked child (upstream's M6 step 6d7b1), here a
+// child rc given the shell's variables, functions and $*: its changes are
+// its own.
+@(test)
+test_9front_children :: proc(t: ^testing.T) {
+	b := shell(t)
+	defer rt.bench_destroy(b)
+	expect_cases(t, b, {
+		{"fn f { echo F $* }; f a b | wc", "3\n"}, // a function as a stage
+		{"{echo a; echo b} | wc", "2\n"}, // a block as a stage
+		{"echo hi | {cat; echo there} | wc", "2\n"}, // and in the middle, reading
+		{"{for(i in a b c) echo $i} | wc", "3\n"}, // a loop in a block
+		{"exitwith '' | exit 3; echo $status after", "3 after\n"}, // a builtin as a stage: its exit
+		{"fn g { echo G }; g &; echo $apid", "G\n42\n"}, // a function run with &
+		{"x=1; {x=2; echo in} &; echo $x", "in\n1\n"}, // a block run with &
+		{"exit 3 &; echo still", "still\n"}, // a builtin run with &
+		{"true && echo y &", "y\n"}, // a && list run with &
+		{"x=1; @{x=2}; echo $x", "1\n"}, // @{...}
+		{"x=1; @ x=2; echo $x", "1\n"}, // @ of an assignment
+		{"x=1; y=`{x=2; echo $x}; echo $x $#y", "1 1\n"}, // `{...}
+		{"fn h { {echo $1 $x} | cat }; x=q h z", "z q\n"}, // its $* and the locals
+		{"{exitwith 7} | true; echo $status", "7|\n"}, // a child's status
+		{"{fn k { echo K }} | true; k; echo $status", "not found\n"}, // a function it defines
+		{"y=`:{x=1; echo a; echo b:c}; echo $#y", "2\n"}, // a list of three, whole
+	})
 }
 
 // The third part (upstream's M6 step 6a6c): the builtins as rc(1) has them,
