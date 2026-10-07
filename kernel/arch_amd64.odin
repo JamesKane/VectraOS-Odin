@@ -904,8 +904,14 @@ regs_result :: proc "contextless" (r: ^vx.Regs) -> u64 {
 	return r.rax
 }
 
+// Always the current thread's frame. The thread's stepping is what holds,
+// not the frame's TF (as aarch64's): FMASK clears TF as a syscall enters,
+// and a frame replaced (an in-task handler leaving with its registers) has
+// none. x86_trap's way out sets it again, and reports a stepped syscall as
+// the call returns (the Rust port's finding, upstream's 5c1bbc9).
 arch_frame_step :: proc "contextless" (f: ^Trap_Frame, on: bool) {
 	f.rflags = on ? f.rflags | RFLAGS_TF : f.rflags &~ RFLAGS_TF
+	this_cpu().current.stepping = on
 }
 
 arch_sync_icache :: proc "contextless" (p: []u8) {} // x86 keeps it coherent itself
@@ -1275,6 +1281,16 @@ x86_trap :: proc "c" (f: ^Trap_Frame) {
 		kput(" at rip ")
 		kput_hex(f.rip)
 		panic_end(f.rip, f.rbp)
+	}
+	if from_user && f.vector == VECTOR_SYSCALL && this_cpu().current.stepping {
+		// A stepped syscall: the step is the instruction, done (as aarch64's
+		// svc): reported now, not after the next one.
+		kind := vx.Exception_Kind.Step
+		address: u64
+		_ = exception_raise(f, &kind, 0, &address)
+	}
+	if from_user && this_cpu().current.stepping {
+		f.rflags |= RFLAGS_TF // a frame replaced keeps its step
 	}
 	if from_user {
 		user_return()

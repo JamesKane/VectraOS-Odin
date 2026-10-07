@@ -299,6 +299,7 @@ Child_Code :: enum {
 	Read_Loop,
 	Fault_Load,
 	Break_Step,
+	Break_Syscall, // a breakpoint, then a syscall (clock_read), then exit 7: a stepped syscall
 	Store_Data, // a write to CHILD_DATA, which start_child_bound maps for it, then exit 7
 	Robust_Hold, // registers a robust list at CHILD_DATA (owner 0x1234), then as .Block
 }
@@ -326,6 +327,12 @@ write_child :: proc "contextless" (what: Child_Code) -> (code: Child_Image) {
 			emit(&code, 0xcc) // int3: a breakpoint, then exit 7
 			what = .Exit_7
 		}
+		if what == .Break_Syscall {
+			emit(&code, 0xb8); emit32(&code, u32(vx.Syscall.Clock_Read)) // mov $clock_read, %eax
+			emit(&code, 0xcc) // int3
+			emit(&code, 0x0f, 0x05) // syscall, then exit 7
+			what = .Exit_7
+		}
 		if what == .Store_Data {
 			emit(&code, 0x48, 0xb8); emit32(&code, u32(CHILD_DATA)); emit32(&code, 0) // movabs $CHILD_DATA, %rax
 			emit(&code, 0x48, 0x89, 0x00) // mov %rax, (%rax), then exit 7
@@ -340,7 +347,7 @@ write_child :: proc "contextless" (what: Child_Code) -> (code: Child_Image) {
 			what = .Block
 		}
 		switch what {
-		case .Exit_7, .Use_Simd, .Break_Step, .Store_Data:
+		case .Exit_7, .Use_Simd, .Break_Step, .Break_Syscall, .Store_Data:
 			emit(&code, 0xbf); emit32(&code, 7) // mov $7, %edi
 			emit(&code, 0xb8); emit32(&code, u32(vx.Syscall.Thread_Exit)) // mov $thread_exit, %eax
 			emit(&code, 0x0f, 0x05) // syscall
@@ -394,6 +401,12 @@ write_child :: proc "contextless" (what: Child_Code) -> (code: Child_Image) {
 			emit(&code, 0xd4200020) // brk #1: a breakpoint, then exit 7
 			what = .Exit_7
 		}
+		if what == .Break_Syscall {
+			emit(&code, 0xd2800008 | u32(vx.Syscall.Clock_Read) << 5) // movz x8, #clock_read
+			emit(&code, 0xd4200020) // brk #1
+			emit(&code, 0xd4000001) // svc #0, then exit 7
+			what = .Exit_7
+		}
 		if what == .Store_Data {
 			emit(&code, 0xd2a00001 | u32(CHILD_DATA >> 16) << 5) // movz x1, #CHILD_DATA >> 16, lsl #16
 			emit(&code, 0xf9000021) // str x1, [x1], then exit 7
@@ -408,7 +421,7 @@ write_child :: proc "contextless" (what: Child_Code) -> (code: Child_Image) {
 			what = .Block
 		}
 		switch what {
-		case .Exit_7, .Use_Simd, .Break_Step, .Store_Data:
+		case .Exit_7, .Use_Simd, .Break_Step, .Break_Syscall, .Store_Data:
 			emit(&code, 0xd2800000 | 7 << 5) // movz x0, #7
 			emit(&code, 0xd2800008 | u32(vx.Syscall.Thread_Exit) << 5) // movz x8, #thread_exit
 			emit(&code, 0xd4000001) // svc #0
@@ -2326,6 +2339,29 @@ test_debugger :: proc "contextless" () {
 		check(e.regs.rdi == 7 && e.regs.rip == CHILD_CODE + 1 + 5) // int3, then mov $7, %edi
 	} else {
 		check(e.regs.x[0] == 7 && e.regs.pc == CHILD_CODE + 8) // brk, then movz x0, #7
+	}
+	check(rt.exception_resume(child, 1, .Continue) == .Ok)
+	check(exits_with(port, child, ""))
+	_ = rt.handle_close(child)
+
+	// A stepped syscall stops right after it, not an instruction later (on
+	// x86_64, FMASK clears TF as it enters: the Rust port's finding, upstream's
+	// 5c1bbc9).
+	child, ok = start_child_bound(.Break_Syscall, port, {.First_Chance})
+	check(ok)
+	check(child_stopped(port))
+	check(rt.thread_state(child, 1, .Get_Exception, &e) == .Ok && e.kind == .Breakpoint)
+	when ODIN_ARCH == .arm64 {
+		e.regs.pc += 4 // past the brk
+		check(rt.thread_state(child, 1, .Set_Regs, &e.regs) == .Ok)
+	}
+	check(rt.exception_resume(child, 1, .Step) == .Ok)
+	check(child_stopped(port))
+	check(rt.thread_state(child, 1, .Get_Exception, &e) == .Ok && e.kind == .Step)
+	when ODIN_ARCH == .amd64 {
+		check(e.regs.rip == CHILD_CODE + 5 + 1 + 2 && e.regs.rdi != 7) // mov, int3, syscall: not the mov after
+	} else {
+		check(e.regs.pc == CHILD_CODE + 12 && e.regs.x[0] != 7) // movz, brk, svc: not the movz after
 	}
 	check(rt.exception_resume(child, 1, .Continue) == .Ok)
 	check(exits_with(port, child, ""))

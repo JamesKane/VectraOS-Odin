@@ -158,7 +158,9 @@ setup_device :: proc "contextless" () {
 	}
 	rx_buf = make_buffers(rx_pages[:])
 	tx_buf = make_buffers(tx_pages[:])
-	for i in u16(0) ..< QSIZE {
+	// As many as each queue has: the device may offer fewer than QSIZE, which
+	// virtq_init takes (the Rust port's finding, upstream's 5c1bbc9).
+	for i in u16(0) ..< rxq.size {
 		driver.virtq_offer(&rxq, i, buf_addr(rx_pages[:], i), BUF, true)
 	}
 	driver.virtio_ready(&dev)
@@ -197,10 +199,10 @@ transmit :: proc "contextless" (e: ^vx.Sqe) -> (result: i64, sent: bool) {
 		return i64(vx.Status.Err_Invalid), true
 	}
 	d := u16(0)
-	for d < QSIZE && tx_busy[d] {
+	for d < txq.size && tx_busy[d] {
 		d += 1
 	}
-	if d == QSIZE {
+	if d == txq.size {
 		return 0, false
 	}
 	b := tx_buf[int(d) * BUF:][:BUF]
@@ -303,6 +305,14 @@ accept_client :: proc "contextless" () {
 	for {
 		req: vx.Msg_Header
 		size, st := rt.channel_read(listen, memory.ptr_to_bytes(&req))
+		if st == .Err_Too_Small { // no request: taken off whole (its handles closed), or it is read for ever
+			@(static) junk: [vx.CHANNEL_MAX_BYTES]u8
+			hs: [vx.CHANNEL_MAX_HANDLES]vx.Handle
+			if got, jst := rt.channel_read(listen, junk[:], hs[:]); jst == .Ok {
+				rt.close_all(..hs[:got.handles])
+			}
+			continue
+		}
 		if st == .Err_Should_Wait {
 			return
 		}

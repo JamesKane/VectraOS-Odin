@@ -734,24 +734,37 @@ sys_thread_interrupt :: proc "contextless" (h: vx.Handle, id: u64, note_ptr: Uva
 @(private="file")
 SUSPEND_MAX :: 64 // threads taken at once by thread_suspend(0)
 
-// Up to len(out) of task t's threads, each with a reference, after the first
-// `skip`: the one with this id, or with id 0, every one (a process stops as
-// a whole), a batch at a time.
+// Up to SUSPEND_MAX of task t's threads, each with a reference: the one with
+// this id, or with id 0, every one (a process stops as a whole), a batch at
+// a time, the lowest ids above `after` in each, in order of id. By id, not by
+// place in the list, which threads join and leave between batches: one would
+// be missed, or taken twice (the Rust port's finding, upstream's 5c1bbc9).
 @(private="file")
-task_threads :: proc "contextless" (t: ^Task, id: u64, skip: int, out: ^[dynamic; SUSPEND_MAX]^Thread) {
+task_threads :: proc "contextless" (t: ^Task, id: u64, after: u32, out: ^[dynamic; SUSPEND_MAX]^Thread) {
 	clear(out)
 	spin_guard(&t.lock)
-	skip := skip
-	for th := t.threads; th != nil && len(out) < SUSPEND_MAX; th = th.task_next {
-		if id != 0 && u64(th.id) != id {
+	for th := t.threads; th != nil; th = th.task_next {
+		if (id != 0 && u64(th.id) != id) || th.id <= after {
 			continue
 		}
-		if skip > 0 {
-			skip -= 1
+		n := len(out)
+		if n == SUSPEND_MAX && th.id >= out[n - 1].id {
 			continue
 		}
+		at := n
+		if n < SUSPEND_MAX {
+			_ = append(out, th)
+		} else {
+			at = n - 1 // the highest falls off
+		}
+		for at > 0 && out[at - 1].id > th.id {
+			out[at] = out[at - 1]
+			at -= 1
+		}
+		out[at] = th
+	}
+	for th in out^ {
 		object_ref(&th.obj)
-		_ = append(out, th)
 	}
 }
 
@@ -810,9 +823,12 @@ sys_thread_suspend :: proc "contextless" (h: vx.Handle, id: u64, resume: bool) -
 	defer object_release(&t.obj)
 	st := vx.Status.Err_Not_Found
 	targets: [dynamic; SUSPEND_MAX]^Thread
-	done := 0
+	done: u32 // the last batch's highest id: the next starts above it
 	for {
 		task_threads(t, id, done, &targets)
+		if len(targets) > 0 { // before they are let go
+			done = targets[len(targets) - 1].id
+		}
 		if len(targets) > 0 && st == .Err_Not_Found {
 			st = .Ok
 		}
@@ -823,7 +839,6 @@ sys_thread_suspend :: proc "contextless" (h: vx.Handle, id: u64, resume: bool) -
 			}
 			object_release(&th.obj)
 		}
-		done += len(targets)
 		if len(targets) < SUSPEND_MAX {
 			return st
 		}

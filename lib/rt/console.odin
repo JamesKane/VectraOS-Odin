@@ -26,10 +26,15 @@ console: struct {
 @(private="file")
 RETRY_AFTER :: vx.Instant(1_000_000_000)
 
-// Connects (again). After a failure it does not try for a second, so a
-// console that is gone for good costs each line nothing, not a connect's wait.
+// A reconnect's wait.
 @(private="file")
-console_open :: proc "contextless" () -> (st: vx.Status) {
+AGAIN :: vx.Duration(100_000_000)
+
+// Connects (again), waiting at most `wait`. After a failure it does not try
+// for a second, so a console that is gone for good costs each line nothing,
+// not a connect's wait.
+@(private="file")
+console_open :: proc "contextless" (wait: vx.Duration) -> (st: vx.Status) {
 	if console.conn.end != 0 {
 		p9_disconnect(&console.conn)
 	}
@@ -44,7 +49,7 @@ console_open :: proc "contextless" () -> (st: vx.Status) {
 		}
 	}
 	c := &console.conn.c
-	p9_connect(console.connector, &console.conn) or_return
+	p9_connect_within(console.connector, &console.conn, wait) or_return
 	root := p9.client_attach(c, "") or_return
 	fid, walked := p9.client_walk(c, root, "cons")
 	_ = p9.client_clunk(c, root) // here, not deferred: the server sees the clunk before the open
@@ -75,7 +80,11 @@ console_flush :: proc "contextless" () {
 	if n == 0 || console_put(console.line[:n]) {
 		return
 	}
-	if console_open() == .Ok && console_put(console.line[:n]) {
+	// Again, after a failure, waiting a tenth of a second, not a connect's 5:
+	// while the console's driver restarts each line would wait that long
+	// (svcd's, the system's: the Rust port's finding, upstream's 5c1bbc9); it
+	// goes to the kernel's log instead.
+	if console_open(AGAIN) == .Ok && console_put(console.line[:n]) {
 		return // the driver restarted
 	}
 	_ = debug_write(string(console.line[:n]))
@@ -105,7 +114,7 @@ buffer_line :: proc "contextless" (line: []u8, n: ^int, s: string, flush: proc "
 @(require_results)
 console_attach :: proc "contextless" (connector: vx.Handle) -> vx.Status {
 	console.connector = connector
-	console_open() or_return
+	console_open(5_000_000_000) or_return // the first: a console server starting may take a while
 	print_hook = console_print
 	return .Ok
 }
@@ -127,7 +136,7 @@ console_read :: proc "contextless" (buf: []u8) -> (int, vx.Status) {
 				return n, .Ok
 			}
 		}
-		if console_open() == .Ok {
+		if console_open(AGAIN) == .Ok {
 			continue
 		}
 		@(static) never: u32
@@ -150,11 +159,11 @@ console_write :: proc "contextless" (data: []u8) {
 		console_flush()
 	}
 	if console.connector != vx.HANDLE_NONE {
-		if (console.open || console_open() == .Ok) && console_put(data) {
+		if (console.open || console_open(5_000_000_000) == .Ok) && console_put(data) {
 			return
 		}
-		if console_open() == .Ok && console_put(data) {
-			return
+		if console_open(AGAIN) == .Ok && console_put(data) {
+			return // the driver restarted
 		}
 	}
 	_ = debug_write(string(data))

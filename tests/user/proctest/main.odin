@@ -591,6 +591,23 @@ vx_main :: proc() -> int {
 	_, wst := wait_record(buf[:])
 	check(wst == .Err_No_Child) // no children yet
 	check(write_file(1, "note", "hangup") == .Err_Access) // svcd takes no notes: one would end it
+	check(write_file(1, "ctl", "childnotes") == .Err_Access) // nor a child's SIGCHLD, by childnotes
+	// procfs itself is as untouchable (the Rust port's finding): stopped, every
+	// /proc call after would hang.
+	procfs: u64
+	for pid: u64 = 2; pid < 64 && procfs == 0; pid += 1 {
+		if k := read_text(pid, "status", buf[:]); len(k) > 0 && has(k, "name=procfs ") {
+			procfs = pid
+		}
+	}
+	check(procfs != 0)
+	check(
+		write_file(procfs, "ctl", "stop") == .Err_Access &&
+		write_file(procfs, "ctl", "kill") == .Err_Access &&
+		write_file(procfs, "note", "hangup") == .Err_Access &&
+		write_file(procfs, "ctl", "childnotes") == .Err_Access,
+	)
+	check(len(read_text(me, "status", buf[:])) > 0) // and /proc still answers
 
 	// A child's end leaves a record with its exit string.
 	c := spawn("exit")

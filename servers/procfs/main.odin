@@ -140,6 +140,15 @@ has_children :: proc "contextless" (p: ^Proc) -> bool {
 @(private="file")
 self_id: u64 // procfs's own pid
 
+// svcd and procfs itself: no note, stop, kill or debugger reaches either,
+// since the system needs them, and procfs stopped would stop every /proc
+// call after (a POSIX kill(-1, SIGSTOP) reached it: the Rust port's finding,
+// upstream's 5c1bbc9).
+@(private)
+untouchable :: proc "contextless" (p: ^Proc) -> bool {
+	return p.root || p.pid == self_id
+}
+
 // What a status carries in a message header's flags.
 @(private="file")
 flags_of :: proc "contextless" (st: vx.Status) -> u32 {
@@ -282,6 +291,9 @@ queue_record :: proc "contextless" (parent, c: ^Proc, kind: Record_Kind, sig: u8
 // blocked in ends, after the note.
 @(private="file", require_results)
 deliver :: proc "contextless" (p: ^Proc, note: string) -> vx.Status {
+	if untouchable(p) {
+		return .Err_Access // a SIGCHLD too, which post never sees
+	}
 	rt.thread_interrupt(p.task, 0, note) or_return
 	if p.wait_held {
 		p.interrupted = true // the held read ends
@@ -377,7 +389,7 @@ event :: proc "contextless" (ctx: rawptr, pk: ^vx.Packet) {
 // any note would end it, and the system with it.
 @(private="file", require_results)
 post :: proc "contextless" (p: ^Proc, note: string) -> vx.Status {
-	if p.root {
+	if untouchable(p) {
 		return .Err_Access
 	}
 	sig, _, _ := signal.note_signal(note)
@@ -687,7 +699,7 @@ fs_open :: proc "contextless" (ctx: rawptr, node: p9.Node, mode: p9.Open_Mode) -
 	if (reads && perm & 0o444 == 0) || (writes && perm & 0o222 == 0) {
 		return .Err_Access
 	}
-	if b.tid == 0 && File(b.file) == .Events && !p.root {
+	if b.tid == 0 && File(b.file) == .Events && !untouchable(p) {
 		return dbg_bind(p) // a reader of events is a debugger
 	}
 	return .Ok // trunc means nothing to a file made as it is read
@@ -883,8 +895,8 @@ written :: proc "contextless" (data: []u8) -> string {
 ctl :: proc "contextless" (p: ^Proc, cmd: string) -> vx.Status {
 	switch {
 	case cmd == "kill":
-		if p.root {
-			return .Err_Access // svcd: the system needs it
+		if untouchable(p) {
+			return .Err_Access // svcd, procfs: the system needs them
 		}
 		return rt.task_kill(p.task, "killed")
 	case str.has_prefix(cmd, "stop") && (len(cmd) == 4 || cmd[4] == ' '):
@@ -896,7 +908,7 @@ ctl :: proc "contextless" (p: ^Proc, cmd: string) -> vx.Status {
 				return .Err_Invalid
 			}
 		}
-		return p.root ? .Err_Access : stop(p, u8(sig))
+		return untouchable(p) ? .Err_Access : stop(p, u8(sig))
 	case cmd == "start":
 		if dbg_pending(p) {
 			return .Ok // a stop not yet read: it is the next to be (as gdb reports one first)
@@ -915,6 +927,9 @@ ctl :: proc "contextless" (p: ^Proc, cmd: string) -> vx.Status {
 		p.sid, p.noteid = p.pid, p.pid // a session, and a note group, of its own
 		return .Ok
 	case cmd == "childnotes":
+		if untouchable(p) {
+			return .Err_Access // a SIGCHLD would end it
+		}
 		p.childnotes = true
 		return .Ok
 	}
@@ -1023,7 +1038,7 @@ fs_write :: proc "contextless" (ctx: rawptr, node: p9.Node, offset: u64, data: [
 @(private="file")
 mem_write :: proc "contextless" (p: ^Proc, offset: u64, data: []u8) -> (count: u32, st: vx.Status) {
 	@(static) buf: [rt.MSIZE]u8 // task_mem_rw's buffer is the caller's to read and write
-	if p.root {
+	if untouchable(p) {
 		return 0, .Err_Access
 	}
 	if len(data) > len(buf) {

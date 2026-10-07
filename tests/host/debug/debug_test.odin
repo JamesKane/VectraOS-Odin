@@ -19,6 +19,23 @@ C_ORIGIN :: 0x402000 // &origin
 C_MAIN :: 0x400020 // &main
 C_POINT_SIZE :: 24 // sizeof(struct point)
 
+// A function whose line sequence starts where the one before ends: the End
+// row the sort puts first is the other's, and its body is past its first
+// statement (the Rust port's finding; upstream's 5c1bbc9, debug_test.c's
+// first case).
+@(test)
+test_body_after_end :: proc(t: ^testing.T) {
+	lines := []debug.Line {
+		{addr = 0x1000, flags = {.End}},
+		{addr = 0x1000, flags = {.Stmt}},
+		{addr = 0x1008, flags = {.Stmt}},
+		{addr = 0x1010, flags = {.End}},
+	}
+	fns := []debug.Func{{low = 0x1000, high = 0x1010}}
+	debug.func_bodies(fns, lines)
+	testing.expect_value(t, fns[0].body, 0x1008)
+}
+
 @(test)
 test_index :: proc(t: ^testing.T) {
 	// (Upstream first calls fixture_add, which the fixture does in its main.)

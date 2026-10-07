@@ -568,8 +568,9 @@ type_index :: proc "contextless" (b: ^Builder, ref: Type_Index) -> Type_Index {
 }
 
 // Where each function's body starts: its first row marked prologue_end, else
-// its second statement row, else its start.
-@(private = "file")
+// its second statement row, else its start. lines sorted as the index keeps
+// them. Not private: tests/host/debug calls it on rows of its own (upstream's
+// debug_test.c calls its func_bodies).
 func_bodies :: proc "contextless" (funcs: []Func, lines: []Line) {
 	for &f in funcs {
 		lo, hi := 0, len(lines)
@@ -584,7 +585,16 @@ func_bodies :: proc "contextless" (funcs: []Func, lines: []Line) {
 		second: u64
 		stmts := 0
 		for l in lines[lo:] {
-			if l.addr >= f.high || .End in l.flags {
+			if l.addr >= f.high {
+				break
+			}
+			// An End at the function's first address ends the sequence
+			// before it, which the sort puts first: not this one's (the Rust
+			// port's finding, its DWARF 5 on aarch64; upstream's 5c1bbc9).
+			if .End in l.flags && l.addr == f.low {
+				continue
+			}
+			if .End in l.flags {
 				break
 			}
 			if .Prologue_End in l.flags {

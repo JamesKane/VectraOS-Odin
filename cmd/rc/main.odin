@@ -465,6 +465,14 @@ export_var :: proc "contextless" (rec: ^ndb.Writer, name: string, val: ^rc.Word)
 	if !plain {
 		return false
 	}
+	words := 0
+	for w := val; w != nil; w = w.next {
+		words += 1
+		if words > CHILD_MAX_ARGS { // more than a child takes: refused, never cut (the Rust port's finding)
+			rec.failed = true
+			return false
+		}
+	}
 	env := str.Buf{buf = env_buf[:]}
 	str.write_string(&env, name)
 	str.write_byte(&env, '=')
@@ -538,6 +546,15 @@ import_env :: proc "contextless" () {
 			continue
 		}
 		if eq > 3 && str.has_prefix(e, "fn#") { // a function: import_fns's
+			continue
+		}
+		// More words than a list here holds: not set at all, rather than cut
+		// (an rc parent refuses to export one: export_var).
+		words_in := 1
+		for c in transmute([]u8)e[eq + 1:] {
+			words_in += int(c == 1)
+		}
+		if words_in > CHILD_MAX_ARGS {
 			continue
 		}
 		clear(&env_words)
@@ -793,7 +810,6 @@ ends: [MAX_STAGES][dynamic; vx.ERRMAX]u8 // each command's exit string, for $sta
 // Host.run: a pipeline's programs, each spawned with its descriptors; then,
 // unless async, the relays served until they and the programs are done.
 run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: bool) -> (pid: u64, ok: bool) {
-	reap()
 	n := len(stages)
 	if n > MAX_STAGES {
 		say("rc: too many commands in a pipe", "", "\n")
@@ -872,7 +888,17 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 			if info, ist := rt.task_info(t); s + 1 == n && ist == .Ok {
 				pid = info.id
 			}
+			// An ended one is kept until wait takes its status (the Rust port's
+			// finding: let go before every command, wait found nothing); only a
+			// new one needing its place lets one go.
 			slot := 0
+			for slot < MAX_BACKGROUND && background[slot] != vx.HANDLE_NONE {
+				slot += 1
+			}
+			if slot == MAX_BACKGROUND {
+				reap()
+				slot = 0
+			}
 			for slot < MAX_BACKGROUND && background[slot] != vx.HANDLE_NONE {
 				slot += 1
 			}

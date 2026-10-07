@@ -211,7 +211,9 @@ test_mutations :: proc(t: ^testing.T) {
 	cases := []Case {
 		{"c-x86_64", C_X86_64, 0x3080, 0xada8_3020_b92b_bba2, 0x888f_7b66_10fe_f92f, 0x1e0d_df61_3945_375f},
 		{"c-aarch64", C_AARCH64, 0x3080, 0xb1f6_8d4f_56dd_dfac, 0x4940_c9f9_0a1d_90cf, 0xeb3a_f399_6962_3f82},
-		{"tiny-object", tiny, 0x64, 0xfe3c_dde4_1992_9620, 0x48ae_a430_b951_1a73, 0x1fe2_5050_2355_0ecb},
+		// Mutated anywhere: upstream's at 5c1bbc9, whose func_bodies passes over an
+		// End row at a function's first address (fe3cdde419929620 before).
+		{"tiny-object", tiny, 0x64, 0x3026_1dde_e577_4e28, 0x48ae_a430_b951_1a73, 0x1fe2_5050_2355_0ecb},
 	}
 	arena := make([]u8, FUZZ_ARENA_SIZE)
 	defer delete(arena)
