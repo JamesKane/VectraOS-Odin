@@ -37,4 +37,4 @@ git -C /opt/odin checkout a2fb372b7
 cd /opt/odin && LLVM_CONFIG=/opt/homebrew/opt/llvm@22/bin/llvm-config ./build_odin.sh release
 ```
 
-The build from source was checked against the bottle it replaces: the tree built with each is byte-identical (every program and kernel image, both architectures).
+The build from source was checked against the bottle it replaces: the tree built with each is byte-identical (every program and kernel image, both architectures). Odin names its own `base:` and `core:` files by absolute path in what it compiles, so the build canonicalizes that root to `/odin` (tools/build/ircanon.odin), as it does the repository's to `/src`: a compiler installed at another path, building another checkout, gives the same bytes.
