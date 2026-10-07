@@ -1,7 +1,9 @@
 # tests/user/installtest.ndb: install (tests/qemu/install.ndb). On the live
 # boot (vx.live), install puts the medium's release on disk0, a blank disk,
 # and powers off; on the installed boot (vx.system), rc runs
-# /boot/tests/installtest.rc with /dist and the store branch mounted.
+# /boot/tests/installtest.rc with /dist and the store branch mounted, as the
+# console shell runs there (M6 step 6d8): as the first user install wrote on
+# the slot's command line (vx.user), with home and cfg at /home and /cfg.
 
 service=installer program=/boot/bin/install console storeimage cmdline when=vx.live
 connect=disk0
@@ -12,8 +14,11 @@ arg=-e
 arg=64
 
 service=installtest program=/boot/bin/rc console when=vx.system
+user=$vx.user
 arg=/boot/tests/installtest.rc
 ns=posix
+mount=/home srv=fsd aname=home flags=c when=vx.system
+mount=/cfg srv=fsd aname=cfg flags=c when=vx.live
 mount=/dist srv=dist
 mount=/n srv=fsd aname=store
 connect=nsd

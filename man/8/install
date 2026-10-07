@@ -5,7 +5,7 @@ page=install sect=8 summary="put the system on a disk from an install medium"
 # SYNOPSIS
 
 ```usage
-install [-y] [-p] [-e mib]
+install [-y] [-p] [-e mib] [-u user]
 ```
 
 # DESCRIPTION
@@ -17,8 +17,8 @@ It works in four stages, and stops at the first failure:
 
 - It checks the whole tree in the store image: the release's record, then each directory, file index and block against its name, as the live system checks its own medium.
 - It writes a GPT on the disk: an EFI system partition, FAT32, of 512 MiB unless `-e` says otherwise, then the system volume over the rest.
-- It writes slot a on the ESP: Limine at the firmware's fallback path, the slot's kernel, bootfs and modules under `\EFI\vectra\a`, the slot table, and Limine's configuration made from that table, each file with its BLAKE2b hash, which Limine checks. The slot's command line is `vx.system vx.slot=a` with the live command line's other words.
-- It makes the system volume, a vx-fs volume with the branches `store`, `cfg`, `home` and `adm`; the users `adm`, `none` and `vectra`, who owns `home`; and the release's objects and record copied into `store`, where distd(8) finds them.
+- It writes slot a on the ESP: Limine at the firmware's fallback path, the slot's kernel, bootfs and modules under `\EFI\vectra\a`, the slot table, and Limine's configuration made from that table, each file with its BLAKE2b hash, which Limine checks. The slot's command line is `vx.system vx.slot=a` with the live command line's other words (but a `vx.user=`), and `vx.user=` the first user, as plan9.ini's `user=`: the console shell runs as that user (M6 step 6d8).
+- It makes the system volume, a vx-fs volume with the branches `store`, `cfg`, `home` and `adm`; the users `adm`, `none` and the first user, `vectra` unless `-u` says otherwise, who owns `home` and is in `adm`'s group; and the release's objects and record copied into `store`, where distd(8) finds them.
 
 Without `-y` it checks the medium and the disk, says what it would erase, and stops.
 No UEFI boot entry is made: the firmware boots Limine from the fallback path.
@@ -29,6 +29,8 @@ No UEFI boot entry is made: the firmware boots Limine from the fallback path.
   Power the machine off when done, through `/srv/acpi` (`connect=acpi`).
 : `-e` <mib>
   The ESP's size, in MiB.
+: `-u` <user>
+  The first user, in place of `vectra`: up to 31 bytes, no `:`, `,`, `=` or blank, and neither `adm` nor `none`.
 
 # EXAMPLES
 

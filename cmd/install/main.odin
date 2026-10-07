@@ -13,10 +13,13 @@
 //    (vx:slots): each file with its BLAKE2b hash, which Limine checks;
 //    vx.system vx.slot=a, with the live command line's other words;
 // 4. makes the system volume (vx:fs): its branches store, cfg, home and adm,
-//    the users adm, none and vectra (vectra owning home), and the release's
-//    objects and record copied into store, where distd finds them.
+//    the users adm, none and the first user (vectra unless -u names another;
+//    it owns home), and the release's objects and record copied into store,
+//    where distd finds them. The slot's command line gets vx.user= the first
+//    user, as plan9.ini's user=: the console shell runs as it (upstream's
+//    6d8).
 //
-//   install [-y] [-p] [-e mib]       the disk is the one connect= names; see install(8)
+//   install [-y] [-p] [-e mib] [-u user]   the disk is the one connect= names; see install(8)
 //
 // Without -y it only checks the medium and says what it would do: the disk
 // is erased only when asked to be. -p: power off when done (through
@@ -347,13 +350,33 @@ copy_objects :: proc "contextless" () -> vx.Status {
 	return st == .Err_Not_Found ? .Ok : st // the archive's end
 }
 
-// users(6), as tools/vxfs mkfs makes it: adm (vectra in its group), none, vectra.
+// The first user (-u; vectra unless told otherwise): the system's, who owns
+// home and leads adm, and the console shell's (vx.user, upstream's 6d8).
+first_user := "vectra"
+
+// Whether a name can be a user(6)'s: 1 to 31 bytes, none of its separators,
+// and neither of the users the system has already.
+user_name_ok :: proc "contextless" (u: string) -> bool {
+	if len(u) == 0 || len(u) > 31 || u == "adm" || u == "none" {
+		return false
+	}
+	for c in transmute([]u8)u {
+		if c == ':' || c == ',' || c == ' ' || c == '\n' || c == '=' {
+			return false
+		}
+	}
+	return true
+}
+
+// users(6), as tools/vxfs mkfs makes it: adm (the first user in its group),
+// none, the first user.
 make_users :: proc "contextless" () -> vx.Status {
-	USERS :: "0:adm:adm:vectra\n1:none::\n1000:vectra:vectra:\n"
+	text: [160]u8
+	users, _ := str.join(text[:], "0:adm:adm:", first_user, "\n1:none::\n1000:", first_user, ":", first_user, ":\n")
 	br := fs.branch_open(&vol, "adm") or_return
 	root := fs.root(&vol, &br.t) or_return
 	f := fs.create(&vol, &br.t, &root, "users", 0o664, 0, 0, now) or_return
-	fs.write(&vol, &br.t, &f, 0, transmute([]u8)string(USERS), now, 0) or_return
+	fs.write(&vol, &br.t, &f, 0, transmute([]u8)users, now, 0) or_return
 	br = fs.branch_open(&vol, "home") or_return
 	root = fs.root(&vol, &br.t) or_return
 	return fs.setattr(&vol, &br.t, &root, {valid = {.Uid, .Gid}, uid = 1000, gid = 1000}, now)
@@ -408,6 +431,12 @@ vx_main :: proc() -> int {
 			yes = true
 		case args[i] == "-p":
 			off = true
+		case args[i] == "-u" && i + 1 < len(args):
+			i += 1
+			first_user = args[i]
+			if !user_name_ok(first_user) {
+				fail("not a name for a user (users(6))", .Err_Invalid)
+			}
 		case args[i] == "-e" && i + 1 < len(args):
 			i += 1
 			esp_mib = 0
@@ -553,19 +582,29 @@ vx_main :: proc() -> int {
 		fail("cannot write slot a", st)
 	}
 	// The slot table, slot a booting, and Limine's configuration made from it
-	// (vx:slots): the live command line's words but vx.live go on.
+	// (vx:slots): the live command line's words but vx.live and a vx.user=
+	// go on.
 	table.boot = .A
 	sl.used, sl.release = true, seq
 	x := store.hex(tree)
 	_ = append(&sl.tree, string(x[:]))
 	line := rt.spawn.cmdline
 	for word in str.split_iterator(&line, ' ') {
-		if word != "" && word != "vx.live" && len(table.cmdline) + len(word) + 2 < slots.CMDLINE_MAX + 1 {
+		dropped := word == "vx.live" || (len(word) > 8 && str.has_prefix(word, "vx.user="))
+		if word != "" && !dropped && len(table.cmdline) + len(word) + 2 < slots.CMDLINE_MAX + 1 {
 			if len(table.cmdline) > 0 {
 				_ = append(&table.cmdline, ' ')
 			}
 			_ = append(&table.cmdline, word)
 		}
+	}
+	// The first user, as plan9.ini's user=: the console shell runs as it (6d8).
+	if len(table.cmdline) + 9 + len(first_user) + 1 < slots.CMDLINE_MAX + 1 {
+		if len(table.cmdline) > 0 {
+			_ = append(&table.cmdline, ' ')
+		}
+		_ = append(&table.cmdline, "vx.user=")
+		_ = append(&table.cmdline, first_user)
 	}
 	w := ndb.Writer{buf = table_text[:]}
 	if !slots.print(&table, &w) {

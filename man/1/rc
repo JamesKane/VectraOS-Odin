@@ -317,6 +317,8 @@ VectraOS has no `/env` device; the environment is all there is.
   `&&`, `||`, `if` and `while` test it.
   When `rc` exits at the end of its input, or by `exit` with no argument, it exits with its first word, or with nothing, success, if it is true.
   Each program's wait message is cut to 128 bytes, a whole rune at a time.
+: `$user`
+  Who `rc` runs as, as 9front's `/env/user`: the user its spawn message names, or `none`, unless the environment gives it; the console shell's is the installed system's first user, `none` on the live medium (M6 step 6d8).
 
 @node=notes title="Notes"
 

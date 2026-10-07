@@ -5,8 +5,15 @@
 # commands share its namespace group, through nsd (ADR-0009); /boot/bin is
 # bound after /bin, where rc's $path finds commands. svcd starts it
 # again when it exits.
+#
+# It runs as the installed system's first user, the kernel command line's
+# vx.user, which install puts there (as plan9.ini's user=); without one, on
+# the live medium, as none. On an installed system (vx.system) it has the
+# system volume's home and cfg branches at /home and /cfg, and the store's
+# tree at /dist (M6 step 6d8, decided 2026-10-05).
 
 service=rc program=/boot/bin/rc console restart
+user=$vx.user
 mount=/ srv=bootfs
 bind=/bin new=/boot/bin flags=a
 mount=/proc srv=proc
@@ -14,4 +21,7 @@ mount=/net srv=net
 mount=/sys srv=sys
 mount=/tmp srv=tmpfs
 mount=/srv srv=srv flags=c
+mount=/home srv=fsd aname=home flags=c when=vx.system
+mount=/cfg srv=fsd aname=cfg flags=c when=vx.system
+mount=/dist srv=dist when=vx.system
 connect=nsd

@@ -36,7 +36,8 @@ svc(6) defines the keys; this is what `svcd` does with them.
 - `mount=` and `bind=` records, and the lines of a namespace template `ns=<name>` (`/lib/ns/<name>` in the boot image, a namespace(6) file), become the mounts and binds of the service's namespace, which vx-rt replays before `vx_main` runs.
   A mount names a post, not a path: `mount=/ srv=bootfs` mounts `/srv/bootfs` on `/`.
 - `ioport=`, `mmio=` and `irq=` records make a service a driver: `svcd` mints the device objects they name from the root Resource once, when it reads the manifest, keeps them, and gives each start of the driver its own duplicates, so a restarted driver gets the same device.
-- `arg=` and `env=` records become its arguments and environment, in order; `part=` records and the device records are passed on as they are, for partd(8) and the driver; `user=<name>` is who it runs as, `none` without it.
+- `arg=` and `env=` records become its arguments and environment, in order; `part=` records and the device records are passed on as they are, for partd(8) and the driver; `user=<name>` is who it runs as, `none` without it; `user=$<word>` is the command line's `<word>=` value, `none` without one (the console shell's `user=$vx.user`, the first user install names, M6 step 6d8).
+- A namespace record with `when=<word>` is used only when `<word>` is on the command line, as a service's own `when=`: the console shell's `/home`, `/cfg` and `/dist` on an installed system.
 - `restart`: when the service exits, for any reason, `svcd` starts it again, unless it has exited more than five times within ten seconds of the first of those exits; then it says so and leaves it.
 
 Each service runs in a session and note group of its own, as Plan 9's daemons do, so a note to one group never reaches the rest of the system.

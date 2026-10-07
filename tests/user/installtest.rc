@@ -26,4 +26,12 @@ check record test-1 `{sed -n 's/.* name=\([a-z0-9-]*\).*/\1/p' /n/records/1.ndb}
 check kernel there `{if(test -f $t/boot/vx/kernel.elf) echo there; if not echo missing}
 check objects b2 `{ls /dist/store}
 
+# The first user (6d8): who the slot's command line names, who owns home and
+# so writes there; a namespace record for another boot (when=vx.live) left out.
+check user vectra $user
+echo mine > /home/f # home is vectra's, 0755: none could not write it
+check home-write mine `{cat /home/f}
+check when-kept 1 `{/boot/bin/ns | grep -cE ' /home( |$)'}
+check when-left 0 `{/boot/bin/ns | grep -cE ' /cfg( |$)'}
+
 echo installtest: $checks checks, $failed failed

@@ -26,7 +26,12 @@
 //   ns=NAME                                    the namespace template /lib/ns/NAME, a
 //                                              namespace(6) file (upstream ADR-0009), here
 //   user=NAME                                  who it runs as (upstream's docs/11 §9),
-//                                              which its attaches name; else none
+//                                              which its attaches name; else none;
+//                                              user=$WORD: the command line's WORD=
+//
+// A namespace record (mount=, bind=, connect=, ns=) with when=WORD is used
+// only when WORD is on the command line, as a service's own when= (upstream's
+// 6d8).
 //
 // post=SRV: svcd makes a listen channel, gives the service its server end
 // ("listen") and keeps the client end as /srv/SRV, for mounts. It keeps a
@@ -548,6 +553,9 @@ start :: proc "contextless" (index: int) -> vx.Status {
 	// names one (ns=NAME: /lib/ns/NAME, a namespace(6) file).
 	user: [dynamic; USER_MAX]u8 // user=NAME, copied: the reader's values last one record
 	for ndb.next(&r, &rec) == .Record && !ndb.has(&rec, "service") {
+		if word, has_when := ndb.get(&rec, "when"); has_when && !cmdline_has(word) {
+			continue // not on this boot
+		}
 		switch {
 		case ndb.has(&rec, "ns"):
 			name, _ := ndb.get(&rec, "ns")
@@ -594,6 +602,11 @@ start :: proc "contextless" (index: int) -> vx.Status {
 			put_bind(&w, nw, old, flags)
 		case ndb.has(&rec, "user"):
 			u, _ := ndb.get(&rec, "user")
+			// $WORD: the command line's WORD=VALUE (vx.user, which install puts in
+			// an installed system's, as plan9.ini's user=), else none (6d8).
+			if len(u) > 1 && u[0] == '$' {
+				u = cmdline_value(u[1:], "none")
+			}
 			if u == "" || len(u) > USER_MAX {
 				return .Err_Invalid
 			}
@@ -679,6 +692,24 @@ exited :: proc "contextless" (index: int) {
 	if gave_up {
 		say(name_of(s), " keeps exiting; it is not restarted again\n")
 	}
+}
+
+// The value of WORD=VALUE on the kernel command line (the first, at its start
+// or after a space), or dflt without one.
+cmdline_value :: proc "contextless" (word, dflt: string) -> string {
+	c := rt.spawn.cmdline
+	for i := 0; i + len(word) + 1 <= len(c); i += 1 {
+		if (i != 0 && c[i - 1] != ' ') || c[i:][:len(word)] != word || c[i + len(word)] != '=' {
+			continue
+		}
+		from := i + len(word) + 1
+		to := from
+		for to < len(c) && c[to] != ' ' {
+			to += 1
+		}
+		return c[from:to]
+	}
+	return dflt
 }
 
 // Whether the kernel command line has word, alone: at its start or after a

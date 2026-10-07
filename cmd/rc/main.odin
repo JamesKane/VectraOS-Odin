@@ -4,7 +4,7 @@
 //
 //   rc [-srdiIlxebpvV] [-c command] [-m initial] [file [arg ...]]
 //
-// As 9front's rc, it reads its flags, sets $pid, $rcname and $cflag, and runs
+// As 9front's rc, it reads its flags, sets $pid, $rcname, $cflag and $user, and runs
 // `. -bq /rc/lib/rcmain $*` (-m names another rcmain), which sets $home,
 // $prompt and $path and then runs the command, the file, or standard input,
 // interactively with -i, or when there is no file and standard input is the
@@ -1705,6 +1705,9 @@ shell :: proc() -> string {
 	digits: [str.U64_DIGITS]u8
 	rc.set_var(&sh, "pid", str.format_u64(digits[:], id))
 	rc.set_var(&sh, "rcname", "rc")
+	if rc.get_var(&sh, "user") == nil { // who it runs as, as 9front's /env/user: the spawn message's user, or none (6d8)
+		rc.set_var(&sh, "user", rt.spawn.user != "" ? rt.spawn.user : "none")
+	}
 	if cflag != "" {
 		rc.set_var(&sh, "cflag", cflag)
 	}

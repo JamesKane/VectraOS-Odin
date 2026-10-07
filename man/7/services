@@ -108,7 +108,7 @@ devmgr restarts drivers itself, up to five starts in all, as above.
 
 @node=users title="Users"
 
-A service runs as the user its manifest's `user=` names, and as `none` without one; the console shell has none, and so runs as `none`.
+A service runs as the user its manifest's `user=` names, and as `none` without one; `user=$vx.user` names the command line's `vx.user=`, which install(8) sets to the installed system's first user: the console shell runs as that user, and as `none` on the live medium.
 The user is who the service's attaches name, so fsd(4) checks its requests as that user (see users(6)), and the user a spawn names no other is the spawner's own.
 On an installed system distd runs as `adm`, to write the boot slots.
 
@@ -121,7 +121,7 @@ The console is a service like any other: a UART driver that posts `/srv/cons` an
 A service whose manifest says `console` gets a connector to it, and its standard output and errors go there.
 Once the console is posted, svcd writes its own messages there, and the kernel stops writing to the serial port and keeps its messages in memory, unless `vx.kconsole` is on the command line.
 
-The console shell is rc(1), started by `boot/svc/shell.ndb` in a namespace of the boot image on `/`, `/boot/bin` after `/bin`, `/proc`, `/net`, `/sys` and `/tmp`, with nsd's post so the commands it runs share its namespace group.
+The console shell is rc(1), started by `boot/svc/shell.ndb` in a namespace of the boot image on `/`, `/boot/bin` after `/bin`, `/proc`, `/net`, `/sys` and `/tmp`, with nsd's post so the commands it runs share its namespace group; on an installed system (`vx.system`) it also has fsd's `home` and `cfg` branches at `/home` and `/cfg` and distd's tree at `/dist`, records the manifest marks `when=vx.system`.
 It is restarted when it exits.
 
 # EXAMPLES

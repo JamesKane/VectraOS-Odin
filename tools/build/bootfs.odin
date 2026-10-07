@@ -27,8 +27,10 @@ BOOTFS_DIRS := []string {
 	"boot/drv",
 	"boot/svc",
 	"boot/tests",
+	"cfg", // fsd's cfg branch, the console shell's on an installed system (upstream's 6d8)
 	"dev",
 	"dist",
+	"home", // and its home branch
 	"lib",
 	"lib/ns",
 	"n",
