@@ -26,7 +26,11 @@ USAGE :: `usage: ./build <command> [--arch x86_64|aarch64] [--release] [-v]
                  both architectures' base trees in out/release/store,
                  store-ARCH.tar, and release.ndb (unsigned); --verify
                  rebuilds and compares
-  check          host tests under ASan, vendor-check
+  check [STAGE ...] [SUITE ...]
+                 the manual's pass, host tests under ASan, the vx-fs
+                 image check, vendor-check; only the stages named (man
+                 host fuzz vxfs vendor), and in host and fuzz only the
+                 suites of tests/host named: check host fs
   vendor-check   check third_party/ against VENDOR.ndb
   loc            the line-count ledger
   man [section ...] title [node]
@@ -111,7 +115,7 @@ main :: proc() {
 	case "loc":
 		ok = cmd_loc()
 	case "check":
-		ok = cmd_check()
+		ok = cmd_check(names[:])
 	case "release":
 		ok = check_pins() && cmd_release(verify)
 	case "all", "image", "qemu", "test":
@@ -226,13 +230,87 @@ has_tests :: proc(dir: string) -> bool {
 	return false
 }
 
+// ./build check [STAGE ...] [SUITE ...] (upstream's 78e748b): the stages
+// named, all without one, and in host and fuzz the suites named, all without
+// one, so a fix to one library is checked in seconds rather than the whole
+// tree's minutes. This tree's stages are upstream's that it has: man (the
+// manual's pass), host (every suite of tests/host, under ASan), fuzz (the
+// suites that replay an upstream fuzz target's corpus, those with a corpus
+// directory: this tree's fuzzers are host suites, not libFuzzer targets),
+// vxfs and vendor. Upstream's format, sa, tidy and time check C this tree
+// does not have.
+CHECK_STAGES :: []string{"man", "host", "fuzz", "vxfs", "vendor"}
+CHECK_ABSENT :: []string{"format", "sa", "tidy", "time"}
+
+@(private="file")
+Check_Words :: struct {
+	stages: [dynamic]string,
+	suites: [dynamic]string,
+}
+
+// Whether the words name this stage, or no stage at all.
+@(private="file")
+check_wants :: proc(w: ^Check_Words, stage: string) -> bool {
+	if len(w.stages) == 0 {
+		return true
+	}
+	return slice.contains(w.stages[:], stage)
+}
+
+// Whether the words name this suite, or no suite at all.
+@(private="file")
+check_wants_suite :: proc(w: ^Check_Words, name: string) -> bool {
+	return len(w.suites) == 0 || slice.contains(w.suites[:], name)
+}
+
 // The manual's pass (man.odin), then host tests: every package under
-// tests/host with a suite, under ASan.
-cmd_check :: proc() -> bool {
-	ok := check_man()
+// tests/host with a suite, under ASan; then the vx-fs image and vendor-check.
+cmd_check :: proc(words: []string) -> bool {
+	w: Check_Words
+	w.stages = make([dynamic]string, context.temp_allocator)
+	w.suites = make([dynamic]string, context.temp_allocator)
+	for word in words {
+		switch {
+		case slice.contains(CHECK_STAGES, word):
+			append(&w.stages, word)
+		case slice.contains(CHECK_ABSENT, word):
+			fmt.eprintfln("build: check: this tree has no %s stage (upstream's checks its C; there is none here)", word)
+			return false
+		case word == "x86_64" || word == "aarch64":
+			// Upstream's narrow its analyzer's and tidy's units; the host
+			// suites are the host's, so here one would narrow nothing.
+			fmt.eprintfln("build: check: %s narrows nothing here: the suites run on the host", word)
+			return false
+		case:
+			append(&w.suites, word)
+		}
+	}
+	ok := true
+	if check_wants(&w, "man") {
+		ok = check_man() && ok
+	}
+	if check_wants(&w, "host") || check_wants(&w, "fuzz") {
+		ok = check_host(&w) && ok
+	}
+	if check_wants(&w, "vxfs") {
+		ok = check_vxfs_image() && ok
+	}
+	if check_wants(&w, "vendor") {
+		ok = cmd_vendor_check() && ok
+	}
+	return ok
+}
+
+// The suites of tests/host the words name: all of them for host, those with
+// an upstream fuzz corpus for fuzz alone. A suite named that is not run (a
+// typo, or not a fuzz suite under fuzz alone) fails the check, as a filter
+// that matches nothing does: never a silent pass.
+@(private="file")
+check_host :: proc(w: ^Check_Words) -> bool {
+	all := check_wants(w, "host")
 	// The usage packages, for the suites that import a program (dbg, dosfs,
 	// isofs): gen:usage/NAME.
-	ok = make_usage() && ok
+	ok := make_usage()
 	dirs, err := os.read_directory_by_path("tests/host", -1, context.temp_allocator)
 	if err != nil {
 		fmt.eprintfln("build: cannot read tests/host: %v", err)
@@ -240,20 +318,26 @@ cmd_check :: proc() -> bool {
 	}
 	slice.sort_by(dirs, proc(a, b: os.File_Info) -> bool {return a.name < b.name})
 	// write_iso's test image, at the date upstream's was written at:
-	// tests/host/iso checks it is upstream's image byte for byte.
+	// tests/host/iso checks it is upstream's image byte for byte, and
+	// tests/host/mount mounts it.
 	make_dirs("out/host") or_return
 	if !make_test_iso("out/host/test.iso", TEST_ISO_EPOCH) {
 		fmt.eprintln("  HOST  cannot make out/host/test.iso")
 		ok = false
 	}
 	ran := 0
+	checked := make([dynamic]string, context.temp_allocator)
 	for d in dirs {
-		if d.type != .Directory || !has_tests(fmt.tprintf("tests/host/%s", d.name)) {
+		dir := fmt.tprintf("tests/host/%s", d.name)
+		if d.type != .Directory || !has_tests(dir) {
 			continue // a helper package the suites import (p9test, blkfake)
 		}
+		if !check_wants_suite(w, d.name) || (!all && !os.is_dir(fmt.tprintf("%s/corpus", dir))) {
+			continue
+		}
 		ran += 1
+		append(&checked, d.name)
 		fmt.eprintfln("  HOST  %s", d.name)
-		dir := fmt.tprintf("tests/host/%s", d.name)
 		c := cmd_make(ODIN, "test", dir, "-collection:vx=lib", "-collection:abi=abi", "-collection:gen=out/gen", "-vet", "-strict-style", "-warnings-as-errors", "-sanitize:address", fmt.tprintf("-out:out/host/%s", d.name))
 		// The vendored C a suite says it links (cobj.odin).
 		ports, found := cobj_host_links(dir)
@@ -263,15 +347,22 @@ cmd_check :: proc() -> bool {
 			continue
 		}
 		append(&c, ..links[:])
-		make_dirs("out/host") or_return
 		ok = run(c[:]) && ok
 	}
+	for name in w.suites {
+		if !slice.contains(checked[:], name) {
+			fmt.eprintfln("build: check: no suite %s is checked by %s", name, all ? "host" : "fuzz")
+			ok = false
+		}
+	}
 	if ran == 0 {
-		fmt.eprintln("build: no packages in tests/host")
+		if len(w.suites) > 0 {
+			fmt.eprintln("build: check: no suite is named so: nothing was checked") // never a silent pass
+		} else {
+			fmt.eprintln("build: no packages in tests/host")
+		}
 		ok = false
 	}
-	ok = check_vxfs_image() && ok
-	ok = cmd_vendor_check() && ok
 	return ok
 }
 

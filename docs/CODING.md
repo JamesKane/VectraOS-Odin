@@ -112,10 +112,13 @@ for, on both architectures:
 
 ```sh
 ./build all          # both architectures; warnings are errors
-./build check        # the manual's pass, host tests under ASan, vendor-check
+./build check        # the manual's pass, host tests under ASan, the vx-fs image, vendor-check
+./build check host fs rc   # only those stages, and only those suites of tests/host
 odin check lib/<name> -no-entry-point -target:freestanding_arm64 -collection:vx=lib -collection:abi=abi -vet -strict-style -warnings-as-errors
 ./build test m6/<scenario> ...   # the scenarios the change can affect
 ```
+
+`./build check [STAGE ...] [SUITE ...]` (upstream's `78e748b`) runs only the stages named, all of them without one: `man` (the manual's pass), `host` (the suites of `tests/host`), `fuzz` (the suites that replay an upstream fuzz target's corpus, those with a `corpus` directory: fuzzers here are host suites), `vxfs` and `vendor`; and in `host` and `fuzz` only the suites named, all of them without one. `./build check host fs` checks a fix to `lib/fs` in seconds; the whole check takes minutes. A suite named that is not checked fails, never a silent pass, as does a stage this tree lacks (upstream's `format`, `sa`, `tidy` and `time` check its C) or an architecture (upstream's narrow its analyzer's units; the suites run on the host). Suite names do not narrow `man`, `vxfs` or `vendor`. Run the whole check before a commit that is not confined to one library.
 
 Which scenarios a change can affect:
 - **A library or program:** the scenarios that run it (grep `tests/qemu/m6/` and
