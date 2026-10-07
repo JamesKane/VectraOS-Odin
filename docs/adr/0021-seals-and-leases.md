@@ -20,5 +20,5 @@ This tree follows upstream's ADR-0043 as written, in Odin's terms:
 - A host shares a structure read-only, seals a plugin's result before trusting its checks, and takes a view back whenever it chooses, or at the end of a call, with the reader's mappings emptied in every task.
 - A reader of a lease is prepared for `.Revoked` (an in-task handler, `rt.notify`, or `SIGBUS` with `siglongjmp`), or dies when its lease ends.
 - A lease of a pager-backed, resizable or physical VMO is not there yet.
-- ktest's `test_leases` and `test_lent` (a server that replies, one that closes its end and one that hangs past the deadline) test it.
+- ktest's `test_leases` and `test_lent` (a server that replies, one that closes its end and one that hangs past the deadline) test it, and the plugin scenario end to end (6e1b3: plugintest, its reader's checks through `vx:shared`, upstream's `<vx/shared.h>`, tested on the host by tests/host/shared).
 - Upstream's `docs/adr/0043-seals-and-leases.md` is the reference for the rest: Hubris's leases and Linux's memfd seals.

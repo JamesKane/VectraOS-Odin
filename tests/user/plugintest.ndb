@@ -1,0 +1,7 @@
+# tests/user/plugintest.ndb: the host and plugin test (tests/qemu/plugin.ndb,
+# M6 step 6e1b3): the boot image at /, where it reads its own image to spawn
+# copies of itself as plugins.
+
+service=plugintest program=/boot/bin/plugintest console
+mount=/ srv=bootfs
+connect=nsd
