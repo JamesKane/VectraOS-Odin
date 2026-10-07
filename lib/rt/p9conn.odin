@@ -727,7 +727,7 @@ p9_connect_within :: proc "contextless" (connector: vx.Handle, k: ^Conn, wait: v
 	// hold the caller for ever (the Rust port's finding); the caller's own
 	// limit, if any, after.
 	k.timeout = wait
-	st = p9.client_version(&k.c, MSIZE, {.Posix, .Xattr, .Map, .Dref, .Srv}) // what the server has of them
+	st = p9.client_version(&k.c, MSIZE, {.Posix, .Xattr, .Map, .Dref, .Srv, .Notify}) // what the server has of them
 	k.timeout = 0
 	return st
 }

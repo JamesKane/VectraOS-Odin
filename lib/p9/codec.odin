@@ -207,6 +207,32 @@ Prot :: bit_set[Prot_Flag;u32]
 
 TOKEN_SIZE :: 16
 
+// notify's event kinds (upstream's docs/proto/notify.md, its M6 step 6e1d),
+// Tnotify's mask bits too. On the wire an event's kind is the byte with the
+// member's bit (CREATE 1 ... MOVED_TO 32, LOST 128), and a mask the u64 whose
+// bit i is the member of value i. Lost is never asked for: it comes when a
+// watch's queue overflowed.
+Notify_Kind :: enum u8 {
+	Create, // a name made in the directory watched
+	Remove, // a name removed from it, or the file watched removed
+	Modify, // data written: to the file, or to a file in the directory
+	Attrib, // attributes changed (setattr, wstat), likewise
+	Moved_From, // a name renamed out of (or within) the directory
+	Moved_To, // and the name it was renamed to
+	Lost = 7, // events were lost: what is watched should be read again
+}
+Notify_Mask :: bit_set[Notify_Kind;u64]
+
+// Tnotify carries its mask in Msg.mask, the field Tgetattr's request_mask
+// shares on the wire.
+notify_mask :: proc "contextless" (m: ^Msg) -> Notify_Mask {
+	return transmute(Notify_Mask)transmute(u64)m.mask
+}
+
+set_notify_mask :: proc "contextless" (m: ^Msg, mask: Notify_Mask) {
+	m.mask = transmute(Getattr_Mask)transmute(u64)mask
+}
+
 // Rstatfs's body (9P2000.L).
 Statfs :: struct {
 	type, bsize:                               u32,
@@ -824,6 +850,38 @@ next_entry :: proc "contextless" (it: ^Dir_Entries) -> (entry: Stat, ok: bool) {
 	}
 	it.off = end
 	return entry, true
+}
+
+// The events of an Rnotify's data, one at a time, each kind[1] name[s]:
+//
+//	it := p9.Notify_Events{buf = data}
+//	for kind, name in p9.next_event(&it) { ... }
+//
+// kind is the wire's byte (one Notify_Kind's bit); name points into buf.
+Notify_Events :: struct {
+	buf: []u8,
+	off: int, // where the next event starts
+}
+
+// An event at the end of o: its kind's bit, then its name (o.failed if it
+// does not fit).
+@(private)
+event_put :: proc "contextless" (o: ^str.Buf, kind: Notify_Kind, name: string) {
+	put(o, u8(1) << u8(kind))
+	put_str(o, name)
+}
+
+next_event :: proc "contextless" (it: ^Notify_Events) -> (kind: u8, name: string, ok: bool) {
+	if len(it.buf) - it.off < 3 {
+		return 0, "", false
+	}
+	n := int(it.buf[it.off + 1]) | int(it.buf[it.off + 2]) << 8
+	if n > len(it.buf) - it.off - 3 {
+		return 0, "", false
+	}
+	kind, name = it.buf[it.off], string(it.buf[it.off + 3:][:n])
+	it.off += 3 + n
+	return kind, name, true
 }
 
 // --- 9P2000.L's directory entries ---

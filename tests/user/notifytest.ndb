@@ -1,0 +1,6 @@
+# tests/user/notifytest.ndb: 9Px notify (tests/qemu/notify.ndb, M6 step
+# 6e1d): two connections to tmpfs, through its connector, a watcher's and a
+# writer's.
+
+service=notifytest program=/boot/bin/notifytest console
+connect=tmpfs

@@ -62,6 +62,8 @@ P9_MSG(Treadref,  160, P9F_FID, P9F_OFFSET, P9F_COUNT, P9F_ROFFSET)
 P9_MSG(Rreadref,  161, P9F_COUNT)
 P9_MSG(Twriteref, 162, P9F_FID, P9F_OFFSET, P9F_COUNT, P9F_ROFFSET)
 P9_MSG(Rwriteref, 163, P9F_COUNT)
+P9_MSG(Tnotify,  164, P9F_FID, P9F_MASK) // notify (docs/proto/notify.md): held until events are queued
+P9_MSG(Rnotify,  165, P9F_DATA)          // each event kind[1] name[s]
 
 P9_MSG(Tversion, 100, P9F_MSIZE, P9F_VERSION)
 P9_MSG(Rversion, 101, P9F_MSIZE, P9F_VERSION)

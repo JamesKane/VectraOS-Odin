@@ -65,6 +65,10 @@ Type :: enum u8 {
 	Rreadref  = 161,
 	Twriteref = 162,
 	Rwriteref = 163,
+	// 9Px's notify extension (upstream's docs/proto/notify.md): held until
+	// events are queued, each event kind[1] name[s].
+	Tnotify   = 164,
+	Rnotify   = 165,
 	Tversion = 100,
 	Rversion = 101,
 	Tauth    = 102,
@@ -119,7 +123,7 @@ Field :: enum u8 {
 	// 9P2000.L's, for the posix and xattr extensions.
 	Name2, // a second name: Trenameat's new one, Tsymlink's target, Rreadlink's
 	Gid,
-	Mask, // Tgetattr's request_mask
+	Mask, // Tgetattr's request_mask; Tnotify's events
 	Datasync,
 	Attr, // Rgetattr's body, valid[8] first
 	Setattr, // Tsetattr's body, valid[4] first
@@ -303,6 +307,8 @@ MESSAGES := [256]Message {
 	161 = {"Rreadref", {.Count}},
 	162 = {"Twriteref", {.Fid, .Offset, .Count, .Roffset}},
 	163 = {"Rwriteref", {.Count}},
+	164 = {"Tnotify", {.Fid, .Mask}}, // notify: held until events are queued
+	165 = {"Rnotify", {.Data}}, // each event kind[1] name[s]
 }
 
 // Whether t is a message 9P2000, or 9P2000.L's or 9Px's extensions, have.

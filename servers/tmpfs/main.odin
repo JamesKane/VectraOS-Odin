@@ -543,7 +543,7 @@ server := p9ring.Server {
 		readlink = fs_readlink,
 	},
 	name = "tmpfs",
-	supported = {.Posix, .Xattr},
+	supported = {.Posix, .Xattr, .Notify},
 }
 
 @(export, link_name="vx_main")

@@ -43,7 +43,10 @@ package p9
 // and with dref, Treadref and Twriteref move data through the client's VMO
 // (upstream docs/proto/map.md, dref.md); with srv, Ropen and Twrite carry
 // handles (srv.md). The handles go by the transport, through the
-// thread-local reply_handle and request_handle.
+// thread-local reply_handle and request_handle. With notify, a Tnotify
+// waits for the events this file makes as it serves each change, on any of
+// the server's connections (notify.md, upstream's M6 step 6e1d): held as a
+// Tread is, and served again once Shared.again says one is queued.
 
 import "base:intrinsics"
 import "abi:vx"
@@ -163,11 +166,35 @@ Lock :: struct {
 	proc_id:    u32,
 }
 
+// notify's watches (upstream's docs/proto/notify.md, its M6 step 6e1d): a
+// fid's, with the events queued for it since its last Tnotify was answered.
+MAX_WATCHES :: 64
+WATCH_EVENTS :: 32
+WATCH_NAME :: 128 // a name is cut to one less
+
+Event :: struct {
+	kind: Notify_Kind,
+	name: [dynamic; WATCH_NAME - 1]u8,
+}
+
+Watch :: struct {
+	used, lost:  bool,
+	conn:        ^Server, // the connection whose fid it is
+	fid:         Fid,
+	node:        Node,
+	mask:        Notify_Mask,
+	head, count: u32, // the queue, a ring in ev
+	ev:          [WATCH_EVENTS]Event,
+}
+
 Shared :: struct {
-	files:  [MAX_OPEN_FILES]Open_File,
-	locks:  [MAX_LOCKS]Lock,
-	random: drbg.Drbg, // tokens; unseeded: Tshare is refused
-	now:    proc "contextless" () -> i64, // nanoseconds; nil: holds never run out
+	files:    [MAX_OPEN_FILES]Open_File,
+	locks:    [MAX_LOCKS]Lock,
+	watches:  [MAX_WATCHES]Watch,
+	nwatches: u32,
+	again:    bool, // an event was queued: a held Tnotify may be answered (vx:p9ring)
+	random:   drbg.Drbg, // tokens; unseeded: Tshare is refused
+	now:      proc "contextless" () -> i64, // nanoseconds; nil: holds never run out
 }
 
 // What a fid refers to, on the server's side.
@@ -311,15 +338,197 @@ fid_holds :: proc "contextless" (s: ^Server, node: Node, delta: int) {
 	}
 }
 
+// --- notify (upstream's docs/proto/notify.md) ---
+//
+// Events are made here, where every change the framework serves passes, on
+// every connection: a create, write, remove, rename, setattr or symlink.
+// One queued wakes the held Tnotify that waits for it (Shared.again).
+
+// Queues kind (name: the entry's, for a directory's watch) for node's watches.
+@(private="file")
+notify :: proc "contextless" (sh: ^Shared, node: Node, kind: Notify_Kind, name: string) {
+	if sh == nil || sh.nwatches == 0 {
+		return
+	}
+	for &w in sh.watches {
+		if !w.used || w.node != node || kind not_in w.mask {
+			continue
+		}
+		if w.count == WATCH_EVENTS {
+			w.lost = true // full: the watcher reads again what it watches
+			continue
+		}
+		e := &w.ev[(w.head + w.count) % WATCH_EVENTS]
+		w.count += 1
+		e.kind = kind
+		clear(&e.name)
+		_ = append(&e.name, name) // cut to fit, as upstream's
+		sh.again = true
+	}
+}
+
+// node's directory and its name there: a change to a file is its
+// directory's watchers' too. Not ok if it has none (a root), or none is known.
+@(private="file")
+notify_parent :: proc "contextless" (s: ^Server, node: Node, name: ^[dynamic; WATCH_NAME - 1]u8) -> (parent: Node, ok: bool) {
+	if s.shared == nil || s.shared.nwatches == 0 || s.fs.parent == nil {
+		return 0, false
+	}
+	p, e := s.fs.parent(s.fs.ctx, node)
+	if e != .Ok || p == node {
+		return 0, false
+	}
+	st: Stat
+	if s.fs.stat(s.fs.ctx, node, &st) != .Ok {
+		return 0, false
+	}
+	clear(name)
+	_ = append(name, st.name)
+	return p, true
+}
+
+// kind for node, and for its directory under its name.
+@(private="file")
+notify_up :: proc "contextless" (s: ^Server, node: Node, kind: Notify_Kind) {
+	if s.shared == nil || s.shared.nwatches == 0 {
+		return
+	}
+	notify(s.shared, node, kind, "")
+	name: [dynamic; WATCH_NAME - 1]u8
+	if parent, ok := notify_parent(s, node, &name); ok {
+		notify(s.shared, parent, kind, string(name[:]))
+	}
+}
+
+// The file server's changes, each with its events.
+@(private="file", require_results)
+fs_create :: proc "contextless" (s: ^Server, dir: Node, name: string, perm: u32, mode: Open_Mode) -> (node: Node, e: vx.Status) {
+	node, e = s.fs.create(s.fs.ctx, dir, name, perm, mode)
+	if e == .Ok {
+		notify(s.shared, dir, .Create, name)
+	}
+	return
+}
+
+@(private="file", require_results)
+fs_write :: proc "contextless" (s: ^Server, node: Node, offset: u64, data: []u8) -> (count: u32, e: vx.Status) {
+	count, e = s.fs.write(s.fs.ctx, node, offset, data)
+	if e == .Ok {
+		notify_up(s, node, .Modify)
+	}
+	return
+}
+
+@(private="file", require_results)
+fs_remove :: proc "contextless" (s: ^Server, node: Node) -> vx.Status {
+	name: [dynamic; WATCH_NAME - 1]u8
+	parent, up := notify_parent(s, node, &name) // before: it is gone after
+	e := s.fs.remove(s.fs.ctx, node)
+	if e == .Ok {
+		notify(s.shared, node, .Remove, "")
+	}
+	if e == .Ok && up {
+		notify(s.shared, parent, .Remove, string(name[:]))
+	}
+	return e
+}
+
+@(private="file", require_results)
+fs_rename :: proc "contextless" (s: ^Server, from: Node, oldname: string, to: Node, newname: string) -> vx.Status {
+	e := s.fs.rename(s.fs.ctx, from, oldname, to, newname)
+	if e == .Ok {
+		notify(s.shared, from, .Moved_From, oldname)
+		notify(s.shared, to, .Moved_To, newname)
+	}
+	return e
+}
+
+@(private="file", require_results)
+fs_setattr :: proc "contextless" (s: ^Server, node: Node, a: ^Setattr) -> vx.Status {
+	e := s.fs.setattr(s.fs.ctx, node, a)
+	if e == .Ok {
+		notify_up(s, node, .Attrib)
+	}
+	return e
+}
+
+@(private="file")
+watch_drop :: proc "contextless" (s: ^Server, fid: Fid) {
+	sh := s.shared
+	if sh == nil || sh.nwatches == 0 {
+		return
+	}
+	for &w in sh.watches {
+		if w.used && w.conn == s && w.fid == fid {
+			w.used = false
+			sh.nwatches -= 1
+		}
+	}
+}
+
+// Tnotify: the fid's watch, made at its first, its mask from this one; its
+// events, as many as fit in out, or Err_Should_Wait (held: an event wakes
+// it).
+@(private="file", require_results)
+serve_notify :: proc "contextless" (s: ^Server, t: ^Msg, r: ^Msg, out: []u8) -> vx.Status {
+	sh := s.shared
+	if .Notify not_in s.extensions || sh == nil {
+		return .Err_Unsupported
+	}
+	f := fid_find(s, t.fid)
+	if f == nil {
+		return .Err_Bad_Handle
+	}
+	w, free_slot: ^Watch
+	for &x in sh.watches {
+		if x.used && x.conn == s && x.fid == t.fid {
+			w = &x
+			break
+		}
+		if !x.used && free_slot == nil {
+			free_slot = &x
+		}
+	}
+	if w == nil {
+		if free_slot == nil {
+			return .Err_No_Memory
+		}
+		w = free_slot
+		w^ = {used = true, conn = s, fid = t.fid, node = f.node}
+		sh.nwatches += 1
+	}
+	w.mask = notify_mask(t)
+	o := str.Buf{buf = out}
+	if w.lost && len(out) >= 3 {
+		event_put(&o, .Lost, "")
+		w.lost = false
+	}
+	for w.count > 0 {
+		e := &w.ev[w.head]
+		if len(out) - o.len < 3 + len(e.name) {
+			break
+		}
+		event_put(&o, e.kind, string(e.name[:]))
+		w.head = (w.head + 1) % WATCH_EVENTS
+		w.count -= 1
+	}
+	if o.len == 0 {
+		return .Err_Should_Wait
+	}
+	r.data = out[:o.len]
+	return .Ok
+}
+
 @(private="file")
 fid_drop :: proc "contextless" (s: ^Server, f: ^Fid_Entry) {
+	watch_drop(s, f.fid) // its watch goes with it
 	fid_holds(s, f.node, -1)
 	remove := f.orclose
 	if o := f.file; o != nil && s.shared != nil {
 		remove = remove || (o.orclose && o.fids == 1) // its last fid
 	}
 	if remove && s.fs.remove != nil {
-		_ = s.fs.remove(s.fs.ctx, f.node) // ORCLOSE; it may already be gone
+		_ = fs_remove(s, f.node) // ORCLOSE; it may already be gone
 	}
 	if s.fs.clunk != nil {
 		s.fs.clunk(s.fs.ctx, f.node, f.open)
@@ -515,7 +724,7 @@ write :: proc "contextless" (s: ^Server, f: ^Fid_Entry, t: ^Msg) -> (count: u32,
 			offset = st.length
 		}
 	}
-	count = s.fs.write(s.fs.ctx, f.node, offset, t.data) or_return
+	count = fs_write(s, f.node, offset, t.data) or_return
 	if o != nil && t.offset == OFFSET_CURRENT {
 		o.offset = offset + u64(count)
 	}
@@ -785,7 +994,7 @@ serve_posix :: proc "contextless" (s: ^Server, t: ^Msg, r: ^Msg) -> vx.Status {
 		}
 		return .Ok
 	case .Tsetattr:
-		return s.fs.setattr != nil ? s.fs.setattr(s.fs.ctx, f.node, &t.setattr) : .Err_Access
+		return s.fs.setattr != nil ? fs_setattr(s, f.node, &t.setattr) : .Err_Access
 	case .Trenameat:
 		to := fid_find(s, t.newfid)
 		if to == nil {
@@ -797,7 +1006,7 @@ serve_posix :: proc "contextless" (s: ^Server, t: ^Msg, r: ^Msg) -> vx.Status {
 		if s.fs.rename == nil {
 			return .Err_Access
 		}
-		return s.fs.rename(s.fs.ctx, f.node, t.name, to.node, t.name2)
+		return fs_rename(s, f.node, t.name, to.node, t.name2)
 	case .Tsymlink:
 		if .Dir not_in f.qid.type || !new_name_ok(t.name) {
 			return .Err_Invalid
@@ -806,6 +1015,7 @@ serve_posix :: proc "contextless" (s: ^Server, t: ^Msg, r: ^Msg) -> vx.Status {
 			return .Err_Access
 		}
 		node := s.fs.symlink(s.fs.ctx, f.node, t.name, t.name2) or_return
+		notify(s.shared, f.node, .Create, t.name)
 		qid, e := qid_of(s, node)
 		r.qid = qid
 		if s.fs.clunk != nil {
@@ -905,6 +1115,9 @@ serve_dref :: proc "contextless" (s: ^Server, t: ^Msg, r: ^Msg) -> vx.Status {
 	count, e := op(s.fs.ctx, f.node, offset, request_handle, t.roffset, t.count)
 	keep_lock -= keep
 	e or_return
+	if !read {
+		notify_up(s, f.node, .Modify)
+	}
 	if o != nil && t.offset == OFFSET_CURRENT {
 		o.offset = offset + u64(count)
 	}
@@ -994,10 +1207,10 @@ serve_wstat :: proc "contextless" (s: ^Server, f: ^Fid_Entry, t: ^Msg) -> vx.Sta
 			}
 			return .Err_Exists
 		}
-		s.fs.rename(s.fs.ctx, dir, old, dir, w.name) or_return
+		fs_rename(s, dir, old, dir, w.name) or_return
 	}
 	if a.valid != {} {
-		if e := s.fs.setattr(s.fs.ctx, f.node, &a); e != .Ok {
+		if e := fs_setattr(s, f.node, &a); e != .Ok {
 			if rename {
 				_ = s.fs.rename(s.fs.ctx, dir, w.name, dir, old) // none of it, then
 			}
@@ -1086,7 +1299,7 @@ serve_l :: proc "contextless" (s: ^Server, t: ^Msg, r: ^Msg, resp: []u8) -> vx.S
 		if s.fs.create == nil {
 			return .Err_Access
 		}
-		node := s.fs.create(s.fs.ctx, f.node, t.name, DMDIR | (t.lmode & 0o777), OREAD) or_return
+		node := fs_create(s, f.node, t.name, DMDIR | (t.lmode & 0o777), OREAD) or_return
 		qid, e := qid_of(s, node)
 		r.qid = qid
 		if s.fs.clunk != nil {
@@ -1108,7 +1321,7 @@ serve_l :: proc "contextless" (s: ^Server, t: ^Msg, r: ^Msg, resp: []u8) -> vx.S
 			if dir != (t.lflags & L_AT_REMOVEDIR != 0) {
 				e = dir ? .Err_Access : .Err_Not_Found // EISDIR, ENOTDIR as errno has them
 			} else {
-				e = s.fs.remove(s.fs.ctx, child)
+				e = fs_remove(s, child)
 			}
 		}
 		if s.fs.clunk != nil {
@@ -1134,7 +1347,7 @@ serve_l :: proc "contextless" (s: ^Server, t: ^Msg, r: ^Msg, resp: []u8) -> vx.S
 		}
 		old := string(old_buf[:copy(old_buf[:], st.name)])
 		dir := s.fs.parent(s.fs.ctx, f.node) or_return
-		return s.fs.rename(s.fs.ctx, dir, old, to.node, t.name)
+		return fs_rename(s, dir, old, to.node, t.name)
 	case .Treaddir:
 		if !f.open || .Dir not_in f.qid.type {
 			return .Err_Access
@@ -1288,7 +1501,7 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 				} else if s.fs.create == nil {
 					e = .Err_Access
 				} else {
-					node, e = s.fs.create(s.fs.ctx, f.node, t.name, t.perm, plain_mode(t.mode))
+					node, e = fs_create(s, f.node, t.name, t.perm, plain_mode(t.mode))
 				}
 				if e == .Ok {
 					if s.fs.clunk != nil {
@@ -1409,7 +1622,7 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 				break
 			}
 			if t.type == .Tremove {
-				e = s.fs.remove != nil ? s.fs.remove(s.fs.ctx, f.node) : .Err_Access
+				e = s.fs.remove != nil ? fs_remove(s, f.node) : .Err_Access
 				f.orclose = false // removed already, or not to be
 				if f.file != nil && s.shared != nil {
 					f.file.orclose = false
@@ -1439,14 +1652,21 @@ serve :: proc "contextless" (s: ^Server, req: []u8, resp: []u8) -> (reply_len: i
 			e = serve_map(s, &t, &r)
 		case .Treadref, .Twriteref:
 			e = serve_dref(s, &t, &r)
+		case .Tnotify: // its events go where Rread's data does
+			if len(resp) < RREAD_HDR {
+				return 0, .Hang_Up
+			}
+			room := min(s.msize - IOHDRSZ, u32(min(len(resp) - RREAD_HDR, int(max(u32)))))
+			e = serve_notify(s, &t, &r, resp[RREAD_HDR:][:room])
 		case .Tmkdir, .Tunlinkat, .Trename, .Treaddir, .Tstatfs:
 			e = dotl ? serve_l(s, &t, &r, resp) : .Err_Unsupported
 		case:
 			return 0, .Hang_Up
 		}
 	}
-	if e == .Err_Should_Wait && (t.type == .Tread || t.type == .Twrite || t.type == .Topen) {
-		return 0, .Defer
+	held := t.type == .Tread || t.type == .Twrite || t.type == .Topen || t.type == .Tnotify
+	if e == .Err_Should_Wait && held {
+		return 0, .Defer // held, and served again (a Tnotify when an event is queued)
 	}
 	if e != .Ok && s.dialect == .P9_2000L {
 		r = {type = .Rlerror, tag = t.tag, ecode = status_errno(e)}

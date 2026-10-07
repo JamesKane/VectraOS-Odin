@@ -108,8 +108,8 @@ full_message :: proc(type: p9.Type, stat: []u8) -> p9.Msg {
 // Not upstream's: every message type, full_message's way, encodes to the
 // bytes upstream's p9_encode writes for its own full_message (upstream.txt,
 // from a harness built with clang against M4's codec, the P4 cross-check, and
-// again against M5's, with map and dref, and against d26fbc7's, with
-// 9P2000.L's).
+// again against M5's, with map and dref, against d26fbc7's, with 9P2000.L's,
+// and against 2cc4729's, with notify's Tnotify and Rnotify).
 @(test)
 test_upstream_bytes :: proc(t: ^testing.T) {
 	UPSTREAM :: #load("upstream.txt", string)
@@ -128,7 +128,7 @@ test_upstream_bytes :: proc(t: ^testing.T) {
 		testing.expectf(t, string(got) == hex_bytes, "%s: %s, upstream's %s", p9.MESSAGES[ty].name, got, hex_bytes)
 		types += 1
 	}
-	testing.expect_value(t, types, 74)
+	testing.expect_value(t, types, 76)
 }
 
 // The fields 9P2000.L's messages add come back as they went.
@@ -220,7 +220,7 @@ test_round_trips :: proc(t: ^testing.T) {
 		buf[0] = u8(n - 1)
 		testing.expectf(t, p9.decode(buf[:n], &d) == .Err_Invalid, "%s with a short size field decoded", name)
 	}
-	testing.expect_value(t, types, 74) // 9P2000's 27, 33 of 9P2000.L's (6d4c2: all it has but xattrs and mknod), 9Px's 14
+	testing.expect_value(t, types, 76) // 9P2000's 27, 33 of 9P2000.L's (6d4c2: all it has but xattrs and mknod), 9Px's 16 (6e1d's Tnotify, Rnotify)
 	testing.expect(t, !p9.known(p9.Type(106))) // there is no Terror
 	m := p9.Msg{type = p9.Type(106)}
 	testing.expect_value(t, p9.encode(&m, buf[:]), 0)

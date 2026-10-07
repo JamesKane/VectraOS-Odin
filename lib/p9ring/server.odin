@@ -209,7 +209,7 @@ Server :: struct {
 	// must not move once it serves.
 	conns:         []Server_Conn,
 	default_conns: [MAX_CONNS]Server_Conn,
-	shared:        p9.Shared, // the open files and locks all its connections share (posix)
+	shared:        p9.Shared, // the open files, locks and watches all its connections share (posix, notify)
 	// The threads (the server's lock held for these): serving, or waiting
 	// for work, rather than let go or parked.
 	lock:          rt.Mutex,
@@ -758,9 +758,9 @@ loop :: proc "contextless" (s: ^Server) {
 		// connection holding requests waits for an event or its doorbell: a
 		// new request, or a Tflush of a held one. A thread with another
 		// running parks instead: one sleeping on the port is enough.
-		if s.again { // a held request may go on now: once more round
+		if s.again || s.shared.again { // a held request may go on now (an event, for a Tnotify): once more round
 			more = true
-			s.again = false
+			s.again, s.shared.again = false, false
 		}
 		if !more && s.running > 1 {
 			park(s)

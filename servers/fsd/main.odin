@@ -1263,7 +1263,7 @@ server := p9ring.Server {
 		write_ref = fs_write_ref,
 	},
 	name = "fsd",
-	supported = {.Posix, .Xattr, .Map, .Dref},
+	supported = {.Posix, .Xattr, .Map, .Dref, .Notify},
 	event = on_event,
 	tick = tick,
 	max_threads = 8, // readers waiting on the disk, and one serving the rest (upstream's 6d5b)

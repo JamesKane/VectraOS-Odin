@@ -1,0 +1,11 @@
+# tests/qemu/notify.ndb: 9Px notify in a running system (M6 step 6e1d,
+# docs/proto/notify.md; tests/user/notifytest.c): a watcher on one
+# connection to tmpfs hears, in order, the create, write, rename and remove
+# a writer makes on another, its Tnotify held by the server until each comes.
+
+scenario=notify timeout=60 cmdline=vx.skip=rc with=notifytest
+expect="notifytest: 13 checks, 0 failed"
+line="svcd: notifytest exited"
+fail="vx: panic"
+fail="notifytest: FAILED"
+fail="svcd: notifytest exited: "

@@ -293,7 +293,7 @@ server := p9ring.Server {
 		write_handle = fs_write_handle,
 	},
 	name = "srvfs",
-	supported = {.Xattr, .Srv},
+	supported = {.Xattr, .Srv, .Notify},
 }
 
 @(export, link_name="vx_main")

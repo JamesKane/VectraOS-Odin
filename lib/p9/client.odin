@@ -712,6 +712,26 @@ client_readlink :: proc "contextless" (c: ^Client, fid: Fid, buf: []u8) -> (targ
 	return string(buf[:copy(buf, rc.r.name2)]), .Ok
 }
 
+// notify (upstream's docs/proto/notify.md): waits for events on what fid
+// names, those in mask, and copies them (kind[1] name[s] each, read with
+// next_event) into buf: how many bytes. The first call on a fid starts its
+// watch; its clunk ends it.
+@(require_results)
+client_notify :: proc "contextless" (c: ^Client, fid: Fid, mask: Notify_Mask, buf: []u8) -> (n: int, e: vx.Status) {
+	if .Notify not_in c.extensions {
+		return 0, .Err_Unsupported
+	}
+	t := Msg{type = .Tnotify, fid = fid}
+	set_notify_mask(&t, mask)
+	rc: Rcall
+	defer finish(c, &rc)
+	exchange(c, &t, &rc) or_return
+	if int(rc.r.count) > len(buf) {
+		return 0, .Err_Too_Small
+	}
+	return copy(buf, rc.r.data), .Ok
+}
+
 @(require_results)
 client_fsync :: proc "contextless" (c: ^Client, fid: Fid) -> vx.Status {
 	if .Posix not_in c.extensions && !dotl(c) {

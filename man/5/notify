@@ -1,0 +1,50 @@
+page=notify sect=5 summary="wait for changes to a file or a directory"
+    names=notify,Tnotify,Rnotify
+    src=lib/vx-9p/server.c,lib/vx-9p/client.c,lib/vx-9p/ring_server.c,lib/vx-9p/messages.def,lib/vx-9p/codec.c,docs/proto/notify.md
+    keys=9p,9px,notify,watch,inotify,change,event,create,remove,modify,rename
+
+# SYNOPSIS
+
+```text
+size[4] Tnotify tag[2] fid[4] mask[8]
+size[4] Rnotify tag[2] count[4] data[count]
+```
+
+# DESCRIPTION
+
+`notify` is a 9Px extension (M6 step 6e1d, `docs/proto/notify.md`): a server answers `Tnotify` only once `Tversion` has negotiated `+notify` (see version(5)), and before that with `operation not supported`.
+`Tnotify` is type 164 and `Rnotify` 165.
+fsd(4), tmpfs(4) and srvfs(4) have it; VectraOS's ring client asks for it.
+
+`Tnotify` watches the file or directory <fid> refers to, which must be in use on the connection and need not be open, for the events in <mask>.
+The first `Tnotify` on a fid starts its watch; each later one sets its mask again; the fid's clunk, or the connection's end, stops it.
+The answer waits until an event is queued for the watch, so a `Tnotify` with none is held, and `Tflush` cancels it; `Rnotify` then carries every event queued that fits, and the client asks again.
+Between asks the server queues events for the watch, 32 at most; past that it drops them and the next answer starts with `LOST`, after which the watcher reads what it watches again.
+
+<data> is the events, one after another, each a kind[1] and a name[s] (a length[2], then its bytes), in the order they happened:
+
+: `CREATE` 1
+  A name made in the directory watched: `Tcreate`, `Tmkdir`, `Tsymlink`.
+: `REMOVE` 2
+  A name removed from the directory watched, or the file watched removed (its name empty).
+: `MODIFY` 4
+  Data written: to the file watched (its name empty), or to a file in the directory watched.
+: `ATTRIB` 8
+  Attributes changed by `Tsetattr` or `Twstat`: the file's, or one in the directory's.
+: `MOVED_FROM` 16, `MOVED_TO` 32
+  A rename: the old name, from the directory it left, and the new one, in the directory it reached.
+: `LOST` 128
+  Events were dropped; never asked for, and always given.
+
+The server makes the events itself, as it serves each change, on every connection: a watcher hears what a writer on another connection does.
+
+# SEE ALSO
+
+intro(5), walk(5), clunk(5), flush(5), version(5); `docs/proto/notify.md` in the repository
+
+# BUGS
+
+A change the file server makes on its own, not through a 9P message (an fsd snapshot's rollback, a post svcd lists in srvfs), makes no event.
+A name is cut to 127 bytes.
+A watch is not told of changes through another name for the same file (a bind, a symbolic link's target).
+Over TCP, VectraOS's client does not ask for `notify`, so a remote mount has none.
