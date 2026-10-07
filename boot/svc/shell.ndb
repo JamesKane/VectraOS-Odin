@@ -10,7 +10,9 @@
 # vx.user, which install puts there (as plan9.ini's user=); without one, on
 # the live medium, as none. On an installed system (vx.system) it has the
 # system volume's home and cfg branches at /home and /cfg, and the store's
-# tree at /dist (M6 step 6d8, decided 2026-10-05).
+# tree at /dist (M6 step 6d8, decided 2026-10-05). /tmp is the user's own
+# (M6 step 6e1c2, as 9front's /usr/$user/tmp): its tree on tmpfs, or on an
+# installed system $home/tmp on disk, which install makes.
 
 service=rc program=/boot/bin/rc console restart
 user=$vx.user
@@ -19,9 +21,11 @@ bind=/bin new=/boot/bin flags=a
 mount=/proc srv=proc
 mount=/net srv=net
 mount=/sys srv=sys
-mount=/tmp srv=tmpfs
+mount=/tmp srv=tmpfs aname=user
 mount=/srv srv=srv flags=c
 mount=/home srv=fsd aname=home flags=c when=vx.system
+bind=/tmp new=/home/tmp flags=c when=vx.system
+mount=/tmp/crash srv=tmpfs aname=crash flags=c
 mount=/cfg srv=fsd aname=cfg flags=c when=vx.system
 mount=/dist srv=dist when=vx.system
 connect=nsd

@@ -1,7 +1,9 @@
 # /lib/ns/posix: the namespace a POSIX program expects (02 §2), a namespace(6)
 # file (ADR-0009); a manifest's ns=posix gives it. The boot image is the root;
 # /bin the programs, sbase's (/boot/bin/posix, ADR-0016) before the native
-# ones of the same names, as APE binds /bin/ape; /tmp a RAM file system; /dev
+# ones of the same names, as APE binds /bin/ape; /tmp the user's own tree on
+# tmpfs (M6 step 6e1c2: a manifest that mounts $home/tmp over it after gives
+# the user's home on disk, as 9front binds /usr/$user/tmp); /dev
 # null, zero, random and urandom, and the terminals (ptmx, pts/); /proc the
 # processes; /net the network, which the C library's sockets use (01 §9);
 # /sys the system's clock (02 §5.1).
@@ -9,7 +11,8 @@
 mount /srv/bootfs /
 bind -a /boot/bin /bin
 bind -b /boot/bin/posix /bin
-mount -c /srv/tmpfs /tmp
+mount -c /srv/tmpfs /tmp user
+mount -c /srv/tmpfs /tmp/crash crash
 mount /srv/null /dev
 mount -a /srv/ptyd /dev
 mount /srv/proc /proc

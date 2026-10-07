@@ -11,6 +11,14 @@
 // opened it lets go, as POSIX has it; a node id names one node only, so a fid
 // to a removed one finds nothing. What it holds lives only in it, and is
 // limited to MAX_BYTES and MAX_NODES.
+//
+// It serves trees: the shared one (aname "", what procfs's crash
+// directories and the tests share), and one for each user (aname "user": the
+// attaching user's own, made at its first attach, 0700), which is that
+// user's /tmp where it has no home on disk (upstream's M6 step 6e1c2, as
+// 9front's /usr/$user/tmp). The trees share the server's limits. aname
+// "crash" is the shared tree's /crash, where procfs saves crash directories
+// (05 §5), which namespaces mount on /tmp/crash inside the user's own /tmp.
 package tmpfs
 
 import "base:intrinsics"
@@ -30,6 +38,7 @@ ROOT :: u32(1)
 @(private="file")
 Node :: struct {
 	used, dir, removed, link:          bool,
+	top:                               bool, // a tree's root: the shared one (ROOT), or a user's, named after the user
 	gen:                               u32, // with the slot, the node's id: a removed node's id names nothing
 	name:                              [dynamic; MAX_NAME - 1]u8,
 	parent, first_child, next_sibling: u32, // slots; 0 is none
@@ -175,6 +184,51 @@ fs_attach :: proc "contextless" (ctx: rawptr, aname: string) -> (root: p9.Node, 
 	return id_of(ROOT), .Ok
 }
 
+// aname "user": the attaching user's own tree, made the first time; "crash":
+// the shared tree's /crash, made if it is not there.
+@(private="file")
+fs_attach_as :: proc "contextless" (ctx: rawptr, aname, uname: string) -> (root: p9.Node, st: vx.Status) {
+	if aname == "crash" {
+		c := child_named(ROOT, "crash")
+		if c == 0 {
+			made := fs_create(ctx, id_of(ROOT), "crash", p9.DMDIR | 0o777, p9.OREAD) or_return
+			c = u32(made)
+		}
+		return id_of(c), .Ok
+	}
+	if aname != "user" {
+		return fs_attach(ctx, aname)
+	}
+	user := uname != "" ? uname : "none"
+	if len(user) >= MAX_NAME {
+		return 0, .Err_Range
+	}
+	free_slot := u32(0)
+	for s in ROOT + 1 ..< MAX_NODES {
+		n := &nodes[s]
+		if n.used && n.top && string(n.name[:]) == user {
+			return id_of(s), .Ok
+		}
+		if !n.used && free_slot == 0 {
+			free_slot = s
+		}
+	}
+	if free_slot == 0 {
+		return 0, .Err_No_Memory
+	}
+	n := &nodes[free_slot]
+	n^ = {
+		used  = true,
+		dir   = true,
+		top   = true,
+		gen   = n.gen,
+		mode  = 0o700,
+		mtime = now_seconds(),
+	}
+	_ = append(&n.name, user) // it fits: checked above
+	return id_of(free_slot), .Ok
+}
+
 @(private="file")
 fs_walk :: proc "contextless" (ctx: rawptr, dir: p9.Node, name: string) -> (child: p9.Node, st: vx.Status) {
 	d, ds := node_at(dir)
@@ -196,12 +250,15 @@ fs_parent :: proc "contextless" (ctx: rawptr, id: p9.Node) -> (parent: p9.Node, 
 	if n == nil || n.removed {
 		return 0, .Err_Not_Found
 	}
-	return id_of(n.parent != 0 ? n.parent : ROOT), .Ok
+	if n.parent == 0 {
+		return id, .Ok // a tree's root is its own parent
+	}
+	return id_of(n.parent), .Ok
 }
 
 @(private="file")
 fs_stat :: proc "contextless" (ctx: rawptr, id: p9.Node, out: ^p9.Stat) -> vx.Status {
-	n, s := node_at(id)
+	n, _ := node_at(id)
 	if n == nil {
 		return .Err_Not_Found
 	}
@@ -213,7 +270,7 @@ fs_stat :: proc "contextless" (ctx: rawptr, id: p9.Node, out: ^p9.Stat) -> vx.St
 		atime  = n.atime,
 		mtime  = n.mtime,
 		length = n.dir ? 0 : n.size,
-		name   = s == ROOT ? "/" : string(n.name[:]),
+		name   = n.top ? "/" : string(n.name[:]),
 		uid    = "posix",
 		gid    = "posix",
 		muid   = "posix",
@@ -351,7 +408,7 @@ fs_remove :: proc "contextless" (ctx: rawptr, id: p9.Node) -> vx.Status {
 	if n == nil || n.removed {
 		return .Err_Not_Found
 	}
-	if s == ROOT {
+	if n.top {
 		return .Err_Access
 	}
 	if n.dir && n.first_child != 0 {
@@ -412,7 +469,7 @@ fs_rename :: proc "contextless" (ctx: rawptr, olddir: p9.Node, oldname: string, 
 	if s == 0 {
 		return .Err_Not_Found
 	}
-	for up := to; up != 0; up = up == ROOT ? 0 : nodes[up].parent {
+	for up := to; up != 0; up = nodes[up].top ? 0 : nodes[up].parent {
 		if up == s {
 			return .Err_Invalid // into itself
 		}
@@ -468,8 +525,9 @@ fs_readlink :: proc "contextless" (ctx: rawptr, id: p9.Node) -> (target: string,
 // Not file-private: tests/host drives its Fs on the host.
 server := p9ring.Server {
 	fs = {
-		attach   = fs_attach,
-		walk     = fs_walk,
+		attach    = fs_attach,
+		attach_as = fs_attach_as,
+		walk      = fs_walk,
 		parent   = fs_parent,
 		stat     = fs_stat,
 		open     = fs_open,
@@ -495,7 +553,7 @@ vx_main :: proc() -> int {
 		rt.print("tmpfs: no listen channel\n")
 		return -1 // upstream's exit string: "no listen channel"
 	}
-	nodes[ROOT] = {used = true, dir = true, mode = 0o777, mtime = now_seconds()}
+	nodes[ROOT] = {used = true, dir = true, top = true, mode = 0o777, mtime = now_seconds()}
 	rt.print("tmpfs: serving /srv/tmpfs\n")
 	return int(p9ring.serve(&server))
 }

@@ -31,6 +31,8 @@ check objects b2 `{ls /dist/store}
 check user vectra $user
 echo mine > /home/f # home is vectra's, 0755: none could not write it
 check home-write mine `{cat /home/f}
+echo t > /tmp/on-disk # /tmp is $home/tmp on an installed system (6e1c2)
+check tmp-home t `{cat /home/tmp/on-disk}
 check when-kept 1 `{/boot/bin/ns | grep -cE ' /home( |$)'}
 check when-left 0 `{/boot/bin/ns | grep -cE ' /cfg( |$)'}
 

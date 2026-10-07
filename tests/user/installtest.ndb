@@ -18,6 +18,7 @@ user=$vx.user
 arg=/boot/tests/installtest.rc
 ns=posix
 mount=/home srv=fsd aname=home flags=c when=vx.system
+bind=/tmp new=/home/tmp flags=c when=vx.system
 mount=/cfg srv=fsd aname=cfg flags=c when=vx.live
 mount=/dist srv=dist
 mount=/n srv=fsd aname=store

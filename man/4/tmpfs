@@ -11,12 +11,21 @@ tmpfs
 # DESCRIPTION
 
 `tmpfs` serves a file system held in its own memory, posted as `/srv/tmpfs`.
-The POSIX template (`/lib/ns/posix`, see namespace(6)) mounts it on `/tmp`, allowing creation, and the console shell's manifest mounts it there too; procfs(4) writes crash directories to it.
+The POSIX template (`/lib/ns/posix`, see namespace(6)) and the console shell's manifest mount the user's own tree on `/tmp`, allowing creation, and its crash directory on `/tmp/crash`; procfs(4) writes crash directories there.
 svcd(8) starts it from the manifest `boot/svc/tmpfs.ndb`, and does not restart it: what it holds lives only in it, and is lost when it exits.
 It takes no arguments.
 
 Files and directories are made, written, truncated and removed as 9P has them, and renamed, changed and linked symbolically with the posix and xattr extensions (`Trenameat`, `Tsetattr`, `Tsymlink`, `Treadlink`).
-The tree is attached with an empty aname; any other is refused.
+It serves trees, by the attach's aname (M6 step 6e1c2):
+
+: `""`
+  The shared tree, which every user reaches.
+: `user`
+  The attaching user's own tree, made at its first attach: a user's `/tmp` where it has no home on disk, as 9front's `/usr/$user/tmp`. Another user's is not reached by any aname.
+: `crash`
+  The shared tree's `/crash`, made if it is not there, where procfs(4) saves crash directories (05 §5): mounted on `/tmp/crash` inside the user's own `/tmp`, so it means what it did.
+
+Any other aname is refused. The trees share the server's limits.
 
 A file's bytes are in a mapping of its own, which doubles as the file grows, from 4 KiB.
 A write past the end leaves a hole that reads as zeros, and so does a truncation that grows a file.
@@ -45,7 +54,7 @@ service=tmpfs program=/boot/bin/tmpfs post=tmpfs console entropy
 and the console shell's mount of it:
 
 ```ndb
-mount=/tmp srv=tmpfs
+mount=/tmp srv=tmpfs aname=user
 ```
 
 # FILES

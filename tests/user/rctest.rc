@@ -210,6 +210,16 @@ check env-rfork-E gone `{@{rfork E; if(test -e /env/fromchild) echo there; if no
 rm /env/fromchild
 check env-rm gone `{if(test -e /env/fromchild) echo there; if not echo gone}
 
+# /tmp is the user's own (6e1c2): tmpfs's tree for this user, apart from the
+# shared one.
+echo mine > /tmp/tmp-own
+mkdir $dir/shared
+mount -c /srv/tmpfs $dir/shared
+check tmp-own absent `{if(test -e $dir/shared/tmp-own) echo there; if not echo absent}
+check tmp-user 1 `{/boot/bin/ns | grep -c ' /tmp user$'}
+unmount $dir/shared
+rm /tmp/tmp-own
+
 # rfork (6d7b3), as 9front's: in children, so this shell keeps its own.
 check rfork-usage 'rfork usage' `{rfork x >[2] /dev/null; echo $status}
 mkdir $dir/nsa $dir/nsb

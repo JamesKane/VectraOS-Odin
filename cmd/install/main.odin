@@ -379,7 +379,11 @@ make_users :: proc "contextless" () -> vx.Status {
 	fs.write(&vol, &br.t, &f, 0, transmute([]u8)users, now, 0) or_return
 	br = fs.branch_open(&vol, "home") or_return
 	root = fs.root(&vol, &br.t) or_return
-	return fs.setattr(&vol, &br.t, &root, {valid = {.Uid, .Gid}, uid = 1000, gid = 1000}, now)
+	fs.setattr(&vol, &br.t, &root, {valid = {.Uid, .Gid}, uid = 1000, gid = 1000}, now) or_return
+	// tmp, the first user's /tmp on disk (upstream's M6 step 6e1c2), as
+	// 9front's /usr/$user/tmp.
+	_ = fs.create(&vol, &br.t, &root, "tmp", fs.DMDIR | 0o700, 1000, 1000, now) or_return
+	return .Ok
 }
 
 // --- Power ---
