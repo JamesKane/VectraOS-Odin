@@ -18,7 +18,7 @@ expect="install: done: "
 reboot
 expect="svcd: started sys-fsd"
 expect="distd: 1 releases for "
-expect="installtest: 11 checks, 0 failed"
+expect="installtest: 12 checks, 0 failed"
 fail="vx: panic"
 fail="install: FAILED"
 fail="installtest: FAILED"

@@ -22,4 +22,5 @@ env=CTEST_CRASH=/n/crash
 env=CTEST_SELF=/boot/bin/ctestfsd
 env=CTEST_FILE=/tmp/hello.txt
 env=CTEST_OWNERS=kept
+env=CTEST_UID=1000
 env=CTEST_MAPPED=shared

@@ -583,6 +583,16 @@ vx_main :: proc() -> int {
 	check(image_size > 0)
 	buf: [512]u8
 
+	// Identity (upstream's 6e1c3): its pid, the path svcd ran it from, its
+	// user, the machine's name, and its environment.
+	host: [64]u8
+	check(rt.pid() == me)
+	check(rt.exe_path() == "/boot/bin/proctest")
+	check(rt.user_name() == "none")
+	check(procns.hostname(&space, host[:]) == "vectra")
+	_, has_var := rt.getenv("NO_SUCH_VARIABLE")
+	check(!has_var)
+
 	// Its own entry: pid = its task id; its parent is svcd.
 	t := read_text(me, "status", buf[:])
 	check(len(t) > 0 && has(t, "name=proctest") && has(t, "pid="))

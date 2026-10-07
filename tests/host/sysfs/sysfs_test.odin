@@ -82,7 +82,7 @@ test_sysfs :: proc(t: ^testing.T) {
 	testing.expect_value(t, e, vx.Status.Ok)
 
 	// The tree, and its stats.
-	testing.expect_value(t, p9test.list(&c, root, ""), "clock")
+	testing.expect_value(t, p9test.list(&c, root, ""), "clock name")
 	testing.expect_value(t, p9test.list(&c, root, "clock"), "info now")
 	Want :: struct {
 		path, name: string,
@@ -95,6 +95,7 @@ test_sysfs :: proc(t: ^testing.T) {
 			{"clock/info", "info", 0o444, {type = p9.QTFILE, path = 3}},
 			{"clock/now", "now", 0o444, {type = p9.QTFILE, path = 4}},
 			{"clock/info/..", "clock", p9.DMDIR | 0o555, {type = p9.QTDIR, path = 2}},
+			{"name", "name", 0o444, {type = p9.QTFILE, path = 5}},
 		}) {
 		st: p9.Stat
 		testing.expectf(t, p9test.stat_of(&c, root, w.path, &st, &names) == .Ok, "stat %s", w.path)
@@ -142,4 +143,23 @@ test_sysfs :: proc(t: ^testing.T) {
 	utc_offset = 1_767_225_600_000_000_000
 	testing.expect_value(t, read_file(&c, root, "clock/now", buf[:]), "monotonic=1234567890 realtime=1767225601234567890\n")
 	utc_offset = 0
+
+	// /sys/name (upstream's 6e1c3): the command line's vx.host=, else vectra,
+	// with no newline; a vx.host= with no value, or one inside another word,
+	// is passed over.
+	Name :: struct {
+		cmdline, want: string,
+	}
+	for w in ([]Name {
+			{"", "vectra"},
+			{"vx.user=vectra vx.host=testhost", "testhost"},
+			{"vx.host= vx.host=late", "late"},
+			{"novx.host=no", "vectra"},
+		}) {
+		rt.spawn.cmdline = w.cmdline
+		testing.expect_value(t, read_file(&c, root, "name", buf[:]), w.want)
+	}
+	rt.spawn.cmdline = "vx.host=testhost"
+	testing.expect_value(t, read_file(&c, root, "name", buf[:4], 4), "host")
+	rt.spawn.cmdline = ""
 }

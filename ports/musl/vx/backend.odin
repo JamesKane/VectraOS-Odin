@@ -269,7 +269,13 @@ dispatch :: proc "contextless" (n, a1, a2, a3, a4, a5, a6: int) -> int {
 	case .pipe2:
 		return fd_pipe2((^[2]i32)(ptr(a1)), oflags(a2))
 	case .getuid, .geteuid, .getgid, .getegid:
-		return 0
+		return proc_uid()
+	case .setuid, .setgid:
+		return proc_setid(i64(i32(a1)), -1, -1)
+	case .setreuid, .setregid:
+		return proc_setid(i64(i32(a1)), i64(i32(a2)), -1)
+	case .setresuid, .setresgid:
+		return proc_setid(i64(i32(a1)), i64(i32(a2)), i64(i32(a3)))
 	case .uname:
 		return proc_uname((^linux.Utsname)(ptr(a1)))
 	case .getrandom:

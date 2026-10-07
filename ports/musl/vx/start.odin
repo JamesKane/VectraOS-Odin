@@ -7,7 +7,11 @@ import "vx:drbg"
 import "vx:memory"
 import "vx:ndb"
 import "vx:note"
+import "vx:ns"
+import "vx:p9"
+import "vx:procns"
 import "vx:rt"
+import "vx:users"
 
 // The process: its start from the spawn message, its exit, what it is, and
 // time.
@@ -172,12 +176,64 @@ put_field :: proc "contextless" (field: ^[65]u8, s: string) {
 	copy(field[:], s)
 }
 
+// The process's user id (upstream's 6e1c3): its user's in users(6), from
+// /adm/users where the namespace has it; else adm 0, none 1, and any other
+// 1000, the id install gives the first user. Each user is its own group, as
+// in Plan 9, so the gid is the same. Looked up once.
+@(private="file")
+uid_known: bool
+@(private="file")
+uid: int
+@(private="file")
+users_text: [16 * 1024]u8
+@(private="file")
+users_table, users_next: users.Table
+
+proc_uid :: proc "contextless" () -> int {
+	if uid_known {
+		return uid
+	}
+	uid_known = true
+	name := rt.user_name()
+	uid = 1000
+	if name == "adm" {
+		uid = 0
+	}
+	if name == "none" {
+		uid = 1
+	}
+	f: ns.File
+	if ns.open(namespace(), "/adm/users", p9.OREAD, &f) == .Ok {
+		n, st := ns.read_all(&f, users_text[:])
+		ns.close(&f)
+		if st == .Ok && users.parse(&users_table, string(users_text[:n]), &users_next) {
+			i := users.named(&users_table, name)
+			if i != users_table.none || name == "none" {
+				uid = int(users_table.users[i].id)
+			}
+		}
+	}
+	return uid
+}
+
+// setuid and its kin: to the ids the process has, a no-op; to any other, EPERM.
+proc_setid :: proc "contextless" (a, b, c: i64) -> int {
+	me := i64(proc_uid())
+	for id in ([3]i64{a, b, c}) {
+		if id != -1 && id != me {
+			return fail(.EPERM)
+		}
+	}
+	return 0
+}
+
 proc_uname :: proc "contextless" (u: ^linux.Utsname) -> int {
 	u^ = {}
 	put_field(&u.sysname, "VectraOS")
-	put_field(&u.nodename, "vectra")
+	host: [64]u8
+	put_field(&u.nodename, procns.hostname(namespace(), host[:len(u.nodename) - 1])) // /sys/name (6e1c3)
 	put_field(&u.release, "0.1.0")
-	put_field(&u.version, "M4")
+	put_field(&u.version, "M6")
 	put_field(&u.machine, linux.MACHINE)
 	return 0
 }

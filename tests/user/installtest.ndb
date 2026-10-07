@@ -12,6 +12,8 @@ arg=-y
 arg=-p
 arg=-e
 arg=64
+arg=-n
+arg=testhost
 
 service=installtest program=/boot/bin/rc console when=vx.system
 user=$vx.user

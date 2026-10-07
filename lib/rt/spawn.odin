@@ -100,6 +100,7 @@ elf_load :: proc "contextless" (task: vx.Handle, image: []u8) -> (entry: u64, st
 
 Spawn_Args :: struct {
 	name:         string, // the task's name and the spawn= record
+	path:         string, // the program's path, the exe= record (exe_path, R16), if known
 	image:        []u8,
 	handles:      []vx.Handle, // given to the child: they leave the caller, whatever happens
 	handle_names: []string, // at most CHANNEL_MAX_HANDLES - 1; "self" is added
@@ -227,6 +228,10 @@ spawn_elf :: proc "contextless" (a: ^Spawn_Args) -> (task: vx.Handle, st: vx.Sta
 	w := ndb.Writer{buf = spawn_out.records[:]}
 	ndb.put(&w, "spawn", a.name)
 	_ = ndb.end(&w)
+	if len(a.path) > 0 {
+		ndb.put(&w, "exe", a.path)
+		_ = ndb.end(&w)
+	}
 	if user := len(a.user) > 0 ? a.user : spawn.user; len(user) > 0 {
 		ndb.put(&w, "user", user)
 		_ = ndb.end(&w)

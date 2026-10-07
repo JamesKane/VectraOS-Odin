@@ -1012,6 +1012,20 @@ conn :: proc "contextless" (i: int) -> ^rt.Conn {
 	return &conns[i]
 }
 
+// The machine's name (upstream's M6 step 6e1c3, R17): /sys/name, as
+// 9front's /dev/sysname, read into buf; or vectra where there is no /sys.
+hostname :: proc "contextless" (space: ^ns.Namespace, buf: []u8) -> string {
+	f: ns.File
+	if ns.open(space, "/sys/name", p9.OREAD, &f) == .Ok {
+		n, st := ns.read_all(&f, buf)
+		ns.close(&f)
+		if st == .Ok && n > 0 {
+			return string(buf[:n])
+		}
+	}
+	return string(buf[:copy(buf, "vectra")])
+}
+
 // Changes the current directory to path (ADR-0017): resolved, walked and
 // found to be a directory, else refused (Err_Invalid if it is not one) and
 // left as it was. libvx's (upstream's 6e1), until libvx.

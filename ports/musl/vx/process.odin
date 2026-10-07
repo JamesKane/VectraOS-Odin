@@ -603,6 +603,7 @@ spawn_image :: proc "contextless" (path: string, search: bool, argv, envp: [^]cs
 	if r == 0 {
 		a := rt.Spawn_Args {
 			name         = base,
+			path         = path,
 			image        = ([^]u8)(uintptr(image))[:st.size],
 			handles      = handles[:count],
 			handle_names = names[:count],

@@ -10,6 +10,10 @@
 //                     1970, once a clock driver has set the kernel's wall
 //                     clock (upstream ADR-0031); from boot until then
 //
+//   /sys/name         the machine's name, as 9front's /dev/sysname: the kernel
+//                     command line's vx.host= (which install writes), else
+//                     vectra; no newline (upstream's M6 step 6e1c3)
+//
 // cpu/, mem/, power/ and the rest of upstream 02 §5.1 come with what
 // measures them.
 package sysfs
@@ -19,6 +23,7 @@ import "vx:ndb"
 import "vx:p9"
 import "vx:p9ring"
 import "vx:rt"
+import "vx:str"
 
 @(private="file")
 File :: enum u64 {
@@ -27,6 +32,7 @@ File :: enum u64 {
 	Clock,
 	Info,
 	Now,
+	Name,
 }
 
 @(private="file")
@@ -36,6 +42,7 @@ NAMES := [File]string {
 	.Clock = "clock",
 	.Info  = "info",
 	.Now   = "now",
+	.Name  = "name",
 }
 
 @(private="file")
@@ -45,6 +52,19 @@ PARENT := [File]File {
 	.Clock = .Root,
 	.Info  = .Clock,
 	.Now   = .Clock,
+	.Name  = .Root,
+}
+
+// The command line's vx.host=, else vectra.
+@(private="file")
+host_name :: proc "contextless" () -> string {
+	line := rt.spawn.cmdline
+	for word in str.split_iterator(&line, ' ') {
+		if len(word) > 8 && str.has_prefix(word, "vx.host=") {
+			return word[8:]
+		}
+	}
+	return "vectra"
 }
 
 // clock_read(&info)'s answer: the counter's frequency, what kind it is, and
@@ -57,7 +77,7 @@ clock_info_read :: proc "contextless" (info: ^vx.Clock_Info) -> (st: vx.Status) 
 
 @(private="file")
 file_of :: proc "contextless" (n: p9.Node) -> File {
-	return n <= p9.Node(File.Now) ? File(n) : .None
+	return n <= p9.Node(File.Name) ? File(n) : .None
 }
 
 @(private="file")
@@ -75,7 +95,7 @@ fs_attach :: proc "contextless" (ctx: rawptr, aname: string) -> (root: p9.Node, 
 
 @(private="file")
 fs_walk :: proc "contextless" (ctx: rawptr, dir: p9.Node, name: string) -> (child: p9.Node, st: vx.Status) {
-	for f in File.Clock ..= File.Now {
+	for f in File.Clock ..= File.Name {
 		if PARENT[f] == file_of(dir) && file_of(dir) != .None && NAMES[f] == name {
 			return p9.Node(f), .Ok
 		}
@@ -133,6 +153,8 @@ fs_read :: proc "contextless" (ctx: rawptr, n: p9.Node, offset: u64, buf: []u8) 
 		ndb.put_u64(&w, "monotonic", u64(now))
 		ndb.put_u64(&w, "realtime", u64(rt.clock_utc()))
 		_ = ndb.end(&w)
+	} else if f == .Name {
+		str.write_string(&w, host_name()[:min(len(host_name()), len(text))])
 	} else if is_dir(f) {
 		return 0, .Err_Invalid // read as a directory, through readdir
 	}
@@ -146,7 +168,7 @@ fs_read :: proc "contextless" (ctx: rawptr, n: p9.Node, offset: u64, buf: []u8) 
 @(private="file")
 fs_readdir :: proc "contextless" (ctx: rawptr, dir: p9.Node, index: u32) -> (child: p9.Node, st: vx.Status) {
 	seen := u32(0)
-	for f in File.Clock ..= File.Now {
+	for f in File.Clock ..= File.Name {
 		if PARENT[f] != file_of(dir) || file_of(dir) == .None {
 			continue
 		}

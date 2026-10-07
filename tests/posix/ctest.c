@@ -1209,6 +1209,21 @@ static bool faults(volatile char *p, bool write) {
   return signals[SIGSEGV] == before + 1 && fault_address == (void *)p;
 }
 
+// Identity (M6 step 6e1c3): the user's id in users(6) (none 1, the first
+// user 1000: CTEST_UID), its own group; setuid only to itself; uname's node
+// name from /sys/name.
+static void test_identity(void) {
+  const char *want = getenv("CTEST_UID");
+  long uid = want ? strtol(want, nullptr, 10) : 1;
+  CHECK(getuid() == (uid_t)uid && geteuid() == (uid_t)uid && getgid() == (gid_t)uid &&
+        getegid() == (gid_t)uid);
+  CHECK(setuid(getuid()) == 0 && setgid(getgid()) == 0);
+  errno = 0;
+  CHECK(setuid(0) == -1 && errno == EPERM);
+  struct utsname u;
+  CHECK(uname(&u) == 0 && strcmp(u.nodename, "vectra") == 0 && strcmp(u.version, "M6") == 0);
+}
+
 // /env (M6 step 6e1c1, ADR-0044): this process's environment group, filled
 // from what it was given, written, and shared with a spawned child and a
 // forked one, as 9front's Egrp.
@@ -2185,6 +2200,7 @@ int main(int argc, char **argv) {
   test_cpu_time();
   test_mapping_kinds();
   test_env_group();
+  test_identity();
   test_mmap();
   test_terminals();
   test_poll();

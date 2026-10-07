@@ -1,0 +1,38 @@
+page=identity sect=2 summary="who and where a program is: its pid, path, user, environment and machine"
+    names=vx_pid,vx_exe_path,vx_user_name,vx_getenv,vx_hostname
+    src=lib/vx-rt/base.c,lib/vx-rt/spawn.c,lib/vx-ns/spawn.c,servers/sysfs/sysfs.c
+    keys=pid,path,executable,user,environment,getenv,hostname,uname,sysname,identity
+
+# SYNOPSIS
+
+```c
+uint64_t vx_pid(void);
+vx_str vx_exe_path(void);
+vx_str vx_user_name(void);
+vx_str vx_getenv(vx_str name);
+size_t vx_hostname(vx_ns *ns, char *buf, size_t cap);
+```
+
+# DESCRIPTION
+
+These are `libvx`'s (M6 step 6e1c3, os-requirements R16 and R17), in vx-rt and vx-ns until `libvx` exists.
+
+`vx_pid` is the process's id: its task's, which procfs(4) names it by.
+
+`vx_exe_path` is the program's path as its spawner found it, the spawn message's `exe=` record: svcd(8) gives a service its manifest's `program=`, rc(1) the path it found, and the POSIX library the one `execve` or `posix_spawn` was given.
+It is empty when the spawner did not say.
+
+`vx_user_name` is who the process runs as, the spawn message's `user=`, or `none`.
+
+`vx_getenv` is the value of <name> in the environment the process was given, its `env=` records, or `{nullptr, 0}` if it has none.
+The whole environment is `vx_spawn.envs`, `vx_spawn.envc` strings of the form <name>`=`<value>; `/env`, envd(4)'s, is the store the process shares with its children beside it.
+
+`vx_hostname` writes the machine's name into <buf> and returns its length: `/sys/name`, which sysfs(4) serves from the kernel command line's `vx.host=` (install(8)'s `-n`), as 9front's `/dev/sysname`; `vectra` where the namespace has no `/sys`.
+
+# SEE ALSO
+
+envd(4), sysfs(4), install(8), procfs(4)
+
+# BUGS
+
+`vx_exe_path` is the path as it was found, not one resolved again: after a `bind` over it, or a rename, it names whatever is there now.

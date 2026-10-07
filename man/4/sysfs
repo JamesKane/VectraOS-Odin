@@ -21,6 +21,8 @@ Every file is read-only and owned by `sys`, and is made afresh by each read from
   On x86_64 it is `tsc.hz=` the counter's frequency, the flags `tsc.invariant` if the counter runs at a constant rate and `tsc.user` if user code may read it, and `source=tsc`.
   On aarch64 the keys are `cntfrq.hz`, `cntvct.invariant`, `cntvct.user` and `source=cntvct`.
   A program that times itself with `rdtsc` or `cntvct_el0`, as `vx_cycles` and procfs(4)'s profiling zones do, takes the frequency from here rather than calibrating.
+: `/sys/name`
+  The machine's name, as 9front's `/dev/sysname`, with no newline: the kernel command line's `vx.host=`, which install(8) writes, else `vectra` (M6 step 6e1c3). `uname`'s node name, and identity(2)'s `vx_hostname`.
 : `/sys/clock/now`
   `monotonic=` the monotonic clock and `realtime=` the wall clock, both in nanoseconds.
   `realtime` is UTC, counted from 1970, once a clock driver has set the kernel's wall clock (ADR-0031); until then it is the monotonic clock.

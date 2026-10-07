@@ -1016,9 +1016,11 @@ spawn :: proc "contextless" (argv: ^rc.Word, child: bool, io: [rc.FDS]vx.Handle,
 			count += 1
 		}
 	}
+	path := base // the program's whole path, its exe= record
 	base = base[str.last_index_byte(base, '/') + 1:]
 	a := rt.Spawn_Args {
 		name         = base[:utf.cut(base, MAX_TASK_NAME)], // whole runes (ADR-0013)
+		path         = path,
 		image        = image[:size],
 		handles      = handles[:count],
 		handle_names = names[:count],

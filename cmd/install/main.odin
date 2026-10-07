@@ -353,6 +353,9 @@ copy_objects :: proc "contextless" () -> vx.Status {
 // The first user (-u; vectra unless told otherwise): the system's, who owns
 // home and leads adm, and the console shell's (vx.user, upstream's 6d8).
 first_user := "vectra"
+// The machine's name (-n; vectra unless told otherwise): vx.host=, which
+// sysfs serves as /sys/name (upstream's 6e1c3).
+host_name := "vectra"
 
 // Whether a name can be a user(6)'s: 1 to 31 bytes, none of its separators,
 // and neither of the users the system has already.
@@ -435,6 +438,12 @@ vx_main :: proc() -> int {
 			yes = true
 		case args[i] == "-p":
 			off = true
+		case args[i] == "-n" && i + 1 < len(args):
+			i += 1
+			host_name = args[i]
+			if !user_name_ok(host_name) {
+				fail("not a name for the machine", .Err_Invalid) // a word, as a user's
+			}
 		case args[i] == "-u" && i + 1 < len(args):
 			i += 1
 			first_user = args[i]
@@ -594,7 +603,7 @@ vx_main :: proc() -> int {
 	_ = append(&sl.tree, string(x[:]))
 	line := rt.spawn.cmdline
 	for word in str.split_iterator(&line, ' ') {
-		dropped := word == "vx.live" || (len(word) > 8 && str.has_prefix(word, "vx.user="))
+		dropped := word == "vx.live" || (len(word) > 8 && (str.has_prefix(word, "vx.user=") || str.has_prefix(word, "vx.host=")))
 		if word != "" && !dropped && len(table.cmdline) + len(word) + 2 < slots.CMDLINE_MAX + 1 {
 			if len(table.cmdline) > 0 {
 				_ = append(&table.cmdline, ' ')
@@ -609,6 +618,12 @@ vx_main :: proc() -> int {
 		}
 		_ = append(&table.cmdline, "vx.user=")
 		_ = append(&table.cmdline, first_user)
+	}
+	// And the machine's name, as /sys/name (6e1c3).
+	if len(table.cmdline) + 9 + len(host_name) + 1 < slots.CMDLINE_MAX + 1 {
+		_ = append(&table.cmdline, ' ')
+		_ = append(&table.cmdline, "vx.host=")
+		_ = append(&table.cmdline, host_name)
 	}
 	w := ndb.Writer{buf = table_text[:]}
 	if !slots.print(&table, &w) {

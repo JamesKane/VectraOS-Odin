@@ -5,7 +5,7 @@ page=install sect=8 summary="put the system on a disk from an install medium"
 # SYNOPSIS
 
 ```usage
-install [-y] [-p] [-e mib] [-u user]
+install [-y] [-p] [-e mib] [-u user] [-n name]
 ```
 
 # DESCRIPTION
@@ -29,6 +29,8 @@ No UEFI boot entry is made: the firmware boots Limine from the fallback path.
   Power the machine off when done, through `/srv/acpi` (`connect=acpi`).
 : `-e` <mib>
   The ESP's size, in MiB.
+: `-n` <name>
+  The machine's name, in place of `vectra`, as `vx.host=` on the slot's command line, which sysfs serves as `/sys/name` (`uname`'s node name): a word, as a user's name is.
 : `-u` <user>
   The first user, in place of `vectra`: up to 31 bytes, no `:`, `,`, `=` or blank, and neither `adm` nor `none`.
 

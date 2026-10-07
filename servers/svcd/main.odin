@@ -494,6 +494,9 @@ start :: proc "contextless" (index: int) -> vx.Status {
 		say("no program ", program, " in the boot image\n")
 		return .Err_Not_Found
 	}
+	// Its path, copied: the reader's values last one record (exe=, upstream's 6e1c3).
+	@(static) exe: [128]u8
+	exe_len := len(program) < len(exe) ? copy(exe[:], program) : 0
 	if ndb.has(&rec, "bootimage") {
 		grant(&g, "bootimage", rt.handle_dup(image_vmo, BOOT_IMAGE_RIGHTS)) or_return
 		ndb.flag(&w, "bootimage")
@@ -620,6 +623,7 @@ start :: proc "contextless" (index: int) -> vx.Status {
 
 	a := rt.Spawn_Args {
 		name         = name_of(s),
+		path         = string(exe[:exe_len]),
 		image        = elf.data,
 		handles      = g.handles[:],
 		handle_names = g.names[:],
