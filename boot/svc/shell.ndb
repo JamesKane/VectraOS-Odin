@@ -25,3 +25,4 @@ mount=/home srv=fsd aname=home flags=c when=vx.system
 mount=/cfg srv=fsd aname=cfg flags=c when=vx.system
 mount=/dist srv=dist when=vx.system
 connect=nsd
+connect=env

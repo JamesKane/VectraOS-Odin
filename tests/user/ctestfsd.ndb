@@ -14,6 +14,7 @@ ns=posix
 mount=/tmp srv=fsd aname=home flags=c
 mount=/n srv=tmpfs flags=c
 connect=nsd
+connect=env
 env=PATH=/bin
 env=HOME=/tmp
 env=TMPDIR=/tmp

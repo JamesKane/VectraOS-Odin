@@ -239,11 +239,17 @@ own_note_group :: proc "contextless" () -> vx.Status {
 	return st
 }
 
+// What updenv (below) last wrote to /env, by the hashes of names and values.
+Env_Seen :: struct {
+	name, value: u64, // FNV-1a hashes; name 0: the slot is free
+}
+env_seen: [1024]Env_Seen
+
 // rfork [fnesFNEm]; without flags, ens. n: a namespace of the shell's own, a
 // copy (it leaves its namespace group); N: a clean one, empty; m: no mounts
-// after; s: a note group of its own; F: its descriptors past 2 closed. e, E
-// and f change nothing: the environment and descriptors are the shell's own
-// already, passed to each child as it is spawned, never shared.
+// after; s: a note group of its own; F: its descriptors past 2 closed; e: an
+// environment group of its own, a copy; E: an empty one (ADR-0022, upstream's
+// ADR-0044). f changes nothing: the descriptors are the shell's own already.
 rfork_builtin :: proc "contextless" (argv: ^rc.Word, n: int) {
 	flags := ""
 	if n == 1 {
@@ -276,6 +282,9 @@ rfork_builtin :: proc "contextless" (argv: ^rc.Word, n: int) {
 	}
 	if st == .Ok && has(flags, 'm') {
 		space.nomount = true // and the children's after (vx:ns, upstream's 6d7c)
+	}
+	if st == .Ok && (has(flags, 'e') || has(flags, 'E')) && procns.env_fork(&space, !has(flags, 'E')) == .Ok && has(flags, 'E') {
+		env_seen = {} // an empty group: every variable written again at the next spawn
 	}
 	if st == .Ok && has(flags, 'F') { // a clean table: none past 2
 		rt.fds_close()
@@ -666,6 +675,45 @@ script_words :: proc "contextless" (w: ^[dynamic; 8]string) {
 	}
 }
 
+// 9front's Updenv (plan9.c), at each spawn: a variable or function whose
+// value changed since the last is written to /env, the shell's environment
+// group (ADR-0022), which its children share. A hash of each one's value is
+// kept, so an unchanged one costs nothing; a table too full writes on.
+
+fnv :: proc "contextless" (s: string) -> u64 {
+	h := u64(0xcbf2_9ce4_8422_2325)
+	for c in transmute([]u8)s {
+		h = (h ~ u64(c)) * 0x100_0000_01b3
+	}
+	return h | 1
+}
+
+// env is NAME=VALUE, eq the '='s place.
+updenv :: proc "contextless" (env: string, eq: int) {
+	nh, vh := fnv(env[:eq]), fnv(env[eq + 1:])
+	at := int(nh % len(env_seen))
+	for probe := 0; probe < 8 && env_seen[at].name != 0 && env_seen[at].name != nh; probe += 1 {
+		at = (at + 1) % len(env_seen)
+	}
+	if env_seen[at].name == nh && env_seen[at].value == vh {
+		return
+	}
+	if eq > 256 {
+		return
+	}
+	path_buf: [8 + 256]u8
+	path := str.join(path_buf[:], "/env/", env[:eq]) or_else ""
+	f: ns.File
+	if ns.create(&space, path, 0o664, {access = .Write, trunc = true}, &f) != .Ok {
+		return // no group
+	}
+	n, wst := ns.write(&f, transmute([]u8)env[eq + 1:])
+	ns.close(&f)
+	if wst == .Ok && n == len(env) - eq - 1 && (env_seen[at].name == 0 || env_seen[at].name == nh) {
+		env_seen[at] = {nh, vh}
+	}
+}
+
 // A variable, exported as rc does: NAME=WORDS, the words of a list separated
 // by \x01; but not $* or $0 and the like, nor names a POSIX program could not
 // read. Too long to pass, it fails the writer: the spawn is refused, not
@@ -701,6 +749,7 @@ export_var :: proc "contextless" (rec: ^ndb.Writer, name: string, val: ^rc.Word)
 		rec.failed = true
 		return false
 	}
+	updenv(str.to_string(&env), len(name))
 	ndb.put(rec, "env", str.to_string(&env))
 	_ = ndb.end(rec)
 	return true
@@ -719,6 +768,7 @@ export_fn :: proc "contextless" (rec: ^ndb.Writer, name, src: string) {
 	str.write_string(&env, name)
 	str.write_byte(&env, ' ')
 	str.write_string(&env, src)
+	updenv(str.to_string(&env), 3 + len(name))
 	ndb.put(rec, "env", str.to_string(&env))
 	_ = ndb.end(rec)
 }

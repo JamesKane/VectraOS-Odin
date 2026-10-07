@@ -43,6 +43,11 @@ MAX_PATH :: 256
 MAX_ENTRIES :: 32
 MAX_MEMBERS :: 8
 MAX_CONNS :: 16 // the POSIX template has 7, and fsd's branches come on top
+// The process's own connection to its environment group (envd, ADR-0022,
+// upstream's ADR-0044), past the namespace's: no mount names it, so a
+// group's table never has it, and /env is the process's, not its namespace
+// group's (9front's Egrp).
+ENV_CONN :: MAX_CONNS
 MAX_SRC :: 64
 MAX_DEPTH :: 64 // names in a path
 
@@ -92,7 +97,7 @@ Entry :: struct {
 
 // All zeroes is an empty namespace of its own.
 Namespace :: struct {
-	conns:    [MAX_CONNS]Conn,
+	conns:    [MAX_CONNS + 1]Conn, // the last, ENV_CONN, the process's /env
 	entries:  [MAX_ENTRIES]Entry,
 	next_seq: u32,
 	// Called when unmount leaves a connection with no members, after its fids
@@ -119,6 +124,11 @@ Namespace :: struct {
 	// m, as 9front's RFNOMNT: the spawn message's nomount record passes it
 	// on; upstream's 6d7c).
 	nomount:  bool,
+	// /env (ADR-0022): its group's root fid on conns[ENV_CONN], attached by
+	// env_attach on first use; false (no envd) leaves /env to the table. Nil:
+	// none (host tests).
+	env_root:   p9.Fid,
+	env_attach: proc "contextless" (ns: ^Namespace) -> bool,
 }
 
 @(private="file")
@@ -355,9 +365,30 @@ walk_on :: proc "contextless" (ns: ^Namespace, conn: u8, fid: p9.Fid, qid: u64, 
 	return jump, false, {}, .Ok
 }
 
+// /env and below, on the process's own environment group (ADR-0022): env
+// true if path is the group's, with the walk's status; false to go on in the
+// table, for a process with no group (no envd).
+@(private="file")
+resolve_env :: proc "contextless" (ns: ^Namespace, path: string) -> (out: At, st: vx.Status, env: bool) {
+	if !str.has_prefix(path, "/env") || (len(path) > 4 && path[4] != '/') || ns.env_attach == nil {
+		return {}, .Ok, false
+	}
+	if ns.conns[ENV_CONN].client == nil && !ns.env_attach(ns) {
+		return {}, .Ok, false
+	}
+	out.fid, st = p9.client_walk(ns.conns[ENV_CONN].client, ns.env_root, path[4:])
+	if st == .Ok {
+		out.conn = ENV_CONN
+	}
+	return out, st, true
+}
+
 // Resolves a cleaned path from the root, crossing mount points by identity.
 @(private="file", require_results)
 resolve :: proc "contextless" (ns: ^Namespace, path: string) -> (out: At, st: vx.Status) {
+	if env_out, env_st, env := resolve_env(ns, path); env {
+		return env_out, env_st
+	}
 	names: [MAX_DEPTH]string
 	n, ok := split(path, &names)
 	e := root_entry(ns)
@@ -681,7 +712,7 @@ unmount_raw :: proc "contextless" (ns: ^Namespace, new, old: string) -> vx.Statu
 	// A connection no member uses any more is let go: no member, mounted or
 	// bound (a bind of something under a mount walks on its connection too,
 	// and outlives the mount: mount; bind /n/x/bin /bin; unmount /n/x).
-	for &c, slot in ns.conns {
+	for &c, slot in ns.conns[:MAX_CONNS] {
 		if c.client == nil || conn_used(ns, u8(slot)) {
 			continue
 		}
@@ -737,7 +768,7 @@ publish_change :: proc "contextless" (ns: ^Namespace, st: vx.Status, new_conn: u
 
 // The slot of connection c, or MAX_CONNS.
 conn_of :: proc "contextless" (ns: ^Namespace, c: ^p9.Client) -> u8 {
-	for &k, i in ns.conns {
+	for &k, i in ns.conns[:MAX_CONNS] {
 		if k.client == c {
 			return u8(i)
 		}

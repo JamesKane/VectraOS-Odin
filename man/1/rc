@@ -275,7 +275,7 @@ A failure prints `rc:`, the command's name and why on the command's standard err
 
 : `rfork` [`fnesFNEm`]
   Changes what the shell shares with the rest of the system, as 9front's (`rfork` alone is `rfork ens`): `n`, a copy of its namespace of its own, leaving its namespace group, so its changes are its own and the group's no longer reach it; `N`, a clean namespace, empty; `m`, no `mount` from here on, the shell's or its children's; `s`, a note group of its own, so a note to the group it was in does not reach it.
-  `e`, `E` and `f` change nothing, as the environment and the descriptors are the shell's own already, given to each child as it starts, and never shared; `F` closes the shell's descriptors past 2.
+  `e`, an environment group of its own, a copy of the one it shared; `E`, an empty one (envd(4)): the children it starts from then on share it, and its variables are written there as it starts them; `f` changes nothing, as the descriptors are the shell's own already; `F` closes the shell's descriptors past 2.
   A failure says `rc: rfork failed` and leaves `$status` `rfork failed`; a flag not one of these prints the usage and leaves `rfork usage`.
 
 @node=environment title="Environment"
@@ -497,7 +497,6 @@ Input that ends inside a construct says `unexpected end of file`.
 # BUGS
 
 There is no `fork`: a child `rc` is given the shell's state by its spawn message, so a variable whose name a POSIX program could not read (not letters, digits and `_`), or one or a function past 32 KiB, does not reach it; and its code is the command's text, so a here document whose lines come after the line that text ends on is not in it: `{cat <<EOF} | wc` fails, `here document never ended`, where a block closed after the document's lines works.
-`rfork E` does not empty the environment children are given, as 9front's does, since there is no shared `/env` to empty: they get the shell's variables still (M6 step 6e1c, which brings `/env`).
 
 A file given to a child `rc`'s programs as a descriptor past 2 that the child was itself given is opened again by its name, at the offset it was at, not shared with the child's (ADR-0040).
 `/fd` is not a directory: `ls /fd` finds nothing, and only `/fd/0` to `/fd/9` open.

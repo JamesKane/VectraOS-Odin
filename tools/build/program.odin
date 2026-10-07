@@ -55,6 +55,7 @@ PROGRAMS := []Program {
 	{name = "tmpfs", dir = "servers/tmpfs", place = .Bootfs},
 	{name = "nullfs", dir = "servers/nullfs", place = .Bootfs},
 	{name = "srvfs", dir = "servers/srvfs", place = .Bootfs},
+	{name = "envd", dir = "servers/envd", place = .Bootfs},
 	{name = "relay", dir = "servers/relay", place = .Bootfs},
 	{name = "sysfs", dir = "servers/sysfs", place = .Bootfs},
 	{name = "ptyd", dir = "servers/ptyd", place = .Bootfs},

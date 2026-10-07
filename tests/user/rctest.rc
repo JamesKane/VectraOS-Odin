@@ -194,6 +194,22 @@ check bg-redirect bgfile `{cat $dir/bgf}
 rc -v -c 'echo x' >[2] $dir/v > /dev/null
 check v-quiet '0 1' `{grep -c 'flag p' $dir/v; grep -c 'echo x' $dir/v}
 
+# /env (6e1c1, ADR-0044): the shell's environment group, which its children
+# share; a variable reaches it at the next spawn (9front's Updenv); rfork e
+# copies the group, rfork E starts an empty one.
+envx=hello
+/boot/bin/true
+check env-var hello `{cat /env/envx}
+check env-native hello `{/boot/bin/cat /env/envx}
+check env-list yes `{if(ls /env | grep -q '^envx$') echo yes; if not echo no}
+rc -c 'echo -n v > /env/fromchild'
+check env-child v `{cat /env/fromchild}
+@{rfork e; echo -n w > /env/fromchild}
+check env-rfork-e v `{cat /env/fromchild}
+check env-rfork-E gone `{@{rfork E; if(test -e /env/fromchild) echo there; if not echo gone}}
+rm /env/fromchild
+check env-rm gone `{if(test -e /env/fromchild) echo there; if not echo gone}
+
 # rfork (6d7b3), as 9front's: in children, so this shell keeps its own.
 check rfork-usage 'rfork usage' `{rfork x >[2] /dev/null; echo $status}
 mkdir $dir/nsa $dir/nsb

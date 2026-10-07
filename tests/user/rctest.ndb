@@ -10,6 +10,7 @@ arg=one
 arg="two words"
 ns=posix
 connect=nsd
+connect=env
 env=PATH=/bin
 env=HOME=/tmp
 env=x"4c4953543d610162"

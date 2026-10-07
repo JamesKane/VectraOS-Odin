@@ -1,0 +1,48 @@
+page=envd sect=4 summary="environment groups: /env, shared by a process and its children"
+    src=servers/envd/envd.c,lib/vx-ns/spawn.c,lib/vx-ns/ns.c
+    keys=env,environment,variables,group,rfork,9front,devenv,egrp
+
+# SYNOPSIS
+
+```usage
+envd
+```
+
+# DESCRIPTION
+
+`envd` serves environment groups, posted as `/srv/env`, as 9front's devenv keeps an environment group for each process group (ADR-0044).
+A group is a directory of variables, each a file whose bytes are its value; `/env/`<name> is a process's variable <name>.
+It is read, listed, written, created and removed as any file: written from the start after an open that truncates, as 9front's `putenv` writes, and created empty if it exists already.
+
+A process reaches its group through a connection of its own, not its namespace: `/env` is the process's, as 9front's `#e` is, so a namespace group (`rfork n`) and an environment group (`rfork e`) are kept apart.
+vx-ns attaches on the first use of a name under `/env`, and when the process first starts a child: to the group its parent named, its `envgroup=` spawn record; or, for a process with none (a service svcd started, or one whose parent's group has gone), to a new group filled from the `env=` records it was given.
+A child shares its parent's group: what one writes there, the others read.
+A forked POSIX child shares it too.
+`rfork e` in rc(1) gives the shell, and the children it starts from then on, a copy; `rfork E` an empty one.
+
+The `env=` records in the spawn message stay a program's environment at start, what `getenv` and musl's `environ` read; `/env` is the shared store beside them.
+rc(1) writes each of its variables and functions that changed since its last spawn to `/env` as it starts a program, as 9front's rc does with `Updenv`.
+
+A group's name is a token of 64 random bits, the root's qid path, drawn from the entropy its manifest gives it: knowing it is the authority to reach the group, as holding a handle is.
+A group goes when its last fid does.
+There are no permissions: whoever holds the token holds the group.
+
+A manifest gives a service `/env` with `connect=env`; each parent passes the connector on to its children (`srv:env`).
+
+# FILES
+
+: `/srv/env`
+  The post, made by svcd from `boot/svc/env.ndb`.
+: `/env`
+  The process's group.
+
+# SEE ALSO
+
+rc(1), namespace(6), svcd(8); 9front's devenv, `sys/src/9/port/devenv.c`, and ADR-0044 in the repository
+
+# BUGS
+
+A group holds at most 1024 variables among all groups, each up to 1 MiB, and `envd` 32 MiB of values in all; there are at most 128 groups.
+A child whose parent exits before the child first touches `/env` finds the group gone, and gets a new one filled from its `env=` records.
+rc(1) writes a variable to `/env` only when it starts a program, not as it is assigned, and does not remove one it deletes.
+`envd` is restarted if it exits, but the groups are gone with it.

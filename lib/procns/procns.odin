@@ -469,7 +469,7 @@ group_make :: proc "contextless" (space: ^ns.Namespace) -> vx.Status {
 	}
 	give: [dynamic; ns.MAX_CONNS]vx.Handle
 	names := str.Buf{buf = make_names[:]}
-	for &c in space.conns {
+	for &c in space.conns[:ns.MAX_CONNS] {
 		if c.client == nil || c.connector == vx.HANDLE_NONE {
 			continue
 		}
@@ -626,6 +626,145 @@ fd_open :: proc "contextless" (space: ^ns.Namespace, path: string, mode: p9.Open
 	return .Ok
 }
 
+// --- /env (ADR-0022, upstream's ADR-0044) ---
+//
+// The process's environment group, on envd, through a connection of its
+// own: the group its parent named (envgroup=TOKEN), or after a fork the
+// parent's, or else a new one filled from the spawn message's env= records.
+// Attached on first use: a process that never touches /env and starts no
+// child never connects.
+
+@(private="file")
+Env :: struct {
+	connector: vx.Handle, // "srv:env", kept for children
+	conn:      rt.Conn,
+	token:     u64, // its group's (the root's qid path); 0 before the first attach
+	failed:    bool, // no envd, or it refused: /env is the namespace table's
+}
+
+@(private="file")
+env: Env
+
+// A token as envd names a group: 16 hex digits.
+@(private="file")
+env_hex :: proc "contextless" (v: u64, out: ^[16]u8) -> string {
+	digits := "0123456789abcdef"
+	for i in 0 ..< 16 {
+		out[i] = digits[(v >> (4 * uint(15 - i))) & 15]
+	}
+	return string(out[:])
+}
+
+// Attaches aname on the env connection: the root fid, and the group's token.
+@(private="file", require_results)
+env_attach_as :: proc "contextless" (aname: string) -> (root: p9.Fid, token: u64, st: vx.Status) {
+	q: p9.Qid
+	root, q, st = p9.client_attach_qid(&env.conn.c, aname)
+	return root, q.path, st
+}
+
+// A new group's variables: this process's environment as it was given.
+@(private="file")
+env_seed :: proc "contextless" (root: p9.Fid) {
+	for e in rt.spawn.envs {
+		eq := str.index_byte(e, '=')
+		if eq <= 0 {
+			continue
+		}
+		fid, st := p9.client_walk(&env.conn.c, root, "")
+		if st != .Ok {
+			return
+		}
+		if p9.client_create(&env.conn.c, fid, e[:eq], 0o664, p9.OWRITE) == .Ok {
+			_, _ = p9.client_write(&env.conn.c, fid, 0, transmute([]u8)e[eq + 1:])
+		}
+		_ = p9.client_clunk(&env.conn.c, fid)
+	}
+}
+
+// ns.Namespace's env_attach: the process's group, attached the first time.
+@(private="file")
+env_attach :: proc "contextless" (space: ^ns.Namespace) -> bool {
+	if space.conns[ns.ENV_CONN].client != nil {
+		return true
+	}
+	if env.failed {
+		return false
+	}
+	if env.connector == vx.HANDLE_NONE {
+		env.connector = rt.spawn_take("srv:env")
+	}
+	if env.connector == vx.HANDLE_NONE || rt.p9_connect(env.connector, &env.conn) != .Ok {
+		env.failed = true
+		return false
+	}
+	hex: [16]u8
+	name := ""
+	rec: ndb.Record
+	if env.token != 0 { // after a fork: the parent's group, as 9front's fork shares its Egrp
+		name = env_hex(env.token, &hex)
+	} else if rt.spawn_record("envgroup", &rec) {
+		if g, _ := ndb.get(&rec, "envgroup"); len(g) == 16 {
+			name = g
+		}
+	}
+	root: p9.Fid
+	st := vx.Status.Err_Not_Found
+	if name != "" {
+		root, env.token, st = env_attach_as(name)
+	}
+	if st != .Ok { // none named, or its last holder is gone: a new one, from what this process was given
+		root, env.token, st = env_attach_as("new")
+		if st == .Ok {
+			env_seed(root)
+		}
+	}
+	if st != .Ok {
+		rt.p9_disconnect(&env.conn)
+		env.conn = {}
+		env.failed = true
+		return false
+	}
+	space.conns[ns.ENV_CONN].client = &env.conn.c
+	space.env_root = root
+	return true
+}
+
+// rfork e (copy) and E (empty) for /env: a new group for this process and the
+// children it starts from now on; the old one goes on for those sharing it.
+@(require_results)
+env_fork :: proc "contextless" (space: ^ns.Namespace, copy_group: bool) -> vx.Status {
+	if !env_attach(space) {
+		return .Err_Not_Found
+	}
+	aname: [17]u8
+	aname[0] = '+'
+	hex: [16]u8
+	copy(aname[1:], env_hex(env.token, &hex))
+	root, token := env_attach_as(copy_group ? string(aname[:]) : "new") or_return
+	_ = p9.client_clunk(&env.conn.c, space.env_root)
+	space.env_root, env.token = root, token
+	return .Ok
+}
+
+// A child's share of this process's group: its token, and envd's connector.
+// None (the child's env= records are all it has) without a group or room.
+@(private="file")
+env_records :: proc "contextless" (space: ^ns.Namespace, w: ^ndb.Writer, handles: []vx.Handle, names: []string, count: ^int) {
+	if count^ >= len(handles) || !env_attach(space) {
+		return
+	}
+	h, st := rt.handle_dup(env.connector, vx.RIGHTS_SAME)
+	if st != .Ok {
+		return
+	}
+	handles[count^], names[count^] = h, "srv:env"
+	count^ += 1
+	hex: [16]u8
+	ndb.put(w, "envgroup", env_hex(env.token, &hex))
+	_ = ndb.end(w)
+}
+
 // Builds the process's namespace from its spawn message: the group nsgroup
 // names, or the mount= and bind= records.
 @(require_results)
@@ -634,6 +773,7 @@ from_spawn :: proc "contextless" (space: ^ns.Namespace) -> vx.Status {
 	ns.dial_lock = dial_lock // a TCP connection's threads take turns
 	space.getwd = rt.getwd // relative names from the current directory (ADR-0017)
 	space.open_dev = fd_open // and /fd/N, its descriptors (ADR-0018)
+	space.env_attach = env_attach // and /env, its environment group (ADR-0022)
 	group.srv = rt.spawn_take("srv:nsd")
 	st: vx.Status
 	if chan := rt.spawn_take("nsgroup"); chan != vx.HANDLE_NONE {
@@ -774,6 +914,9 @@ spawn_records :: proc "contextless" (
 			count += 1
 		}
 	}
+	if st == .Ok {
+		env_records(space, w, handles[:limit], names, &count) // its environment group (ADR-0022)
+	}
 	return
 }
 
@@ -814,6 +957,20 @@ fork_records: [16 * 1024]u8
 // the old TCP connection's state is left behind.
 @(require_results)
 after_fork :: proc "contextless" (space: ^ns.Namespace) -> vx.Status {
+	// The env connection's ring was not copied either: let go here, and
+	// attached again on first use, to the same group (its token is kept).
+	if env.conn.end != vx.HANDLE_NONE {
+		rt.p9_disconnect(&env.conn)
+	}
+	env.conn = {}
+	env.failed = false
+	st := after_fork_table(space)
+	space.env_attach = env_attach
+	return st
+}
+
+@(private="file", require_results)
+after_fork_table :: proc "contextless" (space: ^ns.Namespace) -> vx.Status {
 	if group.chan != vx.HANDLE_NONE {
 		// In a group: the channel to nsd and the mapping of its text were
 		// copied from the parent's; this process gets a channel of its own,

@@ -197,7 +197,7 @@ script_next :: proc "contextless" (s: ^Script, op: ^Op) -> vx.Status {
 // wrote it, or a child that copied its namespace. Err_Not_Found if none did.
 @(require_results)
 mount_srv :: proc "contextless" (ns: ^Namespace, src, aname, old: string, flags: Flags) -> vx.Status {
-	for &c in ns.conns {
+	for &c in ns.conns[:MAX_CONNS] {
 		if c.client != nil && string(c.src[:]) == src {
 			return mount(ns, c.client, c.connector, src, aname, old, flags)
 		}
