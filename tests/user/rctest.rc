@@ -210,6 +210,21 @@ check rfork-m-child refused `{rfork m; rc -c 'mount /srv/nsd '$dir'/nsb >[2] /de
 check rfork-s '' `{rfork s; echo $status}
 check rfork-ens '' `{rfork; echo $status}
 
+# Wave F's file calls through sbase (6d9a): find walking from one server
+# into another, flock(1) holding a lock another flock(1) is refused, sync.
+check find-servers '' `{find / -path /bin -prune -o -name nothing-here -print >[2=1] | grep loop} # /bin's union holds /bin/posix: a real loop
+check flock held `{flock $dir/lk echo held}
+flock $dir/lk flock -n $dir/lk echo inner >[2] /dev/null
+check flock-n ok `{if(! ~ $status '') echo ok; if not echo $status}
+sync
+check sync '' $status
+
+# times(2) (6d9b, ADR-0041): time(1)'s real, user and sys are times' clock
+# ticks, a child's from its wait record; before, ENOSYS made them garbage.
+t=`{time seq 1 20000 >[2=1] >/dev/null}
+check time-words 'real user sys' $t(1) $t(3) $t(5)
+check time-numbers ok `{if(~ $t(2) [0-9]*.[0-9]* && ~ $t(4) [0-9]*.[0-9]* && ~ $t(6) [0-9]*.[0-9]*) echo ok; if not echo $t}
+
 rm -r $dir
 check cleaned no `{if(test -d $dir) echo yes; if not echo no}
 

@@ -117,11 +117,11 @@ test_mutated :: proc(t: ^testing.T) {
 	m := mutator()
 	defer rt.mutator_destroy(&m)
 	folds := []Fold {
-		{BIG_HEAP, false, 0x023ca274f5e2b244},
-		{MID_HEAP, false, 0x87b3d28034b7dea2},
-		{SMALL_HEAP, false, 0xb0a4880824533fbc},
-		{FUZZ_HEAP, true, 0x7ef7aa0e85456351},
-		{SMALL_HEAP, true, 0x4206849ed5522550},
+		{BIG_HEAP, false, 0xaba60cfbb3fabc76},
+		{MID_HEAP, false, 0xca1ef7b80fdf40e0},
+		{SMALL_HEAP, false, 0x7260069583c45bae},
+		{FUZZ_HEAP, true, 0x5814272dd82a6245},
+		{SMALL_HEAP, true, 0x771891a39ebc5052},
 	}
 	text: [dynamic]u8
 	defer delete(text)
