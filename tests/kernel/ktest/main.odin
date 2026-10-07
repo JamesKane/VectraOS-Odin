@@ -2805,6 +2805,139 @@ test_leases :: proc "contextless" () {
 	rt.close_all(rv, w, v)
 }
 
+// --- Leases lent for one call (ADR-0021) ---
+
+Lent_Mode :: enum {
+	Reply,
+	Hang,
+	Close,
+}
+
+Lent_Server :: struct {
+	end:   vx.Handle,
+	mode:  Lent_Mode,
+	value: u64, // what it read through the lent memory
+	lease: vx.Handle, // the lease it was sent
+	done:  u32,
+}
+
+// Reads one request, maps its handle and reads it; then replies, or never
+// does, or closes its end without a reply.
+lent_worker :: proc "c" (unused: vx.Handle, arg: u64) -> ! {
+	s := cast(^Lent_Server)uintptr(arg)
+	port, _ := rt.port_create()
+	_ = rt.port_bind(port, s.end, .Readable, 1)
+	pk: [1]vx.Packet
+	rq: Request
+	got: [1]vx.Handle
+	if n, _ := rt.port_wait(port, after_ms(2000), 0, pk[:]); n == 1 {
+		if size, st := rt.channel_read(s.end, memory.ptr_to_bytes(&rq), got[:]); st == .Ok && size.handles == 1 {
+			if at, mst := rt.as_map(rt.self, got[0], 0, 4096, {}); mst == .Ok {
+				intrinsics.atomic_store(&s.value, intrinsics.volatile_load(cast(^u64)uintptr(at)))
+			}
+			intrinsics.atomic_store(&s.lease, got[0])
+			switch s.mode {
+			case .Reply:
+				_ = rt.channel_write(s.end, memory.ptr_to_bytes(&rq))
+			case .Close:
+				_ = rt.handle_close(s.end)
+			case .Hang:
+			}
+		}
+	}
+	_ = rt.handle_close(port)
+	intrinsics.atomic_store(&s.done, 1)
+	rt.thread_exit()
+}
+
+// One call lending mem to a server in mode: the call's status, and the
+// server's lease after it.
+lend_once :: proc "contextless" (mem: vx.Handle, mode: Lent_Mode, s: ^Lent_Server, deadline: vx.Instant) -> vx.Status {
+	s^ = {mode = mode}
+	a, b, cst := rt.channel_create()
+	if cst != .Ok {
+		return .Err_No_Memory
+	}
+	s.end = b
+	sp := new_stack()
+	th, tst := rt.thread_create(rt.self)
+	if sp == 0 || tst != .Ok || rt.thread_start(th, u64(uintptr(rawptr(lent_worker))), sp, 0, u64(uintptr(s))) != .Ok {
+		return .Err_No_Memory
+	}
+	rq := Request{n = 1}
+	reply: Request
+	lent := [1]vx.Handle{mem}
+	call := vx.Call {
+		wr_bytes   = &rq,
+		wr_len     = size_of(rq),
+		wr_handles = raw_data(lent[:]),
+		wr_count   = 1,
+		rd_bytes   = &reply,
+		rd_cap     = size_of(reply),
+		lent       = 1,
+	}
+	st := rt.channel_call(a, &call, deadline)
+	for mode != .Hang && intrinsics.atomic_load(&s.done) == 0 {
+		_ = rt.futex_wait(&s.done, 0, after_ms(10))
+	}
+	_ = rt.handle_close(a)
+	if mode != .Close {
+		_ = rt.handle_close(b)
+	}
+	_ = rt.handle_close(th)
+	return st
+}
+
+test_lent :: proc "contextless" () {
+	value, got := u64(0x1e47), u64(0)
+	mem, st := rt.vmo_create(4096)
+	check(st == .Ok && rt.vmo_write(mem, 0, memory.ptr_to_bytes(&value)) == .Ok)
+	@(static) s: Lent_Server
+	// A reply: the server read it through its lease, which is gone once the call returns.
+	check(lend_once(mem, .Reply, &s, after_ms(2000)) == .Ok)
+	check(intrinsics.atomic_load(&s.value) == 0x1e47 && intrinsics.atomic_load(&s.lease) != vx.HANDLE_NONE)
+	check(rt.vmo_read(intrinsics.atomic_load(&s.lease), 0, memory.ptr_to_bytes(&got)) == .Err_Revoked)
+	_, st = rt.as_map(rt.self, intrinsics.atomic_load(&s.lease), 0, 4096, {})
+	check(st == .Err_Revoked)
+	check(rt.vmo_revoke(intrinsics.atomic_load(&s.lease)) == .Err_Access) // the server's has no .Manage
+	_ = rt.handle_close(intrinsics.atomic_load(&s.lease))
+	check(rt.vmo_read(mem, 0, memory.ptr_to_bytes(&got)) == .Ok && got == 0x1e47) // the caller's handle stays
+	// The server's end closed with no reply: .Err_Peer_Closed, and revoked.
+	check(lend_once(mem, .Close, &s, after_ms(2000)) == .Err_Peer_Closed)
+	check(intrinsics.atomic_load(&s.value) == 0x1e47 && rt.vmo_read(intrinsics.atomic_load(&s.lease), 0, memory.ptr_to_bytes(&got)) == .Err_Revoked)
+	_ = rt.handle_close(intrinsics.atomic_load(&s.lease))
+	// A server that never replies: the deadline ends the call, and the lease.
+	check(lend_once(mem, .Hang, &s, after_ms(300)) == .Err_Timed_Out)
+	for intrinsics.atomic_load(&s.done) == 0 {
+		_ = rt.futex_wait(&s.done, 0, after_ms(10))
+	}
+	check(intrinsics.atomic_load(&s.value) == 0x1e47 && rt.vmo_read(intrinsics.atomic_load(&s.lease), 0, memory.ptr_to_bytes(&got)) == .Err_Revoked)
+	_ = rt.handle_close(intrinsics.atomic_load(&s.lease))
+	// A lent handle that is not a VMO, or a bit past the handles: refused before
+	// anything is sent, and the caller's handles stay.
+	a, b, cst := rt.channel_create()
+	check(cst == .Ok)
+	rq := Request{n = 1}
+	port, pst := rt.port_create()
+	check(pst == .Ok)
+	handles := [1]vx.Handle{port}
+	call := vx.Call {
+		wr_bytes   = &rq,
+		wr_len     = size_of(rq),
+		wr_handles = raw_data(handles[:]),
+		wr_count   = 1,
+		lent       = 1,
+	}
+	check(rt.channel_call(a, &call, after_ms(100)) == .Err_Bad_Handle)
+	handles[0] = mem
+	call.lent = 2
+	check(rt.channel_call(a, &call, after_ms(100)) == .Err_Invalid)
+	_, st = rt.channel_read(b, memory.ptr_to_bytes(&rq))
+	check(st == .Err_Should_Wait)
+	check(rt.vmo_read(mem, 0, memory.ptr_to_bytes(&got)) == .Ok && rt.handle_close(port) == .Ok)
+	rt.close_all(a, b, mem)
+}
+
 // --- task_exec (ADR-0012) ---
 
 // The program a forked child execs: it closes `probe`, a handle the child
@@ -3105,6 +3238,7 @@ vx_main :: proc() -> int {
 	test_vmo_clone()
 	test_address_space()
 	test_leases()
+	test_lent()
 	test_debugger()
 	test_tls()
 	test_fork()

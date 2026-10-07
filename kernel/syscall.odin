@@ -788,14 +788,19 @@ sys_channel_create :: proc "contextless" (options: u64, out: Uva) -> vx.Status {
 // Builds a message from user memory: the body copied in, the handles moved
 // out of the caller's table (gone whatever happens next, as with every write).
 // `through` is the channel end written to: neither it nor its peer may travel
-// in the message.
+// in the message. values_in: the handles' values, already copied in (a
+// call's, some lent), or nil to copy them from handles.
 @(private="file", require_results)
-msg_from_user :: proc "contextless" (bytes: Uva, body_len: u32, handles: Uva, count: u32, through: ^Channel) -> (m: ^Channel_Msg, st: vx.Status) {
+msg_from_user :: proc "contextless" (bytes: Uva, body_len: u32, handles: Uva, values_in: []vx.Handle, count: u32, through: ^Channel) -> (m: ^Channel_Msg, st: vx.Status) {
 	if body_len < size_of(vx.Msg_Header) || body_len > vx.CHANNEL_MAX_BYTES || count > vx.CHANNEL_MAX_HANDLES {
 		return nil, .Err_Invalid
 	}
 	values: [vx.CHANNEL_MAX_HANDLES]vx.Handle
-	copy_in_slice(values[:count], handles) or_return
+	if values_in != nil {
+		copy(values[:count], values_in)
+	} else {
+		copy_in_slice(values[:count], handles) or_return
+	}
 	msg := msg_alloc(body_len, count)
 	if msg == nil {
 		return nil, .Err_No_Memory
@@ -834,7 +839,7 @@ msg_to_user :: proc "contextless" (m: ^Channel_Msg, bytes, handles: Uva) -> vx.S
 sys_channel_write :: proc "contextless" (h: vx.Handle, bytes: Uva, length: u64, handles: Uva, count: u64) -> vx.Status {
 	c := handle_get_as(current_task(), h, Channel, {.Write}) or_return
 	defer object_release(&c.obj)
-	m := msg_from_user(bytes, u32(min(length, u64(max(u32)))), handles, u32(min(count, u64(max(u32)))), c) or_return
+	m := msg_from_user(bytes, u32(min(length, u64(max(u32)))), handles, nil, u32(min(count, u64(max(u32)))), c) or_return
 	st := channel_write(c, m)
 	if st != .Ok {
 		msg_free(m)
@@ -862,6 +867,47 @@ sys_channel_read :: proc "contextless" (h: vx.Handle, bytes: Uva, cap_bytes: u64
 	return msg_to_user(m, bytes, handles)
 }
 
+// A call's lent handles (ADR-0021): for each, a lease of the caller's VMO in
+// its table, with that handle's rights but .Manage (and .Transfer, to go in
+// the request), whose value takes the lent one's place in values. The leases
+// are kept in leases, for the call's end to revoke; made has a bit for each
+// value replaced.
+@(private="file", require_results)
+lend_handles :: proc "contextless" (values: []vx.Handle, lent: u64, leases: ^[dynamic; vx.CHANNEL_MAX_HANDLES]^Vmo, made: ^u64) -> vx.Status {
+	me := current_task()
+	for &value, i in values {
+		if lent >> uint(i) & 1 == 0 {
+			continue
+		}
+		o, rights := handle_get_rights(me, value, .Vmo, {.Read}) or_return
+		lease, st := vmo_lease_create(cast(^Vmo)o)
+		object_release(o)
+		if st != .Ok {
+			return st
+		}
+		h: vx.Handle
+		h, st = handle_add(me, &lease.obj, rights - {.Manage} + {.Transfer})
+		if st != .Ok {
+			object_release(&lease.obj)
+			return st
+		}
+		value = h
+		_ = append(leases, lease) // kept until the call ends; at most one a handle
+		made^ |= 1 << uint(i)
+	}
+	return .Ok
+}
+
+// Each lease ended: its mappings lose their pages, every use is
+// .Err_Revoked; and the call's reference let go.
+@(private="file")
+revoke_leases :: proc "contextless" (leases: []^Vmo) {
+	for lease in leases {
+		lease_revoke(lease)
+		object_release(&lease.obj)
+	}
+}
+
 @(private="file", require_results)
 sys_channel_call :: proc "contextless" (h: vx.Handle, args_ptr: Uva, deadline: i64) -> vx.Status {
 	args: vx.Call
@@ -873,8 +919,26 @@ sys_channel_call :: proc "contextless" (h: vx.Handle, args_ptr: Uva, deadline: i
 	if !user_range_ok(rd_bytes, u64(args.rd_cap), true) || !user_range_ok(rd_handles, u64(args.rd_count_cap) * size_of(vx.Handle), true) {
 		return .Err_Invalid
 	}
+	if args.wr_count > vx.CHANNEL_MAX_HANDLES || (args.wr_count < 64 && args.lent >> args.wr_count != 0) {
+		return .Err_Invalid // a lent bit past the handles
+	}
+	values: [vx.CHANNEL_MAX_HANDLES]vx.Handle
+	copy_in_slice(values[:args.wr_count], Uva(uintptr(args.wr_handles))) or_return
 	c := handle_get_as(current_task(), h, Channel, {.Read, .Write}) or_return
-	request, st := msg_from_user(Uva(uintptr(args.wr_bytes)), args.wr_len, Uva(uintptr(args.wr_handles)), args.wr_count, c)
+	leases: [dynamic; vx.CHANNEL_MAX_HANDLES]^Vmo
+	made: u64
+	st := lend_handles(values[:args.wr_count], args.lent, &leases, &made)
+	request: ^Channel_Msg
+	if st == .Ok {
+		request, st = msg_from_user(Uva(uintptr(args.wr_bytes)), args.wr_len, 0, values[:args.wr_count], args.wr_count, c)
+	}
+	if st != .Ok { // the leases put in the table were not sent: closed (the caller's own stay)
+		for value, i in values[:args.wr_count] {
+			if made >> uint(i) & 1 != 0 {
+				_ = handle_close(current_task(), value)
+			}
+		}
+	}
 	reply: ^Channel_Msg
 	if st == .Ok {
 		sent: bool
@@ -884,6 +948,7 @@ sys_channel_call :: proc "contextless" (h: vx.Handle, args_ptr: Uva, deadline: i
 		}
 	}
 	object_release(&c.obj)
+	revoke_leases(leases[:]) // however the call ended (ADR-0021)
 	if st != .Ok {
 		return st
 	}

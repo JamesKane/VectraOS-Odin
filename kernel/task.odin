@@ -672,7 +672,7 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 		st = .Err_Range
 	case task_maps_in(t, at, end):
 		st = .Err_Exists // checked against the mappings, not the page tables: a no-access one has no pages
-	case vmo_revoked(v):
+	case vmo_revoked(v) && .No_Access not_in flags:
 		st = .Err_Revoked // checked under the lock: a revoke after it finds this mapping (ADR-0021)
 	case .Write in flags && vmo_sealed(v):
 		st = .Err_Access // under the lock too: vmo_seal looks for writable mappings after it seals
@@ -758,7 +758,11 @@ task_fork_copy :: proc "contextless" (parent, child: ^Task) -> vx.Status {
 		// The same VMO: a file's pages, MAP_SHARED memory, a lease (a revoke
 		// reaches the child).
 		if m.vmo.pager != nil || .Shared in m.flags || m.vmo.lease_of != nil {
-			_ = task_map(child, m.vmo, m.offset, m.size, m.flags, m.va, m.key, m.allowed) or_return
+			flags, key := m.flags, m.key
+			if vmo_revoked(m.vmo) {
+				flags, key = {.No_Access}, 0 // a revoked lease's: its place, no pages
+			}
+			_ = task_map(child, m.vmo, m.offset, m.size, flags, m.va, key, m.allowed) or_return
 			continue
 		}
 		dup := vmo_create(m.size) or_return

@@ -191,6 +191,14 @@ SPAWN :: u32(0x6e77_7073) // "spwn"
 // read waits on for the reply, so no answer is lost; the interrupt comes when
 // the call returns. A server that holds calls answers one before
 // interrupting its caller.
+//
+// lent (ADR-0021, upstream's ADR-0043): bit i lends wr_handles[i], a VMO
+// handle the caller keeps: the server is sent a lease of it, with that
+// handle's rights but .Manage, which the kernel revokes when the call
+// returns, however it ends (a reply, the deadline, an interrupt, the
+// server's end closed, the caller killed). A lent handle that is not a VMO,
+// or a lease, fails the call before it is sent (.Err_Bad_Handle,
+// .Err_Invalid).
 Call :: struct {
 	wr_bytes:     rawptr,
 	wr_handles:   [^]Handle,
@@ -201,7 +209,10 @@ Call :: struct {
 	rd_cap:       u32,
 	rd_count_cap: u32,
 	actual:       Msg_Size,
+	lent:         u64,
 }
+
+#assert(size_of(Call) == 64 && offset_of(Call, lent) == 56)
 
 // --- Rings ---
 //
