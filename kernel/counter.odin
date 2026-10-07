@@ -131,7 +131,7 @@ futex_key_of :: proc "contextless" (t: ^Task, word: Uva) -> (k: Futex_Key, prese
 			continue
 		}
 		k = {
-			vmo    = m.vmo,
+			vmo    = vmo_root(m.vmo), // a lease's: its parent's, so both are one futex
 			offset = m.offset + u64(word - m.va),
 		}
 		ok = true

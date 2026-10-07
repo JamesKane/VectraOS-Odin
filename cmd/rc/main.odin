@@ -239,11 +239,17 @@ own_note_group :: proc "contextless" () -> vx.Status {
 	return st
 }
 
-// What updenv (below) last wrote to /env, by the hashes of names and values.
+// What updenv (below) last wrote to /env: each name, with hashes of it and
+// its value, and the spawn that last exported it (env_round), so one gone
+// from the shell since is removed from /env too (the review of 2026-10-07,
+// upstream's 2cc4729).
 Env_Seen :: struct {
 	name, value: u64, // FNV-1a hashes; name 0: the slot is free
+	round:       u32,
+	text:        [dynamic; 256]u8, // the name
 }
-env_seen: [1024]Env_Seen
+env_seen: [512]Env_Seen
+env_round: u32
 
 // rfork [fnesFNEm]; without flags, ens. n: a namespace of the shell's own, a
 // copy (it leaves its namespace group); N: a clean one, empty; m: no mounts
@@ -695,10 +701,13 @@ updenv :: proc "contextless" (env: string, eq: int) {
 	for probe := 0; probe < 8 && env_seen[at].name != 0 && env_seen[at].name != nh; probe += 1 {
 		at = (at + 1) % len(env_seen)
 	}
+	if env_seen[at].name == nh {
+		env_seen[at].round = env_round // exported still
+	}
 	if env_seen[at].name == nh && env_seen[at].value == vh {
 		return
 	}
-	if eq > 256 {
+	if eq >= 256 {
 		return
 	}
 	path_buf: [8 + 256]u8
@@ -710,7 +719,29 @@ updenv :: proc "contextless" (env: string, eq: int) {
 	n, wst := ns.write(&f, transmute([]u8)env[eq + 1:])
 	ns.close(&f)
 	if wst == .Ok && n == len(env) - eq - 1 && (env_seen[at].name == 0 || env_seen[at].name == nh) {
-		env_seen[at] = {nh, vh}
+		env_seen[at] = {
+			name  = nh,
+			value = vh,
+			round = env_round,
+		}
+		_ = append(&env_seen[at].text, env[:eq])
+	}
+}
+
+// After a spawn's exports: what the shell no longer has (x=(), a function
+// deleted) goes from /env too, as 9front's rc empties it there.
+env_prune :: proc "contextless" () {
+	for &e in env_seen {
+		if e.name == 0 || e.round == env_round {
+			continue
+		}
+		path_buf: [8 + 256]u8
+		if path, ok := str.join(path_buf[:], "/env/", string(e.text[:])); ok {
+			if c, fid, st := ns.walk(&space, path); st == .Ok {
+				_ = p9.client_remove(c, fid)
+			}
+		}
+		e = {}
 	}
 }
 
@@ -986,6 +1017,7 @@ spawn :: proc "contextless" (argv: ^rc.Word, child: bool, io: [rc.FDS]vx.Handle,
 		ndb.put(&rec, "end", IO[i])
 		_ = ndb.end(&rec)
 	}
+	env_round += 1 // updenv marks what this spawn exports; env_prune removes the rest
 	it := rc.vars(&sh)
 	for name, val in rc.next_var(&it) {
 		if export_var(&rec, name, val) {
@@ -997,6 +1029,7 @@ spawn :: proc "contextless" (argv: ^rc.Word, child: bool, io: [rc.FDS]vx.Handle,
 		export_fn(&rec, name, src)
 		exported += 1
 	}
+	env_prune()
 	// More than a spawn message holds, or than the child takes: refused
 	// whole, never run with a list cut short.
 	if rec.failed || args > CHILD_MAX_ARGS || exported > CHILD_MAX_ARGS {

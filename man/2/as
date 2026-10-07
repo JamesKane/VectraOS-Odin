@@ -35,7 +35,7 @@ With `*`<addr> zero the kernel picks the address and writes it to `*`<addr>; oth
 <task> needs `VX_RIGHT_MANAGE`; <vmo> needs `VX_RIGHT_MAP` and `VX_RIGHT_READ`, and `VX_RIGHT_WRITE` or `VX_RIGHT_EXEC` to match <flags>.
 The mapping holds a reference to the VMO, so the VMO's handle may be closed once it is mapped.
 A VMO of physical memory, a device's registers, is mapped as device memory; a pager's VMO is mapped as far as its pager has supplied the pages, the rest as they are touched, and a page of it is writable only once it is dirty.
-The kernel places mappings upward from `0x0000'1000'0000'0000`, leaving an unmapped guard page after each, and past any reservation.
+The kernel places mappings upward from `0x0000'1000'0000'0000`, leaving an unmapped guard page after each, and past any reservation or mapping in the way.
 A mapping at a named address lies wholly inside one reservation or outside every one.
 A task holds at most 102 mappings.
 

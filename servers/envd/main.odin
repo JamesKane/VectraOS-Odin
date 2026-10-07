@@ -60,25 +60,50 @@ vars: [VARS]Var
 @(private="file")
 bytes_used: u64
 
-// A node: the group's index plus 1, then its variable's plus 1 (0 for the root).
+// A node: the group's index plus 1 (bits 40 up), the variable slot's
+// generation (bits 16 to 39) and its index plus 1 (0 for the root), so a fid
+// on a variable removed finds nothing when its slot is used again (the
+// review of 2026-10-07, upstream's 2cc4729).
+@(private="file")
+Node_Bits :: bit_field u64 {
+	var:   u32 | 16, // the slot's index plus 1; 0: the group's root
+	gen:   u32 | 24, // the slot's generation, its low 24 bits
+	group: u32 | 24, // the group's index plus 1
+}
+#assert(VARS < 1 << 16)
+
 @(private="file")
 node_of :: proc "contextless" (g, v: u32) -> p9.Node {
-	return p9.Node(u64(g + 1) << 32 | u64(v))
+	n := Node_Bits{var = v, group = g + 1}
+	if v != 0 {
+		n.gen = vars[v - 1].gen & 0xff_ffff
+	}
+	return p9.Node(transmute(u64)n)
+}
+
+@(private="file")
+node_group :: proc "contextless" (node: p9.Node) -> u32 { // plus 1
+	return (transmute(Node_Bits)u64(node)).group
+}
+
+@(private="file")
+node_var :: proc "contextless" (node: p9.Node) -> u32 { // plus 1
+	return (transmute(Node_Bits)u64(node)).var
 }
 
 @(private="file")
 group_of :: proc "contextless" (node: p9.Node) -> ^Group {
-	g := u32(u64(node) >> 32)
+	g := node_group(node)
 	return g != 0 && g <= GROUPS && groups[g - 1].used ? &groups[g - 1] : nil
 }
 
 @(private="file")
 var_of :: proc "contextless" (node: p9.Node) -> ^Var {
-	v := u32(node)
-	if v == 0 || v > VARS || vars[v - 1].group != u32(u64(node) >> 32) {
+	n := transmute(Node_Bits)u64(node)
+	if n.var == 0 || n.var > VARS || vars[n.var - 1].group != n.group || vars[n.var - 1].gen & 0xff_ffff != n.gen {
 		return nil
 	}
-	return &vars[v - 1]
+	return &vars[n.var - 1]
 }
 
 // vx:rt's as_unmap wrapper comes with the kernel's M4 port; until then, the
@@ -279,10 +304,10 @@ fs_fid_node :: proc "contextless" (ctx: rawptr, node: p9.Node, delta: int) {
 
 @(private="file")
 fs_walk :: proc "contextless" (ctx: rawptr, dir: p9.Node, name: string) -> (child: p9.Node, st: vx.Status) {
-	if u32(dir) != 0 || group_of(dir) == nil {
+	if node_var(dir) != 0 || group_of(dir) == nil {
 		return 0, .Err_Not_Found
 	}
-	g := u32(u64(dir) >> 32) - 1
+	g := node_group(dir) - 1
 	x := var_named(g, name)
 	if x == nil {
 		return 0, .Err_Not_Found
@@ -292,7 +317,7 @@ fs_walk :: proc "contextless" (ctx: rawptr, dir: p9.Node, name: string) -> (chil
 
 @(private="file")
 fs_parent :: proc "contextless" (ctx: rawptr, node: p9.Node) -> (parent: p9.Node, st: vx.Status) {
-	return p9.Node(u64(node) &~ u64(max(u32))), .Ok
+	return node_of(node_group(node) - 1, 0), .Ok // the group's root
 }
 
 @(private="file")
@@ -301,7 +326,7 @@ fs_stat :: proc "contextless" (ctx: rawptr, node: p9.Node, out: ^p9.Stat) -> vx.
 	if g == nil {
 		return .Err_Not_Found
 	}
-	if u32(node) == 0 {
+	if node_var(node) == 0 {
 		out^ = {
 			qid  = {type = p9.QTDIR, path = g.token}, // the token: how a process learns its group's
 			mode = p9.DMDIR | 0o775,
@@ -330,7 +355,7 @@ fs_stat :: proc "contextless" (ctx: rawptr, node: p9.Node, out: ^p9.Stat) -> vx.
 
 @(private="file")
 fs_open :: proc "contextless" (ctx: rawptr, node: p9.Node, mode: p9.Open_Mode) -> vx.Status {
-	if u32(node) == 0 {
+	if node_var(node) == 0 {
 		return mode.access == .Read && group_of(node) != nil ? .Ok : .Err_Access
 	}
 	x := var_of(node)
@@ -345,7 +370,7 @@ fs_open :: proc "contextless" (ctx: rawptr, node: p9.Node, mode: p9.Open_Mode) -
 
 @(private="file")
 fs_create :: proc "contextless" (ctx: rawptr, dir: p9.Node, name: string, perm: u32, mode: p9.Open_Mode) -> (node: p9.Node, st: vx.Status) {
-	if u32(dir) != 0 || group_of(dir) == nil {
+	if node_var(dir) != 0 || group_of(dir) == nil {
 		return 0, .Err_Not_Found
 	}
 	if perm & p9.DMDIR != 0 {
@@ -359,7 +384,7 @@ fs_create :: proc "contextless" (ctx: rawptr, dir: p9.Node, name: string, perm: 
 			return 0, .Err_Invalid
 		}
 	}
-	g := u32(u64(dir) >> 32) - 1
+	g := node_group(dir) - 1
 	x := var_named(g, name)
 	if x != nil { // as 9front's devenv: creating one that exists empties it
 		x.size = 0
@@ -404,7 +429,7 @@ fs_write :: proc "contextless" (ctx: rawptr, node: p9.Node, offset: u64, data: [
 fs_remove :: proc "contextless" (ctx: rawptr, node: p9.Node) -> vx.Status {
 	x := var_of(node)
 	if x == nil {
-		return u32(node) != 0 ? .Err_Not_Found : .Err_Access // a group goes with its fids, not by name
+		return node_var(node) != 0 ? .Err_Not_Found : .Err_Access // a group goes with its fids, not by name
 	}
 	var_free(x)
 	return .Ok
@@ -412,10 +437,10 @@ fs_remove :: proc "contextless" (ctx: rawptr, node: p9.Node) -> vx.Status {
 
 @(private="file")
 fs_readdir :: proc "contextless" (ctx: rawptr, dir: p9.Node, index: u32) -> (child: p9.Node, st: vx.Status) {
-	if u32(dir) != 0 || group_of(dir) == nil {
+	if node_var(dir) != 0 || group_of(dir) == nil {
 		return 0, .Err_Not_Found
 	}
-	g := u32(u64(dir) >> 32)
+	g := node_group(dir)
 	left := index
 	for &x, i in vars {
 		if x.group != g {
@@ -428,6 +453,14 @@ fs_readdir :: proc "contextless" (ctx: rawptr, dir: p9.Node, index: u32) -> (chi
 	}
 	return 0, .Err_Not_Found
 }
+
+// Every process that starts a child or touches /env holds a connection for
+// its life: far more than vx:p9ring's default 16 (the review of 2026-10-07).
+@(private="file")
+CONNS :: 128
+
+@(private="file")
+conns: [CONNS]p9ring.Server_Conn
 
 @(private="file")
 server := p9ring.Server {
@@ -451,6 +484,7 @@ server := p9ring.Server {
 @(export, link_name="vx_main")
 vx_main :: proc() -> int {
 	server.listen = rt.spawn_take("listen")
+	server.conns = conns[:]
 	if server.listen == vx.HANDLE_NONE {
 		rt.print("envd: no listen channel\n")
 		return -1 // upstream's exit string: "no listen channel"

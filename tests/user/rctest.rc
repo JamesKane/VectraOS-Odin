@@ -209,6 +209,17 @@ check env-rfork-e v `{cat /env/fromchild}
 check env-rfork-E gone `{@{rfork E; if(test -e /env/fromchild) echo there; if not echo gone}}
 rm /env/fromchild
 check env-rm gone `{if(test -e /env/fromchild) echo there; if not echo gone}
+# The review of 2026-10-07: a variable the shell deletes leaves /env at the
+# next spawn; a file still open on a variable removed does not reach the one
+# made in its place.
+delx=1
+/boot/bin/true
+delx=()
+/boot/bin/true
+check env-deleted gone `{if(test -e /env/delx) echo there; if not echo gone}
+echo -n old > /env/stale
+check env-stale '' `{{rm /env/stale; echo -n new > /env/fresh; cat <[0=3] >[2] /dev/null} <[3] /env/stale}
+rm /env/fresh
 
 # /tmp is the user's own (6e1c2): tmpfs's tree for this user, apart from the
 # shared one.

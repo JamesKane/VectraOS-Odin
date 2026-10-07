@@ -171,7 +171,8 @@ mem_map_file :: proc "contextless" (o: ^Ofd, size: u64, prot: linux.Prot_Flags, 
 
 // mremap, of a private mapping (realloc's large blocks, which are musl's own
 // anonymous mappings): shrunk in place; grown in place, with a VMO of its
-// own after it, where the pages after it are free; else, with
+// own after it, where the pages after it are free and it is one mapping
+// still; else, with
 // MREMAP_MAYMOVE, moved to a new mapping (at new_addr with MREMAP_FIXED)
 // and copied. A shared mapping cannot be grown or moved: a copy would not be
 // shared, and the VMO's handle is gone (EINVAL).
@@ -202,6 +203,9 @@ mem_remap :: proc "contextless" (addr: uintptr, old_len, new_len: uint, flags: i
 	if .Shared in opts {
 		return fail(.EINVAL)
 	}
+	if fixed && u64(new_addr) < u64(addr) + old_size && u64(addr) < u64(new_addr) + new_size {
+		return fail(.EINVAL) // the new place overlaps the old, as Linux refuses
+	}
 	prot := linux.PROT_NONE
 	if .No_Access not_in opts {
 		prot = {.Read}
@@ -209,7 +213,12 @@ mem_remap :: proc "contextless" (addr: uintptr, old_len, new_len: uint, flags: i
 			prot += {.Write}
 		}
 	}
-	if !fixed { // the pages after it, if they are free
+	// Grown in place only while it is one mapping: a second growth moves it
+	// into one again, so a buffer grown step by step never takes more than
+	// two of the task's mappings (the review of 2026-10-07, upstream's
+	// 2cc4729).
+	single := mi.base == u64(addr) && mi.size == old_size
+	if !fixed && single { // the pages after it, if they are free
 		if more := mem_map(addr + uintptr(old_size), uint(new_size - old_size), prot, linux.MAP_PRIVATE | linux.MAP_ANONYMOUS | linux.MAP_FIXED_NOREPLACE, -1, 0); more >= 0 {
 			return int(addr)
 		}
@@ -224,6 +233,9 @@ mem_remap :: proc "contextless" (addr: uintptr, old_len, new_len: uint, flags: i
 	to := mem_map(fixed ? new_addr : 0, new_len, {.Read, .Write}, at_flags, -1, 0)
 	if to < 0 {
 		return to
+	}
+	if prot == linux.PROT_NONE {
+		_ = rt.as_protect(rt.self, u64(addr), old_size, {}) // readable, to copy
 	}
 	intrinsics.mem_copy_non_overlapping(rawptr(uintptr(to)), rawptr(addr), min(old_size, new_size))
 	if prot != {.Read, .Write} {

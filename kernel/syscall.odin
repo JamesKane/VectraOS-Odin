@@ -569,8 +569,8 @@ sys_dma_map :: proc "contextless" (dh, vh: vx.Handle, offset, size, options: u64
 	}
 	v := handle_get_as(current_task(), vh, Vmo, need) or_return
 	defer object_release(&v.obj)
-	if v.pager != nil {
-		return .Err_Unsupported // its pages come and go: no device may hold them
+	if v.pager != nil || v.resizable || v.lease_of != nil {
+		return .Err_Unsupported // its pages come and go (a pager's, a shrink, a revoke): no device may hold them
 	}
 	addresses: [MAX_PAGES]u64
 	m := dma_map(d, v, offset, size, opts, addresses[:pages]) or_return

@@ -1303,6 +1303,34 @@ static void test_mapping_kinds(void) {
   CHECK(mremap(moved, 4 * pg, 4 * pg, MREMAP_FIXED, g) == MAP_FAILED &&
         errno == EINVAL); // FIXED needs MAYMOVE
   CHECK(munmap(moved, 4 * pg) == 0);
+
+  // The review of 2026-10-07: an mmap after a growth in place (which may
+  // cover where the next mmap was to go) still works; a second growth moves
+  // the buffer into one mapping again; a PROT_NONE buffer moves without a
+  // fault; MREMAP_FIXED onto its own old place is EINVAL.
+  char *a = mmap(nullptr, pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  CHECK(a != MAP_FAILED);
+  if (a == MAP_FAILED) return;
+  a[0] = 'a';
+  char *a2 = mremap(a, pg, 4 * pg, MREMAP_MAYMOVE);
+  CHECK(a2 != MAP_FAILED && a2[0] == 'a');
+  char *after = mmap(nullptr, pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  CHECK(after != MAP_FAILED); // was EEXIST when the growth covered the next placement
+  char *a3 = mremap(a2, 4 * pg, 8 * pg, MREMAP_MAYMOVE);
+  CHECK(a3 != MAP_FAILED && a3[0] == 'a');
+  if (a3 != MAP_FAILED) munmap(a3, 8 * pg);
+  if (after != MAP_FAILED) munmap(after, pg);
+  char *none = mmap(nullptr, 2 * pg, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  CHECK(none != MAP_FAILED && munmap(none + pg, pg) == 0);
+  char *block = mmap(none + pg, pg, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+  CHECK(block == none + pg);                                   // the next page taken: it must move
+  char *moved_none = mremap(none, pg, 2 * pg, MREMAP_MAYMOVE); // a fault, before the fix
+  CHECK(moved_none != MAP_FAILED && moved_none != none);
+  errno = 0;
+  CHECK(mremap(moved_none, 2 * pg, 2 * pg, MREMAP_MAYMOVE | MREMAP_FIXED, moved_none + pg) == MAP_FAILED &&
+        errno == EINVAL);
+  if (moved_none != MAP_FAILED) munmap(moved_none, 2 * pg);
+  munmap(block, pg);
 }
 
 // The posix extension's open files, kept by the server: a child's writes

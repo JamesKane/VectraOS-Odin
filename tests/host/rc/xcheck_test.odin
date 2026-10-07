@@ -13,7 +13,7 @@
 //
 // The digests are those of upstream's rc.c at 8385e74 (unchanged since its
 // 6d7c, 0a629a3: a function's text as 9front's pcmd rebuilds it; and at
-// a6f0916; the mutated ones with rctest.rc at d0a5ce7, its 6e1c2),
+// a6f0916 and 2cc4729; the mutated ones with rctest.rc at 2cc4729, its review),
 // unpatched: its ab83fe6 and f24356f fixed what this tree's findings said (a
 // here document's redirection closes nothing; a stage's paths and here
 // document are kept until it runs), so a stage's paths are logged and its
@@ -119,11 +119,11 @@ test_mutated :: proc(t: ^testing.T) {
 	m := mutator()
 	defer rt.mutator_destroy(&m)
 	folds := []Fold {
-		{BIG_HEAP, false, 0x422d77d7b51c2fda},
-		{MID_HEAP, false, 0xca4d9cb1c51249c4},
-		{SMALL_HEAP, false, 0x0dbce8359e9c1a9a},
-		{FUZZ_HEAP, true, 0x913916a89da9ac6d},
-		{SMALL_HEAP, true, 0xf74400fe57c2a952},
+		{BIG_HEAP, false, 0x12a110da7cecc55c},
+		{MID_HEAP, false, 0x6112d6ce58178c06},
+		{SMALL_HEAP, false, 0x702ec4c0beb9f632},
+		{FUZZ_HEAP, true, 0x0ed587a264213049},
+		{SMALL_HEAP, true, 0x05249dc14e2cefc0},
 	}
 	text: [dynamic]u8
 	defer delete(text)

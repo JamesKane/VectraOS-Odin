@@ -46,3 +46,4 @@ A group holds at most 1024 variables among all groups, each up to 1 MiB, and `en
 A child whose parent exits before the child first touches `/env` finds the group gone, and gets a new one filled from its `env=` records.
 rc(1) writes a variable to `/env` only when it starts a program, not as it is assigned, and does not remove one it deletes.
 `envd` is restarted if it exits, but the groups are gone with it.
+It takes 128 connections, and each process that has used `/env` or started a child holds one for its life: past that, a process's `/env` is its namespace's, and its children share no group.

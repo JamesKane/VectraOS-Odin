@@ -614,16 +614,25 @@ task_resv_fits :: proc "contextless" (t: ^Task, va, end: Uva) -> bool {
 }
 
 // Where as_map places a mapping of size bytes: from map_next on, past any
-// reservation in the way (a guard page after it).
+// reservation or mapping in the way (a mapping placed at an address, as
+// mremap's growth in place, may lie there), a guard page after it.
 @(private="file")
 task_place :: proc "contextless" (t: ^Task, size: u64) -> Uva {
 	at := t.map_next
-	for _ in 0 ..= TASK_MAX_RESERVATIONS {
+	for _ in 0 ..= TASK_MAX_RESERVATIONS + TASK_MAX_MAPPINGS {
 		moved := false
 		for r in t.resv {
 			if r.size != 0 && r.va < at + Uva(size) && at < r.va + Uva(r.size) {
 				at = r.va + Uva(r.size) + PAGE_SIZE
 				moved = true
+			}
+		}
+		if t.maps != nil {
+			for &m in t.maps {
+				if m.size != 0 && m.va < at + Uva(size) && at < m.va + Uva(m.size) {
+					at = m.va + Uva(m.size) + PAGE_SIZE
+					moved = true
+				}
 			}
 		}
 		if !moved {
@@ -1011,23 +1020,37 @@ resv_random_u64 :: proc "contextless" () -> (x: u64) {
 	return
 }
 
-@(private="file", require_results)
-task_release :: proc "contextless" (t: ^Task, va: Uva, size: u64) -> vx.Status {
-	found := false
-	{
-		spin_guard(&t.lock)
-		for &r in t.resv {
-			if r.size != 0 && r.va == va && r.size == size {
-				r = {}
-				found = true
-				break
-			}
+// The reservation of [va, va + size) exactly, or nil. Under the task's lock.
+@(private="file")
+task_resv_at :: proc "contextless" (t: ^Task, va: Uva, size: u64) -> ^Reservation {
+	for &r in t.resv {
+		if r.size != 0 && r.va == va && r.size == size {
+			return &r
 		}
 	}
-	if !found {
+	return nil
+}
+
+// Unmaps what is in it first, while it is still reserved, so nothing as_map
+// places can land there in between and be unmapped with it; then lets it go.
+@(private="file", require_results)
+task_release :: proc "contextless" (t: ^Task, va: Uva, size: u64) -> vx.Status {
+	spin_lock(&t.lock)
+	there := task_resv_at(t, va, size) != nil
+	spin_unlock(&t.lock)
+	if !there {
 		return .Err_Not_Found
 	}
 	st := task_unmap(t, va, size)
+	spin_lock(&t.lock)
+	r := task_resv_at(t, va, size)
+	if r != nil {
+		r^ = {}
+	}
+	spin_unlock(&t.lock)
+	if r == nil {
+		return .Err_Not_Found // another thread's release took it
+	}
 	return st == .Err_Bad_State ? .Ok : st // a task torn down has none left to unmap
 }
 

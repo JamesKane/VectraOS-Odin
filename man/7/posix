@@ -193,7 +193,7 @@ Job control is partial: no `SIGTTIN` or `SIGTTOU`, no controlling terminal kept 
 Sockets are IPv4 only, with no `AF_UNIX` and no `socketpair`; `getaddrinfo` reads `/etc/resolv.conf` and `/etc/hosts`, which the namespace lacks, so only numeric addresses work; a bound port is used only by `listen`; a UDP datagram is at most 16 KiB.
 There is no `epoll` or `kqueue`.
 
-`mprotect` is `as_protect`, and `PROT_NONE` maps no page, so a guard page faults; `MAP_SHARED` anonymous memory is shared with forked children (ADR-0042). `mremap` grows a private mapping in place where the pages after it are free, else moves and copies it (to `MREMAP_FIXED`'s address too); a shared mapping is neither grown nor moved (`EINVAL`), as a copy would not be shared. A mapping past a file's last page faults with `SIGSEGV`, not `SIGBUS`; `msync(MS_SYNC)` does not wait; at most 64 files are mapped at once.
+`mprotect` is `as_protect`, and `PROT_NONE` maps no page, so a guard page faults; `MAP_SHARED` anonymous memory is shared with forked children (ADR-0042). `mremap` grows a private mapping in place where the pages after it are free and it is one mapping still, else moves and copies it into one (to `MREMAP_FIXED`'s address too, which may not overlap the old); a shared mapping is neither grown nor moved (`EINVAL`), as a copy would not be shared. A mapping past a file's last page faults with `SIGSEGV`, not `SIGBUS`; `msync(MS_SYNC)` does not wait; at most 64 files are mapped at once.
 `fork` copies all of a process's memory at once.
 
 An offset is shared with a child only on a server with `posix`; elsewhere the child opens the file again.

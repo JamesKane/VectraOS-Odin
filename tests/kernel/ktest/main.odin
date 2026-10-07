@@ -2805,6 +2805,60 @@ test_leases :: proc "contextless" () {
 	rt.close_all(rv, w, v)
 }
 
+// --- The review of 2026-10-07 (upstream's 2cc4729): regressions ---
+
+lease_wait_result: i64 = 1
+
+lease_waiter :: proc "c" (unused: vx.Handle, addr: u64) -> ! { // waits on a word through the parent's mapping
+	intrinsics.atomic_store(&lease_wait_result, i64(rt.futex_wait(cast(^u32)uintptr(addr), 0, after_ms(3000))))
+	rt.thread_exit()
+}
+
+test_review_fixes :: proc "contextless" () {
+	// A debugger's write into a read-only mapping of a lease is refused, not a
+	// privatize that left its release slot unset (a kernel crash).
+	w, st := rt.vmo_create(4096)
+	check(st == .Ok)
+	lease, lst := rt.vmo_lease(w)
+	check(lst == .Ok)
+	la, mst := rt.as_map(rt.self, lease, 0, 4096, {})
+	check(mst == .Ok)
+	one := u64(1)
+	op := [1]vx.Mem_Op{{address = la, buffer = u64(uintptr(&one)), size = 8, write = true}}
+	rw := rt.task_mem_rw(rt.self, op[:])
+	check(rw == .Ok && op[0].status == .Err_Unsupported) // refused: a lease is never privatized
+
+	// A futex in lent memory is one futex through the parent and the lease.
+	pa, pst := rt.as_map(rt.self, w, 0, 4096, {.Write})
+	check(pst == .Ok)
+	th, tst := rt.thread_create(rt.self)
+	check(tst == .Ok && rt.thread_start(th, u64(uintptr(rawptr(lease_waiter))), new_stack(), 0, pa) == .Ok)
+	_ = rt.futex_wait(&never, 0, after_ms(50)) // it is waiting
+	woken, _ := rt.futex_wake(cast(^u32)uintptr(la), 1) // through the lease
+	check(woken == 1)
+	for i := 0; i < 1000 && intrinsics.atomic_load(&lease_wait_result) == 1; i += 1 {
+		_ = rt.futex_wait(&never, 0, after_ms(1))
+	}
+	check(intrinsics.atomic_load(&lease_wait_result) == i64(vx.Status.Ok))
+	_ = rt.handle_close(th)
+	check(rt.as_unmap(rt.self, la, 4096) == .Ok && rt.as_unmap(rt.self, pa, 4096) == .Ok)
+	rt.close_all(lease, w)
+
+	// A placed mapping steps over one mapped at an address where placement was
+	// to go next (mremap's growth in place), rather than failing EXISTS.
+	v, vst := rt.vmo_create(4 * 4096)
+	check(vst == .Ok)
+	p, p1 := rt.as_map(rt.self, v, 0, 4096, {})
+	check(p1 == .Ok)
+	fixed := p + 4096 // the guard page, and where the next placed one would go
+	_, fst := rt.as_map(rt.self, v, 0, 4 * 4096, {}, fixed)
+	check(fst == .Ok)
+	q, qst := rt.as_map(rt.self, v, 0, 4096, {})
+	check(qst == .Ok && (q >= fixed + 4 * 4096 || q + 4096 <= p))
+	check(rt.as_unmap(rt.self, p, 4096) == .Ok && rt.as_unmap(rt.self, fixed, 4 * 4096) == .Ok && rt.as_unmap(rt.self, q, 4096) == .Ok)
+	_ = rt.handle_close(v)
+}
+
 // --- Leases lent for one call (ADR-0021) ---
 
 Lent_Mode :: enum {
@@ -3239,6 +3293,7 @@ vx_main :: proc() -> int {
 	test_address_space()
 	test_leases()
 	test_lent()
+	test_review_fixes()
 	test_debugger()
 	test_tls()
 	test_fork()
