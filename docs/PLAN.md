@@ -68,7 +68,7 @@ macOS is the primary host; Fedora 44 is validated in CI, as upstream's host.
 
 | Tool | Pin | macOS path |
 |---|---|---|
-| Odin | `dev-2026-09:a2fb372b7` (LLVM 22.1.8) | `/opt/homebrew/bin/odin` |
+| Odin | `dev-2026-09:a2fb372b7` (LLVM 22.1.8) | `/opt/odin/odin` |
 | clang, llc, llvm-objcopy, llvm-ar | 22.1.8 | `/opt/homebrew/opt/llvm@22/bin/` |
 | ld.lld | 22.1.8 | `/opt/homebrew/opt/lld@22/bin/` |
 | nasm | 3.02 | `/opt/homebrew/bin/nasm` |

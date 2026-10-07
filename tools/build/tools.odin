@@ -7,8 +7,12 @@ import "core:strings"
 // The pinned toolchain (ADR-0001), by absolute path: a Swift toolchain's
 // clang comes first on PATH on the macOS host, so PATH is never used.
 
+// Odin, built from source at the pin on every host (Homebrew's upgrades under
+// us); its root (base:, core:) is mapped to /odin in the IR (ircanon.odin).
+ODIN_ROOT :: "/opt/odin"
+ODIN :: ODIN_ROOT + "/odin"
+
 when ODIN_OS == .Darwin {
-	ODIN :: "/opt/homebrew/bin/odin"
 	CLANG :: "/opt/homebrew/opt/llvm@22/bin/clang"
 	LLC :: "/opt/homebrew/opt/llvm@22/bin/llc"
 	OBJCOPY :: "/opt/homebrew/opt/llvm@22/bin/llvm-objcopy"
@@ -27,7 +31,6 @@ when ODIN_OS == .Darwin {
 	VARS_X86_64 :: "/opt/homebrew/share/qemu/edk2-i386-vars.fd" // the x86 firmware's variable store
 	VARS_AARCH64 :: "/opt/homebrew/share/qemu/edk2-arm-vars.fd"
 } else when ODIN_OS == .Linux {
-	ODIN :: "/opt/odin/odin"
 	CLANG :: "/usr/bin/clang"
 	LLC :: "/usr/bin/llc"
 	OBJCOPY :: "/usr/bin/llvm-objcopy"

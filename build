@@ -5,8 +5,7 @@
 # repository root. See tools/build/main.odin.
 set -eu
 cd "$(dirname "$0")"
-ODIN=/opt/homebrew/bin/odin
-[ -x "$ODIN" ] || ODIN=/opt/odin/odin
+ODIN=/opt/odin/odin # the pinned build (ADR-0001), on every host: Homebrew's odin moves with its releases
 mkdir -p out/bin
 gen=abi/vx/abi_gen.odin
 stale=
