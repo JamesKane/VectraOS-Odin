@@ -34,6 +34,7 @@ import "vx:memory"
 import "vx:ndb"
 import "vx:ns"
 import "vx:p9"
+import "vx:process"
 import "vx:procns"
 import "vx:rc"
 import "vx:rt"
@@ -218,6 +219,77 @@ cd_builtin :: proc "contextless" (argv: ^rc.Word, n: int) {
 	err("\n")
 }
 
+// --- rfork (upstream's 6d7b3), as 9front's execrfork ---
+
+no_mounts: bool // rfork m: mount refused from here on (RFNOMNT)
+
+// A note group of the shell's own (rfork s, RFNOTEG): its own pid written
+// to its noteid (procfs, as 9front's changenoteid allows).
+own_note_group :: proc "contextless" () -> vx.Status {
+	if rt.self == vx.HANDLE_NONE {
+		return .Err_Bad_State
+	}
+	me := rt.task_info(rt.self) or_return
+	digits: [str.U64_DIGITS]u8
+	id := str.format_u64(digits[:], me.id)
+	path_buf: [40]u8
+	path := str.join(path_buf[:], "/proc/", id, "/noteid") or_else ""
+	f: ns.File
+	ns.open(&space, path, p9.OWRITE, &f) or_return
+	_, st := ns.write(&f, transmute([]u8)id)
+	ns.close(&f)
+	return st
+}
+
+// rfork [fnesFNEm]; without flags, ens. n: a namespace of the shell's own, a
+// copy (it leaves its namespace group); N: a clean one, empty; m: no mounts
+// after; s: a note group of its own; F: its descriptors past 2 closed. e, E
+// and f change nothing: the environment and descriptors are the shell's own
+// already, passed to each child as it is spawned, never shared.
+rfork_builtin :: proc "contextless" (argv: ^rc.Word, n: int) {
+	flags := ""
+	if n == 1 {
+		flags = "ens"
+	}
+	if n == 2 {
+		flags = rc.text(argv.next)
+	}
+	ok := n <= 2 && len(flags) > 0
+	for c in transmute([]u8)flags {
+		ok = ok && str.index_byte("fnesFNEm", c) >= 0
+	}
+	if !ok {
+		err("Usage: rfork [fnesFNEm]\n")
+		set_status("rfork usage")
+		return
+	}
+	has :: proc "contextless" (flags: string, c: u8) -> bool {
+		return str.index_byte(flags, c) >= 0
+	}
+	st := vx.Status.Ok
+	if has(flags, 's') {
+		st = own_note_group() // first: N takes /proc away
+	}
+	if st == .Ok && (has(flags, 'n') || has(flags, 'N')) {
+		procns.group_leave(&space)
+	}
+	if st == .Ok && has(flags, 'N') {
+		ns.reset(&space)
+	}
+	if st == .Ok && has(flags, 'm') {
+		no_mounts = true
+	}
+	if st == .Ok && has(flags, 'F') { // a clean table: none past 2
+		rt.fds_close()
+	}
+	if st != .Ok {
+		err("rc: rfork failed\n")
+		set_status("rfork failed")
+		return
+	}
+	set_status("")
+}
+
 builtin_run :: proc "contextless" (argv: ^rc.Word, n: int) -> bool {
 	w: [4]string // the first words: all a builtin reads
 	words := argv
@@ -234,6 +306,9 @@ builtin_run :: proc "contextless" (argv: ^rc.Word, n: int) -> bool {
 	case "cd":
 		cd_builtin(argv, n)
 		return true
+	case "rfork":
+		rfork_builtin(argv, n)
+		return true
 	case "bind":
 		if !flags_ok || n - first != 2 {
 			usage(usage_of.TEXT_bind)
@@ -246,6 +321,10 @@ builtin_run :: proc "contextless" (argv: ^rc.Word, n: int) -> bool {
 		// ns prints it, so its output replays) or srvfs has (srv(1)'s, say);
 		// or a 9P server over TCP, tcp!HOST!PORT or 9p://HOST:PORT, through
 		// a relay, so the children share its session (procns's relay.odin).
+		if no_mounts { // rfork m
+			report("mount", .Err_Access)
+			return true
+		}
 		if !flags_ok || n - first < 2 || n - first > 3 {
 			usage(usage_of.TEXT_mount)
 			return true
@@ -677,6 +756,13 @@ records: [vx.CHANNEL_MAX_BYTES - 4096]u8 // room left for spawn's own records
 // 6d7b1).
 RC_SELF :: "/boot/bin/rc"
 
+// Whether a spawn is a command run with &'s: in a note group of its own, as
+// 9front's rc runs `rfork s` in its child (code.c's Xasync), so the
+// terminal's interrupt does not reach it. Not a <{...}'s (its Xpipefd's has
+// none).
+spawn_noteg: bool
+in_pipefd: bool // pipe_fd's run: not an & job
+
 // A file the shell opened, a descriptor from 3: the musl back end's fd=N
 // file=PATH flags=F offset=O token=T (ADR-0018), the open file itself, which
 // the program joins, so it takes nothing from it until it reads: a relay
@@ -825,6 +911,10 @@ spawn :: proc "contextless" (argv: ^rc.Word, child: bool, io: [rc.FDS]vx.Handle,
 		handle_names = names[:count],
 		records      = ndb.written(&rec),
 		exec         = exec,
+		// Registered with whatever serves /proc (ADR-0011): the shell watches
+		// each command's end itself, so no wait record.
+		proc_conn    = ns.connector(&space, "/proc"),
+		proc_flags   = spawn_noteg ? process.Flags{.No_Wait, .Note_Group} : process.Flags{.No_Wait},
 	}
 	return rt.spawn_elf(&a)
 }
@@ -1010,6 +1100,7 @@ ends: [MAX_STAGES][dynamic; vx.ERRMAX]u8 // each command's exit string, for $sta
 // Host.run: a pipeline's programs, each spawned with its descriptors; then,
 // unless async, the relays served until they and the programs are done.
 run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: bool) -> (pid: u64, ok: bool) {
+	spawn_noteg = async && !in_pipefd
 	n := len(stages)
 	if n > MAX_STAGES {
 		say("rc: too many commands in a pipe", "", "\n")
@@ -1285,7 +1376,9 @@ pipe_fd :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, child: ^rc.Command, comma
 	pipe_ends[near], pipe_ends[far] = a, b
 	c := child^
 	c.fds[command_reads ? 1 : 0] = rc.Fd_Pipefd{handle = PIPE_BASE + far, reads = !command_reads}
+	in_pipefd = true
 	_, ran := run(ctx, r, ([^]rc.Command)(&c)[:1], true)
+	in_pipefd = false
 	close_file(ctx, PIPE_BASE + far) // the child has its own
 	if !ran {
 		close_file(ctx, PIPE_BASE + near)
@@ -1457,7 +1550,7 @@ quoted :: proc "contextless" (b: ^[dynamic; 512]u8, room: int, s: string) {
 }
 
 // The host's builtins, for whatis.
-HOST_BUILTINS := [?]string{"cd", "bind", "mount", "unmount"}
+HOST_BUILTINS := [?]string{"cd", "rfork", "bind", "mount", "unmount"}
 
 @(export, link_name="vx_main")
 vx_main :: proc() -> int {

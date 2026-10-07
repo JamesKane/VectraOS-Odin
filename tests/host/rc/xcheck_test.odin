@@ -11,8 +11,8 @@
 // upstream's heap sizes from 4 MiB down to 64 KiB, where scripts run out of
 // memory as they compile or run.
 //
-// The digests are those of upstream's rc.c at e194269 (its 6d7b2),
-// unpatched: its ab83fe6 and f24356f fixed what this tree's findings said (a
+// The digests are those of upstream's rc.c at 5c1bbc9 (unchanged since its
+// 6d7b2, e194269), unpatched: its ab83fe6 and f24356f fixed what this tree's findings said (a
 // here document's redirection closes nothing; a stage's paths and here
 // document are kept until it runs), so a stage's paths are logged and its
 // here document read, as the shell does. Its host has exists, read_line (its
@@ -117,11 +117,11 @@ test_mutated :: proc(t: ^testing.T) {
 	m := mutator()
 	defer rt.mutator_destroy(&m)
 	folds := []Fold {
-		{BIG_HEAP, false, 0xc2a750e82058c5f2},
-		{MID_HEAP, false, 0xb153b2f67cb7566c},
-		{SMALL_HEAP, false, 0x0dfb800a8a3f6240},
-		{FUZZ_HEAP, true, 0x2dda2e426c131011},
-		{SMALL_HEAP, true, 0xe83b61c25a75a07a},
+		{BIG_HEAP, false, 0x3e58edc20ab882c4},
+		{MID_HEAP, false, 0x2ddca4f9ea2b0996},
+		{SMALL_HEAP, false, 0xebb739d8bf2503e2},
+		{FUZZ_HEAP, true, 0x88bc961e293a05ed},
+		{SMALL_HEAP, true, 0xeed913702fd796b8},
 	}
 	text: [dynamic]u8
 	defer delete(text)

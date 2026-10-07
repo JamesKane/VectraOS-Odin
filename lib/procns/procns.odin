@@ -431,6 +431,26 @@ group_join :: proc "contextless" (space: ^ns.Namespace, chan: vx.Handle) -> vx.S
 	return .Ok
 }
 
+// Leaves the namespace group (rc's rfork n, upstream's 6d7b3, as RFNAMEG):
+// the table, as it is, a copy of this process's own; the group's later
+// changes are not seen, nor are this one's by the group. A child shares it
+// in a group made for it (spawn_records). Nothing to do without a group.
+group_leave :: proc "contextless" (space: ^ns.Namespace) {
+	if group.chan == vx.HANDLE_NONE {
+		return
+	}
+	if !space.quiet {
+		group_refresh(space) // the group's table as it is now
+	}
+	space.refresh, space.publish = nil, nil
+	rt.close_all(group.chan)
+	if group.page != nil {
+		// vx:rt has no as_unmap yet (the kernel's M4 port brings it): the call itself.
+		_ = rt.vx_syscall(.As_Unmap, u64(rt.self), u64(uintptr(group.page)), PAGE_SIZE)
+	}
+	group.chan, group.page, group.seq = vx.HANDLE_NONE, nil, 0
+}
+
 @(private="file")
 make_text: [ns.NSD_TEXT_MAX]u8
 @(private="file")

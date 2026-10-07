@@ -171,6 +171,30 @@ echo written | tee >{cat > $dir/teed} > /dev/null
 wait
 check pipefd-write written `{cat $dir/teed}
 
+# A command run with & that has ended keeps its status until wait takes it,
+# however many commands came between (the Rust port's finding).
+{exit 3} &
+bg=$apid
+/boot/bin/true
+/boot/bin/true
+wait $bg
+check bg-wait ok `{if(~ $status *': 3') echo ok; if not echo $status}
+
+# rfork (6d7b3), as 9front's: in children, so this shell keeps its own.
+check rfork-usage 'rfork usage' `{rfork x >[2] /dev/null; echo $status}
+mkdir $dir/nsa $dir/nsb
+@{bind /boot/bin $dir/nsa}
+check rfork-shared yes `{if(test -e $dir/nsa/echo) echo yes; if not echo no} # a child's bind: the group's
+unmount $dir/nsa
+@{rfork n; bind /boot/bin $dir/nsb; if(test -e $dir/nsb/echo) echo seen > $dir/seen}
+check rfork-n-own seen `{cat $dir/seen}
+check rfork-n-private no `{if(test -e $dir/nsb/echo) echo yes; if not echo no}
+@{rfork N; /boot/bin/true} >[2] /dev/null
+check rfork-N-clean ok `{if(~ $status *'file does not exist') echo ok; if not echo $status}
+check rfork-m refused `{rfork m; mount /srv/nsd $dir/nsb >[2] /dev/null; if(! ~ $status '') echo refused}
+check rfork-s '' `{rfork s; echo $status}
+check rfork-ens '' `{rfork; echo $status}
+
 rm -r $dir
 check cleaned no `{if(test -d $dir) echo yes; if not echo no}
 
