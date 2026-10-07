@@ -1,6 +1,6 @@
 # ADR-0019: CPU time, sampled as 9front's, as upstream's ADR-0041
 
-Status: proposed, 2026-10-07: upstream's ADR-0041 (proposed upstream the same day, `5096568`, its M6 step 6d9b; still proposed at `8385e74`), followed here.
+Status: accepted, 2026-10-07 (proposed 2026-10-07): upstream's ADR-0041 (proposed upstream the same day, `5096568`, its M6 step 6d9b; accepted in `bdae968`), followed here.
 
 ## Context
 

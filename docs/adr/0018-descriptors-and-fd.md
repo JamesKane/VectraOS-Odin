@@ -1,6 +1,6 @@
 # ADR-0018: Descriptors past 2, and `/fd`, as upstream's ADR-0040
 
-Status: proposed, 2026-10-06: upstream's ADR-0040 (proposed upstream the same day, `e194269`, its M6 step 6d7b2; still proposed at `5c1bbc9`), followed here.
+Status: accepted, 2026-10-07 (proposed 2026-10-06): upstream's ADR-0040 (proposed upstream the same day, `e194269`, its M6 step 6d7b2; accepted in `bdae968`), followed here.
 
 ## Context
 
