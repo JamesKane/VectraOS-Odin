@@ -30,7 +30,8 @@ Table :: struct {
 // The index of the user named name, or none's.
 named :: proc "contextless" (t: ^Table, name: string) -> u32 {
 	for &u, i in t.users {
-		if string(u.name[:]) == name {
+		// A removed user's place has no name, which no one is.
+		if len(u.name) != 0 && string(u.name[:]) == name {
 			return u32(i)
 		}
 	}

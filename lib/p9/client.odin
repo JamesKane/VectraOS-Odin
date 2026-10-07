@@ -457,6 +457,7 @@ readdir_as_stat :: proc "contextless" (c: ^Client, slot: int, offset: u64, buf: 
 		defer finish(c, &rc)
 		exchange(c, &t, &rc) or_return
 		pos := 0
+		overflow := false // an entry did not fit
 		for {
 			q, next, type, name, ok := dirent_next(rc.r.data, &pos)
 			if !ok {
@@ -469,13 +470,14 @@ readdir_as_stat :: proc "contextless" (c: ^Client, slot: int, offset: u64, buf: 
 			}
 			k := stat_encode(&st, buf[used:])
 			if k == 0 {
+				overflow = true
 				break
 			}
 			used += k
 			d.cookie = next
 		}
-		if used == 0 && pos < len(rc.r.data) {
-			return 0, .Err_Too_Small // not one entry fits
+		if used == 0 && overflow {
+			return 0, .Err_Too_Small // not one entry fits, the last one too
 		}
 	}
 	dirs_lock(c)

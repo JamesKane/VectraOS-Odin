@@ -49,7 +49,7 @@ tty_note :: proc "contextless" (o: ^Ofd, device: bool, pty: u32) {
 // tty_note from the fid's stat: for a file opened again or joined.
 tty_check :: proc "contextless" (o: ^Ofd) {
 	s: p9.Stat
-	names: p9.Stat_Text // a pty's number is its name (upstream passes none: UPSTREAM-FINDINGS)
+	names: p9.Stat_Text // the name: the pty's number (UPSTREAM-FINDINGS, fixed upstream in 6319e48)
 	if p9.client_stat(o.f.c, o.f.fid, &s, &names) != .Ok || s.mode & p9.DMDEVICE == 0 {
 		return
 	}

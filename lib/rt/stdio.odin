@@ -174,7 +174,8 @@ read_all :: proc "contextless" (buf: []u8) -> (n: int, st: vx.Status) {
 // It holds stdio_lock to the end, so no other thread prints over the last
 // lines (upstream's M6 step 6d1); but a note handler that ends the program
 // (.Dflt) may run on a thread that holds it already, interrupted inside a
-// print, so it waits for it only a while (UPSTREAM-FINDINGS).
+// print, so it waits for it only 100 ms (UPSTREAM-FINDINGS; upstream's
+// 6319e48 does the same).
 exits :: proc "contextless" (msg: string) -> ! {
 	_ = mutex_lock_until(&stdio_lock, clock_read() + 100_000_000)
 	console_flush()
