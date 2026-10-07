@@ -1,6 +1,6 @@
 # ADR-0020: Reservations, no-access and shared mappings, resizable VMOs, as upstream's ADR-0042
 
-Status: proposed, 2026-10-07: upstream's ADR-0042 (proposed upstream the same day, `c5700f0`, its M6 step 6e1a1), followed here.
+Status: accepted, 2026-10-07 (proposed 2026-10-07): upstream's ADR-0042 (proposed upstream the same day, `c5700f0`, its M6 step 6e1a1; accepted upstream the same day, `4e5770f`), followed here.
 
 ## Context
 
