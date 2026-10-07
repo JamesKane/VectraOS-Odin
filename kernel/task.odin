@@ -2,6 +2,8 @@ package kernel
 
 import "base:intrinsics"
 import vx "abi:vx"
+import "vx:drbg"
+import "vx:memory"
 import "vx:utf"
 
 // Tasks, threads, handles and address spaces.
@@ -53,6 +55,15 @@ Mapping :: struct {
 
 TASK_MAX_MAPPINGS :: PAGE_SIZE / size_of(Mapping)
 
+// A reservation (as_reserve, ADR-0020): address space no placed mapping
+// lands in, kept for the task's own as_map at addresses inside it.
+Reservation :: struct {
+	va:   Uva,
+	size: u64, // 0: the slot is free
+}
+
+TASK_MAX_RESERVATIONS :: 32
+
 // A task's lock covers its handle table, its address space, its threads and
 // its life (state, exit string, bindings on its exit) and where its faults go.
 Task :: struct {
@@ -61,6 +72,7 @@ Task :: struct {
 	id:              u64,
 	root:            Paddr, // the address space's top table; 0 once torn down
 	map_next:        Uva, // the next address as_map places at
+	resv:            [TASK_MAX_RESERVATIONS]Reservation, // under the lock; they go with the address space (task_exec)
 	keys:            bit_set[0 ..< 16; u16], // its protection keys, 1 to 15 (ADR-0035): as_key_alloc's
 	handles:         ^[HANDLE_SLOTS]Handle_Entry, // nil once torn down
 	maps:            ^[TASK_MAX_MAPPINGS]Mapping, // size 0 is a free slot
@@ -550,12 +562,64 @@ page_map_flags :: proc "contextless" (v: ^Vmo, flags: vx.Map_Options, page: Page
 	return mf
 }
 
+// The start of the first mapping or reservation that [va, end) overlaps, or
+// 0 if none does. Under the task's lock.
+@(private="file")
+task_in_way :: proc "contextless" (t: ^Task, va, end: Uva) -> Uva {
+	first: Uva
+	if t.maps != nil {
+		for m in t.maps {
+			if m.size != 0 && m.va < end && va < m.va + Uva(m.size) && (first == 0 || m.va < first) {
+				first = m.va
+			}
+		}
+	}
+	for r in t.resv {
+		if r.size != 0 && r.va < end && va < r.va + Uva(r.size) && (first == 0 || r.va < first) {
+			first = r.va
+		}
+	}
+	return first
+}
+
+// Whether [va, end) lies wholly inside one reservation or outside every one.
+@(private="file")
+task_resv_fits :: proc "contextless" (t: ^Task, va, end: Uva) -> bool {
+	for r in t.resv {
+		if r.size != 0 && r.va < end && va < r.va + Uva(r.size) {
+			return va >= r.va && end <= r.va + Uva(r.size)
+		}
+	}
+	return true
+}
+
+// Where as_map places a mapping of size bytes: from map_next on, past any
+// reservation in the way (a guard page after it).
+@(private="file")
+task_place :: proc "contextless" (t: ^Task, size: u64) -> Uva {
+	at := t.map_next
+	for _ in 0 ..= TASK_MAX_RESERVATIONS {
+		moved := false
+		for r in t.resv {
+			if r.size != 0 && r.va < at + Uva(size) && at < r.va + Uva(r.size) {
+				at = r.va + Uva(r.size) + PAGE_SIZE
+				moved = true
+			}
+		}
+		if !moved {
+			break
+		}
+	}
+	return at
+}
+
 // Maps [offset, offset + size) of a VMO into a task's address space. With
 // va == 0 the kernel picks the address; otherwise va is used and must be
 // page-aligned and free. The mapping holds a reference on the VMO. W^X:
 // never writable and executable. key is the mapping's protection key, 0 or
 // one the task allocated; allowed what the VMO's handle gave, which
-// as_protect may later give the mapping and no more (ADR-0035).
+// as_protect may later give the mapping and no more (ADR-0035). .No_Access
+// maps no page: a touch faults (ADR-0020).
 @(require_results)
 task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.Map_Options, want_va: Uva, key: u32, allowed: vx.Map_Options) -> (Uva, vx.Status) {
 	if flags >= {.Write, .Exec} {
@@ -567,7 +631,7 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 	}
 	mf := user_map_flags(flags, v.physical)
 	spin_lock(&t.lock)
-	at := want_va != 0 ? want_va : t.map_next
+	at := want_va != 0 ? want_va : task_place(t, size)
 	end, end_overflow := intrinsics.overflow_add(at, Uva(size))
 	slot: ^Mapping
 	if t.maps != nil {
@@ -584,7 +648,7 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 		st = .Err_Bad_State
 	case !key_ok(t, key):
 		st = .Err_Invalid // a key it has not allocated
-	case at & (PAGE_SIZE - 1) != 0 || end_overflow || end > USER_TOP:
+	case at & (PAGE_SIZE - 1) != 0 || end_overflow || end > USER_TOP || !task_resv_fits(t, at, end):
 		st = .Err_Range
 	case slot == nil:
 		st = .Err_No_Memory
@@ -594,14 +658,16 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 	// pages are mapped as far as it has supplied them, the rest as they are
 	// touched (pager.odin).
 	done: u64
-	if v.pager != nil {
+	locked := vmo_locked(v)
+	if locked {
 		spin_lock(&v.lock)
 		if st == .Ok && vmo_end > v.size {
 			st = .Err_Range // shrunk since the check above
 		}
 	}
+	none := .No_Access in flags
 	for st == .Ok && done < size {
-		page := v.pages[(offset + done) / PAGE_SIZE]
+		page := none ? Page{} : v.pages[(offset + done) / PAGE_SIZE]
 		pa := Paddr(page.frame << 12)
 		pf := v.pager != nil ? page_map_flags(v, flags, page) : mf
 		if pa != 0 && !map_range(t.root, u64(at) + done, pa, PAGE_SIZE, pf, key) {
@@ -610,7 +676,7 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 			done += PAGE_SIZE
 		}
 	}
-	if v.pager != nil {
+	if locked {
 		spin_unlock(&v.lock)
 	}
 	if st != .Ok {
@@ -628,7 +694,7 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 	slot^ = {va = at, size = size, offset = offset, vmo = v, flags = flags, allowed = allowed, key = key}
 	t.mapped += size
 	if want_va == 0 {
-		t.map_next = end + PAGE_SIZE // leave a guard page between placed mappings
+		t.map_next = end + PAGE_SIZE // leave a guard page between placed mappings, past any reservation
 	}
 	spin_unlock(&t.lock)
 	return at, .Ok
@@ -645,7 +711,9 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 //     says about its handles (its file descriptors) holds in the child. A
 //     handle to the parent itself becomes one to the child.
 //   - A pager's VMO is shared, not copied: the child maps the same one, as
-//     a file mapped MAP_SHARED is in both.
+//     a file mapped MAP_SHARED is in both; so is a mapping made .Shared
+//     (ADR-0020), MAP_SHARED anonymous memory.
+//   - Its reservations are the parent's.
 //   - The in-task fault handler is the parent's (signal handlers are
 //     inherited); exception ports, a debugger and I/O ports are not.
 @(require_results)
@@ -655,17 +723,27 @@ task_fork_copy :: proc "contextless" (parent, child: ^Task) -> vx.Status {
 		return .Err_Bad_State
 	}
 	child.keys = parent.keys // first: the mappings below carry their keys
+	child.resv = parent.resv // and its reservations, which they may lie in
 	for m in parent.maps {
 		if m.size == 0 || m.vmo.physical || m.vmo.ring {
 			continue
 		}
-		if m.vmo.pager != nil {
+		if m.vmo.pager != nil || .Shared in m.flags { // the same VMO: a file's pages, MAP_SHARED memory
 			_ = task_map(child, m.vmo, m.offset, m.size, m.flags, m.va, m.key, m.allowed) or_return
 			continue
 		}
 		dup := vmo_create(m.size) or_return
+		v := m.vmo
+		if v.resizable {
+			spin_lock(&v.lock) // a page past a shrink's end is absent: the copy's stays zero
+		}
 		for i in 0 ..< m.size / PAGE_SIZE {
-			page_copy(vmo_page(dup, i), vmo_page(m.vmo, m.offset / PAGE_SIZE + i))
+			if pa := vmo_page_in(v, m.offset / PAGE_SIZE + i); pa != 0 {
+				page_copy(vmo_page(dup, i), pa)
+			}
+		}
+		if v.resizable {
+			spin_unlock(&v.lock)
 		}
 		_, st := task_map(child, dup, 0, m.size, m.flags, m.va, m.key, m.allowed)
 		object_release(&dup.obj) // the child's mapping holds it, if it was made
@@ -805,7 +883,7 @@ task_protect :: proc "contextless" (t: ^Task, va: Uva, size: u64, flags: vx.Map_
 			if m_end <= va || m.va >= end {
 				continue
 			}
-			if flags - m.allowed != {} {
+			if flags & {.Write, .Exec} - m.allowed != {} {
 				return .Err_Access // more than its handle gave
 			}
 			covered += u64(min(m_end, end) - max(m.va, va))
@@ -840,21 +918,22 @@ task_protect :: proc "contextless" (t: ^Task, va: Uva, size: u64, flags: vx.Map_
 				rest.va = end
 				m.size = u64(end - m.va)
 			}
-			m.flags = flags
+			m.flags = flags + m.flags & {.Shared} // .Shared is as_map's, and stays
 			m.key = key
 			v := m.vmo
-			if v.pager != nil {
+			locked := vmo_locked(v)
+			if locked {
 				spin_lock(&v.lock)
 			}
 			for off := u64(0); off < m.size && st == .Ok; off += PAGE_SIZE {
 				index := (m.offset + off) / PAGE_SIZE
-				pa := vmo_page(v, index)
+				pa := .No_Access in flags ? 0 : vmo_page_in(v, index)
 				unmap_page(t.root, u64(m.va) + off)
 				if pa != 0 && !map_range(t.root, u64(m.va) + off, pa, PAGE_SIZE, page_map_flags(v, m.flags, v.pages[index]), m.key) {
 					st = .Err_No_Memory
 				}
 			}
-			if v.pager != nil {
+			if locked {
 				spin_unlock(&v.lock)
 			}
 		}
@@ -873,6 +952,104 @@ free_mapping :: proc "contextless" (t: ^Task) -> ^Mapping {
 		}
 	}
 	kpanic("free_mapping: no slot, after they were counted")
+}
+
+// as_reserve (ADR-0020): a reservation of size bytes aligned to align, at a
+// random base or (.Fixed) at *va; or (.Release) the one at *va given back,
+// after what is mapped in it is unmapped.
+@(private="file")
+resv_random: drbg.Drbg // the kernel's, seeded from the bootloader's entropy
+@(private="file")
+resv_random_lock: Spinlock
+
+@(private="file")
+resv_random_u64 :: proc "contextless" () -> (x: u64) {
+	spin_guard(&resv_random_lock)
+	if !resv_random.seeded {
+		drbg.mix(&resv_random, memory.ptr_to_bytes(&boot.seed), true)
+		drbg.mix(&resv_random, transmute([]u8)string("as_reserve"), false)
+		now := clock_now() // without the bootloader's entropy, at least not the same each boot
+		drbg.mix(&resv_random, memory.ptr_to_bytes(&now), false)
+	}
+	drbg.read(&resv_random, memory.ptr_to_bytes(&x))
+	return
+}
+
+@(private="file", require_results)
+task_release :: proc "contextless" (t: ^Task, va: Uva, size: u64) -> vx.Status {
+	found := false
+	{
+		spin_guard(&t.lock)
+		for &r in t.resv {
+			if r.size != 0 && r.va == va && r.size == size {
+				r = {}
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		return .Err_Not_Found
+	}
+	st := task_unmap(t, va, size)
+	return st == .Err_Bad_State ? .Ok : st // a task torn down has none left to unmap
+}
+
+// *va is where it was made, or with .Err_Exists, where what is in the way
+// starts.
+@(require_results)
+task_reserve :: proc "contextless" (t: ^Task, size, align_in: u64, flags: vx.As_Options, va: ^Uva) -> vx.Status {
+	if .Release in flags {
+		return task_release(t, va^, size)
+	}
+	align := align_in != 0 ? align_in : PAGE_SIZE
+	if size == 0 || size & (PAGE_SIZE - 1) != 0 || size > u64(USER_TOP - USER_MAP_BASE) || align & (align - 1) != 0 || align < PAGE_SIZE || align > 1 << 39 {
+		return .Err_Range
+	}
+	fixed := va^
+	end, overflow := intrinsics.overflow_add(fixed, Uva(size))
+	if .Fixed in flags && (u64(fixed) & (align - 1) != 0 || fixed == 0 || overflow || end > USER_TOP) {
+		return .Err_Range
+	}
+	r: [16]Uva // the random bases to try, drawn before the lock
+	slots := (u64(USER_TOP - USER_MAP_BASE) - size) / align + 1
+	for &x in r {
+		x = USER_MAP_BASE + Uva(resv_random_u64() % slots * align)
+	}
+	spin_guard(&t.lock)
+	slot: ^Reservation
+	for &x in t.resv {
+		if x.size == 0 {
+			slot = &x
+			break
+		}
+	}
+	at: Uva
+	switch {
+	case t.root == 0 || t.maps == nil || t.ending:
+		return .Err_Bad_State
+	case slot == nil:
+		return .Err_No_Space
+	case .Fixed in flags:
+		if in_way := task_in_way(t, fixed, end); in_way != 0 {
+			va^ = in_way
+			return .Err_Exists
+		}
+		at = fixed
+	case:
+		for x in r {
+			if task_in_way(t, x, x + Uva(size)) == 0 && !(x <= t.map_next && t.map_next < x + Uva(size)) {
+				at = x
+				break
+			}
+		}
+		if at == 0 {
+			return .Err_No_Memory // a crowded address space: sixteen draws all hit something
+		}
+	}
+	slot^ = {va = at, size = size}
+	va^ = at
+	return .Ok
 }
 
 // The protection key of the mapping holding addr (0 if none): a

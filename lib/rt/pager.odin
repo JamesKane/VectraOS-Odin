@@ -51,8 +51,8 @@ pager_resize :: proc "contextless" (pager, vmo: vx.Handle, size: u64) -> vx.Stat
 	return status(vx_syscall(.Pager_Op, u64(pager), u64(vmo), u64(vx.Pager_Op.Resize), 0, size))
 }
 
-// An anonymous VMO's new size: not yet (.Err_Unsupported); a pager-backed
-// one's is its pager's (.Err_Access).
+// A resizable anonymous VMO's new size (ADR-0020); a pager-backed
+// one's is its pager's (.Err_Access), any other .Err_Unsupported.
 @(require_results)
 vmo_resize :: proc "contextless" (vmo: vx.Handle, size: u64) -> vx.Status {
 	return status(vx_syscall(.Vmo_Op, u64(vmo), u64(vx.Vmo_Resize_Op.Resize), size))

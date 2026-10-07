@@ -34,7 +34,7 @@ A physical VMO is device memory, a fixed range of physical addresses that is not
 A pager-backed VMO starts with no pages, and a trusted task supplies them as they are touched; pager(2) describes it.
 
 `vx_vmo_create` makes an anonymous VMO of <size> bytes and puts a handle to it in <out>.
-<options> must be 0: the other two kinds have calls of their own, below, which make the same system call with `VX_VMO_PHYSICAL` or `VX_VMO_PAGER`.
+<options> is 0, or `VX_VMO_RESIZABLE` for one `vx_vmo_resize` may change (below): the other two kinds have calls of their own, below, which make the same system call with `VX_VMO_PHYSICAL` or `VX_VMO_PAGER`.
 The handle has every right but `VX_RIGHT_DEBUG`, `VX_RIGHT_EXEC` among them, since loaders and JITs map their own code; that a mapping is never both writable and executable is decided per mapping by as_map(2), not per VMO.
 
 `vx_vmo_create_physical` makes a VMO over the device memory from <pa> to <pa> + <size>.
@@ -60,7 +60,9 @@ A write to a pager-backed VMO marks the pages it writes dirty, as a store throug
 A physical VMO is not read or written this way; it is mapped.
 
 `vx_vmo_resize` makes the system call `vmo_op` with `VX_VMO_RESIZE`: it asks for <vmo>'s size to become <size>, and needs `VX_RIGHT_WRITE`.
-An anonymous or physical VMO cannot be resized yet.
+Only an anonymous VMO made with the option `VX_VMO_RESIZABLE` is resized (ADR-0042): pages added are zero; pages past a smaller size leave every mapping and are freed, so a touch there faults, and a mapping keeps its place.
+Its pages are read under its lock, as a pager's are, so `vx_vmo_rw` on it goes through a small buffer; a VMO that will not be resized is better made without the option.
+Any other anonymous VMO, and a physical one, is not resized.
 A pager-backed one is its pager's to resize, with `pager_op` (see pager(2)), since everyone who maps it shares its size: `vmo_op` on one is refused.
 `VX_VMO_RESIZE` is the only operation `vmo_op` has.
 
@@ -101,7 +103,7 @@ pager(2), as_map(2), dma_map(2), handle_dup(2), intro(2)
 : `VX_OK`
   The VMO is made, and its handle is in <out>.
 : `VX_ERR_INVALID`
-  <options> holds a bit that is not `VX_VMO_PHYSICAL` or `VX_VMO_PAGER`, or both of them; <key> does not fit 32 bits; or <out> is not writable memory of the caller's.
+  <options> holds a bit that is not `VX_VMO_PHYSICAL`, `VX_VMO_PAGER` or `VX_VMO_RESIZABLE`, or more than one of them; <key> does not fit 32 bits; or <out> is not writable memory of the caller's.
 : `VX_ERR_RANGE`
   <size> is 0 or more than 256 MiB; for a physical VMO, <pa> or <size> is not page-aligned, or the range wraps.
 : `VX_ERR_BAD_HANDLE`
@@ -154,13 +156,12 @@ pager(2), as_map(2), dma_map(2), handle_dup(2), intro(2)
 : `VX_ERR_ACCESS`
   <vmo> lacks `VX_RIGHT_WRITE`, or is pager-backed.
 : `VX_ERR_UNSUPPORTED`
-  <vmo> is anonymous or physical.
+  <vmo> was not made `VX_VMO_RESIZABLE`, or is physical.
 
 `vmo_seal`, `vmo_lease` and `vmo_revoke` return `VX_ERR_UNSUPPORTED`.
 
 # BUGS
 
-`vmo_op` never succeeds: anonymous VMOs cannot be resized yet, and pager-backed ones are refused, so `VX_VMO_RESIZE` is a call that only says no.
 The design's other operations (commit, decommit, cache cleaning and invalidation, lock, hint, purgeable, priority; 01 §3, §5) are not there, and neither are seals, leases or the `NODUMP` mark.
 
 A clone is a full copy made at once, not pages shared until written; the design's copy-on-write is an optimization for later behind the same call.

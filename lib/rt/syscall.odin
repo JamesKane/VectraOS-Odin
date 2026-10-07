@@ -224,11 +224,24 @@ port_post :: proc "contextless" (port: vx.Handle, packet: ^vx.Packet) -> vx.Stat
 	return status(vx_syscall(.Port_Post, u64(port), addr(packet)))
 }
 
+// Anonymous memory of size bytes, zero; with {.Resizable}, one vmo_resize may
+// change (ADR-0020).
 @(require_results)
-vmo_create :: proc "contextless" (size: u64) -> (vx.Handle, vx.Status) {
+vmo_create :: proc "contextless" (size: u64, options: vx.Vmo_Options = {}) -> (vx.Handle, vx.Status) {
 	h: vx.Handle
-	st := status(vx_syscall(.Vmo_Create, size, 0, addr(&h)))
+	st := status(vx_syscall(.Vmo_Create, size, u64(transmute(u32)options), addr(&h)))
 	return h, st
+}
+
+// A reservation of size bytes of the task's address space, aligned to align
+// (0: a page), at a random base or, with .Fixed, at `at`; with .Release, the
+// one at `at` given back (ADR-0020). The address comes back, or with
+// .Err_Exists, the start of what is in the way.
+@(require_results)
+as_reserve :: proc "contextless" (task: vx.Handle, size, align: u64, flags: vx.As_Options = {}, at: u64 = 0) -> (u64, vx.Status) {
+	va := at
+	st := status(vx_syscall(.As_Reserve, u64(task), size, align, u64(transmute(u32)flags), addr(&va)))
+	return va, st
 }
 
 // Maps [offset, offset + size) of a VMO into a task. With at == 0 the

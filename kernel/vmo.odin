@@ -12,7 +12,10 @@ import vx "abi:vx"
 // pager-backed VMO (pager.odin) starts with none: a page's entry is empty
 // until its pager is asked for it, .asked until it is supplied, and its
 // address from then on, .dirty once it has been written; its lock covers the
-// list and the threads waiting on it.
+// list and the threads waiting on it. A resizable one (vmo_create
+// {.Resizable}, ADR-0020) is anonymous memory whose list vmo_resize may
+// change, so it is read under the lock too; every other anonymous VMO's list
+// never changes, and is read without it.
 
 Vmo :: struct {
 	using obj:  Object,
@@ -23,9 +26,10 @@ Vmo :: struct {
 	ring:       bool, // a ring's memory (ring.odin), never copied into a forked task
 	pager:      ^Pager, // its pages' supplier (pager.odin), which it holds; or nil
 	pager_key:  u32, // what its page requests call it
-	lock:       Spinlock, // a pager-backed one's: its page list, and waiters
+	lock:       Spinlock, // a pager-backed or resizable one's: its page list, and waiters
 	waiters:    ^Page_Waiter,
 	resizing:   bool, // a resize under way (pager.odin), which drops the lock between its steps
+	resizable:  bool, // anonymous, made {.Resizable} (ADR-0020): its page list under its lock too
 }
 
 #assert(offset_of(Vmo, obj) == 0) // objects are cast from ^Object
@@ -49,6 +53,18 @@ page_of :: #force_inline proc "contextless" (pa: Paddr) -> Page {
 // The address of page i, or 0 if a pager has not supplied it.
 vmo_page :: #force_inline proc "contextless" (v: ^Vmo, i: u64) -> Paddr {
 	return Paddr(v.pages[i].frame << 12)
+}
+
+// Whether v's page list may change under a reader (a pager's VMO, a
+// resizable one): read it under v's lock.
+vmo_locked :: #force_inline proc "contextless" (v: ^Vmo) -> bool {
+	return v.pager != nil || v.resizable
+}
+
+// The address of page i, or 0 if it is past the VMO's end (a resizable
+// one's, shrunk) or not supplied. Under v's lock, for one vmo_locked says is.
+vmo_page_in :: proc "contextless" (v: ^Vmo, i: u64) -> Paddr {
+	return i < v.size / PAGE_SIZE ? vmo_page(v, i) : 0
 }
 
 vmo_pool: Pool(Vmo)

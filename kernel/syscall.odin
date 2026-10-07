@@ -290,8 +290,8 @@ DEVICE_RIGHTS :: vx.Rights{.Duplicate, .Transfer, .Inspect}
 @(private="file", require_results)
 sys_vmo_create :: proc "contextless" (size, options: u64, out: Uva, rh: vx.Handle, pa: Paddr) -> vx.Status {
 	opts, valid := options_of(vx.Vmo_Options, options)
-	if !valid || opts == {.Physical, .Pager} {
-		return .Err_Invalid
+	if !valid || card(opts) > 1 {
+		return .Err_Invalid // one kind at most
 	}
 	if .Pager in opts {
 		if u64(pa) > u64(max(u32)) {
@@ -315,6 +315,7 @@ sys_vmo_create :: proc "contextless" (size, options: u64, out: Uva, rh: vx.Handl
 		return return_handle(&pv.obj, vx.Rights{.Read, .Write, .Map} + DEVICE_RIGHTS, out)
 	}
 	v := vmo_create(size) or_return
+	v.resizable = .Resizable in opts // vmo_op .Resize may change it (ADR-0020)
 	// EXEC included: loaders and JITs map their own code. W^X holds per
 	// mapping (task_map), never per VMO.
 	return return_handle(&v.obj, vx.ALL_RIGHTS - {.Debug}, out)
@@ -577,7 +578,7 @@ sys_as_map :: proc "contextless" (th, vh: vx.Handle, offset, size, flags: u64, a
 		defer object_release(&target.obj)
 		return task_enable_io(target, io)
 	}
-	mf, opts, valid := map_flags_of(flags)
+	mf, opts, valid := map_flags_of(flags, {.Write, .Exec, .No_Access, .Shared})
 	if !valid {
 		return .Err_Invalid
 	}
@@ -612,28 +613,48 @@ sys_as_map :: proc "contextless" (th, vh: vx.Handle, offset, size, flags: u64, a
 }
 
 // as_map's and as_protect's flags word (vx.Map_Flags): the options and the
-// key; false for a bit nothing uses.
+// key; false for a bit nothing uses, an option outside `allowed`, or
+// .No_Access beside another right (ADR-0020: it is alone).
 @(private="file")
-map_flags_of :: proc "contextless" (flags: u64) -> (f: vx.Map_Flags, opts: vx.Map_Options, ok: bool) {
+map_flags_of :: proc "contextless" (flags: u64, allowed: vx.Map_Options) -> (f: vx.Map_Flags, opts: vx.Map_Options, ok: bool) {
 	if flags > u64(max(u32)) {
 		return
 	}
 	f = transmute(vx.Map_Flags)u32(flags)
 	opts, ok = options_of(vx.Map_Options, u64(f.options))
-	return f, opts, ok && f.reserved == 0
+	ok = ok && f.reserved == 0 && opts - allowed == {}
+	return f, opts, ok && !(.No_Access in opts && opts & {.Write, .Exec} != {})
 }
 
 // as_protect(task, address, size, flags): the rights and key of a range,
 // every page of it mapped (ADR-0035).
 @(private="file", require_results)
 sys_as_protect :: proc "contextless" (th: vx.Handle, va: Uva, size, flags: u64) -> vx.Status {
-	mf, opts, valid := map_flags_of(flags)
+	mf, opts, valid := map_flags_of(flags, {.Write, .Exec, .No_Access}) // .Shared is as_map's alone
 	if !valid {
 		return .Err_Invalid
 	}
 	t := handle_get_as(current_task(), th, Task, {.Manage}) or_return
 	defer object_release(&t.obj)
 	return task_protect(t, va, size, opts, mf.key)
+}
+
+// as_reserve(task, size, align, flags, &address) (ADR-0020).
+@(private="file", require_results)
+sys_as_reserve :: proc "contextless" (th: vx.Handle, size, align, flags: u64, addr_ptr: Uva) -> vx.Status {
+	opts, valid := options_of(vx.As_Options, flags)
+	if !valid || opts == {.Fixed, .Release} {
+		return .Err_Invalid
+	}
+	va: Uva
+	copy_in(&va, addr_ptr) or_return
+	t := handle_get_as(current_task(), th, Task, {.Manage}) or_return
+	st := task_reserve(t, size, align, opts, &va)
+	object_release(&t.obj)
+	if st == .Ok || st == .Err_Exists {
+		copy_out(addr_ptr, &va) or_return
+	}
+	return st
 }
 
 // as_key_alloc(task, &key) and as_key_free(task, key): the task's protection
@@ -1212,6 +1233,7 @@ sys_task_exec :: proc "contextless" (sh, bootstrap: vx.Handle, entry, sp: Uva) -
 	t.map_next, s.map_next = s.map_next, t.map_next
 	t.mapped, s.mapped = s.mapped, t.mapped
 	t.maps, s.maps = s.maps, t.maps
+	t.resv, s.resv = s.resv, t.resv // they go with the address space too (ADR-0020)
 	t.name = s.name
 	t.exc_handler = 0 // the old program's in-task handler is not in the new one
 	unlock_pair(t, s)
@@ -1277,8 +1299,8 @@ sys_vmo_rw :: proc "contextless" (h: vx.Handle, op, offset: u64, buf: Uva, size:
 	if overflow || end > v.size {
 		return .Err_Range
 	}
-	if v.pager != nil {
-		return pager_vmo_rw(v, reading, offset, buf, size)
+	if vmo_locked(v) {
+		return locked_vmo_rw(v, reading, offset, buf, size)
 	}
 	// Through the fault-safe copies: another thread may unmap the buffer meanwhile.
 	for done := u64(0); done < size; {
@@ -1296,11 +1318,13 @@ sys_vmo_rw :: proc "contextless" (h: vx.Handle, op, offset: u64, buf: Uva, size:
 	return .Ok
 }
 
-// vmo_rw on a pager-backed VMO: its pages can go (.Evict, a shrink), so each
-// is touched under its lock, through a bounce buffer. A page not supplied is
-// .Err_Should_Wait; a write dirties a page as a store through a mapping would.
+// vmo_rw on a pager-backed or resizable VMO: its pages can go (.Evict, a
+// shrink), so each is touched under its lock, through a bounce buffer. A page
+// a pager has not supplied is .Err_Should_Wait, one a shrink took meanwhile
+// .Err_Range; a write dirties a pager's page as a store through a mapping
+// would.
 @(private="file", require_results)
-pager_vmo_rw :: proc "contextless" (v: ^Vmo, reading: bool, offset: u64, buf: Uva, size: u64) -> vx.Status {
+locked_vmo_rw :: proc "contextless" (v: ^Vmo, reading: bool, offset: u64, buf: Uva, size: u64) -> vx.Status {
 	for done := u64(0); done < size; {
 		at := offset + done
 		bounce: [256]u8
@@ -1312,21 +1336,21 @@ pager_vmo_rw :: proc "contextless" (v: ^Vmo, reading: bool, offset: u64, buf: Uv
 		pa: Paddr
 		{
 			spin_guard(&v.lock)
-			if at / PAGE_SIZE < v.size / PAGE_SIZE {
-				pa = vmo_page(v, at / PAGE_SIZE)
-			}
+			pa = vmo_page_in(v, at / PAGE_SIZE)
 			if pa != 0 {
 				page := page_bytes(pa)[at % PAGE_SIZE:][:n]
 				if reading {
 					copy(bounce[:n], page)
 				} else {
 					copy(page, bounce[:n])
-					v.pages[at / PAGE_SIZE].dirty = true
+					if v.pager != nil {
+						v.pages[at / PAGE_SIZE].dirty = true // written, as a store through a mapping would mark it
+					}
 				}
 			}
 		}
 		if pa == 0 {
-			return .Err_Should_Wait // a pager has not supplied it
+			return v.pager != nil ? .Err_Should_Wait : .Err_Range // not supplied yet, or shrunk meanwhile
 		}
 		if reading {
 			copy_to_user(user, &bounce, n) or_return
@@ -1451,6 +1475,8 @@ syscall_dispatch :: proc "contextless" (nr: u64, a: [6]u64) -> i64 {
 		return i64(sys_iorange_create(vx.Handle(a[0]), a[1], a[2], Uva(a[3])))
 	case .Vmo_Rw:
 		return i64(sys_vmo_rw(vx.Handle(a[0]), a[1], a[2], Uva(a[3]), a[4]))
+	case .As_Reserve:
+		return i64(sys_as_reserve(vx.Handle(a[0]), a[1], a[2], a[3], Uva(a[4])))
 	case .As_Map:
 		return i64(sys_as_map(vx.Handle(a[0]), vx.Handle(a[1]), a[2], a[3], a[4], Uva(a[5])))
 	case .As_Query:

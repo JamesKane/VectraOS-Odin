@@ -1492,7 +1492,12 @@ handler :: proc "c" (e: ^vx.Exception) -> ! {
 	case .Pager_Timeout: // the page, late: supplied now, and the access made again
 		_ = rt.pager_supply(late.pager, late.vmo, 0, 4096, late.src, 0)
 	case .Page_Fault:
-		_, _ = rt.as_map(rt.self, in_task.missing, 0, 4096, {}, e.address &~ 4095) // then the load is retried
+		if guard_at != 0 && e.address &~ 4095 == guard_at {
+			intrinsics.atomic_add(&guard_faults, 1) // a no-access page touched: opened, and the access made again
+			_ = rt.as_protect(rt.self, guard_at, 4096, {.Write})
+		} else {
+			_, _ = rt.as_map(rt.self, in_task.missing, 0, 4096, {}, e.address &~ 4095) // then the load is retried
+		}
 	case .Breakpoint:
 		when ODIN_ARCH == .arm64 {
 			e.regs.pc += 4 // brk stops at itself; int3 has already been stepped past
@@ -2531,6 +2536,7 @@ test_debugger :: proc "contextless" () {
 // --- fork ---
 
 fork_page: [512]u64
+fork_shared: u64 // a .Shared mapping the child writes to (test_address_space)
 fork_ring: u64 // where a ring's memory is mapped, in the parent
 
 // The forked child's first thread. Its exit string says what it found: "ok"
@@ -2547,6 +2553,9 @@ fork_child :: proc "c" (unused: vx.Handle, my_id: u64) -> ! {
 	}
 	if fork_ring != 0 {
 		_ = intrinsics.volatile_load(cast(^u64)uintptr(fork_ring)) // not there: a fault ends it
+	}
+	if fork_shared != 0 {
+		intrinsics.volatile_store(cast(^u64)uintptr(fork_shared), 0x7777) // the same VMO: the parent sees it
 	}
 	msg := [7]u8{'w', 'r', 'o', 'n', 'g', ' ', '0' + u8(wrong)}
 	_ = rt.task_kill(rt.self, wrong != 0 ? string(msg[:]) : "ok")
@@ -2606,6 +2615,123 @@ test_fork :: proc "contextless" () {
 	none := vx.HANDLE_NONE
 	check(rt.vx_syscall(.Task_Create, u64(uintptr(raw_data(string("x")))), 1, u64(uintptr(&none)), 2) == i64(vx.Status.Err_Invalid))
 	_ = rt.handle_close(port)
+}
+
+// --- Reservations, no-access, resizable and shared VMOs (ADR-0020) ---
+
+guard_at: u64 // a no-access page the handler opens when touched (test_address_space)
+guard_faults: u32
+
+inside :: proc "contextless" (a, base, size: u64) -> bool {
+	return a >= base && a < base + size
+}
+
+test_address_space :: proc "contextless" () {
+	// Reservations: random, aligned, distinct; nothing placed lands in one.
+	r1, st := rt.as_reserve(rt.self, 1 << 20, 1 << 16)
+	check(st == .Ok && r1 != 0 && r1 & 0xffff == 0)
+	r2, st2 := rt.as_reserve(rt.self, 1 << 20, 1 << 16)
+	check(st2 == .Ok && r2 != r1)
+	v, vst := rt.vmo_create(16 * 4096)
+	check(vst == .Ok)
+	for _ in 0 ..< 4 {
+		placed, pst := rt.as_map(rt.self, v, 0, 16 * 4096, {.Write})
+		check(pst == .Ok)
+		check(!inside(placed, r1, 1 << 20) && !inside(placed, r2, 1 << 20))
+		check(rt.as_unmap(rt.self, placed, 16 * 4096) == .Ok)
+	}
+	// A mapping at an address inside it; one across its edge refused; an
+	// unmap there leaves it reserved.
+	at, ast := rt.as_map(rt.self, v, 0, 4096, {.Write}, r1 + 4096)
+	check(ast == .Ok && at == r1 + 4096)
+	intrinsics.volatile_store(cast(^u64)uintptr(at), 42)
+	_, st = rt.as_map(rt.self, v, 0, 8192, {.Write}, r1 + (1 << 20) - 4096)
+	check(st == .Err_Range)
+	check(rt.as_unmap(rt.self, at, 4096) == .Ok)
+	in_way: u64
+	in_way, st = rt.as_reserve(rt.self, 4096, 0, {.Fixed}, r1)
+	check(st == .Err_Exists && in_way == r1) // still there
+	// .Fixed where a mapping is: .Err_Exists, naming where it starts.
+	placed, pst := rt.as_map(rt.self, v, 0, 4096, {})
+	check(pst == .Ok)
+	in_way, st = rt.as_reserve(rt.self, 8192, 0, {.Fixed}, placed - 4096)
+	check(st == .Err_Exists && in_way == placed)
+	check(rt.as_unmap(rt.self, placed, 4096) == .Ok)
+	// Released: what is mapped in it goes, and its range is free again.
+	_, st = rt.as_map(rt.self, v, 0, 4096, {}, r2)
+	check(st == .Ok)
+	_, st = rt.as_reserve(rt.self, 1 << 20, 0, {.Release}, r2)
+	check(st == .Ok)
+	mi, qst := rt.as_query(rt.self, r2)
+	check(qst != .Ok || mi.base >= r2 + (1 << 20))
+	_, st = rt.as_reserve(rt.self, 1 << 20, 0, {.Release}, r2)
+	check(st == .Err_Not_Found)
+	in_way, st = rt.as_reserve(rt.self, 1 << 20, 1 << 16, {.Fixed}, r2)
+	check(st == .Ok && in_way == r2)
+	_, st = rt.as_reserve(rt.self, 1 << 20, 0, {.Release}, in_way)
+	check(st == .Ok)
+	_, st = rt.as_reserve(rt.self, 1 << 20, 0, {.Release}, r1)
+	check(st == .Ok)
+	_, st = rt.as_reserve(rt.self, 4096, 3 * 4096, {}, in_way)
+	check(st == .Err_Range) // not a power of two
+
+	// No access: a guard page between two writable ones. A touch faults; the
+	// handler opens it, and the write is made again.
+	g, gst := rt.as_map(rt.self, v, 0, 3 * 4096, {.Write})
+	check(gst == .Ok)
+	check(rt.as_protect(rt.self, g + 4096, 4096, {.No_Access}) == .Ok)
+	mi, qst = rt.as_query(rt.self, g + 4096)
+	check(qst == .Ok && .No_Access in vx.map_options(mi.flags))
+	check(rt.as_protect(rt.self, g, 4096, {.No_Access, .Write}) == .Err_Invalid)
+	intrinsics.volatile_store(cast(^u64)uintptr(g), 1)
+	intrinsics.volatile_store(cast(^u64)uintptr(g + 8192), 3)
+	guard_at = g + 4096
+	check(rt.exception_bind(rt.self, vx.HANDLE_NONE, u64(uintptr(rawptr(handler))), {.In_Task}) == .Ok)
+	intrinsics.volatile_store(cast(^u64)uintptr(g + 4096), 2)
+	check(rt.exception_bind(rt.self, vx.HANDLE_NONE, 0, {.In_Task}) == .Ok)
+	guard_at = 0
+	check(intrinsics.atomic_load(&guard_faults) == 1 && intrinsics.volatile_load(cast(^u64)uintptr(g + 4096)) == 2)
+	check(rt.as_unmap(rt.self, g, 3 * 4096) == .Ok)
+	none, nst := rt.as_map(rt.self, v, 0, 4096, {.No_Access}) // mapped no-access from the start: a reservation's placeholder
+	check(nst == .Ok && rt.as_unmap(rt.self, none, 4096) == .Ok)
+	_ = rt.handle_close(v)
+
+	// A resizable VMO: grown with zero pages, shrunk back; one made without it
+	// is not resized.
+	value, got := u64(0x77), u64(1)
+	rv, rst := rt.vmo_create(4096, {.Resizable})
+	check(rst == .Ok && rt.vmo_write(rv, 0, memory.ptr_to_bytes(&value)) == .Ok)
+	check(rt.vmo_resize(rv, 3 * 4096) == .Ok)
+	ra, mst := rt.as_map(rt.self, rv, 0, 3 * 4096, {.Write})
+	check(mst == .Ok)
+	check(intrinsics.volatile_load(cast(^u64)uintptr(ra)) == 0x77 && intrinsics.volatile_load(cast(^u64)uintptr(ra + 8192)) == 0)
+	intrinsics.volatile_store(cast(^u64)uintptr(ra + 8192), 9)
+	check(rt.vmo_read(rv, 8192, memory.ptr_to_bytes(&got)) == .Ok && got == 9)
+	check(rt.as_unmap(rt.self, ra, 3 * 4096) == .Ok)
+	check(rt.vmo_resize(rv, 4096) == .Ok)
+	check(rt.vmo_read(rv, 8192, memory.ptr_to_bytes(&got)) == .Err_Range)
+	check(rt.vmo_read(rv, 0, memory.ptr_to_bytes(&got)) == .Ok && got == 0x77)
+	fixed, fst := rt.vmo_create(4096)
+	check(fst == .Ok && rt.vmo_resize(fixed, 8192) == .Err_Unsupported)
+	_, st = rt.vmo_create(4096, {.Resizable, .Pager})
+	check(st == .Err_Invalid)
+	rt.close_all(fixed, rv)
+
+	// .Shared: a forked child maps the same VMO, and its write is seen.
+	sp := new_stack()
+	port, pcst := rt.port_create()
+	sv, svst := rt.vmo_create(4096)
+	sa, sast := rt.as_map(rt.self, sv, 0, 4096, {.Write, .Shared})
+	check(sp != 0 && pcst == .Ok && svst == .Ok && sast == .Ok)
+	fork_shared = sa
+	fork_page[7] = 0x1234
+	exit, ok := run_fork(sp, port)
+	check(ok && exit == "ok")
+	fork_shared = 0
+	check(intrinsics.volatile_load(cast(^u64)uintptr(sa)) == 0x7777)
+	check(rt.as_protect(rt.self, sa, 4096, {.Shared}) == .Err_Invalid) // as_map's alone
+	check(rt.as_unmap(rt.self, sa, 4096) == .Ok)
+	rt.close_all(sv, port)
 }
 
 // --- task_exec (ADR-0012) ---
@@ -2906,6 +3032,7 @@ vx_main :: proc() -> int {
 	test_note_stack()
 	test_robust()
 	test_vmo_clone()
+	test_address_space()
 	test_debugger()
 	test_tls()
 	test_fork()

@@ -385,16 +385,19 @@ Cqe :: struct #align (32) { // the generic completion entry, 32 bytes
 //       past it leave every mapping and are freed (a touch there is an
 //       ordinary fault), pages added absent. The pager's alone.
 //   vmo_op(vmo, .Resize, size)
-//       an anonymous VMO's new size: not yet (.Err_Unsupported). A
-//       pager-backed one is its pager's to resize (pager_op .Resize):
-//       .Err_Access
+//       a resizable anonymous VMO's new size (ADR-0020, upstream's
+//       ADR-0042): pages added are zero, pages past the end leave every
+//       mapping and are freed (a touch there faults). One made without
+//       .Resizable: .Err_Unsupported. A pager-backed one is its pager's to
+//       resize (pager_op .Resize): .Err_Access
 Vmo_Option :: enum u32 { // vmo_create
 	Physical,
 	Pager,
+	Resizable, // vmo_op .Resize may change its size (ADR-0020); its pages are read under its lock
 }
 Vmo_Options :: bit_set[Vmo_Option; u32]
 
-#assert(u32(Vmo_Option.Physical) == 0 && u32(Vmo_Option.Pager) == 1)
+#assert(u32(Vmo_Option.Physical) == 0 && u32(Vmo_Option.Pager) == 1 && u32(Vmo_Option.Resizable) == 2)
 
 Pager_Op :: enum u32 { // pager_op
 	Dirty = 1,
@@ -530,14 +533,17 @@ Task_Info_Option :: enum u32 {
 }
 Task_Info_Options :: bit_set[Task_Info_Option; u32]
 
-Map_Option :: enum u32 { // as_map, as_protect; a mapping is always readable
+Map_Option :: enum u32 { // as_map, as_protect; a mapping is readable unless .No_Access
 	Write,
 	Exec,
+	No_Access, // ADR-0020: no access at all, a touch faults (PROT_NONE, guard pages); alone
+	Shared, // ADR-0020, as_map only: a forked task maps the same VMO here, not a copy
 }
 Map_Options :: bit_set[Map_Option; u32]
 
 // On the wire, an option set is the u32 whose bit i is the option with value i.
 #assert(u32(Map_Option.Write) == 0 && u32(Map_Option.Exec) == 1)
+#assert(u32(Map_Option.No_Access) == 2 && u32(Map_Option.Shared) == 3)
 
 // as_map's and as_protect's flags word, and as_query's: the options in its
 // low byte, and the mapping's protection key in bits 8-11 (upstream's
@@ -577,12 +583,31 @@ Key_Rights :: bit_set[Key_Right; u32]
 // pages of [address, address + size), every one mapped, within the rights
 // each mapping's VMO handle gave when it was mapped (.Err_Access past them);
 // a mapping cut by the range becomes two or three (ADR-0035).
+// as_reserve(task, size, align, flags, &address) (ADR-0020, upstream's
+// ADR-0042; 01 §5): a reservation, address space no mapping the kernel
+// places lands in, for the task's own as_map at addresses inside it;
+// as_unmap there leaves it reserved. align: 0 (a page), or a power of two
+// up to 2^39. Without .Fixed, at a random aligned base; with it, at
+// *address, or .Err_Exists with *address set to the start of the first
+// mapping or reservation in the way. .Release: the reservation starting at
+// *address of size bytes given back, what is mapped in it unmapped
+// (.Err_Not_Found if there is none). A mapping placed at an address must lie
+// wholly inside one reservation or outside every one (.Err_Range). At most
+// 32 reservations a task (.Err_No_Space).
 // as_key_alloc(task, &key) and as_key_free(task, key): a protection key of
 // the task's, 1 to Cpu_Info.keys (key 0 is every mapping's default), with
 // the task handle's MANAGE as as_map takes it; .Err_No_Space when none is
 // free, .Err_Unsupported where the CPU has none; a key a mapping still uses
 // is not freed (.Err_Bad_State). A thread's rights to each key are its own
 // (PKRU, POR_EL0), set with the unprivileged instruction (rt.keys_set).
+
+As_Option :: enum u32 { // as_reserve
+	Fixed,
+	Release,
+}
+As_Options :: bit_set[As_Option; u32]
+
+#assert(u32(As_Option.Fixed) == 0 && u32(As_Option.Release) == 1)
 
 // The longest exit string or note, in bytes: Plan 9's ERRMAX (ADR-0010).
 ERRMAX :: 128
@@ -860,7 +885,7 @@ Thread_Info :: struct { // thread_state(.Next_Thread)
 Map_Info :: struct { // as_query
 	base, size: u64,
 	offset:     u64, // into the VMO mapped
-	flags:      Map_Flags, // its options (always readable) and key
+	flags:      Map_Flags, // its options (readable unless .No_Access) and key
 	reserved:   u32,
 }
 

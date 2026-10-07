@@ -890,12 +890,23 @@ sys_thread_suspend :: proc "contextless" (h: vx.Handle, id: u64, resume: bool) -
 mapping_privatize :: proc "contextless" (t: ^Task, m: ^Mapping) -> (old: ^Vmo, st: vx.Status) {
 	dup := vmo_create(m.size) or_return
 	mf := user_map_flags(m.flags, false)
+	v := m.vmo
+	if v.resizable {
+		spin_lock(&v.lock)
+	}
 	for off := u64(0); off < m.size; off += PAGE_SIZE {
-		page_copy(vmo_page(dup, off / PAGE_SIZE), vmo_page(m.vmo, (m.offset + off) / PAGE_SIZE))
+		pa := vmo_page_in(v, (m.offset + off) / PAGE_SIZE)
+		if pa != 0 {
+			page_copy(vmo_page(dup, off / PAGE_SIZE), pa)
+		}
 		unmap_page(t.root, u64(m.va) + off)
-		if !map_range(t.root, u64(m.va) + off, vmo_page(dup, off / PAGE_SIZE), PAGE_SIZE, mf, m.key) {
+		shown := .No_Access not_in m.flags && pa != 0 // a no-access page stays unmapped (ADR-0020)
+		if shown && !map_range(t.root, u64(m.va) + off, vmo_page(dup, off / PAGE_SIZE), PAGE_SIZE, mf, m.key) {
 			st = .Err_No_Memory
 		}
+	}
+	if v.resizable {
+		spin_unlock(&v.lock)
 	}
 	old = m.vmo
 	m.vmo = dup
@@ -945,16 +956,30 @@ mem_op :: proc "contextless" (t: ^Task, op: ^vx.Mem_Op, shoot: ^bool, released: 
 			_ = append(released, old)
 			shoot^ = true
 		}
-		page := page_bytes(vmo_page(m.vmo, (m.offset + u64(Uva(at) - m.va)) / PAGE_SIZE))[at % PAGE_SIZE:][:n]
-		user := Uva(op.buffer + done)
-		if op.write {
-			copy_from_user(raw_data(page), user, n) or_return
-			if .Exec in m.flags {
-				arch_sync_icache(page)
-			}
-		} else {
-			copy_to_user(user, raw_data(page), n) or_return
+		v := m.vmo
+		if v.resizable {
+			spin_lock(&v.lock) // its pages can go with a shrink
 		}
+		pa := vmo_page_in(v, (m.offset + u64(Uva(at) - m.va)) / PAGE_SIZE)
+		st := vx.Status.Ok
+		if pa == 0 {
+			st = .Err_Invalid // past its end
+		} else {
+			page := page_bytes(pa)[at % PAGE_SIZE:][:n]
+			user := Uva(op.buffer + done)
+			if op.write {
+				st = copy_from_user(raw_data(page), user, n)
+				if st == .Ok && .Exec in m.flags {
+					arch_sync_icache(page)
+				}
+			} else {
+				st = copy_to_user(user, raw_data(page), n)
+			}
+		}
+		if v.resizable {
+			spin_unlock(&v.lock)
+		}
+		st or_return
 		done += n
 	}
 	return .Ok
