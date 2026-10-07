@@ -1190,6 +1190,81 @@ static void test_cpu_time(void) {
   CHECK(nice(1) == -1 && errno == EPERM);
 }
 
+// Whether touching p (a write if write) faults, as SIGSEGV.
+static bool faults(volatile char *p, bool write) {
+  struct sigaction fault = {.sa_sigaction = on_fault, .sa_flags = SA_SIGINFO}, old;
+  sigaction(SIGSEGV, &fault, &old);
+  int before = signals[SIGSEGV];
+  if (sigsetjmp(fault_jump, 1) == 0) {
+    if (write)
+      *p = 1;
+    else
+      (void)*p;
+  }
+  sigaction(SIGSEGV, &old, nullptr);
+  return signals[SIGSEGV] == before + 1 && fault_address == (void *)p;
+}
+
+// mprotect and PROT_NONE, MAP_SHARED anonymous memory across fork, and
+// mremap in place and to a fixed address (M6 step 6e1a2, ADR-0042).
+static void test_mapping_kinds(void) {
+  const size_t pg = 4096;
+  // PROT_NONE faults; mprotect opens it, and closes part of it again.
+  char *p = mmap(nullptr, 3 * pg, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  CHECK(p != MAP_FAILED);
+  if (p == MAP_FAILED) return;
+  CHECK(faults(p, false) && faults(p + pg, true));
+  CHECK(mprotect(p, 3 * pg, PROT_READ | PROT_WRITE) == 0);
+  p[0] = 'a', p[pg] = 'b', p[2 * pg] = 'c';
+  CHECK(mprotect(p + pg, pg, PROT_READ) == 0 && p[pg] == 'b' && faults(p + pg, true)); // a read-only middle
+  CHECK(mprotect(p + pg, pg, PROT_NONE) == 0 && faults(p + pg, false));                // a guard page
+  CHECK(p[0] == 'a' && p[2 * pg] == 'c'); // its neighbours untouched
+  errno = 0;
+  CHECK(mprotect(p, pg, PROT_WRITE | PROT_EXEC) == -1 && errno == EACCES); // W^X
+  CHECK(munmap(p + 2 * pg, pg) == 0);
+  errno = 0;
+  CHECK(mprotect(p, 3 * pg, PROT_READ) == -1 && errno == ENOMEM); // a hole
+  CHECK(munmap(p, 2 * pg) == 0);
+
+  // MAP_SHARED anonymous: a forked child's write is its parent's; a private
+  // mapping's is not.
+  volatile int *shared = mmap(nullptr, pg, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  volatile int *own = mmap(nullptr, pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  CHECK(shared != MAP_FAILED && own != MAP_FAILED);
+  if (shared == MAP_FAILED || own == MAP_FAILED) return;
+  *shared = 1, *own = 1;
+  int status = 0;
+  pid_t child = fork();
+  if (child == 0) {
+    *shared = 42, *own = 42;
+    _exit(0);
+  }
+  CHECK(child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status));
+  CHECK(*shared == 42 && *own == 1);
+  CHECK(munmap((void *)shared, pg) == 0 && munmap((void *)own, pg) == 0);
+
+  // mremap: grown in place where the pages after are free, its bytes kept.
+  char *g = mmap(nullptr, 4 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  CHECK(g != MAP_FAILED);
+  if (g == MAP_FAILED) return;
+  CHECK(munmap(g + 2 * pg, 2 * pg) == 0);
+  g[0] = 'x', g[pg] = 'y';
+  char *grown = mremap(g, 2 * pg, 4 * pg, 0);
+  CHECK(grown == g && g[0] == 'x' && g[pg] == 'y' && g[3 * pg] == 0);
+  g[3 * pg] = 'z';
+  // Moved to an address it is told, with MREMAP_FIXED: the bytes there.
+  char *spot = mmap(nullptr, 4 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  CHECK(spot != MAP_FAILED);
+  char *moved = mremap(g, 4 * pg, 4 * pg, MREMAP_MAYMOVE | MREMAP_FIXED, spot);
+  CHECK(moved != MAP_FAILED);
+  if (moved == MAP_FAILED) return;
+  CHECK(moved == spot && moved[0] == 'x' && moved[3 * pg] == 'z' && faults(g, false));
+  errno = 0;
+  CHECK(mremap(moved, 4 * pg, 4 * pg, MREMAP_FIXED, g) == MAP_FAILED &&
+        errno == EINVAL); // FIXED needs MAYMOVE
+  CHECK(munmap(moved, 4 * pg) == 0);
+}
+
 // The posix extension's open files, kept by the server: a child's writes
 // move its parent's offset; O_APPEND is the server's; locks between
 // processes.
@@ -2083,6 +2158,7 @@ int main(int argc, char **argv) {
   test_permissions();
   test_file_calls();
   test_cpu_time();
+  test_mapping_kinds();
   test_mmap();
   test_terminals();
   test_poll();

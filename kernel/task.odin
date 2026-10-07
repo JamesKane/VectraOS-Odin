@@ -582,6 +582,19 @@ task_in_way :: proc "contextless" (t: ^Task, va, end: Uva) -> Uva {
 	return first
 }
 
+// Whether any mapping overlaps [va, end). Under the task's lock.
+@(private="file")
+task_maps_in :: proc "contextless" (t: ^Task, va, end: Uva) -> bool {
+	if t.maps != nil {
+		for m in t.maps {
+			if m.size != 0 && m.va < end && va < m.va + Uva(m.size) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Whether [va, end) lies wholly inside one reservation or outside every one.
 @(private="file")
 task_resv_fits :: proc "contextless" (t: ^Task, va, end: Uva) -> bool {
@@ -650,6 +663,8 @@ task_map :: proc "contextless" (t: ^Task, v: ^Vmo, offset, size: u64, flags: vx.
 		st = .Err_Invalid // a key it has not allocated
 	case at & (PAGE_SIZE - 1) != 0 || end_overflow || end > USER_TOP || !task_resv_fits(t, at, end):
 		st = .Err_Range
+	case task_maps_in(t, at, end):
+		st = .Err_Exists // checked against the mappings, not the page tables: a no-access one has no pages
 	case slot == nil:
 		st = .Err_No_Memory
 	}

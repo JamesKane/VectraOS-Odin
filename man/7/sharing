@@ -130,7 +130,7 @@ Protection keys (as(2), M6 step 6c4) let a thread deny itself access to chosen m
 
 A thread that dies holding a lock in shared memory leaves its waiters asleep: robust futexes come in M6 step 6d, which also checks whether keying a futex by physical address strands its waiters when a pager evicts the page and supplies it again elsewhere.
 
-`MAP_SHARED` anonymous mappings are refused, and `fork` copies every anonymous mapping at once; shared anonymous mappings come in M6 step 6e.
+`fork` copies a private anonymous mapping at once, not page by page as written; a `MAP_SHARED` one (`VX_MAP_SHARED`, ADR-0042) is the same memory in both. A shared mapping cannot be grown or moved with `mremap`.
 `vmo_clone` copies at once, not page by page as written, and is charged in full.
 
 VMOs are at most 256 MiB, are not charged to a memory budget, and `dma_map`'s pinned pages to no pin budget; `vmo_op` has no operation that succeeds, so there are no hints, purgeable VMOs or priorities.

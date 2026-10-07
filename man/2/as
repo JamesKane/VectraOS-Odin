@@ -167,7 +167,7 @@ handle(2), intro(2)
 
 `as_map`'s own placement is not random, as reservations' are: mappings go one after another from a fixed base, and space freed by `as_unmap` is never placed in again.
 The kernel's random generator is mixed once from the bootloader's entropy and the clock; without the bootloader's entropy, reservations' bases can be guessed.
-A fixed address is checked page by page against the page tables, not against the task's mappings: an overlap with a mapped page fails with `VX_ERR_NO_MEMORY`, where the design says it fails and says what is there, and an overlap with a pager's pages not yet supplied is not noticed at all.
+A fixed address that overlaps a mapping fails with `VX_ERR_EXISTS` but, unlike `vx_as_reserve`'s, does not say where the mapping starts.
 Large pages, which the design lets `as_map` ask for, are not offered, and a mapping is made of 4 KiB pages.
 An IoRange without `VX_RIGHT_MAP` is reported as `VX_ERR_BAD_HANDLE`, not `VX_ERR_ACCESS`.
 Mapping the same IoRange twice takes two of the task's 32 ranges.
