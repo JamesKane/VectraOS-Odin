@@ -10,8 +10,8 @@ import "vx:rt"
 // Descriptors for a child.
 //
 // A child (posix_spawn, execve) is given a table of descriptors as fd=
-// records in its spawn message, one per open descriptor without FD_CLOEXEC,
-// and the working directory as cwd=:
+// records in its spawn message, one per open descriptor without FD_CLOEXEC
+// (the working directory goes as vx:procns's cwd=, ADR-0017):
 //   fd=N console
 //   fd=N pipe=read|write end=NAME flags=F       the same channel end, shared
 //   fd=N file=PATH flags=F offset=O [dir] [token=T]   joined, or opened again
@@ -95,11 +95,10 @@ flags_word :: proc "contextless" (f: linux.Open_Flags) -> u64 {
 	return u64(transmute(u32)f)
 }
 
-// The child's descriptors and working directory as records, its pipes'
-// ends duplicated into handles[count^:cap] (names beside them).
+// The child's descriptors as records, its pipes' ends duplicated into
+// handles[count^:cap] (names beside them). Its working directory is
+// procns.spawn_records' cwd=.
 fd_records :: proc "contextless" (table: ^[FD_MAX]Slot, w: ^ndb.Writer, handles: []vx.Handle, names: []string, count: ^int, cap: int) {
-	ndb.put(w, "cwd", cwd())
-	_ = ndb.end(w)
 	for &slot, fd in table {
 		o := slot.o
 		if o == nil || slot.cloexec || o.lost {
@@ -165,7 +164,7 @@ fd_records :: proc "contextless" (table: ^[FD_MAX]Slot, w: ^ndb.Writer, handles:
 @(private="file")
 records_scratch: [vx.CHANNEL_MAX_BYTES]u8
 
-// The descriptors and working directory a POSIX parent's records give.
+// The descriptors a POSIX parent's records give (the working directory is vx:rt's cwd=).
 from_records :: proc "contextless" () {
 	r := ndb.Reader {
 		src     = rt.spawn.text,
@@ -173,11 +172,8 @@ from_records :: proc "contextless" () {
 	}
 	rec: ndb.Record
 	for ndb.next(&r, &rec) == .Record {
-		if dir, ok := ndb.get(&rec, "cwd"); ok {
-			if len(dir) > 0 && len(dir) < ns.MAX_PATH && dir[0] == '/' {
-				set_cwd(dir)
-			}
-			continue
+		if ndb.has(&rec, "cwd") {
+			continue // vx:rt's, read at start-up
 		}
 		fd, ok := ndb.get_u64(&rec, "fd")
 		if !ok || fd >= FD_MAX {

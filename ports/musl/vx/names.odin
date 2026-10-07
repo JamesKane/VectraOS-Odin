@@ -109,7 +109,8 @@ fd_unlinkat :: proc "contextless" (dirfd: int, path: string, flag: int) -> int {
 }
 
 fd_getcwd :: proc "contextless" (buf: []u8) -> int {
-	dir := cwd()
+	wd: Wd_Buf
+	dir := cwd(&wd)
 	if len(buf) < len(dir) + 1 {
 		return fail(.ERANGE)
 	}
@@ -133,8 +134,7 @@ fd_chdir :: proc "contextless" (path: string) -> int {
 	if s.mode & p9.DMDIR == 0 {
 		return fail(.ENOTDIR)
 	}
-	set_cwd(p)
-	return 0
+	return set_cwd(p) ? 0 : fail(.ENAMETOOLONG)
 }
 
 // 9P directory entries, as Linux's dirent64 (musl's struct dirent is the

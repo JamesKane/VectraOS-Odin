@@ -43,8 +43,6 @@ Reading standard input, the exit string is `read error` when a read fails; it is
 
 # BUGS
 
-A relative path is refused as `bad message`, the error a malformed path is given.
-
 Beware of `cat a b >a` and `cat a b >b`, which destroy input files before reading them.
 
 @node=posix title="The POSIX command"

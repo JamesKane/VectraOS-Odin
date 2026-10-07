@@ -1885,6 +1885,16 @@ int main(int argc, char **argv) {
   CHECK(f != nullptr);
   if (f) fclose(f);
   CHECK(chdir(manifest) == -1 && errno == ENOTDIR);
+  { // a native child starts here too (ADR-0039): rc, putting native pwd's output in a file
+    char *rc_args[] = {"rc", "-c", "/boot/bin/pwd > /tmp/ctest.wd", nullptr};
+    pid_t rc_child;
+    int rc_status = -1;
+    CHECK(posix_spawn(&rc_child, "/boot/bin/rc", nullptr, nullptr, rc_args, environ) == 0 &&
+          waitpid(rc_child, &rc_status, 0) == rc_child && WIFEXITED(rc_status) &&
+          WEXITSTATUS(rc_status) == 0);
+    CHECK(file_is("/tmp/ctest.wd", "/boot\n"));
+    unlink("/tmp/ctest.wd");
+  }
 
   // A directory, read whole.
   DIR *d = opendir("/boot/bin");

@@ -477,6 +477,7 @@ group_make :: proc "contextless" (space: ^ns.Namespace) -> vx.Status {
 from_spawn :: proc "contextless" (space: ^ns.Namespace) -> vx.Status {
 	p9.client_user = rt.spawn.user // its attaches name its user (upstream docs/11 §9)
 	ns.dial_lock = dial_lock // a TCP connection's threads take turns
+	space.getwd = rt.getwd // relative names from the current directory (ADR-0017)
 	group.srv = rt.spawn_take("srv:nsd")
 	if chan := rt.spawn_take("nsgroup"); chan != vx.HANDLE_NONE {
 		return group_join(space, chan)
@@ -557,7 +558,8 @@ copy_records :: proc "contextless" (
 	return count, w.failed ? .Err_Range : .Ok
 }
 
-// The namespace for a child, as spawn records and handles (02 §2). As Plan
+// The namespace for a child, as spawn records and handles (02 §2), and the
+// current directory it starts in (cwd=, ADR-0017). As Plan
 // 9's rfork shares a namespace unless asked not to, the child joins this
 // process's namespace group, made now if this is the first child to share
 // it: a channel to nsd for it ("nsgroup"). Without nsd, a copy
@@ -579,6 +581,11 @@ spawn_records :: proc "contextless" (
 	limit := min(len(handles), vx.CHANNEL_MAX_HANDLES)
 	if first + 2 > limit {
 		return first, .Err_No_Memory
+	}
+	wd: [rt.WD_MAX]u8 // the child starts where this process is (ADR-0017)
+	if dir := rt.getwd(wd[:]); dir != "" {
+		ndb.put(w, "cwd", dir)
+		_ = ndb.end(w)
 	}
 	count = first
 	st = .Err_Not_Found
@@ -625,7 +632,9 @@ drop_conns :: proc "contextless" (space: ^ns.Namespace) {
 		clear(&conn_names[i])
 		rt.close_all(space.conns[i].connector)
 	}
+	getwd := space.getwd
 	intrinsics.mem_zero(space, size_of(ns.Namespace)) // in place: too big to build on the stack first
+	space.getwd = getwd // the process's, not the table's
 }
 
 @(private="file")
@@ -678,4 +687,14 @@ after_fork :: proc "contextless" (space: ^ns.Namespace) -> vx.Status {
 // speaks to its server directly (nstest's hostile client).
 conn :: proc "contextless" (i: int) -> ^rt.Conn {
 	return &conns[i]
+}
+
+// Changes the current directory to path (ADR-0017): resolved, walked and
+// found to be a directory, else refused (Err_Invalid if it is not one) and
+// left as it was. libvx's (upstream's 6e1), until libvx.
+@(require_results)
+chdir :: proc "contextless" (space: ^ns.Namespace, path: string) -> vx.Status {
+	buf: [ns.MAX_PATH]u8
+	dir := ns.dir_check(space, path, buf[:]) or_return
+	return rt.wd_set(dir) ? .Ok : .Err_Range
 }

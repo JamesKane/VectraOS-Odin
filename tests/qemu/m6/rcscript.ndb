@@ -1,10 +1,11 @@
 # tests/qemu/rcscript.ndb: M4's exit test, the shell's part (step 7b): rc
 # runs an rc script (tests/user/rctest.rc) in the POSIX userland, over sbase:
 # pipelines, redirections, globbing, functions, loops, a nested script, and
-# the environment both ways. The script counts its checks; its exit status
+# the environment both ways; cd and the current directory, and cdtest's
+# checks of the native one from C (6d7a), which it runs. The script counts its checks; its exit status
 # is empty (success) or the failures' count.
 
-scenario=rcscript timeout=180 with=rctest cmdline=vx.skip=rc
+scenario=rcscript timeout=180 with=rctest,cdtest cmdline=vx.skip=rc
 expect="rctest: rc in the POSIX userland, args one two words"
 expect=" checks, 0 failed"
 line="svcd: rctest exited"

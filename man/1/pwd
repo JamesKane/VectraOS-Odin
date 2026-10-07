@@ -1,40 +1,48 @@
 page=pwd sect=1 summary="print the working directory"
-    src=third_party/sbase/pwd.c
-    keys=directory,current,working,cwd,posix
+    src=cmd/pwd.c,third_party/sbase/pwd.c
+    keys=directory,current,working,cwd,posix,getwd
 
 # SYNOPSIS
 
 ```usage
-pwd [-LP]
+pwd
 ```
 
 # DESCRIPTION
 
 `pwd` prints the absolute path of the current directory, then a newline.
 
+A process's current directory is a path in its namespace (ADR-0039): rc's `cd` and vx-ns's `vx_chdir` set it, POSIX programs' `chdir` too, and a program starts in its parent's.
+`pwd` prints that path, as last set; it is never worked out from the files, so after the directory is renamed it still prints the old name, which then names nothing.
+
+`pwd` is 9front's, in `/boot/bin`.
+In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find sbase's instead, built into `sbase-box` and installed as `/boot/bin/posix/pwd`, which takes two flags:
+
 : `-L`
-  The default: print `$PWD` if it is an absolute path to the current directory, the same device and file index, and the path the C library holds otherwise, so a path through symbolic links is kept.
+  The default: print `$PWD` if it is an absolute path to the current directory, the same device and file index, and the path `getcwd` returns otherwise, so a path through symbolic links is kept.
 : `-P`
-  Print the path the C library holds, as `getcwd` returns it.
+  Print the path `getcwd` returns.
 
 When both are given, the last wins.
 
-A POSIX program's current directory is kept by its C library, not by VectraOS: it is a path in the program's namespace, set by `chdir` and passed on to the programs it starts.
-`getcwd` returns that path, as last set; it is never worked out from the files.
+# EXAMPLES
 
-`pwd` is sbase's, built into `sbase-box` with sbase's other commands and installed as `/boot/bin/posix/pwd`, a hard link to it.
-In the POSIX namespace (a manifest's `ns=posix`, made by `/lib/ns/posix`, see namespace(6)) `/boot/bin/posix` is bound before `/boot/bin` on `/bin`, so POSIX programs find it as `/bin/pwd`.
-There is no native `pwd`: native programs have no current directory.
+```rc
+cd /boot/bin
+pwd
+```
+
+prints `/boot/bin`.
 
 # SEE ALSO
 
-ls(1), namespace(6); sbase's page is `third_party/sbase/pwd.1` in the repository
+rc(1), ls(1), namespace(6); sbase's page is `third_party/sbase/pwd.1` in the repository
 
 # DIAGNOSTICS
 
-`pwd: getcwd:` and the error, on standard error, when the path cannot be had; an unknown flag prints the usage message.
-Either exits 1; otherwise `pwd` exits 0, or 1 if the output could not be written.
+The native `pwd` with an argument prints the usage message and exits `usage`.
+sbase's prints `pwd: getcwd:` and the error, on standard error, when the path cannot be had, and the usage message for an unknown flag; either exits 1, and otherwise it exits 0, or 1 if the output could not be written.
 
 # BUGS
 
-Untested on VectraOS: `tests/posix/sbasetest.c` does not run it, and whether two paths to one directory give the same device and file index is not checked, so whether `-L` ever keeps `$PWD` is unknown.
+sbase's is untested on VectraOS: `tests/posix/sbasetest.c` does not run it, and whether two paths to one directory give the same device and file index is not checked, so whether `-L` ever keeps `$PWD` is unknown.

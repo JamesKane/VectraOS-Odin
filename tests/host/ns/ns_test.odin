@@ -414,3 +414,40 @@ bound_released: int // how many times count_bound_release ran: test_release_keep
 count_bound_release :: proc "contextless" (c: ^p9.Client, connector: vx.Handle) {
 	sync.atomic_add(&bound_released, 1)
 }
+
+// Relative names (ADR-0017, upstream's ADR-0039): joined to the current
+// directory the getwd hook gives, .. cleaned away against it; refused with
+// no hook. This tree's own: upstream tests them on the target (cdtest).
+@(test)
+test_relative :: proc(t: ^testing.T) {
+	space := new(ns.Namespace)
+	defer free(space)
+	fx := fixture(t)
+	defer free(fx)
+	testing.expect_value(t, ns.mount(space, &fx.boot_c, vx.HANDLE_NONE, "/srv/bootfs", "", "/", {}), vx.Status.Ok)
+	expect_exists(t, space, "readme", false) // no hook: refused
+	space.getwd = wd_boot
+	expect_exists(t, space, "bin/ls")
+	expect_exists(t, space, "./bin/../bin/cat")
+	expect_exists(t, space, "../readme")
+	expect_exists(t, space, "../../../readme") // .. above the root is the root
+	expect_exists(t, space, "ls", false)
+	buf: [ns.MAX_PATH]u8
+	dir, st := ns.dir_check(space, "bin", buf[:])
+	testing.expect_value(t, st, vx.Status.Ok)
+	testing.expect_value(t, dir, "/boot/bin")
+	_, st = ns.dir_check(space, "bin/ls", buf[:])
+	testing.expect_value(t, st, vx.Status.Err_Invalid) // not a directory
+	_, st = ns.dir_check(space, "nope", buf[:])
+	testing.expect_value(t, st, vx.Status.Err_Not_Found)
+	_, st = ns.dir_check(space, "", buf[:])
+	testing.expect_value(t, st, vx.Status.Err_Invalid)
+	testing.expect_value(t, ns.bind(space, "bin", "/dev", {}), vx.Status.Ok) // a relative new
+	testing.expect_value(t, list(space, "/dev"), "ls cat")
+	testing.expect_value(t, ns.unmount(space, "", "../dev"), vx.Status.Ok)
+	testing.expect_value(t, list(space, "/dev"), "")
+}
+
+wd_boot :: proc "contextless" (buf: []u8) -> string {
+	return string(buf[:copy(buf, "/boot")])
+}

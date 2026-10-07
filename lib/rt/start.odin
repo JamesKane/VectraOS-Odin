@@ -160,6 +160,9 @@ read_spawn :: proc "contextless" (bootstrap: vx.Handle) {
 			spawn.has_argv0 = true
 		case ndb.has(&rec, "user"):
 			spawn.user, _ = ndb.get(&rec, "user")
+		case ndb.has(&rec, "cwd"):
+			dir, _ := ndb.get(&rec, "cwd")
+			_ = wd_set(dir) // the parent's directory; one not absolute leaves /
 		case ndb.has(&rec, "env"):
 			env, _ := ndb.get(&rec, "env")
 			ok = append(&spawn.envs, env) == 1

@@ -350,9 +350,10 @@ posix_wait4 :: proc "contextless" (pid: i64, status: ^i32, options: linux.Wait_O
 //
 // The parent builds the child (rt.spawn_elf) from the program's file: it
 // gives it the namespace, the console, its arguments and environment, its
-// descriptors and working directory (fd= and cwd= records), and registers it
-// with procfs before it runs (posix_spawn), in the group or session
-// posix_spawn's attributes ask for; execve goes on in this task (ADR-0012).
+// descriptors (fd= records) and working directory (procns's cwd=,
+// ADR-0017), and registers it with procfs before it runs (posix_spawn), in
+// the group or session posix_spawn's attributes ask for; execve goes on in
+// this task (ADR-0012).
 // musl's posix_spawn, whose child is a clone that calls execve, is left out
 // of the build.
 
@@ -611,7 +612,9 @@ spawn_actions :: proc "contextless" (fa: ^linux.Spawn_File_Actions, vt: ^[FD_MAX
 			if d.kind != .File || !d.dir {
 				return fail(.ENOTDIR)
 			}
-			set_cwd(string(d.path[:]))
+			if !set_cwd(string(d.path[:])) {
+				return fail(.ENAMETOOLONG)
+			}
 		case:
 			return fail(.EINVAL)
 		}
@@ -642,8 +645,8 @@ posix_spawn :: proc "c" (pid: ^i32, path: cstring, fa: ^linux.Spawn_File_Actions
 	// middle of the back end's work. It waits, as in a call, until the child
 	// is made.
 	be_me().sig_depth += 1
-	saved: [dynamic; ns.MAX_PATH]u8
-	_ = append(&saved, cwd())
+	saved_buf: Wd_Buf
+	saved := cwd(&saved_buf)
 	r := spawn_actions(fa, &spawn_table)
 	if r == 0 {
 		r = spawn_image(cstr(path), attr != nil && attr.fn != nil, argv, envp, &spawn_table, &ctx) // posix_spawnp sets fn
@@ -654,7 +657,7 @@ posix_spawn :: proc "c" (pid: ^i32, path: cstring, fa: ^linux.Spawn_File_Actions
 		}
 		s = {}
 	}
-	set_cwd(string(saved[:]))
+	_ = set_cwd(saved) // as it was before the file actions
 	be_me().sig_depth -= 1
 	if be_me().sig_depth == 0 {
 		_ = sig_deliver_pending()

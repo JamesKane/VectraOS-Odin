@@ -12,9 +12,9 @@ ls [file ...]
 
 For each directory argument, `ls` prints the names in the directory, sorted by their bytes, on one line, two spaces apart, then a newline; an empty directory prints an empty line.
 For each other <file> it prints the argument as given, on a line of its own.
-With no <file> it lists `/`: there is no current directory.
+With no <file> it lists `.`, the current directory.
 
-Each <file> is looked up in the namespace `ls` was started with, and must be an absolute path.
+Each <file> is looked up in the namespace `ls` was started with, a relative one from the current directory it was started in (rc(1)'s `cd`).
 A directory that is a union (see ns(1)) is read as each member in turn, and every member's names are listed.
 
 `ls` takes no flags: an argument beginning with `-` is a file's name.
@@ -43,8 +43,6 @@ When a <file> cannot be found, `ls` says so on standard error, as `ls: /nothing:
 If any <file> fails the exit string is `error`; it is `no namespace` when `ls` was started without one.
 
 # BUGS
-
-A relative path is refused as `bad message`, the error a malformed path is given.
 
 A directory found but not opened, or not read to its end, fails with no message; what was read of it is still printed.
 

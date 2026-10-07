@@ -131,6 +131,89 @@ builtin :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, argv: ^rc.Word, argc: u32
 	return builtin_run(argv, int(argc))
 }
 
+// --- cd (ADR-0017, upstream's ADR-0039), as 9front's execcd ---
+
+// One try: dir, joined to a $cdpath entry as 9front's makepath joins them,
+// into buf.
+cd_try :: proc "contextless" (entry, dir: string, buf: []u8) -> (tried: string, st: vx.Status) {
+	n := len(entry)
+	for n > 0 && entry[n - 1] == '/' {
+		n -= 1
+	}
+	dir := dir
+	for len(entry) > 0 && len(dir) > 0 && dir[0] == '/' {
+		dir = dir[1:]
+	}
+	if len(entry) == 0 {
+		tried = dir
+	} else {
+		if n + 1 + len(dir) >= len(buf) {
+			return "", .Err_Range
+		}
+		copy(buf, entry[:n])
+		buf[n] = '/'
+		copy(buf[n + 1:], dir)
+		tried = string(buf[:n + 1 + len(dir)])
+	}
+	return tried, procns.chdir(&space, tried)
+}
+
+chdir_why :: proc "contextless" (st: vx.Status) -> string {
+	return st == .Err_Invalid ? "not a directory" : p9.error_text(st)
+}
+
+// cd [dir]: to dir, a relative one through $cdpath unless it starts with /,
+// ./ or ../ (9front's searchpath), printing where it went when an entry
+// other than "" or "." found it; to $home without one.
+cd_builtin :: proc "contextless" (argv: ^rc.Word, n: int) {
+	set_status("can't cd")
+	if n > 2 {
+		err("Usage: cd [directory]\n")
+		return
+	}
+	if n == 1 {
+		home := rc.get_var(&sh, "home")
+		if home == nil {
+			err("Can't cd -- $home empty\n")
+			return
+		}
+		if st := procns.chdir(&space, rc.text(home)); st == .Ok {
+			set_status("")
+		} else {
+			say("Can't cd ", rc.text(home), ": ")
+			err(chdir_why(st))
+			err("\n")
+		}
+		return
+	}
+	dir := rc.text(argv.next)
+	searched := len(dir) > 0 && dir[0] != '/' && dir[0] != '#' && !(dir == "." || dir == ".." || str.has_prefix(dir, "./") || str.has_prefix(dir, "../"))
+	none: rc.Word // "": the current directory alone (not a heap word: no text)
+	cdpath := searched ? rc.get_var(&sh, "cdpath") : nil
+	if cdpath == nil {
+		cdpath = &none
+	}
+	st := vx.Status.Err_Not_Found
+	for e := cdpath; e != nil; e = e.next {
+		buf: [512]u8
+		entry := e == &none ? "" : rc.text(e)
+		tried: string
+		tried, st = cd_try(entry, dir, buf[:])
+		if st != .Ok {
+			continue
+		}
+		if entry != "" && entry != "." {
+			err(tried)
+			err("\n")
+		}
+		set_status("")
+		return
+	}
+	say("Can't cd ", dir, ": ")
+	err(chdir_why(st))
+	err("\n")
+}
+
 builtin_run :: proc "contextless" (argv: ^rc.Word, n: int) -> bool {
 	w: [4]string // the first words: all a builtin reads
 	words := argv
@@ -144,6 +227,9 @@ builtin_run :: proc "contextless" (argv: ^rc.Word, n: int) -> bool {
 		first = 2
 	}
 	switch w[0] {
+	case "cd":
+		cd_builtin(argv, n)
+		return true
 	case "bind":
 		if !flags_ok || n - first != 2 {
 			usage(usage_of.TEXT_bind)
@@ -1142,7 +1228,7 @@ quoted :: proc "contextless" (b: ^[dynamic; 512]u8, room: int, s: string) {
 }
 
 // The host's builtins, for whatis.
-HOST_BUILTINS := [?]string{"bind", "mount", "unmount"}
+HOST_BUILTINS := [?]string{"cd", "bind", "mount", "unmount"}
 
 @(export, link_name="vx_main")
 vx_main :: proc() -> int {

@@ -151,17 +151,19 @@ fd_port: vx.Handle
 // just before a wait it ends.
 KEY_SIGNAL :: max(u64)
 
-// The working directory, cleaned and absolute; empty is "/".
-@(private="file")
-cwd_buf: [dynamic; ns.MAX_PATH]u8
+// The working directory, cleaned and absolute: vx:rt's, the native one
+// (ADR-0017, upstream's ADR-0039), so chdir and getcwd, rc's cd and
+// rt.getwd are one directory and either kind of child inherits it.
+Wd_Buf :: [rt.WD_MAX]u8
 
-cwd :: proc "contextless" () -> string {
-	return len(cwd_buf) == 0 ? "/" : string(cwd_buf[:])
+cwd :: proc "contextless" (buf: ^Wd_Buf) -> string {
+	return rt.getwd(buf[:])
 }
 
-set_cwd :: proc "contextless" (p: string) {
-	clear(&cwd_buf)
-	_ = append(&cwd_buf, p)
+// False if p is too long (or not absolute).
+@(require_results)
+set_cwd :: proc "contextless" (p: string) -> bool {
+	return rt.wd_set(p)
 }
 
 // fd_port's keys: 1 + a description's index, and FD_MAX more for its
@@ -439,8 +441,9 @@ fd_path :: proc "contextless" (dirfd: int, path: string, out: ^Path_Buf) -> (str
 		}
 	}
 	base := ""
+	wd: Wd_Buf
 	if path[0] != '/' && dirfd == linux.AT_FDCWD {
-		base = cwd()
+		base = cwd(&wd)
 	} else if path[0] != '/' {
 		d := fd_get(dirfd)
 		if d == nil {

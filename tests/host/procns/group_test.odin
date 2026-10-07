@@ -255,7 +255,7 @@ test_groups :: proc(t: ^testing.T) {
 	testing.expect_value(t, st, vx.Status.Ok)
 	testing.expect_value(t, count, 1)
 	testing.expect_value(t, names[0], "ns.00")
-	testing.expect_value(t, string(buf[:w.len]), "mount=/ handle=ns.00 src=/srv/a\nbind=/e new=/d\n")
+	testing.expect_value(t, string(buf[:w.len]), "cwd=/\nmount=/ handle=ns.00 src=/srv/a\nbind=/e new=/d\n") // where it starts (ADR-0017), then the table
 	testing.expect_value(t, len(nsd.calls), 0)
 
 	// With nsd: the first child that shares makes the group, from the table's
@@ -272,7 +272,7 @@ test_groups :: proc(t: ^testing.T) {
 	testing.expect_value(t, names[0], "nsgroup")
 	testing.expect_value(t, handles[0], CHAN_FIRST + 1)
 	testing.expect_value(t, names[1], "srv:nsd")
-	testing.expect_value(t, w.len, 0) // no records: the group says it all
+	testing.expect_value(t, string(buf[:w.len]), "cwd=/\n") // no table's records: the group says it all
 	text: [1024]u8
 	testing.expect_value(t, nsd_text(), string(text[:ns.print(space, text[:])]))
 	testing.expect_value(t, string(nsd.names[:nsd.names_len]), "/srv/a\n")

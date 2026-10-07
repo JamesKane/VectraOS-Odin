@@ -9,6 +9,7 @@ page=rc sect=1 summary="command language"
 rc [-srdiIlxebpvV] [-c command] [-m initial] [file [arg ...]]
 . [-biq] file [arg ...]
 builtin command ...
+cd [dir]
 eval arg ...
 exec command ...
 exit [status]
@@ -219,6 +220,11 @@ They write to the command's own descriptors, redirections followed, and capture 
   `-b` compiles the whole file before running any of it, so a syntax error anywhere stops it before it starts; `-i` reads it interactively; `-q` says nothing if the file does not exist, and turns `-e` off in it.
 : `builtin` <command> ...
   Runs <command> as usual, except that a function of its name is ignored.
+: `cd` [<dir>]
+  Changes the current directory (ADR-0039), which relative names are resolved against and every program `rc` starts begins in.
+  A <dir> that does not start `/`, `./` or `../` is looked for through `$cdpath`, each entry joined to it in turn (an empty `$cdpath` is the current directory alone), and the directory found is printed on standard error if it came from an entry other than `''` or `.`; without <dir>, `cd` goes to `$home`.
+  A name that is not a directory, or not there, prints `Can't cd`, the name and why, and leaves `$status` `can't cd` and the directory as it was.
+  The directory is kept as a path: `..` is taken off it lexically, as 9front's is, but after the directory is renamed the path names nothing, where 9front's `rc` stays in it.
 : `eval` <arg> ...
   Joins the arguments with spaces, and runs the result as a command line.
 : `exec` <command> ...
@@ -257,7 +263,7 @@ A failure prints `rc:`, the command's name and why on the command's standard err
 : `unmount` [<new>] <old>
   Undoes a `bind` or `mount` of <new> on <old>, or everything on <old> if <new> is not given.
 
-`rc` has no `cd` and no `rfork`.
+`rc` has no `rfork`.
 
 @node=environment title="Environment"
 
@@ -488,8 +494,6 @@ A builtin followed by `&` runs in the foreground.
 A command run with `&` that has ended is let go when `rc` next starts a program, after which `wait` does not find it and leaves `$status` empty.
 
 Descriptors past 2 are not given to programs.
-
-There is no `cd`, nor a current directory to change.
 
 `exec` with a file, here document or capture redirected is refused.
 

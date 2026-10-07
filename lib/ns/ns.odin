@@ -18,7 +18,8 @@
 // names after it. A mount point may also be a new name in a directory
 // (/n/host, which Plan 9's mntgen would provide): it is found by that
 // directory and the name. Confinement is not this table's job: it is the
-// connections' (02 §2).
+// connections' (02 §2). A relative name is joined to the process's current
+// directory (the getwd hook, ADR-0017) before it is cleaned.
 //
 // ns output (print) is namespace(6), and replays: one mount or bind line per
 // member, in the order the members were added, since each may resolve paths
@@ -106,6 +107,10 @@ Namespace :: struct {
 	refresh:  proc "contextless" (ns: ^Namespace),
 	publish:  proc "contextless" (ns: ^Namespace, new_conn: u8) -> vx.Status,
 	quiet:    bool, // a refresh is replaying the group's table: no hooks
+	// The process's current directory (ADR-0017, upstream's ADR-0039;
+	// vx:rt's getwd), which a relative name is resolved against: copied into
+	// buf, a slice of it, or "". Nil: a relative name is refused (host tests).
+	getwd:    proc "contextless" (buf: []u8) -> string,
 }
 
 @(private="file")
@@ -157,6 +162,27 @@ clean :: proc "contextless" (path: string, out: []u8) -> string {
 		n += len(name)
 	}
 	return string(out[:n])
+}
+
+// A name as an absolute, clean path (clean's): a relative one joined to the
+// current directory first (ADR-0017), its ".." cleaned away against it, as
+// 9front's ".." follows its dot's name (chan.c, fixdotdotname). "" as clean
+// gives it, or with no current directory to resolve against.
+@(private="file")
+clean_name :: proc "contextless" (ns: ^Namespace, path: string, out: []u8) -> string {
+	if len(path) == 0 || path[0] == '/' {
+		return clean(path, out)
+	}
+	joined: [2 * MAX_PATH]u8
+	wd := ns.getwd != nil ? ns.getwd(joined[:MAX_PATH - 1]) : ""
+	if len(wd) == 0 || len(wd) + 1 + len(path) > len(joined) {
+		return ""
+	}
+	n := len(wd)
+	joined[n] = '/'
+	n += 1
+	n += copy(joined[n:], path)
+	return clean(string(joined[:n]), out)
 }
 
 // The path an entry was made at; "" for a free slot.
@@ -369,12 +395,31 @@ resolve :: proc "contextless" (ns: ^Namespace, path: string) -> (out: At, st: vx
 walk :: proc "contextless" (ns: ^Namespace, path: string) -> (c: ^p9.Client, fid: p9.Fid, e: vx.Status) {
 	catch_up(ns)
 	buf: [MAX_PATH]u8
-	cleaned := clean(path, buf[:])
+	cleaned := clean_name(ns, path, buf[:])
 	if len(cleaned) == 0 {
 		return nil, 0, .Err_Invalid
 	}
 	at := resolve(ns, cleaned) or_return
 	return ns.conns[at.conn].client, at.fid, .Ok
+}
+
+// Whether path names a directory, for a change of the current directory
+// (ADR-0017): its absolute, clean form, a slice of out (MAX_PATH bytes).
+// Err_Invalid if it is not a directory, or the walk's error.
+@(require_results)
+dir_check :: proc "contextless" (ns: ^Namespace, path: string, out: []u8) -> (dir: string, st: vx.Status) {
+	dir = clean_name(ns, path, out)
+	if len(dir) == 0 {
+		return "", .Err_Invalid
+	}
+	c, fid := walk(ns, dir) or_return
+	s: p9.Stat
+	st = p9.client_stat(c, fid, &s)
+	_ = p9.client_clunk(c, fid)
+	if st == .Ok && s.mode & p9.DMDIR == 0 {
+		st = .Err_Invalid
+	}
+	return dir, st
 }
 
 // The connector of the first mount at the path path was made at (a spawner
@@ -503,7 +548,7 @@ add :: proc "contextless" (ns: ^Namespace, old: string, m: Member, flags: Flags)
 @(private="file", require_results)
 mount_raw :: proc "contextless" (ns: ^Namespace, c: ^p9.Client, connector: vx.Handle, src, aname, old: string, flags: Flags) -> vx.Status {
 	buf: [MAX_PATH]u8
-	cleaned := clean(old, buf[:])
+	cleaned := clean_name(ns, old, buf[:])
 	if len(cleaned) == 0 || len(src) > MAX_SRC || len(aname) > MAX_PATH {
 		return .Err_Invalid
 	}
@@ -553,7 +598,7 @@ mount_raw :: proc "contextless" (ns: ^Namespace, c: ^p9.Client, connector: vx.Ha
 @(private="file", require_results)
 bind_raw :: proc "contextless" (ns: ^Namespace, new, old: string, flags: Flags) -> vx.Status {
 	from_buf, to_buf: [MAX_PATH]u8
-	from, to := clean(new, from_buf[:]), clean(old, to_buf[:])
+	from, to := clean_name(ns, new, from_buf[:]), clean_name(ns, old, to_buf[:])
 	if len(from) == 0 || len(to) == 0 {
 		return .Err_Invalid
 	}
@@ -593,8 +638,8 @@ bind_raw :: proc "contextless" (ns: ^Namespace, new, old: string, flags: Flags) 
 @(private="file", require_results)
 unmount_raw :: proc "contextless" (ns: ^Namespace, new, old: string) -> vx.Status {
 	to_buf, from_buf: [MAX_PATH]u8
-	to := clean(old, to_buf[:])
-	from := len(new) > 0 ? clean(new, from_buf[:]) : ""
+	to := clean_name(ns, old, to_buf[:])
+	from := len(new) > 0 ? clean_name(ns, new, from_buf[:]) : ""
 	if len(to) == 0 || (len(new) > 0 && len(from) == 0) {
 		return .Err_Invalid
 	}
@@ -914,7 +959,7 @@ open :: proc "contextless" (ns: ^Namespace, path: string, mode: p9.Open_Mode, f:
 		ns = ns,
 	}
 	buf: [MAX_PATH]u8
-	cleaned := clean(path, buf[:])
+	cleaned := clean_name(ns, path, buf[:])
 	if len(cleaned) == 0 {
 		return .Err_Invalid
 	}
@@ -942,7 +987,7 @@ create :: proc "contextless" (ns: ^Namespace, path: string, perm: u32, mode: p9.
 		ns = ns,
 	}
 	buf: [MAX_PATH]u8
-	cleaned := clean(path, buf[:])
+	cleaned := clean_name(ns, path, buf[:])
 	slash := len(cleaned)
 	for slash > 0 && cleaned[slash - 1] != '/' {
 		slash -= 1

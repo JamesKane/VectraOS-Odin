@@ -95,6 +95,39 @@ check big-spawn 300 `{echo `{seq 1 300} | wc -w}
 echo 'echo $#* $2' > $dir/inner.rc
 check nested '2 b' `{rc $dir/inner.rc a b}
 
+# The current directory (6d7a, ADR-0039): cd, a relative name after each
+# change, and children, sbase's and native, starting in it. (A cd in `{...}
+# would move this shell: `{...} runs in it, a known gap.)
+check wd-start / `{pwd}
+check cdtest '24 checks, 0 failed' `{/boot/bin/cdtest | sed -n 's/^cdtest: //p'} # from C, a child of this shell's
+check wd-start-native / `{/boot/bin/pwd}
+cd $dir
+check cd $dir `{pwd}
+check cd-native $dir `{/boot/bin/pwd}
+echo hello > rel
+check rel-sbase hello `{cat rel}
+check rel-native hello `{/boot/bin/cat rel}
+check rel-glob rel `{echo re?}
+mkdir sub
+cd sub
+check cd-rel $dir/sub `{pwd}
+cd ..
+check cd-dotdot $dir `{pwd}
+cd rel >[2] /dev/null
+check cd-file 'can''t cd' $status
+check cd-file-left $dir `{pwd}
+cd no-such-dir >[2] /dev/null
+check cd-missing 'can''t cd' $status
+cdpath=(/nowhere /boot)
+cd bin >[2] /dev/null
+check cdpath /boot/bin `{pwd}
+cdpath=()
+home=$dir
+cd
+check cd-home $dir `{pwd}
+cd /
+check cd-root / `{pwd}
+
 rm -r $dir
 check cleaned no `{if(test -d $dir) echo yes; if not echo no}
 

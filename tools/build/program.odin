@@ -11,7 +11,7 @@ import "core:path/filepath"
 Program_Place :: enum {
 	Module, // on the ESP, a Limine module: the root task's candidates
 	Bootfs, // in bootfs.tar
-	Tests, // in bootfs.tar for a scenario that names it (with=), with tests/user/NAME.ndb
+	Tests, // in bootfs.tar for a scenario that names it (with=), with tests/user/NAME.ndb if it has one (one without is run by another test)
 }
 
 Program_Kind :: enum {
@@ -67,6 +67,7 @@ PROGRAMS := []Program {
 	{name = "cat", dir = "cmd/cat", place = .Bootfs},
 	{name = "srv", dir = "cmd/srv", place = .Bootfs},
 	{name = "echo", dir = "cmd/echo", place = .Bootfs},
+	{name = "pwd", dir = "cmd/pwd", place = .Bootfs},
 	{name = "ps", dir = "cmd/ps", place = .Bootfs},
 	{name = "ns", dir = "cmd/ns", place = .Bootfs},
 	{name = "tail", dir = "cmd/tail", place = .Bootfs},
@@ -101,6 +102,7 @@ PROGRAMS := []Program {
 	// its threads are musl's pthreads, through the shim's vx_thread_spawn.
 	{name = "dbgthreads", source = "tests/user/dbgthreads.c", place = .Tests, kind = .C},
 	{name = "schedtest", dir = "tests/user/schedtest", place = .Tests},
+	{name = "cdtest", dir = "tests/user/cdtest", place = .Tests},
 }
 
 program_path :: proc(a: ^Arch, mode: Mode, name: string) -> string {

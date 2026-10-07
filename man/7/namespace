@@ -24,7 +24,7 @@ A restricted view is a connection attached at a restricted root, which the serve
 
 A name is an absolute path of UTF-8 components, as utf(6) defines them.
 It is cleaned before it is used, so `..` is taken away lexically and never climbs out of a bind, as in Plan 9.
-A process's names are absolute: a native program has no current directory (BUGS), and a POSIX program's is kept by its C library, which makes each relative name absolute before resolving it (see posix(7)).
+A relative name is made absolute from the process's current directory before it is resolved (ADR-0039): one directory for the process, a path, which rc(1)'s `cd` and POSIX's `chdir` set and a child starts in.
 
 Resolution walks from the root's mount, a walk(5) of the names that remain at a time.
 A `Twalk` answers with one qid for each name walked, and vx-ns checks each against the table: a mount point is found by the identity of the directory it was made on, the connection and the qid path, not by the path it was made at.
@@ -178,6 +178,6 @@ nsd is not restarted, and its groups would be lost if it were.
 A group's text is at most 16 KiB, a member replays the whole text after any change, and a group's connectors are never let go, so a group takes at most 8 servers over its life.
 nsd takes a member's word for which process it is, so `/proc/`<pid>`/ns` can be read, or claimed, by another process until there are capability tokens.
 
-Native programs have no current directory, so their names must be absolute; there is no `/env`, `/fd`, `/dev/cons` or `consctl`, and the console is a handle given at spawn (M6 step 6e brings `/env`).
+There is no `/env`, `/fd`, `/dev/cons` or `consctl`, and the console is a handle given at spawn (M6 step 6e brings `/env`).
 
 Each process dials its own TCP connection for a `tcp!` mount, and a forked child dials again (M6 step 6d shares one).

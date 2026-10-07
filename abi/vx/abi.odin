@@ -162,6 +162,13 @@ Msg_Size :: struct { // what channel_read and channel_call report
 //   spawn=NAME                       the program
 //   handle=NAME index=N              the message's handle N; "self" is the task
 //   arg=VALUE                        an argument; repeated, in order
+//   argv0=VALUE                      the POSIX argv[0], when it is not the
+//                                    program's name (posix_spawn)
+//   cwd=PATH                         the current directory, absolute and
+//                                    clean (ADR-0017, upstream's ADR-0039);
+//                                    without it, /
+//   env=NAME=VALUE                   an environment variable (the POSIX
+//                                    personality's); repeated
 //   cmdline=VALUE                    the kernel command line (the root task's)
 //   entropy=BYTES                    32 bytes to seed a random generator: the
 //                                    bootloader's (the root task's), or one its

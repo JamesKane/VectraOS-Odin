@@ -80,7 +80,7 @@ run :: proc() -> string {
 		return "no namespace"
 	}
 	if len(rt.args()) == 0 {
-		return ls("/") ? "" : "error"
+		return ls(".") ? "" : "error" // the current directory
 	}
 	exit := ""
 	for a in rt.args() {

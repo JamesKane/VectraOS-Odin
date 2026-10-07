@@ -150,8 +150,9 @@ make_bootfs :: proc(a: ^Arch, mode: Mode, out: string, with := "") -> bool {
 		if p.place != .Tests || !listed(with, p.name) {
 			continue
 		}
-		data := read_file(fmt.tprintf("tests/user/%s.ndb", p.name)) or_return
-		append(&entries, Bootfs_Entry{path = fmt.tprintf("boot/svc/%s.ndb", p.name), data = data, mode = 0o644})
+		if manifest := fmt.tprintf("tests/user/%s.ndb", p.name); os.exists(manifest) { // none: another test runs it
+			append(&entries, Bootfs_Entry{path = fmt.tprintf("boot/svc/%s.ndb", p.name), data = read_file(manifest) or_return, mode = 0o644})
+		}
 		if cmds := fmt.tprintf("tests/user/%s.cmds", p.name); os.exists(cmds) { // a dbg script
 			append(&entries, Bootfs_Entry{path = fmt.tprintf("boot/tests/%s.cmds", p.name), data = read_file(cmds) or_return, mode = 0o644})
 		}
