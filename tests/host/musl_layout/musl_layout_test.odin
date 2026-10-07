@@ -42,6 +42,7 @@ HEADERS :: `#define _GNU_SOURCE
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/times.h>
 #include <sys/uio.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
@@ -105,6 +106,11 @@ common_checks :: proc(out: ^[dynamic]Check) {
 	check(out, "offsetof(struct utsname, machine)", offset_of(linux.Utsname, machine))
 	check(out, "sizeof(struct rlimit)", size_of(linux.Rlimit))
 	check(out, "sizeof(struct rusage)", size_of(linux.Rusage))
+	check(out, "sizeof(struct tms)", size_of(linux.Tms))
+	check(out, "offsetof(struct tms, tms_stime)", offset_of(linux.Tms, stime))
+	check(out, "offsetof(struct tms, tms_cutime)", offset_of(linux.Tms, cutime))
+	check(out, "offsetof(struct tms, tms_cstime)", offset_of(linux.Tms, cstime))
+	check(out, "offsetof(struct rusage, ru_stime)", offset_of(linux.Rusage, stime))
 	check(out, "sizeof(struct flock)", size_of(linux.Flock))
 	check(out, "offsetof(struct flock, l_whence)", offset_of(linux.Flock, whence))
 	check(out, "offsetof(struct flock, l_start)", offset_of(linux.Flock, start))
@@ -246,6 +252,14 @@ common_checks :: proc(out: ^[dynamic]Check) {
 		{"CLOCK_REALTIME_ALARM", linux.CLOCK_REALTIME_ALARM},
 		{"CLOCK_BOOTTIME_ALARM", linux.CLOCK_BOOTTIME_ALARM},
 		{"CLOCK_TAI", linux.CLOCK_TAI},
+		{"CLOCK_PROCESS_CPUTIME_ID", linux.CLOCK_PROCESS_CPUTIME_ID},
+		{"CLOCK_THREAD_CPUTIME_ID", linux.CLOCK_THREAD_CPUTIME_ID},
+		{"RUSAGE_SELF", linux.RUSAGE_SELF},
+		{"RUSAGE_CHILDREN", linux.RUSAGE_CHILDREN},
+		{"RUSAGE_THREAD", linux.RUSAGE_THREAD},
+		{"PRIO_PROCESS", linux.PRIO_PROCESS},
+		{"PRIO_PGRP", linux.PRIO_PGRP},
+		{"PRIO_USER", linux.PRIO_USER},
 		{"TIMER_ABSTIME", linux.TIMER_ABSTIME},
 		{"RWF_NOAPPEND", linux.RWF_NOAPPEND},
 		{"SIGHUP", linux.SIGHUP},

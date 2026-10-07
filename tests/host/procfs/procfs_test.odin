@@ -512,12 +512,13 @@ test_procfs :: proc(t: ^testing.T) {
 	_, e = write_file(&c, root, "13/note", "posix: SIGKILL pid=7")
 	testing.expect_value(t, e, vx.Status.Ok)
 	testing.expect_value(t, string(victim.exit[:]), "killed")
+	victim.times = {user = 30_000_000, sys = 10_000_000} // the kernel's samples: its task's CPU time (ADR-0019)
 	fire_exit(victim)
 	testing.expect_value(t, victim.closed, true)
 	_, e = p9.client_walk(&c, root, "13")
 	testing.expect_value(t, e, vx.Status.Err_Not_Found) // gone
 	text, e = fs_read(7, .Wait, buf[:])
-	testing.expect_value(t, text, "pid=13 name=victim noteid=7 status=killed real=15\n")
+	testing.expect_value(t, text, "pid=13 name=victim noteid=7 status=killed user=30 sys=10 real=15\n")
 	testing.expect_value(t, note_text(shell, 2), "posix: SIGCHLD pid=13")
 	// A child registered with No_Wait leaves none.
 	long := task_by_id(14)
@@ -973,7 +974,7 @@ test_procfs :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(ls.exit[:]), "killed")
 	fire_exit(ls)
 	text, _ = fs_read(7, .Wait, buf[:])
-	testing.expect_value(t, text, "pid=9 name=ls noteid=7 status=killed real=15\n")
+	testing.expect_value(t, text, "pid=9 name=ls noteid=7 status=killed user=0 sys=0 real=15\n")
 	testing.expect_value(t, p9test.list(&c, root, ""), "1 2 7 12")
 	_, e = fs_read(7, .Wait, buf[:])
 	testing.expect_value(t, e, vx.Status.Err_Should_Wait) // 12 lives on
@@ -981,7 +982,7 @@ test_procfs :: proc(t: ^testing.T) {
 	_, e = fs_read(7, .Wait, buf[:])
 	testing.expect_value(t, e, vx.Status.Err_Interrupted) // SIGCHLD ended the held read (childnotes)
 	text, e = fs_read(7, .Wait, buf[:])
-	testing.expect_value(t, text, "pid=12 name=crasher noteid=12 status=\"\" real=15\n")
+	testing.expect_value(t, text, "pid=12 name=crasher noteid=12 status=\"\" user=0 sys=0 real=15\n")
 	_, e = fs_read(7, .Wait, buf[:])
 	testing.expect_value(t, e, vx.Status.Err_No_Child)
 

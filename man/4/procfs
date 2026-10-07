@@ -68,7 +68,7 @@ Each process directory holds these files, described in the nodes that follow:
   It is empty if the process is in no group or nsd does not answer within a second.
 : `wait`
   A read waits for one of the process's children to end, then returns its wait record, one record each read whatever the offset, as in 9front.
-  The record holds `pid`, `name`, `noteid` (its note group when it ended), `status` (its exit string, empty for success) and `real` (milliseconds from its registration to its end).
+  The record holds `pid`, `name`, `noteid` (its note group when it ended), `status` (its exit string, empty for success), `user` and `sys` (milliseconds of CPU time, the kernel's samples of its task and of its own children that ended, as 9front's wait message has them, ADR-0041) and `real` (milliseconds from its registration to its end).
   A process that has asked for `childnotes` (see {control|#ctl}) also gets records of its children's stops, with `stopped=` and the signal in place of `status` and `real`, and of their continues, with the flag `continued`.
   A read with no record queued and no living child that will leave one fails with `no living children`.
   The file's length in a stat is the number of records queued, so a length above 0 means a read will not wait.
@@ -294,7 +294,7 @@ Anyone who can open `/proc/<pid>` can debug, signal and kill the process: `mem`,
 A restart loses the table: svcd registers its services again, but every other process is gone from `/proc`.
 The table holds 128 processes.
 
-9front's `ctl` verbs `startstop`, `waitstop`, `hang` and `nohang`, and its `args` file, are not there, and wait records have no CPU times.
+9front's `ctl` verbs `startstop`, `waitstop`, `hang` and `nohang`, and its `args` file, are not there.
 
 The debugger follows 16 held threads of a process, and steps a thread over a breakpoint without stopping the others, so in a busy multithreaded process another thread may run past the breakpoint meanwhile.
 

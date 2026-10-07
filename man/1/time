@@ -33,7 +33,4 @@ With no <cmd>, or an unknown flag, it prints the usage message and exits 1.
 
 # BUGS
 
-VectraOS's C library does not implement the `times` system call (`ports/musl/vx/backend.c` has no case for it), which `time` takes every figure from.
-The call's failure is not the one `time` checks for, so it goes on: `real` is written as 0, and `user` and `sys` are whatever the uninitialized memory held.
-The first call in a process writes `vx-musl: system call` and its number `is not implemented` on the debug console.
-`time` is untested on VectraOS.
+`user` and `sys` are the kernel's samples (ADR-0041), in 10 ms ticks: a command that runs for less than a tick at a time may show 0, or 0.01 for a moment's work.

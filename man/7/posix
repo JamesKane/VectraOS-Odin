@@ -181,9 +181,9 @@ There is no `/etc/passwd`, `/etc/group`, `/etc/services`, `/dev/log` or `/dev/tt
 `st_dev` is the connection in the process's namespace (a slot an unmount frees may come again for another server).
 `flock`'s locks: see lock(5) and flock(1).
 
-Not implemented: `link` and `linkat` (`EPERM`), `mknod`, `chroot`, `getpriority` and `setpriority`, `sethostname`, `clock_settime`, `times` and `mprotect` (`ENOSYS`; `PROT_NONE` is mapped readable, so guard pages do not fault, until M6 step 6e).
+Not implemented: `link` and `linkat` (`EPERM`), `mknod`, `chroot`, `sethostname`, `clock_settime` and `mprotect` (`ENOSYS`; `PROT_NONE` is mapped readable, so guard pages do not fault, until M6 step 6e).
 `getrlimit` answers infinity for every limit.
-The CPU-time clocks are the monotonic clock.
+CPU time is the kernel's 10 ms samples (ADR-0041): `times`, `getrusage`, `wait4`'s rusage and the process's and thread's CPU-time clocks report it; another thread's or process's clock is refused, and children's times are lost across `execve`. Priorities: `getpriority` answers 0 and `setpriority` to any other value is `EPERM`.
 
 Signals have no `sigqueue` or real-time queueing, and `sigaltstack` no `SS_AUTODISARM`.
 A handler without `SA_ONSTACK` may run on the alternate stack, where the kernel put the note, if the thread has one.

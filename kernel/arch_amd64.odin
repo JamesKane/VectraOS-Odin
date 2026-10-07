@@ -1233,7 +1233,7 @@ x86_trap :: proc "c" (f: ^Trap_Frame) {
 		f.rax = u64(syscall_dispatch(f.rax, {f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9}))
 	case VECTOR_TIMER:
 		vx_wrmsr(X2APIC_EOI, 0)
-		timer_interrupt()
+		timer_interrupt(from_user)
 	case VECTOR_RESCHED:
 		vx_wrmsr(X2APIC_EOI, 0)
 		this_cpu().resched = true

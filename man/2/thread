@@ -80,6 +80,10 @@ Stopping a process is this, not a note (ADR-0011).
   With <thread> 0, the caller's note stack, a `vx_note_stack` (<base>, <size>; ADR-0036): where the kernel diverts the thread to its task's in-task handler (exception(2)) when its stack pointer is not on it already, so a fault on an overflowed stack still finds room.
   <size> 0 means none; otherwise at least `VX_NOTE_STACK_MIN` bytes inside user memory, or `VX_ERR_RANGE`.
   Another thread's is `VX_ERR_INVALID`. A new thread has none.
+: `VX_STATE_GET_TIMES`
+  At any time, with `VX_RIGHT_INSPECT`, the CPU time the thread, or with <thread> 0 the whole task (its ended threads too), has had, a `vx_cpu_times` of `user` and `sys` nanoseconds (ADR-0041).
+  The kernel samples it as 9front's does: a CPU running a thread takes a tick every 10 ms, which charges the thread 10 ms of user or system time by where it found it; an idle CPU takes none.
+  The figures are statistical: a thread that runs less than a tick at a time may be charged nothing.
 : `VX_STATE_GET_WATCH`, `VX_STATE_SET_WATCH`
   With <thread> 0, the task's watchpoints, a `vx_watches`, which all its threads take from when each next runs.
   Each slot is off, or watches writes or reads and writes at an address aligned to its length of 1, 2, 4 or 8 bytes; GET says in `count` how many the hardware has (x86_64 four, aarch64 two to sixteen).

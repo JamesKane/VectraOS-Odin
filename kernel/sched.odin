@@ -42,6 +42,16 @@ import vx "abi:vx"
 // before its registers are saved.
 
 TIME_SLICE :: Instant(10_000_000)
+// CPU time is sampled as 9front's is (ADR-0041): while a CPU runs a thread,
+// not its idle one, a tick every 10 ms charges the thread a tick of user or
+// system time, by where it found it. An idle CPU stays tickless.
+TICK :: Instant(10_000_000)
+
+// Where a tick found the thread it charges.
+Cpu_Time :: enum u8 {
+	User,
+	Sys,
+}
 INFINITE :: Instant(vx.INFINITE) // a deadline that never comes
 
 Cpu_Set :: bit_set[0 ..< MAX_CPUS; u64] // by index
@@ -54,6 +64,7 @@ Cpu :: struct {
 	sleepers:   ^Thread, // blocked here with a deadline, earliest first
 	slice_end:  Instant,
 	run_start:  Instant, // when current began running, for charging its context
+	tick_at:    Instant, // the next CPU-time tick, while it runs a thread (ADR-0041)
 	reserved:   ^Sched_Ctx, // the context that reserved this CPU, or none
 	resched:    bool, // call schedule before returning to user mode
 	lending:    ^Thread, // a channel_call delivering its request: the port waiter it wakes is lent to
@@ -765,6 +776,9 @@ schedule_locked :: proc "contextless" () {
 	} else {
 		sched.idle -= {int(c.index)}
 		c.slice_end = now + TIME_SLICE
+		if c.tick_at <= now {
+			c.tick_at = now + TICK // leaving idle: ticks start again
+		}
 		if x := ctx_of(next); x != nil {
 			ctx_refill(x, now)
 		}
@@ -905,6 +919,7 @@ sched_arm_timer :: proc "contextless" (c: ^Cpu) {
 	}
 	if c.current != &c.idle {
 		next = min(next, c.slice_end)
+		next = min(next, c.tick_at)
 		if x := ctx_of(c.current); x != nil && x.intent == .Realtime && !x.throttled {
 			next = min(next, c.run_start + x.left) // its budget runs out
 		}
@@ -917,16 +932,23 @@ sched_arm_timer :: proc "contextless" (c: ^Cpu) {
 	}
 }
 
-// This CPU's timer fired (time.odin): wake its sleepers whose deadlines have
-// passed, fill the contexts whose periods have come, charge the running
-// thread's, and end the slice if others of its band or above are waiting.
-sched_timer :: proc "contextless" () {
+// This CPU's timer fired (time.odin): charge the running thread the ticks
+// due, to user or system time by where the interrupt came from (from_user),
+// wake its sleepers whose deadlines have passed, fill the contexts whose
+// periods have come, charge the running thread's, and end the slice if
+// others of its band or above are waiting.
+sched_timer :: proc "contextless" (from_user: bool) {
 	c := this_cpu()
 	if c.current == nil {
 		return // before the scheduler runs on this CPU
 	}
 	spin_lock(&sched.lock)
 	now := clock_now()
+	if c.current != &c.idle && now >= c.tick_at { // the ticks due, all to where it was found
+		n := 1 + u64((now - c.tick_at) / TICK)
+		intrinsics.atomic_add_explicit(&c.current.ticks[from_user ? .User : .Sys], n, .Relaxed)
+		c.tick_at += Instant(n) * TICK
+	}
 	for c.sleepers != nil && c.sleepers.wake_at <= now {
 		t := c.sleepers
 		t.wait_token = nil // a waker that finds it later skips it

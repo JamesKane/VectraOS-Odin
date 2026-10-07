@@ -56,6 +56,7 @@ Fake_Task :: struct {
 	crash_key:   u64, // its exception binding, the last in line
 	debug_key:   u64, // its debugger's (First_Chance)
 	closed:      bool, // procfs closed its handle
+	times:       vx.Cpu_Times, // thread_state(.Get_Times) for the whole task
 }
 
 tasks: [dynamic; 16]Fake_Task
@@ -348,6 +349,12 @@ thread_state :: proc "contextless" (t: ^Fake_Task, tid: u32, op: vx.Thread_State
 		return 0
 	case .Get_Cpu:
 		ptr(vx.Cpu_Info, buf)^ = {xstate_size = FAKE_XSTATE_SIZE}
+		return 0
+	case .Get_Times:
+		if tid != 0 {
+			return ERR(.Err_Unsupported)
+		}
+		ptr(vx.Cpu_Times, buf)^ = t.times
 		return 0
 	case .Set_Watch:
 		w := ptr(vx.Watches, buf)

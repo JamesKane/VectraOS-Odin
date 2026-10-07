@@ -313,7 +313,15 @@ dispatch :: proc "contextless" (n, a1, a2, a3, a4, a5, a6: int) -> int {
 	case .clock_gettime:
 		return time_get(int(i32(a1)), (^linux.Timespec)(ptr(a2)))
 	case .clock_getres:
-		return time_res((^linux.Timespec)(ptr(a2)))
+		return time_res(int(i32(a1)), (^linux.Timespec)(ptr(a2)))
+	case .times:
+		return posix_times((^linux.Tms)(ptr(a1)))
+	case .getrusage:
+		return posix_getrusage(int(i32(a1)), (^linux.Rusage)(ptr(a2)))
+	case .getpriority:
+		return posix_getpriority(int(i32(a1)))
+	case .setpriority:
+		return posix_setpriority(int(i32(a1)), int(i32(a3)))
 	case .nanosleep:
 		return time_sleep(1, 0, (^linux.Timespec)(ptr(a1)), (^linux.Timespec)(ptr(a2))) // CLOCK_MONOTONIC
 	case .clock_nanosleep:

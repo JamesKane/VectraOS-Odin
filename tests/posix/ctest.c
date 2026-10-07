@@ -28,9 +28,11 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/random.h>
+#include <sys/resource.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/times.h>
 #include <sys/uio.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
@@ -114,6 +116,23 @@ static void on_fault(int sig, siginfo_t *info, void *uc) {
   siglongjmp(fault_jump, 1);
 }
 
+// Spins until the process's CPU-time clock has gone on 100 ms, or 10 s go
+// by; whether it did.
+static bool burn_cpu(void) {
+  struct timespec cpu, start, now;
+  clock_gettime(CLOCK_MONOTONIC, &start);
+  clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &cpu);
+  int64_t until = cpu.tv_sec * 1'000'000'000 + cpu.tv_nsec + 100'000'000;
+  volatile uint64_t spin = 0;
+  for (;;) {
+    for (int i = 0; i < 100'000; i++) spin = spin + (uint64_t)i;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &cpu);
+    if (cpu.tv_sec * 1'000'000'000 + cpu.tv_nsec >= until) return true;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (now.tv_sec - start.tv_sec > 10) return false;
+  }
+}
+
 static int child_main(char **argv) {
   // default: the end, as SIGSEGV; before the parent's check, as dbg runs it too (tests/qemu/dbgmusl.ndb)
   if (strcmp(argv[1], "segv") == 0) return *nowhere_at();
@@ -140,6 +159,7 @@ static int child_main(char **argv) {
     return ok ? 10 : 2;
   }
   if (strcmp(argv[1], "signal") == 0) return kill(parent, SIGUSR1) == 0 ? 12 : 2;
+  if (strcmp(argv[1], "burn") == 0) return burn_cpu() ? 17 : 2;         // CPU time for its parent to see
   if (strcmp(argv[1], "umask") == 0) return umask(022) == 027 ? 16 : 2; // the parent's, kept by posix_spawn
   if (strcmp(argv[1], "socket") == 0) { // descriptor 3, a TCP socket the parent connected
     struct stat st;
@@ -1131,6 +1151,45 @@ static void test_file_calls(void) {
         rmdir("/tmp/accd") == 0);
 }
 
+// CPU time (6d9b, ADR-0041): the kernel's 10 ms samples, as times, getrusage,
+// the CPU-time clocks and wait4's rusage give them; priorities refused.
+static void test_cpu_time(void) {
+  struct tms before, after;
+  times(&before);
+  CHECK(burn_cpu());
+  struct timespec proc = {}, thread = {}, res = {};
+  CHECK(clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &proc) == 0 &&
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &thread) == 0);
+  CHECK(proc.tv_sec > 0 || proc.tv_nsec >= 100'000'000);
+  CHECK(thread.tv_sec < proc.tv_sec || (thread.tv_sec == proc.tv_sec && thread.tv_nsec <= proc.tv_nsec));
+  CHECK(clock_getres(CLOCK_PROCESS_CPUTIME_ID, &res) == 0 && res.tv_nsec == 10'000'000);
+  CHECK(times(&after) > 0 && after.tms_utime - before.tms_utime >= 5); // a spin is user time, mostly
+  struct rusage ru;
+  CHECK(getrusage(RUSAGE_SELF, &ru) == 0 && ru.ru_utime.tv_sec * 1'000'000 + ru.ru_utime.tv_usec >= 50'000);
+
+  // A child's: in wait4's rusage, then times' cutime and RUSAGE_CHILDREN.
+  pid_t child;
+  int status = 0;
+  CHECK(spawn_child("burn", nullptr, &child) == 0);
+  CHECK(wait4(child, &status, 0, &ru) == child && WIFEXITED(status) && WEXITSTATUS(status) == 17);
+  long used = ru.ru_utime.tv_sec * 1'000'000 + ru.ru_utime.tv_usec + ru.ru_stime.tv_sec * 1'000'000 +
+              ru.ru_stime.tv_usec;
+  CHECK(used >= 100'000);
+  CHECK(times(&after) > 0 && after.tms_cutime + after.tms_cstime >= 10);
+  CHECK(getrusage(RUSAGE_CHILDREN, &ru) == 0 && ru.ru_utime.tv_sec * 1'000'000 + ru.ru_utime.tv_usec +
+                                                        ru.ru_stime.tv_sec * 1'000'000 +
+                                                        ru.ru_stime.tv_usec >=
+                                                    100'000);
+
+  // Priorities: every process's is 0; another is refused, not ignored.
+  errno = 0;
+  CHECK(getpriority(PRIO_PROCESS, 0) == 0 && errno == 0 && setpriority(PRIO_PROCESS, 0, 0) == 0);
+  errno = 0;
+  CHECK(setpriority(PRIO_PROCESS, 0, 5) == -1 && errno == EPERM);
+  errno = 0;
+  CHECK(nice(1) == -1 && errno == EPERM);
+}
+
 // The posix extension's open files, kept by the server: a child's writes
 // move its parent's offset; O_APPEND is the server's; locks between
 // processes.
@@ -2023,6 +2082,7 @@ int main(int argc, char **argv) {
   test_shared_offsets_and_locks();
   test_permissions();
   test_file_calls();
+  test_cpu_time();
   test_mmap();
   test_terminals();
   test_poll();

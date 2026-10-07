@@ -641,6 +641,9 @@ ERRMAX :: 128
 //     (.Err_Range). A new thread has none; fork's thread and exec's have
 //     none. .Get_Sched, at any time, with INSPECT on the task (thread 0:
 //     the caller's own), its scheduling, a Sched_Info (ADR-0038).
+//     .Get_Times, at any time, with INSPECT on the task, the CPU time the
+//     thread, or with thread 0 the whole task, has had, a Cpu_Times
+//     (ADR-0041).
 // thread_suspend(task, thread), thread_resume(task, thread): counted, with
 //     the DEBUG right; with thread 0, every thread of the task. A suspended
 //     thread stops before it next returns to user mode; thread_suspend
@@ -758,7 +761,18 @@ Thread_State_Op :: enum u32 {
 	Get_Note_Stack, // ADR-0036
 	Set_Note_Stack,
 	Get_Sched, // ADR-0038: a Sched_Info, at any time
+	Get_Times, // ADR-0041: a Cpu_Times, at any time
 }
+
+// thread_state's .Get_Times (ADR-0041): the CPU time a thread, or with thread
+// 0 its whole task (threads that have ended too), has had, in nanoseconds,
+// sampled as 9front does: each 10 ms tick of a CPU running it is charged to
+// user or system time by where the tick found it.
+Cpu_Times :: struct {
+	user, sys: Duration,
+}
+
+#assert(size_of(Cpu_Times) == 16)
 
 // thread_state's .Get_Note_Stack and .Set_Note_Stack (ADR-0036): the stack a
 // thread's in-task handler runs on, [base, base + size); size 0: none.

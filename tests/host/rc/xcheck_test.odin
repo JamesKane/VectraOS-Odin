@@ -12,7 +12,7 @@
 // memory as they compile or run.
 //
 // The digests are those of upstream's rc.c at 5c1bbc9 (unchanged since its
-// 6d7b2, e194269; the mutated ones with rctest.rc at 905e103), unpatched: its ab83fe6 and f24356f fixed what this tree's findings said (a
+// 6d7b2, e194269; the mutated ones with rctest.rc at 5096568), unpatched: its ab83fe6 and f24356f fixed what this tree's findings said (a
 // here document's redirection closes nothing; a stage's paths and here
 // document are kept until it runs), so a stage's paths are logged and its
 // here document read, as the shell does. Its host has exists, read_line (its
@@ -117,11 +117,11 @@ test_mutated :: proc(t: ^testing.T) {
 	m := mutator()
 	defer rt.mutator_destroy(&m)
 	folds := []Fold {
-		{BIG_HEAP, false, 0x3827a8f8b085ac94},
-		{MID_HEAP, false, 0xd5862da6ea39ac66},
-		{SMALL_HEAP, false, 0x5c43df3e871d4856},
-		{FUZZ_HEAP, true, 0x6fe01880e93f306f},
-		{SMALL_HEAP, true, 0xd346a11b1e9ad416},
+		{BIG_HEAP, false, 0xeeda566f76b6e1be},
+		{MID_HEAP, false, 0x07a6dcd8d2c5e4a0},
+		{SMALL_HEAP, false, 0x7588299b5668d942},
+		{FUZZ_HEAP, true, 0xd840d01cc48e5a0f},
+		{SMALL_HEAP, true, 0x8defb0fde11b1f28},
 	}
 	text: [dynamic]u8
 	defer delete(text)

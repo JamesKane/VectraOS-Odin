@@ -454,12 +454,21 @@ IOV_MAX :: 1024
 UTIME_NOW :: 0x3fffffff
 UTIME_OMIT :: 0x3ffffffe
 CLOCK_REALTIME :: 0
+CLOCK_PROCESS_CPUTIME_ID :: 2
+CLOCK_THREAD_CPUTIME_ID :: 3
 CLOCK_REALTIME_COARSE :: 5
 CLOCK_REALTIME_ALARM :: 8
 CLOCK_BOOTTIME_ALARM :: 9
 CLOCK_TAI :: 11 // the highest clock id
 TIMER_ABSTIME :: 1
 RLIM_INFINITY :: max(u64)
+CLK_TCK :: 100 // sysconf(_SC_CLK_TCK): times' clock ticks a second
+RUSAGE_SELF :: 0
+RUSAGE_CHILDREN :: -1
+RUSAGE_THREAD :: 1
+PRIO_PROCESS :: 0
+PRIO_PGRP :: 1
+PRIO_USER :: 2
 RWF_NOAPPEND :: 0x20
 
 // wait4's options.
@@ -848,6 +857,12 @@ Rusage :: struct {
 	_:            [16]i64,
 }
 #assert(size_of(Rusage) == 272)
+
+// struct tms, times's: clock_t is a long.
+Tms :: struct {
+	utime, stime, cutime, cstime: i64,
+}
+#assert(size_of(Tms) == 32)
 
 Flock :: struct {
 	type, whence: i16,
