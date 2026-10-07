@@ -5,7 +5,7 @@
 
 scenario=fsdperm timeout=60 cmdline=vx.skip=rc with=fsdnone,fsdvol disk=64 volume=tests/fsd/home
 expect="fsd: serving /srv/fsd"
-expect="fsdnone: 6 checks, 0 failed"
+expect="fsdnone: 10 checks, 0 failed"
 line="svcd: fsdnone exited"
 fail="vx: panic"
 fail="fsdnone: FAILED"

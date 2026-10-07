@@ -22,13 +22,21 @@ check list 'docs greeting hello.txt' `{ls /tmp | sort}
 if(touch /tmp/none-was-here >[2]/dev/null) r=written
 if not r=refused
 check create refused $r
-if(rm /tmp/hello.txt >[2]/dev/null) r=removed
+if(rm /tmp/hello.txt </dev/null >[2]/dev/null) r=removed # no terminal: rm asks before removing a file access(2) says it may not write
 if not r=refused
 check remove refused $r
 check still 'hello from a vx-fs volume' `{cat /tmp/hello.txt}
 if(echo sync | tee /adm/ctl >/dev/null >[2]/dev/null) r=obeyed
 if not r=refused
 check ctl refused $r
+
+# test(1)'s -r, -w and -x ask access(2), which asks fsd by opening (6d9a):
+# none may read hello.txt and search the root, and write neither.
+fn t { if(test $1 $2) echo yes; if not echo no }
+check test-r yes `{t -r /tmp/hello.txt}
+check test-w no `{t -w /tmp/hello.txt}
+check test-x no `{t -x /tmp/hello.txt}
+check test-dir 'yes no yes' `{t -r /tmp} `{t -w /tmp} `{t -x /tmp}
 
 echo 'fsdnone:' $checks checks, $failed failed
 if(~ $failed 0) exit # an empty status: success, as rc's

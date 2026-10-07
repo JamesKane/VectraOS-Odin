@@ -95,10 +95,12 @@ flags_word :: proc "contextless" (f: linux.Open_Flags) -> u64 {
 	return u64(transmute(u32)f)
 }
 
-// The child's descriptors as records, its pipes' ends duplicated into
-// handles[count^:cap] (names beside them). Its working directory is
-// procns.spawn_records' cwd=.
+// The child's file-creation mask and descriptors as records, its pipes' ends
+// duplicated into handles[count^:cap] (names beside them). Its working
+// directory is procns.spawn_records' cwd=.
 fd_records :: proc "contextless" (table: ^[FD_MAX]Slot, w: ^ndb.Writer, handles: []vx.Handle, names: []string, count: ^int, cap: int) {
+	ndb.put_u64(w, "umask", u64(umask)) // musl's own, as signals= is
+	_ = ndb.end(w)
 	for &slot, fd in table {
 		o := slot.o
 		if o == nil || slot.cloexec || o.lost {

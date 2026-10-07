@@ -34,6 +34,7 @@ HEADERS :: `#define _GNU_SOURCE
 #include <stddef.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
@@ -47,6 +48,7 @@ HEADERS :: `#define _GNU_SOURCE
 #include <termios.h>
 #include <time.h>
 #include <ucontext.h>
+#include <unistd.h>
 #include "src/process/fdop.h"
 #define hidden // musl's internal visibility, for ksigaction.h
 `
@@ -175,6 +177,14 @@ common_checks :: proc(out: ^[dynamic]Check) {
 		{"AT_SYMLINK_NOFOLLOW", linux.AT_SYMLINK_NOFOLLOW},
 		{"AT_REMOVEDIR", linux.AT_REMOVEDIR},
 		{"AT_EMPTY_PATH", linux.AT_EMPTY_PATH},
+		{"F_OK", linux.F_OK},
+		{"X_OK", linux.X_OK},
+		{"W_OK", linux.W_OK},
+		{"R_OK", linux.R_OK},
+		{"LOCK_SH", linux.LOCK_SH},
+		{"LOCK_EX", linux.LOCK_EX},
+		{"LOCK_NB", linux.LOCK_NB},
+		{"LOCK_UN", linux.LOCK_UN},
 		{"F_DUPFD", linux.F_DUPFD},
 		{"F_GETFD", linux.F_GETFD},
 		{"F_SETFD", linux.F_SETFD},

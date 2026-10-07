@@ -132,6 +132,7 @@ Sys_Amd64 :: enum int {
 	kill            = 62,
 	uname           = 63,
 	fcntl           = 72,
+	flock           = 73,
 	fsync           = 74,
 	fdatasync       = 75,
 	truncate        = 76,
@@ -151,6 +152,8 @@ Sys_Amd64 :: enum int {
 	fchown          = 93,
 	lchown          = 94,
 	umask           = 95,
+	getrusage       = 98,
+	times           = 100,
 	getuid          = 102,
 	getgid          = 104,
 	geteuid         = 107,
@@ -160,6 +163,9 @@ Sys_Amd64 :: enum int {
 	setsid          = 112,
 	getpgid         = 121,
 	getsid          = 124,
+	getpriority     = 140,
+	setpriority     = 141,
+	sync            = 162,
 	rt_sigpending   = 127,
 	rt_sigsuspend   = 130,
 	sigaltstack     = 131,
@@ -194,10 +200,12 @@ Sys_Amd64 :: enum int {
 	dup3            = 292,
 	pipe2           = 293,
 	prlimit64       = 302,
+	syncfs          = 306,
 	renameat2       = 316,
 	getrandom       = 318,
 	preadv2         = 327,
 	pwritev2        = 328,
+	faccessat2      = 439,
 }
 
 Sys_Arm64 :: enum int {
@@ -206,6 +214,7 @@ Sys_Arm64 :: enum int {
 	dup3            = 24,
 	fcntl           = 25,
 	ioctl           = 29,
+	flock           = 32,
 	mkdirat         = 34,
 	unlinkat        = 35,
 	symlinkat       = 36,
@@ -235,6 +244,7 @@ Sys_Arm64 :: enum int {
 	readlinkat      = 78,
 	newfstatat      = 79,
 	fstat           = 80,
+	sync            = 81,
 	fsync           = 82,
 	fdatasync       = 83,
 	utimensat       = 88,
@@ -257,11 +267,15 @@ Sys_Arm64 :: enum int {
 	rt_sigaction    = 134,
 	rt_sigprocmask  = 135,
 	rt_sigpending   = 136,
+	setpriority     = 140,
+	getpriority     = 141,
+	times           = 153,
 	setpgid         = 154,
 	getpgid         = 155,
 	getsid          = 156,
 	setsid          = 157,
 	uname           = 160,
+	getrusage       = 165,
 	umask           = 166,
 	getpid          = 172,
 	getppid         = 173,
@@ -297,10 +311,12 @@ Sys_Arm64 :: enum int {
 	accept4         = 242,
 	wait4           = 260,
 	prlimit64       = 261,
+	syncfs          = 267,
 	renameat2       = 276,
 	getrandom       = 278,
 	preadv2         = 286,
 	pwritev2        = 287,
+	faccessat2      = 439,
 }
 
 // --- Flag words ---
@@ -349,6 +365,18 @@ AT_FDCWD :: -100
 AT_SYMLINK_NOFOLLOW :: 0x100
 AT_REMOVEDIR :: 0x200
 AT_EMPTY_PATH :: 0x1000
+
+// access's modes (unistd.h): F_OK, that the file is there, is none of them.
+F_OK :: 0
+X_OK :: 1
+W_OK :: 2
+R_OK :: 4
+
+// flock's operations (sys/file.h).
+LOCK_SH :: 1
+LOCK_EX :: 2
+LOCK_NB :: 4
+LOCK_UN :: 8
 
 // fcntl's commands.
 F_DUPFD :: 0

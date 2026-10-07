@@ -91,9 +91,8 @@ A malformed <expression> ends `find` before the walk, as `unknown operand: -x`, 
 
 VectraOS has no user database in the POSIX namespace, no `/etc/passwd` or `/etc/group`, so `-user` and `-group` take numbers only, a name being `unknown user`, and `-nouser` and `-nogroup` are true for every file.
 
-The POSIX layer gives a file whose server answers Tgetattr (see getattr(5)), as most do, a device number of 0.
-So `-xdev` cannot tell where one file system meets another, and two directories on different servers whose qids have the same path look like one, which `find` reports as a loop and does not descend into.
-This is read from the code; untested on VectraOS.
+A file's device number is its connection's in the process's namespace: `-xdev` stops where another server's mount begins, and two mounts of one connection are one device.
+A union directory that holds one of its own members is a loop, as `/bin` is, whose first member `/boot/bin/posix` is also `/bin/posix`: `find /` reports `loop detected '/bin/posix' is '/bin'`.
 
 The times are compared in whole seconds, ignoring nanoseconds.
 `-exec` replaces only an argument that is exactly `{}`, not `{}` within one.

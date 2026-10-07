@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/auxv.h>
+#include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/random.h>
@@ -139,6 +140,7 @@ static int child_main(char **argv) {
     return ok ? 10 : 2;
   }
   if (strcmp(argv[1], "signal") == 0) return kill(parent, SIGUSR1) == 0 ? 12 : 2;
+  if (strcmp(argv[1], "umask") == 0) return umask(022) == 027 ? 16 : 2; // the parent's, kept by posix_spawn
   if (strcmp(argv[1], "socket") == 0) { // descriptor 3, a TCP socket the parent connected
     struct stat st;
     int type = 0;
@@ -1046,6 +1048,89 @@ static void test_permissions(void) {
   CHECK(chmod("/tmp/locked/x", 0644) == 0 && unlink("/tmp/locked/x") == 0 && rmdir("/tmp/locked") == 0);
 }
 
+// Wave F's file calls (M6 step 6d9a): access as the server's permissions
+// answer it, umask kept and passed on, st_dev per server, flock, sync.
+static void test_file_calls(void) {
+  int fd = open("/tmp/acc", O_RDWR | O_CREAT | O_TRUNC, 0644);
+  CHECK(fd >= 0 && close(fd) == 0);
+  CHECK(access("/tmp/acc", F_OK) == 0 && access("/tmp/acc", R_OK | W_OK) == 0);
+  errno = 0;
+  CHECK(access("/tmp/nothing", F_OK) == -1 && errno == ENOENT);
+  errno = 0;
+  CHECK(access("/tmp/acc", 0x40) == -1 && errno == EINVAL);
+  CHECK(mkdir("/tmp/accd", 0755) == 0 && access("/tmp/accd", R_OK | W_OK | X_OK) == 0);
+  if (owners_kept) { // a server that checks permissions (fsd)
+    errno = 0;
+    CHECK(access("/tmp/acc", X_OK) == -1 && errno == EACCES);
+    CHECK(chmod("/tmp/acc", 0755) == 0 && access("/tmp/acc", X_OK) == 0);
+    CHECK(chmod("/tmp/acc", 0444) == 0 && access("/tmp/acc", R_OK) == 0);
+    errno = 0;
+    CHECK(access("/tmp/acc", W_OK) == -1 && errno == EACCES);
+    CHECK(chmod("/tmp/accd", 0555) == 0 && access("/tmp/accd", R_OK | X_OK) == 0);
+    errno = 0;
+    CHECK(faccessat(AT_FDCWD, "/tmp/accd", W_OK, 0) == -1 && errno == EACCES);
+    CHECK(chmod("/tmp/accd", 0755) == 0 && chmod("/tmp/acc", 0644) == 0);
+  }
+  DIR *d = opendir("/tmp/accd"); // W_OK's probe file is gone
+  CHECK(d != nullptr);
+  int names = 0;
+  for (struct dirent *e; d && (e = readdir(d));) names += e->d_name[0] != '.';
+  if (d) closedir(d);
+  CHECK(names == 0);
+
+  // umask: kept, applied to files and directories, passed to a child.
+  CHECK(umask(027) == 022);
+  struct stat st, other;
+  fd = open("/tmp/masked", O_RDWR | O_CREAT | O_TRUNC, 0666);
+  CHECK(fd >= 0 && fstat(fd, &st) == 0 && (st.st_mode & 0777) == 0640 && close(fd) == 0);
+  CHECK(mkdir("/tmp/maskedd", 0777) == 0 && stat("/tmp/maskedd", &st) == 0 && (st.st_mode & 0777) == 0750);
+  pid_t child;
+  int status = 0;
+  CHECK(spawn_child("umask", nullptr, &child) == 0);
+  CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 16);
+  CHECK(umask(022) == 027);
+
+  // st_dev: one server's files share it; another server's differs.
+  CHECK(stat("/tmp/acc", &st) == 0 && stat("/tmp/masked", &other) == 0 && st.st_dev == other.st_dev);
+  CHECK(st.st_dev != 0 && stat("/boot", &other) == 0 && st.st_dev != other.st_dev);
+  fd = open("/tmp/acc", O_RDONLY);
+  CHECK(fd >= 0 && fstat(fd, &other) == 0 && other.st_dev == st.st_dev && other.st_ino == st.st_ino);
+
+  // flock: the open file's, whatever it was opened for; another open of the
+  // file, or another process, waits for it or is told it would.
+  int again = open("/tmp/acc", O_RDONLY);
+  CHECK(again >= 0 && flock(fd, LOCK_EX) == 0); // opened for reading, as flock(1) does
+  errno = 0;
+  CHECK(flock(again, LOCK_SH | LOCK_NB) == -1 && errno == EWOULDBLOCK);
+  CHECK(flock(fd, LOCK_SH) == 0 && flock(again, LOCK_SH | LOCK_NB) == 0); // shared with shared
+  int ready[2];
+  CHECK(pipe(ready) == 0);
+  child = fork();
+  if (child == 0) {
+    int mine = open("/tmp/acc", O_RDONLY);
+    bool ok = mine >= 0 && flock(mine, LOCK_EX | LOCK_NB) == -1 && errno == EWOULDBLOCK;
+    ok = write(ready[1], "r", 1) == 1 && ok;
+    ok = ok && flock(mine, LOCK_EX) == 0; // once both let go
+    _exit(ok ? 0 : 1);
+  }
+  char rd;
+  CHECK(read(ready[0], &rd, 1) == 1);
+  close(ready[0]);
+  close(ready[1]);
+  CHECK(flock(again, LOCK_UN) == 0 && close(fd) == 0); // the close lets fd's go
+  CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  close(again);
+  errno = 0;
+  CHECK(flock(0x7fff, LOCK_EX) == -1 && errno == EBADF);
+
+  // sync and syncfs: every mounted server asked to put its changes on disk.
+  sync();
+  fd = open("/tmp/acc", O_RDONLY);
+  CHECK(fd >= 0 && syncfs(fd) == 0 && close(fd) == 0);
+  CHECK(unlink("/tmp/acc") == 0 && unlink("/tmp/masked") == 0 && rmdir("/tmp/maskedd") == 0 &&
+        rmdir("/tmp/accd") == 0);
+}
+
 // The posix extension's open files, kept by the server: a child's writes
 // move its parent's offset; O_APPEND is the server's; locks between
 // processes.
@@ -1937,6 +2022,7 @@ int main(int argc, char **argv) {
   test_names_and_attributes();
   test_shared_offsets_and_locks();
   test_permissions();
+  test_file_calls();
   test_mmap();
   test_terminals();
   test_poll();

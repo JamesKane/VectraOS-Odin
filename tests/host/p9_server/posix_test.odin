@@ -7,8 +7,9 @@
 // one server (two with posix and xattr, one without), and every reply must be
 // the bytes upstream's p9_serve gives for the same requests on the same file
 // system (upstream.txt, from a harness built with clang against M4's
-// server.c: the P4 cross-check). Build with -define:P9_POSIX_DUMP=PATH to
-// write the script's requests for that harness.
+// server.c: the P4 cross-check; made again against server.c at 905e103, M6
+// step 6d9a, whose Tlock takes any open fid). Build with
+// -define:P9_POSIX_DUMP=PATH to write the script's requests for that harness.
 //
 //   /     (node 1)
 //   /f    (node 2)  "0123456789"
@@ -312,7 +313,7 @@ script :: proc() -> []Step {
 		{conn = 2, msg = {type = .Tlock, tag = 14, fid = 5, lock_type = .Write, start = 0, length = 0, proc_id = 2}},
 		{conn = 1, msg = w(1, 3, "g")},
 		{conn = 1, msg = {type = .Topen, tag = 29, fid = 3, mode = p9.OREAD}},
-		{conn = 1, msg = {type = .Tlock, tag = 30, fid = 3, lock_type = .Write, start = 0, length = 0, proc_id = 1}}, // opened for reading
+		{conn = 1, msg = {type = .Tlock, tag = 30, fid = 3, lock_type = .Write, start = 0, length = 0, proc_id = 1}}, // opened for reading: granted (fcntl's rule is the client's)
 		{conn = 1, msg = {type = .Tlock, tag = 31, fid = 1, lock_type = .Read, start = 0, length = 0, proc_id = 1}}, // not open
 		// Holds run out: a token not used within the hold time joins nothing.
 		{conn = 1, msg = {type = .Tshare, tag = 32, fid = 3, holds = 1}},

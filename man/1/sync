@@ -27,6 +27,4 @@ A flag or an operand prints the usage message and exits 1.
 
 # BUGS
 
-VectraOS's C library does not implement the `sync` system call (`ports/musl/vx/backend.c` has no case for it), so `sync` writes nothing out and still exits 0.
-The first call in a process writes `vx-musl: system call` and its number `is not implemented` on the debug console.
-A POSIX program that needs a file on its storage calls `fsync` on that file, which the C library does implement.
+The C library's `sync` sends `Tfsync` (fsync(5)) on each mount in the process's namespace, which fsd(4) answers once its volume is committed; a server that keeps nothing for later answers at once. A mount that is not in the namespace, or a server that ignores `Tfsync`, is not written out.

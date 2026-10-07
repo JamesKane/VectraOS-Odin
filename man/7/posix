@@ -177,11 +177,11 @@ There is no `/bin/sh`, and `exec` runs only ELF programs, so `system`, `popen`, 
 
 Everyone is root: `getuid` and its kin answer 0, and a file's owner and group read as 0, though fsd keeps owners and checks permissions (M6 step 6e).
 There is no `/etc/passwd`, `/etc/group`, `/etc/services`, `/dev/log` or `/dev/tty`, and no `LOGNAME`, and `ttyname` needs `/proc/self/fd`, so `chown`, `chgrp`, `whoami`, `logname`, `logger`, `tty` and others fail or misbehave.
-`faccessat` checks only that a file exists, so every file is readable, writable and executable to `test`, `which` and `rm`'s prompt.
-`umask` is fixed at 022, and `mkdirat` masks a mode to 0755.
-`st_dev` is 0, so `du` and `find` take two servers' files with equal qid paths for one.
+`faccessat` opens the file in the mode asked, as 9front's APE, and makes and removes a probe file `_AcChAcK`<pid> to answer a directory's `W_OK`; there are no effective ids, so `AT_EACCESS` changes nothing.
+`st_dev` is the connection in the process's namespace (a slot an unmount frees may come again for another server).
+`flock`'s locks: see lock(5) and flock(1).
 
-Not implemented: `link` and `linkat` (`EPERM`), `mknod`, `chroot`, `flock`, `getpriority` and `setpriority`, `sethostname`, `clock_settime`, `times`, `sync` and `mprotect` (`ENOSYS`; `PROT_NONE` is mapped readable, so guard pages do not fault, until M6 step 6e).
+Not implemented: `link` and `linkat` (`EPERM`), `mknod`, `chroot`, `getpriority` and `setpriority`, `sethostname`, `clock_settime`, `times` and `mprotect` (`ENOSYS`; `PROT_NONE` is mapped readable, so guard pages do not fault, until M6 step 6e).
 `getrlimit` answers infinity for every limit.
 The CPU-time clocks are the monotonic clock.
 

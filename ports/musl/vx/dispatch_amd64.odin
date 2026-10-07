@@ -19,7 +19,7 @@ dispatch_amd64 :: proc "contextless" (n, a1, a2, a3, a4, a5, a6: int) -> (r: int
 	case .lstat:
 		return fd_fstatat(linux.AT_FDCWD, s(a1), (^linux.Stat)(p(a2)), linux.AT_SYMLINK_NOFOLLOW), true
 	case .access:
-		return fd_faccessat(linux.AT_FDCWD, s(a1)), true
+		return fd_faccessat(linux.AT_FDCWD, s(a1), int(i32(a2))), true
 	case .mkdir:
 		return fd_mkdirat(linux.AT_FDCWD, s(a1), u32(a2)), true
 	case .unlink:

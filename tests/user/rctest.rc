@@ -195,6 +195,15 @@ check rfork-m refused `{rfork m; mount /srv/nsd $dir/nsb >[2] /dev/null; if(! ~ 
 check rfork-s '' `{rfork s; echo $status}
 check rfork-ens '' `{rfork; echo $status}
 
+# Wave F's file calls through sbase (6d9a): find walking from one server
+# into another, flock(1) holding a lock another flock(1) is refused, sync.
+check find-servers '' `{find / -path /bin -prune -o -name nothing-here -print >[2=1] | grep loop} # /bin's union holds /bin/posix: a real loop
+check flock held `{flock $dir/lk echo held}
+flock $dir/lk flock -n $dir/lk echo inner >[2] /dev/null
+check flock-n ok `{if(! ~ $status '') echo ok; if not echo $status}
+sync
+check sync '' $status
+
 rm -r $dir
 check cleaned no `{if(test -d $dir) echo yes; if not echo no}
 

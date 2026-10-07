@@ -50,9 +50,7 @@ Otherwise `du` exits 0.
 
 # BUGS
 
-The POSIX layer gives a file whose server answers Tgetattr (see getattr(5)), as most do, a device number of 0.
-So `-x` cannot tell where one file system meets another, and two directories on different servers whose qids have the same path look like one, so the second is left out without a word.
-This is read from the code; untested on VectraOS.
+A file's device number is its connection's in the process's namespace: `-x` stops where another server's mount begins, and two mounts of one connection are one device.
 
 A directory found again below itself, through a symbolic link with `-L`, is skipped without a word.
 

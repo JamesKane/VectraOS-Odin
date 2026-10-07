@@ -46,6 +46,5 @@ A <file> that cannot be found or changed is reported, as `chmod: chmod /x: Opera
 
 # BUGS
 
-The file-creation mask is always `022` on VectraOS: the C library's `umask` neither keeps nor returns another.
 
 What a mode means beyond the nine permission bits is up to the file server; set-user-ID, set-group-ID and sticky bits are untested on VectraOS.

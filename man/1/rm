@@ -54,4 +54,4 @@ When both `-f` and `-i` are given `rm` never asks, whichever came last; POSIX ha
 With `-i` and `-r`, a directory named as a <file> is asked about only after what it holds has been asked about and removed; a directory inside it is asked about first.
 The question says `file` for a directory too.
 
-On VectraOS `rm` never asks without `-i`: the C library's `faccessat` checks only that the file exists, leaving permissions to the server, so every file seems writable.
+On tmpfs, which enforces no permissions, every file seems writable, so `rm` never asks there without `-i`.

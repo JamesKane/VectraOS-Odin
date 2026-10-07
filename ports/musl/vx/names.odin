@@ -6,6 +6,7 @@ import "vx:memory"
 import "vx:ns"
 import "vx:p9"
 import "vx:rt"
+import "vx:str"
 
 // Names: stat, access, mkdir, unlink, the working directory, directories,
 // and the posix and xattr extensions' calls: rename, symbolic links and
@@ -61,14 +62,54 @@ fd_fstatat :: proc "contextless" (dirfd: int, path: string, st: ^linux.Stat, fla
 	return errno_of(sst)
 }
 
-fd_faccessat :: proc "contextless" (dirfd: int, path: string) -> int {
+// The open faccessat asks for each combination of R_OK, W_OK and X_OK.
+@(private="file")
+access_modes := [8]p9.Open_Mode{p9.OREAD, p9.OEXEC, p9.OWRITE, p9.ORDWR, p9.OREAD, p9.OEXEC, p9.ORDWR, p9.ORDWR}
+
+// access and faccessat, as 9front's APE has them (sys/src/ape/lib/ap/plan9/
+// access.c): the server, which keeps the permissions, is asked by opening
+// the file in the mode asked for; a directory, which opens only for reading,
+// by opening it so for R_OK and X_OK, and for W_OK by making a file in it
+// and removing it at once. There are no effective ids: faccessat2's flags
+// change nothing.
+fd_faccessat :: proc "contextless" (dirfd: int, path: string, amode: int) -> int {
+	if amode &~ (linux.R_OK | linux.W_OK | linux.X_OK) != 0 {
+		return fail(.EINVAL)
+	}
 	buf: Path_Buf
-	c, fid, _, e := fd_walk(dirfd, path, true, &buf)
+	c, fid, p, e := fd_walk(dirfd, path, true, &buf)
 	if e < 0 {
 		return e
 	}
+	st := amode == linux.F_OK ? vx.Status.Ok : p9.client_open(c, fid, access_modes[amode])
+	sb: linux.Stat
+	dir := st != .Ok && stat_fid(c, fid, &sb) == .Ok && sb.mode & linux.S_IFMT == linux.S_IFDIR
+	if dir && amode & (linux.R_OK | linux.X_OK) != 0 {
+		st = p9.client_open(c, fid, p9.OREAD)
+	} else if dir {
+		st = .Ok
+	}
 	_ = p9.client_clunk(c, fid)
-	return 0 // it exists; permissions are the server's to refuse when it is opened
+	if st != .Ok || !dir || amode & linux.W_OK == 0 {
+		return errno_of(st)
+	}
+	// The probe, as APE's: _AcChAcK and the pid, in the directory.
+	probe: [ns.MAX_PATH - 1]u8 // and its NUL, as upstream's
+	b := str.Buf {
+		buf = probe[:],
+	}
+	str.write_string(&b, p)
+	str.write_string(&b, "/_AcChAcK")
+	str.write_u64(&b, u64(posix_pid()))
+	if b.failed {
+		return fail(.ENAMETOOLONG)
+	}
+	f: ns.File
+	st = ns.create(namespace(), str.to_string(&b), 0o600, p9.OREAD, &f)
+	if st == .Ok {
+		_ = p9.client_remove(f.c, f.fid) // which clunks it
+	}
+	return errno_of(st)
 }
 
 fd_mkdirat :: proc "contextless" (dirfd: int, path: string, mode: u32) -> int {
@@ -78,7 +119,7 @@ fd_mkdirat :: proc "contextless" (dirfd: int, path: string, mode: u32) -> int {
 		return e
 	}
 	f: ns.File
-	st := ns.create(namespace(), p, p9.DMDIR | (mode & 0o755), p9.OREAD, &f)
+	st := ns.create(namespace(), p, p9.DMDIR | (mode & ~umask & 0o777), p9.OREAD, &f)
 	if st == .Ok {
 		ns.close(&f)
 	}

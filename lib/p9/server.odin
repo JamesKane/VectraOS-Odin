@@ -568,11 +568,10 @@ serve_lock :: proc "contextless" (s: ^Server, f: ^Fid_Entry, t: ^Msg, r: ^Msg) -
 		}
 		return .Ok
 	}
-	// A lock as the fid was opened for, as POSIX has it: reading for a read
-	// lock, writing for a write lock.
-	if (t.lock_type == .Read && f.mode.access == .Write) || (t.lock_type == .Write && !writes(f.mode)) {
-		return .Err_Access
-	}
+	// Any open fid may take either lock: fcntl's rule, a read lock on a file
+	// open for reading and a write lock on one open for writing, is the
+	// client's, as Linux's kernel keeps it; flock has none (upstream's M6 step
+	// 6d9a).
 	r.status = .Success
 	if t.lock_type != .Unlock {
 		for &l in sh.locks {

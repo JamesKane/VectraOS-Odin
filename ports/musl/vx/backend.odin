@@ -26,6 +26,7 @@ package backend
 import "base:intrinsics"
 import vx "abi:vx"
 import "linux"
+import "vx:ns"
 import "vx:rt"
 import "vx:str"
 
@@ -177,8 +178,13 @@ dispatch :: proc "contextless" (n, a1, a2, a3, a4, a5, a6: int) -> int {
 			return fail(.EBADF)
 		}
 		return a1 == a2 ? fail(.EINVAL) : fd_dup(int(i32(a1)), int(i32(a2)), oflags(a3))
-	case .faccessat:
-		return fd_faccessat(int(i32(a1)), cs(a2))
+	case .faccessat, .faccessat2: // faccessat2's flags: there are no effective ids
+		return fd_faccessat(int(i32(a1)), cs(a2), int(i32(a3)))
+	case .flock:
+		return fd_flock(int(i32(a1)), int(i32(a2)))
+	case .sync, .syncfs:
+		ns.sync(namespace())
+		return 0
 	case .mkdirat:
 		return fd_mkdirat(int(i32(a1)), cs(a2), u32(a3))
 	case .unlinkat:
@@ -214,7 +220,7 @@ dispatch :: proc "contextless" (n, a1, a2, a3, a4, a5, a6: int) -> int {
 	case .fsync, .fdatasync:
 		return fd_fsync(int(i32(a1)))
 	case .umask:
-		return 0o022
+		return fd_set_umask(u32(a1))
 
 	// Memory
 	case .mmap:
