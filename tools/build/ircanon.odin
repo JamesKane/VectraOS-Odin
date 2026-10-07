@@ -35,10 +35,13 @@ import "core:strings"
 // Odin has no -ffile-prefix-map either: its DWARF and its source-location
 // strings (bounds checks, #caller_location) name every file by its absolute
 // path. The repository root becomes /src in both, as -ffile-prefix-map does
-// for clang (file_prefix_map), with each string's length fixed where it is
-// used. A module that still names the root afterwards is an error.
+// for clang (file_prefix_map), and Odin's own root (base:, core:) becomes
+// /odin, so the output does not depend on where either lives; each string's
+// length is fixed where it is used. A module that still names either root
+// afterwards is an error.
 
 SRC_PREFIX :: "/src"
+ODIN_PREFIX :: "/odin"
 
 @(private = "file")
 Ir_Func :: struct {
@@ -69,14 +72,17 @@ ir_canonicalize :: proc(paths, texts: []string, root: string) -> (out: []string,
 	}
 	rename_proclits(mods) or_return
 	out = make([]string, len(mods), context.temp_allocator)
-	root_esc := ll_escape(root)
+	roots := [2][2]string{{ll_escape(root), SRC_PREFIX}, {ll_escape(ODIN_ROOT), ODIN_PREFIX}}
 	for &m, i in mods {
-		canon_module(&m, root_esc) or_return
+		canon_module(&m, roots[:]) or_return
 		out[i] = emit_module(&m) or_return
-		if root != SRC_PREFIX && strings.contains(out[i], root_esc) {
+		for r in roots {
+			if r[0] == r[1] || !strings.contains(out[i], r[0]) {
+				continue
+			}
 			for l in strings.split_lines(out[i], context.temp_allocator) {
-				if strings.contains(l, root_esc) {
-					fmt.eprintfln("build: %s still names %s after scrub_ir:\n  %.200s", m.path, root, l)
+				if strings.contains(l, r[0]) {
+					fmt.eprintfln("build: %s still names %s after scrub_ir:\n  %.200s", m.path, r[0], l)
 					break
 				}
 			}
@@ -290,7 +296,7 @@ rename_proclit_refs :: proc(s: string, renamed: map[int]int) -> (string, bool) {
 }
 
 @(private = "file")
-canon_module :: proc(m: ^Ir_Module, root_esc: string) -> bool {
+canon_module :: proc(m: ^Ir_Module, roots: [][2]string) -> bool {
 	provide_libcalls(m)
 	slice.sort_by(m.funcs[:], proc(a, b: Ir_Func) -> bool {
 		if a.decl != b.decl {
@@ -300,7 +306,9 @@ canon_module :: proc(m: ^Ir_Module, root_esc: string) -> bool {
 	})
 	slice.sort(m.types[:])
 	rename_numbered_globals(m) or_return
-	map_root_in_strings(m, root_esc) or_return
+	for r in roots {
+		map_root_in_strings(m, r[0], r[1]) or_return
+	}
 	fix_instance_lines(m) or_return
 	sort_unit_lists(m) or_return
 	return true
@@ -534,15 +542,15 @@ next_global :: proc(s: string, from: int) -> (name: string, start, end: int, ok:
 	return "", 0, 0, false
 }
 
-// The root in the IR's strings: in metadata (DIFile directories), and in the
+// A root, as prefix, in the IR's strings: in metadata (DIFile directories), and in the
 // string constants Odin's source-code locations point at, whose lengths are
 // fixed where they are used.
 @(private = "file")
-map_root_in_strings :: proc(m: ^Ir_Module, root_esc: string) -> bool {
-	if root_esc == SRC_PREFIX {
+map_root_in_strings :: proc(m: ^Ir_Module, root_esc, prefix: string) -> bool {
+	if root_esc == prefix {
 		return true
 	}
-	delta := ll_unescaped_len(root_esc) - len(SRC_PREFIX)
+	delta := ll_unescaped_len(root_esc) - len(prefix)
 	mapped := make(map[string]int, allocator = context.temp_allocator) // name -> old length, NUL excluded
 	needle := fmt.tprintf(`c"%s`, root_esc)
 	for &g in m.globals {
@@ -571,7 +579,7 @@ map_root_in_strings :: proc(m: ^Ir_Module, root_esc: string) -> bool {
 			return false
 		}
 		mapped[name] = n - 1
-		g = fmt.tprintf("%s[%d x i8] c\"%s%s", head[:open], n - delta, SRC_PREFIX, after)
+		g = fmt.tprintf("%s[%d x i8] c\"%s%s", head[:open], n - delta, prefix, after)
 	}
 	if len(mapped) > 0 {
 		for &f in m.funcs {
@@ -587,8 +595,8 @@ map_root_in_strings :: proc(m: ^Ir_Module, root_esc: string) -> bool {
 	whole := fmt.tprintf(`"%s"`, root_esc)
 	for &l in m.meta {
 		if strings.contains(l, root_esc) {
-			l, _ = strings.replace_all(l, slash, `"` + SRC_PREFIX + "/", context.temp_allocator)
-			l, _ = strings.replace_all(l, whole, `"` + SRC_PREFIX + `"`, context.temp_allocator)
+			l, _ = strings.replace_all(l, slash, fmt.tprintf(`"%s/`, prefix), context.temp_allocator)
+			l, _ = strings.replace_all(l, whole, fmt.tprintf(`"%s"`, prefix), context.temp_allocator)
 		}
 	}
 	return true
