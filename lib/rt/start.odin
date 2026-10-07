@@ -73,6 +73,7 @@ start :: proc "c" (bootstrap: vx.Handle, arg2: u64) -> ! {
 		thread_main_init() // its TLS, before anything may use a @(thread_local)
 	}
 	stdio_init()
+	fds_from_spawn() // 3 to 9 (ADR-0018)
 	context = runtime.default_context()
 	exit_status := vx_main()
 	if exit_status == 0 {

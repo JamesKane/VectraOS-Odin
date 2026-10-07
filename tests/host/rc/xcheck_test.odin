@@ -11,7 +11,7 @@
 // upstream's heap sizes from 4 MiB down to 64 KiB, where scripts run out of
 // memory as they compile or run.
 //
-// The digests are those of upstream's rc.c at 62b8d5a (its 6d7b1),
+// The digests are those of upstream's rc.c at e194269 (its 6d7b2),
 // unpatched: its ab83fe6 and f24356f fixed what this tree's findings said (a
 // here document's redirection closes nothing; a stage's paths and here
 // document are kept until it runs), so a stage's paths are logged and its
@@ -22,8 +22,9 @@
 // child (a command with child set) is rc_test.c's: a second interpreter on
 // the host, 1 MiB with upstream's interpreter inside, given the parent's
 // variables, functions and step budget; a command run with & leaves
-// $status as it was. Upstream's interpreter is 41696 bytes since 6d7b1
-// (rctest.C_RC_SIZE), so the heaps are smaller by that much.
+// $status as it was; <{...} and >{...} are rc_test.c's pipes too.
+// Upstream's interpreter is 41704 bytes since 6d7b2, 41712 aligned in its
+// heap (rctest.C_RC_SIZE), so the heaps are smaller by that much.
 package rc_test
 
 import "core:testing"
@@ -92,10 +93,10 @@ test_seeds :: proc(t: ^testing.T) {
 	defer rt.mutator_destroy(&m)
 	testing.expect_value(t, len(m.seeds), 209)
 	folds := []Fold {
-		{BIG_HEAP, false, 0xb7b0edc0c7545841},
-		{MID_HEAP, false, 0x4fbc7c1292c56465},
-		{SMALL_HEAP, false, 0x247d817ac3b555f7},
-		{SMALL_HEAP, true, 0xa561a0e89428bf5b},
+		{BIG_HEAP, false, 0x179cc66fa1b86365},
+		{MID_HEAP, false, 0x51d7f54ecaaf2fe9},
+		{SMALL_HEAP, false, 0x80e55c92ca13f29b},
+		{SMALL_HEAP, true, 0xcc9727abf20326f7},
 	}
 	for f in folds {
 		b := rt.bench_make(f.heap, f.minimal)
@@ -116,11 +117,11 @@ test_mutated :: proc(t: ^testing.T) {
 	m := mutator()
 	defer rt.mutator_destroy(&m)
 	folds := []Fold {
-		{BIG_HEAP, false, 0xa8402caf948a9ee2},
-		{MID_HEAP, false, 0x14a10f225227e3fe},
-		{SMALL_HEAP, false, 0xcdda011316481b04},
-		{FUZZ_HEAP, true, 0x755484b1607c1f44},
-		{SMALL_HEAP, true, 0xb4172849ead1186c},
+		{BIG_HEAP, false, 0xc2a750e82058c5f2},
+		{MID_HEAP, false, 0xb153b2f67cb7566c},
+		{SMALL_HEAP, false, 0x0dfb800a8a3f6240},
+		{FUZZ_HEAP, true, 0x2dda2e426c131011},
+		{SMALL_HEAP, true, 0xe83b61c25a75a07a},
 	}
 	text: [dynamic]u8
 	defer delete(text)

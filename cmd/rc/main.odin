@@ -19,8 +19,10 @@
 // message (name pid: exit string) joined as rc's concstatus (ADR-0010).
 // What 9front's rc runs in a forked child and is not a program (a stage that
 // is a function, builtin or block, &, @, `{...}) runs in a child rc: this
-// program, spawned with an rcchild= record (upstream's M6 step 6d7b1);
-// descriptors past 2 are not given to programs yet.
+// program, spawned with an rcchild= record (upstream's M6 step 6d7b1).
+// Descriptors 3 to 9 are given to programs as the musl back end's fd=
+// records, and <{...} and >{...} are 9front's, a pipe and /fd/N (upstream's
+// 6d7b2, ADR-0018).
 //
 // rc's Host callbacks are contextless, so everything they reach is too; only
 // vx_main has a context.
@@ -320,7 +322,17 @@ open_file :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, path: string, kind: rc.
 	return u32(h), true
 }
 
+// <{...} and >{...}'s pipe ends (upstream's 6d7b2), handles PIPE_BASE and on.
+PIPE_BASE :: u32(1) << 16
+MAX_PIPES :: 16
+pipe_ends: [MAX_PIPES]vx.Handle
+
 close_file :: proc "contextless" (ctx: rawptr, handle: u32) {
+	if handle >= PIPE_BASE && handle - PIPE_BASE < MAX_PIPES {
+		rt.close_all(pipe_ends[handle - PIPE_BASE])
+		pipe_ends[handle - PIPE_BASE] = vx.HANDLE_NONE
+		return
+	}
 	if handle >= MAX_FILES || !files[handle].used {
 		return
 	}
@@ -665,14 +677,64 @@ records: [vx.CHANNEL_MAX_BYTES - 4096]u8 // room left for spawn's own records
 // 6d7b1).
 RC_SELF :: "/boot/bin/rc"
 
+// A file the shell opened, a descriptor from 3: the musl back end's fd=N
+// file=PATH flags=F offset=O token=T (ADR-0018), the open file itself, which
+// the program joins, so it takes nothing from it until it reads: a relay
+// would read it for the program whether or not it does.
+O_WRONLY :: 1 // musl's, Linux's values
+O_RDWR :: 2
+O_APPEND :: 0o2000
+
+passed_file :: proc "contextless" (fd: rc.Fd) -> bool {
+	_, is := fd.(rc.Fd_File)
+	return is
+}
+
+file_record :: proc "contextless" (rec: ^ndb.Writer, n: int, file: rc.Fd_File) {
+	if file.handle >= MAX_FILES || !files[file.handle].used {
+		return
+	}
+	f := &files[file.handle].f
+	flags: u64
+	switch file.kind {
+	case .Read:
+	case .Rdwr:
+		flags = O_RDWR
+	case .Write:
+		flags = O_WRONLY
+	case .Append:
+		flags = O_WRONLY | O_APPEND
+	}
+	ndb.put_u64(rec, "fd", u64(n))
+	ndb.put(rec, "file", file.path)
+	ndb.put_u64(rec, "flags", flags)
+	ndb.put_u64(rec, "offset", f.offset)
+	if f.c != nil {
+		if token, st := p9.client_share(f.c, f.fid, 1); st == .Ok {
+			ndb.put(rec, "token", string(token[:]))
+		}
+	}
+	_ = ndb.end(rec)
+}
+
+// One of the shell's own descriptors that is an open file it was given:
+// passed on as it was given, but for its token, which was good once.
+own_file_record :: proc "contextless" (rec: ^ndb.Writer, n: int, e: ^rt.Fd_Entry) {
+	ndb.put_u64(rec, "fd", u64(n))
+	ndb.put(rec, "file", string(e.path[:]))
+	ndb.put_u64(rec, "flags", u64(e.flags))
+	ndb.put_u64(rec, "offset", e.offset)
+	_ = ndb.end(rec)
+}
+
 // Spawns one program with its standard input, output and error (channel
 // ends, or HANDLE_NONE for the console), which are given away. child: argv
 // is rc code and its $*, which a child rc runs (an rcchild= record,
 // run_child), given the shell's flags, variables, functions, namespace and
 // directory, as rc's fork gives them. With exec, the program takes this
 // task's place (task_exec, ADR-0012): it returns only if it failed.
-spawn :: proc "contextless" (argv: ^rc.Word, child: bool, io: [3]vx.Handle, exec := false) -> (task: vx.Handle, st: vx.Status) {
-	IO := [3]string{"stdin", "stdout", "stderr"}
+spawn :: proc "contextless" (argv: ^rc.Word, child: bool, io: [rc.FDS]vx.Handle, reads: [rc.FDS]bool, fds: [rc.FDS]rc.Fd, exec := false) -> (task: vx.Handle, st: vx.Status) {
+	IO := [rc.FDS]string{"stdin", "stdout", "stderr", "fd3", "fd4", "fd5", "fd6", "fd7", "fd8", "fd9"}
 	io := io
 	handles: [vx.CHANNEL_MAX_HANDLES - 1]vx.Handle
 	names: [vx.CHANNEL_MAX_HANDLES - 1]string
@@ -706,6 +768,24 @@ spawn :: proc "contextless" (argv: ^rc.Word, child: bool, io: [3]vx.Handle, exec
 		_ = ndb.end(&rec)
 		args += 1
 	}
+	for i in 3 ..< rc.FDS { // 3 to 9 as the musl back end's records have them (ADR-0018)
+		if file, is := fds[i].(rc.Fd_File); is {
+			file_record(&rec, i, file)
+		}
+		if own, is := fds[i].(rc.Fd_Inherit); is {
+			if e := rt.fd_file(int(own.which)); e != nil {
+				own_file_record(&rec, i, e)
+			}
+		}
+		if io[i] == vx.HANDLE_NONE {
+			continue
+		}
+		digit := [1]u8{'0' + u8(i)}
+		ndb.put(&rec, "fd", string(digit[:]))
+		ndb.put(&rec, "pipe", reads[i] ? "read" : "write")
+		ndb.put(&rec, "end", IO[i])
+		_ = ndb.end(&rec)
+	}
 	it := rc.vars(&sh)
 	for name, val in rc.next_var(&it) {
 		if export_var(&rec, name, val) {
@@ -722,7 +802,7 @@ spawn :: proc "contextless" (argv: ^rc.Word, child: bool, io: [3]vx.Handle, exec
 	if rec.failed || args > CHILD_MAX_ARGS || exported > CHILD_MAX_ARGS {
 		return vx.HANDLE_NONE, .Err_Range
 	}
-	count = procns.spawn_records(&space, &rec, handles[:vx.CHANNEL_MAX_HANDLES - 5], names[:], 0) or_return
+	count = procns.spawn_records(&space, &rec, handles[:vx.CHANNEL_MAX_HANDLES - 1 - 1 - rc.FDS], names[:], 0) or_return
 	if con := rt.console_connector(); con != vx.HANDLE_NONE {
 		if h, dst := rt.handle_dup(con, vx.RIGHTS_SAME); dst == .Ok {
 			handles[count], names[count] = h, "console"
@@ -824,7 +904,7 @@ relay_run :: proc "contextless" (rl: ^Relay, broken: ^bool) -> bool {
 			rc.capture_write(&sh, rl.to, s)
 		case rc.Fd_File:
 			write_file(v.handle, s, broken)
-		case rc.Fd_Inherit, rc.Fd_Dup, rc.Fd_Closed, rc.Fd_Pipe_Out, rc.Fd_Pipe_In, rc.Fd_Here: // never relayed out
+		case rc.Fd_Inherit, rc.Fd_Dup, rc.Fd_Closed, rc.Fd_Pipe_Out, rc.Fd_Pipe_In, rc.Fd_Here, rc.Fd_Pipefd: // never relayed out
 		}
 	}
 }
@@ -844,18 +924,47 @@ reap :: proc "contextless" () {
 	}
 }
 
-// One of the shell's own standard descriptors, to lend a command.
-own_fd :: proc "contextless" (which: u8) -> vx.Handle {
-	input, output, errors := rt.stdio_handles()
-	switch which {
-	case 0:
-		return input
-	case 1:
-		return output
-	case 2:
-		return errors
+// One of the shell's own descriptors, 0 to 9 (vx:rt's; ADR-0018), and
+// whether it reads.
+own_fd :: proc "contextless" (which: u8) -> (end: vx.Handle, reads: bool) {
+	return rt.fd_pipe(int(which))
+}
+
+// Whether two descriptors go to the one relayed thing: the same file the
+// shell opened, here document or capture.
+same_relay :: proc "contextless" (a, b: rc.Fd) -> bool {
+	#partial switch x in a {
+	case rc.Fd_File:
+		y, is := b.(rc.Fd_File)
+		return is && x.kind == y.kind && x.handle == y.handle && raw_data(x.path) == raw_data(y.path)
+	case rc.Fd_Capture:
+		y, is := b.(rc.Fd_Capture)
+		return is && x.index == y.index
+	case rc.Fd_Here:
+		y, is := b.(rc.Fd_Here)
+		return is && raw_data(x.text) == raw_data(y.text)
 	}
-	return vx.HANDLE_NONE
+	return false
+}
+
+// Whether the program reads descriptor i, given where it goes: 0 always; 3
+// to 9 as their redirection or the shell's own descriptor has it.
+stage_reads :: proc "contextless" (fd: rc.Fd, i: int) -> bool {
+	if i < 3 {
+		return i == 0
+	}
+	#partial switch v in fd {
+	case rc.Fd_Inherit:
+		_, reads := own_fd(v.which)
+		return reads
+	case rc.Fd_Pipefd:
+		return v.reads // the command's end, which it reads or writes
+	case rc.Fd_File:
+		return v.kind == .Read
+	case rc.Fd_Here, rc.Fd_Pipe_In:
+		return true
+	}
+	return false
 }
 
 // A channel no one is at the other end of: reads end, writes fail.
@@ -865,13 +974,17 @@ unheard :: proc "contextless" () -> (io: vx.Handle, st: vx.Status) {
 	return a, .Ok
 }
 
-// A stage's standard descriptor i: the program's channel end (or none, for
-// the console), making relays and joining pipes as need be.
-stage_io :: proc "contextless" (fd: rc.Fd, i: int, pipe_in, pipe_out: vx.Handle) -> (io: vx.Handle, st: vx.Status) {
+// A stage's descriptor: the program's channel end (or none, for the
+// console), making relays and joining pipes as need be.
+stage_io :: proc "contextless" (fd: rc.Fd, reads: bool, pipe_in, pipe_out: vx.Handle) -> (io: vx.Handle, st: vx.Status) {
 	share: vx.Handle
 	switch v in fd {
 	case rc.Fd_Inherit:
-		share = own_fd(v.which)
+		share, _ = own_fd(v.which)
+	case rc.Fd_Pipefd:
+		if v.handle - PIPE_BASE < MAX_PIPES {
+			share = pipe_ends[v.handle - PIPE_BASE]
+		}
 	case rc.Fd_Pipe_In:
 		share = pipe_in
 	case rc.Fd_Pipe_Out:
@@ -879,37 +992,17 @@ stage_io :: proc "contextless" (fd: rc.Fd, i: int, pipe_in, pipe_out: vx.Handle)
 	case rc.Fd_Closed, rc.Fd_Dup: // a copy left is of no descriptor
 		return unheard()
 	case rc.Fd_Here: // read; on an output it is no file, as 9front's read-only one takes no writes (upstream f24356f)
-		if i != 0 {
+		if !reads {
 			return unheard()
 		}
 		return relay_for(fd, true)
 	case rc.Fd_File, rc.Fd_Capture:
-		return relay_for(fd, i == 0)
+		return relay_for(fd, reads)
 	}
 	if share == vx.HANDLE_NONE {
 		return vx.HANDLE_NONE, .Ok
 	}
 	return rt.handle_dup(share, vx.RIGHTS_SAME)
-}
-
-// Whether a stage's descriptor 2 goes where its 1 does (>[2=1] into a file,
-// a capture or a pipe), so it shares 1's channel.
-same_as_1 :: proc "contextless" (fd2, fd1: rc.Fd) -> bool {
-	#partial switch a in fd2 {
-	case rc.Fd_File:
-		b, is := fd1.(rc.Fd_File)
-		return is && a.kind != .Read && a.kind == b.kind && a.handle == b.handle
-	case rc.Fd_Capture:
-		b, is := fd1.(rc.Fd_Capture)
-		return is && a.index == b.index
-	case rc.Fd_Pipe_Out:
-		_, is := fd1.(rc.Fd_Pipe_Out)
-		return is
-	case rc.Fd_Pipe_In:
-		_, is := fd1.(rc.Fd_Pipe_In)
-		return is
-	}
-	return false
 }
 
 ends: [MAX_STAGES][dynamic; vx.ERRMAX]u8 // each command's exit string, for $status
@@ -933,7 +1026,9 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 	clear(&relays)
 	for &c, s in stages {
 		clear(&ends[s])
-		pipe, io: [3]vx.Handle // pipe: [this stage's output, the next one's input]
+		pipe: [2]vx.Handle // this stage's output, the next one's input
+		io: [rc.FDS]vx.Handle
+		reads: [rc.FDS]bool
 		st := vx.Status.Ok
 		if s + 1 < n {
 			pipe[0], pipe[1], st = rt.channel_create()
@@ -942,20 +1037,35 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 		if own, is := fds[0].(rc.Fd_Inherit); async && is && own.which == 0 {
 			fds[0] = rc.Fd_Closed{} // & reads nothing, as rc's /dev/null
 		}
-		for i in 0 ..< 3 {
+		for i in 0 ..< rc.FDS { // 3 to 9 too (ADR-0018)
 			if st != .Ok {
 				break
 			}
-			if i == 2 && io[1] != vx.HANDLE_NONE && same_as_1(fds[2], fds[1]) {
-				io[2], st = rt.handle_dup(io[1], vx.RIGHTS_SAME)
+			reads[i] = stage_reads(fds[i], i)
+			if i >= 3 && passed_file(fds[i]) {
+				continue // the open file itself (spawn's file_record)
+			}
+			// A descriptor on the same file, here document or capture as one
+			// before it (>[2=1], <[0=3]): that one's channel, as a dup shares
+			// an open file; two relays would each take part of it.
+			same := i
+			for j in 0 ..< i {
+				if io[j] != vx.HANDLE_NONE && same_relay(fds[i], fds[j]) {
+					same = j
+					break
+				}
+			}
+			if same < i {
+				reads[i] = reads[same]
+				io[i], st = rt.handle_dup(io[same], vx.RIGHTS_SAME)
 			} else {
-				io[i], st = stage_io(fds[i], i, pipe_in, pipe[0])
+				io[i], st = stage_io(fds[i], reads[i], pipe_in, pipe[0])
 			}
 		}
 		rt.close_all(pipe_in, pipe[0])
 		pipe_in = pipe[1]
 		if st == .Ok {
-			tasks[s], st = spawn(c.argv, c.child, io)
+			tasks[s], st = spawn(c.argv, c.child, io, reads, fds)
 		} else {
 			rt.close_all(..io[:])
 		}
@@ -1115,25 +1225,33 @@ wait_message :: proc "contextless" (m: ^[dynamic; $N]u8, info: ^vx.Task_Summary)
 // shell relays files, here documents and captures, so a command with one of
 // those redirected is refused until the program can be given the file itself.
 exec_builtin :: proc "contextless" (argv: ^rc.Word, fds: ^[rc.FDS]rc.Fd) -> bool {
-	io: [3]vx.Handle
+	io: [rc.FDS]vx.Handle
+	reads: [rc.FDS]bool
 	st := vx.Status.Ok
-	for i in 0 ..< 3 {
-		#partial switch _ in fds[i] {
+	for i in 0 ..< rc.FDS {
+		fd := fds[i]
+		passed := i >= 3 && passed_file(fd)
+		#partial switch _ in fd {
 		case rc.Fd_Inherit, rc.Fd_Closed:
 		case:
-			say("rc: exec with a file, here document or capture redirected needs the shell to stay (for now)", "", "\n")
-			set_status("exec redirection")
-			rt.close_all(..io[:])
-			return true
+			if !passed {
+				say("rc: exec with a file, here document or capture redirected needs the shell to stay (for now)", "", "\n")
+				set_status("exec redirection")
+				rt.close_all(..io[:])
+				return true
+			}
 		}
-		io[i], st = stage_io(fds[i], i, vx.HANDLE_NONE, vx.HANDLE_NONE)
+		reads[i] = stage_reads(fd, i)
+		if !passed {
+			io[i], st = stage_io(fd, reads[i], vx.HANDLE_NONE, vx.HANDLE_NONE)
+		}
 		if st != .Ok {
 			rt.close_all(..io[:])
 			break
 		}
 	}
 	if st == .Ok {
-		_, st = spawn(argv.next, false, io, exec = true) // returns only if it failed
+		_, st = spawn(argv.next, false, io, reads, fds^, exec = true) // returns only if it failed
 	}
 	why := p9.error_text(st)
 	say("", rc.text(argv.next), ": ")
@@ -1141,6 +1259,39 @@ exec_builtin :: proc "contextless" (argv: ^rc.Word, fds: ^[rc.FDS]rc.Fd) -> bool
 	set_status(why)
 	sh.exiting = true // as rc's: it exits all the same
 	return true
+}
+
+// Host.pipefd (upstream's 6d7b2): a pipe, child started with & on its far
+// end as its standard output (or input, when the command writes), as 9front's
+// Xpipefd forks it; the near end the command's, PIPE_BASE + its slot.
+pipe_fd :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, child: ^rc.Command, command_reads: bool) -> (handle: u32, ok: bool) {
+	near := u32(0)
+	for near < MAX_PIPES && pipe_ends[near] != vx.HANDLE_NONE {
+		near += 1
+	}
+	far := near + 1
+	for far < MAX_PIPES && pipe_ends[far] != vx.HANDLE_NONE {
+		far += 1
+	}
+	if far >= MAX_PIPES {
+		set_status("can't make pipe")
+		return 0, false
+	}
+	a, b, st := rt.channel_create()
+	if st != .Ok {
+		set_status("can't make pipe")
+		return 0, false
+	}
+	pipe_ends[near], pipe_ends[far] = a, b
+	c := child^
+	c.fds[command_reads ? 1 : 0] = rc.Fd_Pipefd{handle = PIPE_BASE + far, reads = !command_reads}
+	_, ran := run(ctx, r, ([^]rc.Command)(&c)[:1], true)
+	close_file(ctx, PIPE_BASE + far) // the child has its own
+	if !ran {
+		close_file(ctx, PIPE_BASE + near)
+		return 0, false
+	}
+	return PIPE_BASE + near, true
 }
 
 // wait [pid]: for a command run with &, or for all of them; $status its wait
@@ -1329,6 +1480,7 @@ shell :: proc() -> string {
 		exists    = exists,
 		read_line = read_line,
 		builtin_names = HOST_BUILTINS[:],
+		pipefd    = pipe_fd,
 	}
 	if !rc.init(&sh, heap[:], host) {
 		return "no memory"

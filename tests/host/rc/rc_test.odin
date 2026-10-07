@@ -457,6 +457,28 @@ test_9front_children :: proc(t: ^testing.T) {
 	})
 }
 
+// <{...} and >{...} (upstream's M6 step 6d7b2), as 9front's Xpipefd: a pipe
+// and /fd/N, the lowest descriptor from 3 free; the child sees the shell's
+// state.
+@(test)
+test_9front_pipefd :: proc(t: ^testing.T) {
+	b := shell(t)
+	defer rt.bench_destroy(b)
+	expect_cases(t, b, {
+		{"echo <{echo a} <{echo b}", "/fd/3 /fd/4\n"}, // the words
+		{"cat <{echo hi}", "hi\n"}, // read
+		{"cat <{echo a} <{echo b}", "a\nb\n"}, // two
+		{"x=v; cat <{echo $x; echo $1} w", "v\n\n"}, // the child's state: the shell's
+		{"fn f { echo F }; cat <{f}", "F\n"}, // a function in it
+		{"cat <{echo a b} | wc", "2\n"}, // a stage's
+		{"wr >{cat} hello there", "hello there\n"}, // written, then read by the child
+		{"echo <{echo a} >[3] f; cat < f", "/fd/4\n"}, // past a redirected 3
+		{"x=`{echo <{echo a}}; if(~ $x /fd/3*) echo yes", "yes\n"}, // in `{...}
+	})
+	testing.expect(t, !b.host.pipes_fd[0].used) // each let go once its command ran
+	testing.expect(t, !b.host.pipes_fd[1].used)
+}
+
 // The third part (upstream's M6 step 6a6c): the builtins as rc(1) has them,
 // functions for export, sigexit, and notes as functions.
 @(test)

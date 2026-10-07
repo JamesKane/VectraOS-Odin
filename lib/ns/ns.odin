@@ -111,6 +111,10 @@ Namespace :: struct {
 	// vx:rt's getwd), which a relative name is resolved against: copied into
 	// buf, a slice of it, or "". Nil: a relative name is refused (host tests).
 	getwd:    proc "contextless" (buf: []u8) -> string,
+	// A name the process serves itself, not a 9P server: /fd/N (ADR-0018,
+	// upstream's ADR-0040; vx:procns's). Err_Not_Found for any other, which
+	// resolves as usual. Nil: none (host tests).
+	open_dev: proc "contextless" (ns: ^Namespace, path: string, mode: p9.Open_Mode, f: ^File) -> vx.Status,
 }
 
 @(private="file")
@@ -941,14 +945,23 @@ is_empty :: proc "contextless" (ns: ^Namespace) -> bool {
 
 // --- Files ---
 
+// What a file the process serves itself does for reads, writes and its close.
+Dev :: struct {
+	read:  proc "contextless" (f: ^File, buf: []u8) -> (n: int, e: vx.Status),
+	write: proc "contextless" (f: ^File, data: []u8) -> (n: int, e: vx.Status),
+	close: proc "contextless" (f: ^File),
+}
+
 // All zeroes is a file that is not open.
 File :: struct {
-	ns:     ^Namespace,
-	c:      ^p9.Client,
-	fid:    p9.Fid,
-	offset: u64,
-	u:      ^Entry, // a union directory being read member by member, or nil
-	member: int,
+	ns:      ^Namespace,
+	c:       ^p9.Client,
+	fid:     p9.Fid,
+	offset:  u64,
+	u:       ^Entry, // a union directory being read member by member, or nil
+	member:  int,
+	dev:     ^Dev, // a file the process serves (open_dev's), not a 9P one; dev_ctx its state
+	dev_ctx: rawptr,
 }
 
 // Opens a path. A directory that is a union reads as each member in turn.
@@ -962,6 +975,11 @@ open :: proc "contextless" (ns: ^Namespace, path: string, mode: p9.Open_Mode, f:
 	cleaned := clean_name(ns, path, buf[:])
 	if len(cleaned) == 0 {
 		return .Err_Invalid
+	}
+	if ns.open_dev != nil {
+		if st := ns.open_dev(ns, cleaned, mode, f); st != .Err_Not_Found {
+			return st
+		}
 	}
 	at := resolve(ns, cleaned) or_return
 	f.c = ns.conns[at.conn].client
@@ -1029,6 +1047,9 @@ create :: proc "contextless" (ns: ^Namespace, path: string, perm: u32, mode: p9.
 // end, or an error.
 @(require_results)
 read :: proc "contextless" (f: ^File, buf: []u8) -> (n: int, e: vx.Status) {
+	if f.dev != nil {
+		return f.dev.read(f, buf)
+	}
 	if f.c == nil {
 		return 0, .Err_Bad_Handle // not open
 	}
@@ -1075,6 +1096,9 @@ read_all :: proc "contextless" (f: ^File, buf: []u8) -> (n: int, e: vx.Status) {
 
 @(require_results)
 write :: proc "contextless" (f: ^File, data: []u8) -> (n: int, e: vx.Status) {
+	if f.dev != nil {
+		return f.dev.write(f, data)
+	}
 	if f.c == nil {
 		return 0, .Err_Bad_Handle
 	}
@@ -1086,6 +1110,9 @@ write :: proc "contextless" (f: ^File, data: []u8) -> (n: int, e: vx.Status) {
 }
 
 close :: proc "contextless" (f: ^File) {
+	if f.dev != nil {
+		f.dev.close(f)
+	}
 	if f.c != nil {
 		_ = p9.client_clunk(f.c, f.fid)
 	}

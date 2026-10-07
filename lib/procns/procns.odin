@@ -471,6 +471,141 @@ group_make :: proc "contextless" (space: ^ns.Namespace) -> vx.Status {
 	return .Ok
 }
 
+// --- /fd (ADR-0018, upstream's ADR-0040): the process's own descriptors, as 9front's devdup ---
+//
+// /fd/N opened is a copy of descriptor N (rt.fd_pipe): a pipe end, read or
+// written with the pipe protocol; or an open file it was given (rt.fd_file),
+// joined by its token once, else opened again by its name at its offset. Not
+// listed, and not in the namespace.
+
+@(private="file")
+Fd_Opened :: struct { // an open /fd/N's state
+	used:  bool,
+	input: rt.Pipe_In, // a reading end's
+	out:   vx.Handle, // a writing end
+}
+
+@(private="file")
+fd_opens: [8]Fd_Opened
+@(private="file")
+fd_opens_lock: rt.Mutex
+
+@(private="file")
+fd_read :: proc "contextless" (f: ^ns.File, buf: []u8) -> (n: int, e: vx.Status) {
+	x := (^Fd_Opened)(f.dev_ctx)
+	if x.input.end == vx.HANDLE_NONE {
+		return 0, .Err_Access
+	}
+	return rt.pipe_read(&x.input, buf)
+}
+
+@(private="file")
+fd_write :: proc "contextless" (f: ^ns.File, data: []u8) -> (n: int, e: vx.Status) {
+	x := (^Fd_Opened)(f.dev_ctx)
+	if x.out == vx.HANDLE_NONE {
+		return 0, .Err_Access
+	}
+	rt.pipe_send(x.out, data)
+	return len(data), .Ok
+}
+
+@(private="file")
+fd_close :: proc "contextless" (f: ^ns.File) {
+	x := (^Fd_Opened)(f.dev_ctx)
+	rt.close_all(x.input.end, x.input.port, x.out)
+	rt.mutex_lock(&fd_opens_lock)
+	x^ = {}
+	rt.mutex_unlock(&fd_opens_lock)
+	f.dev = nil
+}
+
+@(private="file")
+fd_dev := ns.Dev {
+	read  = fd_read,
+	write = fd_write,
+	close = fd_close,
+}
+
+// An open file given as a descriptor: joined by its token, the first time,
+// as the open file the parent had; else opened again by its name, at the
+// offset it was at.
+@(private="file", require_results)
+fd_open_file :: proc "contextless" (space: ^ns.Namespace, e: ^rt.Fd_Entry, mode: p9.Open_Mode, f: ^ns.File) -> vx.Status {
+	path := string(e.path[:])
+	if e.has_token {
+		e.has_token = false
+		dir := len(path) // the file's connection, or its directory's if it has gone since
+		for dir > 1 && path[dir - 1] != '/' {
+			dir -= 1
+		}
+		c, fid, st := ns.walk(space, path)
+		if st != .Ok {
+			c, fid, st = ns.walk(space, path[:dir])
+		}
+		if st == .Ok {
+			_ = p9.client_clunk(c, fid)
+			if joined, jst := p9.client_join(c, e.token); jst == .Ok {
+				f^ = {
+					ns     = space,
+					c      = c,
+					fid    = joined,
+					offset = e.offset,
+				}
+				return .Ok
+			}
+		}
+	}
+	st := ns.open(space, path, mode, f)
+	if st == .Ok {
+		f.offset = e.offset
+	}
+	return st
+}
+
+// ns.Namespace's open_dev: /fd/N, for a descriptor this process has, opened
+// the way it goes (Err_Access otherwise); Err_Not_Found for any other name.
+@(private="file")
+fd_open :: proc "contextless" (space: ^ns.Namespace, path: string, mode: p9.Open_Mode, f: ^ns.File) -> vx.Status {
+	if len(path) != 5 || path[:4] != "/fd/" || path[4] < '0' || path[4] > '9' {
+		return .Err_Not_Found
+	}
+	n := int(path[4] - '0')
+	if file := rt.fd_file(n); file != nil {
+		return fd_open_file(space, file, mode, f)
+	}
+	h, reader := rt.fd_pipe(n)
+	if h == vx.HANDLE_NONE {
+		return .Err_Not_Found
+	}
+	if mode.access != (reader ? p9.Access.Read : p9.Access.Write) {
+		return .Err_Access
+	}
+	dup := rt.handle_dup(h, vx.RIGHTS_SAME) or_return
+	rt.mutex_lock(&fd_opens_lock)
+	x: ^Fd_Opened
+	for &o in fd_opens {
+		if !o.used {
+			x = &o
+			break
+		}
+	}
+	if x != nil {
+		x^ = {used = true}
+		if reader {
+			x.input.end = dup
+		} else {
+			x.out = dup
+		}
+	}
+	rt.mutex_unlock(&fd_opens_lock)
+	if x == nil {
+		rt.close_all(dup)
+		return .Err_No_Memory
+	}
+	f.dev, f.dev_ctx = &fd_dev, x
+	return .Ok
+}
+
 // Builds the process's namespace from its spawn message: the group nsgroup
 // names, or the mount= and bind= records.
 @(require_results)
@@ -478,6 +613,7 @@ from_spawn :: proc "contextless" (space: ^ns.Namespace) -> vx.Status {
 	p9.client_user = rt.spawn.user // its attaches name its user (upstream docs/11 §9)
 	ns.dial_lock = dial_lock // a TCP connection's threads take turns
 	space.getwd = rt.getwd // relative names from the current directory (ADR-0017)
+	space.open_dev = fd_open // and /fd/N, its descriptors (ADR-0018)
 	group.srv = rt.spawn_take("srv:nsd")
 	if chan := rt.spawn_take("nsgroup"); chan != vx.HANDLE_NONE {
 		return group_join(space, chan)
@@ -632,9 +768,9 @@ drop_conns :: proc "contextless" (space: ^ns.Namespace) {
 		clear(&conn_names[i])
 		rt.close_all(space.conns[i].connector)
 	}
-	getwd := space.getwd
+	getwd, open_dev := space.getwd, space.open_dev
 	intrinsics.mem_zero(space, size_of(ns.Namespace)) // in place: too big to build on the stack first
-	space.getwd = getwd // the process's, not the table's
+	space.getwd, space.open_dev = getwd, open_dev // the process's, not the table's
 }
 
 @(private="file")

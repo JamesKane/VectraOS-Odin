@@ -47,6 +47,7 @@ Op :: enum u8 {
 	Popredir, // a: how many
 	Rdcmds, // the frame's reader: the next command read, compiled and run, then this again (rc's Xrdcmds)
 	Eflag, // -e: exit unless $status is true
+	Pipefd, // f0: Read or Write; the top list a child's code and $*: /fd/N onto the list below (upstream's 6d7b2)
 }
 
 @(private)
@@ -265,6 +266,14 @@ emit_code :: proc "contextless" (c: ^Compiler, n: i32) -> bool {
 	return true
 }
 
+// <{body} or >{body}: the body a child's, Pipefd its word.
+@(private = "file")
+emit_pipefd :: proc "contextless" (c: ^Compiler, t: ^Node) {
+	if emit_code(c, t.a) {
+		emit(c, .Pipefd, u8(t.rkind))
+	}
+}
+
 // A command a child rc runs, its text and $* the command's words: a stage,
 // or a command run now or with &. What it sets is the child's, never the
 // shell's.
@@ -411,6 +420,8 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 		switch t.kind {
 		case .Word:
 			emit_word(c, t.s)
+		case .Pipefd:
+			emit_pipefd(c, t)
 		case .Dol, .Count, .Join:
 			if it.phase == 0 {
 				emit(c, .Mark)

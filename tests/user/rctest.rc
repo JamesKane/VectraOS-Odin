@@ -151,6 +151,26 @@ check fn-async 'fn z' `{cat $dir/bgfn}
 check child-status ok `{{exit 7} | true; if(~ $status 'rc '*': 7|') echo ok; if not echo $status}
 check child-local 'L q' `{fn inner { {echo $1 $x} | cat }; x=q inner L}
 
+# Descriptors past 2 and /fd (6d7b2, ADR-0040); <{...} and >{...} on them,
+# as 9front's rc has them.
+check fd3-sbase 'first second' `{cat /fd/3 <[3] $dir/f}
+check fd3-native 'first second' `{/boot/bin/cat /fd/3 <[3] $dir/f}
+check fd0-native 'first second' `{/boot/bin/cat /fd/0 < $dir/f}
+{true; /boot/bin/true; cat <[0=3] > $dir/f3} <[3] $dir/f
+check fd3-untouched 'first second' `{cat $dir/f3} # programs that never read 3 take nothing from it
+echo three | tee /fd/3 >[3] $dir/three > /dev/null
+check fd3-write three `{cat $dir/three}
+check pipefd-words '/fd/3 /fd/4' `{echo <{true} <{true}}
+check pipefd-sbase hi `{cat <{echo hi}}
+check pipefd-native hi `{/boot/bin/cat <{echo hi}}
+check pipefd-two 'a b' `{paste <{echo a} <{echo b}}
+check pipefd-cmp same `{cmp <{echo x} <{echo x} && echo same}
+check pipefd-differ differ `{cmp -s <{echo x} <{echo y} || echo differ}
+check pipefd-state 'outer z' `{fn st { cat <{echo $x $1} }; st z}
+echo written | tee >{cat > $dir/teed} > /dev/null
+wait
+check pipefd-write written `{cat $dir/teed}
+
 rm -r $dir
 check cleaned no `{if(test -d $dir) echo yes; if not echo no}
 

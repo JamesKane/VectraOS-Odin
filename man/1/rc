@@ -120,7 +120,10 @@ Each of these is an argument:
   Lists of one length are joined pairwise; otherwise one must have one element, which is joined to each of the other's.
   Two empty lists give an empty list; one empty and one not is an error, `null list in concatenation`.
 
-`rc` has no `<{...}` or `>{...}`.
+: `<{`<command>`}`
+: `>{`<command>`}`
+  A pipe: `rc` starts <command> in a child with the pipe as its standard output (or, with `>`, its standard input), and does not wait for it; the argument is `/fd/`<n>, the other end, as the command's descriptor <n>, the lowest from 3 its redirections leave free, until it has run.
+  `cmp <{sort a} <{sort b}` compares two outputs; `tee >{wc} <f` counts what passes through.
 
 Variable names are any characters but blanks, control characters and
 
@@ -158,7 +161,7 @@ A redirection's file is opened once, where the redirection is, and one on a bloc
 
 A file that cannot be opened is an error, `< can't open:` and the name, and its why is `$status`.
 
-Descriptors 3 to 9 can be redirected, but a program is given only 0, 1 and 2.
+Descriptors 3 to 9 can be redirected, and a program is given them (ADR-0040): it opens descriptor <n> as `/fd/`<n>, which is a copy of it, natively and in the POSIX personality.
 
 @node=compound title="Compound commands"
 
@@ -485,13 +488,14 @@ Input that ends inside a construct says `unexpected end of file`.
 # BUGS
 
 There is no `fork`: a child `rc` is given the shell's state by its spawn message, so a variable whose name a POSIX program could not read (not letters, digits and `_`), or one or a function past 32 KiB, does not reach it; and its code is the command's text, so a here document whose lines come after the line that text ends on is not in it: `{cat <<EOF} | wc` fails, `here document never ended`, where a block closed after the document's lines works.
-There is no `<{...}`, `>{...}` or `rfork` (M6 steps 6d7b2 and 6d7b3).
+There is no `rfork` (M6 step 6d7b3).
 
 A command run with `&` is given no file, here document or capture as a redirection, since `rc` does not serve them while it goes on; its standard input, unless redirected, reads nothing.
 
 A command run with `&` that has ended is let go when `rc` next starts a program, after which `wait` does not find it and leaves `$status` empty.
 
-Descriptors past 2 are not given to programs.
+A file given to a child `rc`'s programs as a descriptor past 2 that the child was itself given is opened again by its name, at the offset it was at, not shared with the child's (ADR-0040).
+`/fd` is not a directory: `ls /fd` finds nothing, and only `/fd/0` to `/fd/9` open.
 
 `exec` with a file, here document or capture redirected is refused.
 

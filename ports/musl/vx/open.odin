@@ -77,6 +77,10 @@ fd_openat :: proc "contextless" (dirfd: int, path: string, flags: linux.Open_Fla
 	if e < 0 {
 		return e
 	}
+	if len(p) == 5 && p[:4] == "/fd/" && p[4] >= '0' && p[4] <= '9' { // a copy of that descriptor (ADR-0018)
+		n := int(p[4] - '0')
+		return fd_get(n) != nil ? fd_dup(n, -1, flags & {.Cloexec}) : fail(.ENOENT)
+	}
 	if .Nofollow in flags {
 		target: Path_Buf
 		if r, _ := link_at(p, &target); r == 1 {

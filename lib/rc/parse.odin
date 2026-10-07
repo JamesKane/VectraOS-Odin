@@ -40,6 +40,7 @@ Node_Kind :: enum u8 {
 	Assign,
 	Redir,
 	Dup,
+	Pipefd, // <{...} or >{...}: a: the body; rkind: Read (the command reads) or Write (upstream's 6d7b2)
 }
 
 @(private)
@@ -94,6 +95,7 @@ Frame_Kind :: enum u8 {
 	Fn_Body, // a: the names; c: where its { is in the text
 	Backq_Body, // `{ ... }; b: the ifs words, or none
 	Backq_Wait, // `word: its { next; a: the word
+	Pipefd_Body, // <{ ... } or >{ ... }; rkind: which
 	Prefix, // op, prec; a, b, fd0, fd1, rkind: what it holds
 	Bin, // op, prec, fd0, fd1
 	Simple, // a: its words' head, b: its redirections' head; c, d: their tails
@@ -477,6 +479,14 @@ list_done :: proc "contextless" (p: ^Parser) -> State {
 		set_from(p, n, up.from)
 		_ = push_val(p, n)
 		return .After_Cmd
+	case .Pipefd_Body:
+		n := node_new(p, .Pipefd, list.a, NONE, NONE)
+		if n != NONE {
+			p.nodes[n].rkind = up.rkind
+		}
+		set_from(p, n, up.from)
+		_ = push_val(p, n)
+		return .After_Atom
 	case .Backq_Body:
 		n := node_new(p, .Backq, list.a, up.b, NONE)
 		set_from(p, n, up.from)
@@ -670,6 +680,17 @@ after_cmd :: proc "contextless" (p: ^Parser) -> State {
 	return .Cmd
 }
 
+// Whether the next tokens are < or > and a brace: <{...} or >{...}, a word
+// (rc's REDIR brace, PIPEFD), not a redirection (upstream's 6d7b2).
+@(private = "file")
+is_pipefd :: proc "contextless" (p: ^Parser) -> bool {
+	t := peek(p)
+	if t.kind != .Redir || (t.rkind != .Read && t.rkind != .Write) {
+		return false
+	}
+	return peek2(p).kind == .Lbrace
+}
+
 // Words being gathered: for a simple command, a ( ) list, fn's names, ~'s patterns.
 @(private = "file")
 collect :: proc "contextless" (p: ^Parser) -> State {
@@ -686,6 +707,9 @@ collect :: proc "contextless" (p: ^Parser) -> State {
 		name := f.a
 		_ = pop(p)
 		_ = push(p, {kind = .Want, purpose = .Want_Assign, a = name})
+		return .Word
+	}
+	if is_pipefd(p) {
 		return .Word
 	}
 	#partial switch t.kind {
@@ -794,6 +818,11 @@ atom :: proc "contextless" (p: ^Parser) -> State {
 		}
 		_ = push(p, {kind = .Want, purpose = .Want_Backq, from = start(t)})
 		return .Word
+	case .Redir: // <{ or >{, as is_pipefd found: the brace next
+		_ = take(p)
+		_ = push(p, {kind = .Pipefd_Body, rkind = t.rkind, from = start(t)})
+		_ = push(p, {kind = .List, term = .Rbrace, a = NONE})
+		return .Cmd
 	case .Lp:
 		_ = push(p, {kind = .Words, purpose = .Paren, term = .Rp, a = NONE, c = NONE, from = start(t)})
 		return .Collect

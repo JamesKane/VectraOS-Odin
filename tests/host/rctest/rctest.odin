@@ -20,7 +20,7 @@ import "vx:str"
 // Upstream's struct rc, which its heap holds too (rc_new takes it from the
 // front): a heap this much smaller is the same heap to the allocator, so the
 // port runs out of memory where upstream does.
-C_RC_SIZE :: 41696
+C_RC_SIZE :: 41712 // 41704, aligned
 
 FILES :: 8
 
@@ -42,6 +42,20 @@ CHILDREN :: 4
 // Upstream's child heaps, 1 MiB each with the interpreter inside.
 CHILD_HEAP :: 1 << 20 - C_RC_SIZE
 
+// <{...} and >{...}'s pipes (upstream's 6d7b2): what one child wrote for the
+// command to read, or what the command wrote for a >{...} child, run when it
+// closes.
+Pipe_Fd :: struct {
+	used, command_reads: bool,
+	data:                [dynamic]u8, // a command's writes past upstream's 1024 bytes are dropped
+	r:                   ^rc.Rc,
+	fds:                 [rc.FDS]rc.Fd, // the child's, but its end
+	code:                [dynamic; 255]u8, // a >{...}'s, run at the close
+}
+PIPES :: 4
+PIPE_HANDLE :: 100 // pipes_fd[i]'s handle: PIPE_HANDLE + i
+PIPE_DATA :: 1024
+
 Host :: struct {
 	sh:          ^rc.Rc,
 	// The children's interpreters and heaps, by depth (bench_make's), kept
@@ -51,6 +65,7 @@ Host :: struct {
 	child_status: [CHILDREN][dynamic; 255]u8,
 	children:    [CHILDREN]Child_Io,
 	nchildren:   int,
+	pipes_fd:    [PIPES]Pipe_Fd,
 	files:       [FILES]File,
 	open_now:    [FILES]bool, // the files the shell has open, by handle
 	used_closed: bool, // a stage was given a file the shell had already closed
@@ -83,6 +98,7 @@ callbacks :: proc(h: ^Host) -> rc.Host {
 		close = close_fake,
 		exists = exists_fake,
 		read_line = read_line_fake,
+		pipefd = pipefd_fake,
 	}
 }
 
@@ -92,6 +108,9 @@ reset :: proc(h: ^Host) {
 	delete(h.err)
 	delete(h.exported)
 	delete(h.log)
+	for &pf in h.pipes_fd {
+		delete(pf.data)
+	}
 	h^ = {
 		sh         = sh,
 		child_sh   = child_sh,
@@ -157,6 +176,8 @@ fd_desc :: proc(b: ^[dynamic]u8, fd: rc.Fd, with_path := true) {
 		if with_path {
 			esc(b, v.text)
 		}
+	case rc.Fd_Pipefd:
+		putf(b, " P%d:%d", int(v.reads), v.handle)
 	}
 }
 
@@ -233,6 +254,15 @@ emit :: proc(h: ^Host, r: ^rc.Rc, fds: ^[rc.FDS]rc.Fd, which: int, s: string, pi
 		}
 	case rc.Fd_Closed:
 		return
+	case rc.Fd_Pipefd: // a >{...}'s
+		k := v.handle - PIPE_HANDLE
+		putf(&h.log, "  P%d", v.handle)
+		esc(&h.log, s)
+		put(&h.log, "\n")
+		if k < PIPES && len(h.pipes_fd[k].data) + len(s) <= PIPE_DATA {
+			append(&h.pipes_fd[k].data, s)
+		}
+		return
 	case rc.Fd_Inherit, rc.Fd_Dup, rc.Fd_Pipe_In, rc.Fd_Here:
 	}
 	if v, is := fd.(rc.Fd_Inherit); is && v.which == 2 {
@@ -251,13 +281,25 @@ emit :: proc(h: ^Host, r: ^rc.Rc, fds: ^[rc.FDS]rc.Fd, which: int, s: string, pi
 // The most of a pipeline's $status the hosts keep.
 STATUS_MAX :: 8191
 
+// The pipe a /fd/N argument names in a stage's descriptors, or -1.
+pipe_of :: proc(fds: ^[rc.FDS]rc.Fd, word: string) -> int {
+	arg := c_str(word)
+	if len(arg) != 5 || arg[:4] != "/fd/" || arg[4] < '0' || arg[4] > '9' {
+		return -1
+	}
+	if v, is := fds[arg[4] - '0'].(rc.Fd_Pipefd); is && v.handle - PIPE_HANDLE < PIPES {
+		return int(v.handle - PIPE_HANDLE)
+	}
+	return -1
+}
+
 // A child rc (upstream's 6d7b1), as 9front's rc forks one: a new interpreter
 // on this host, given the shell's variables and functions, its $* the words
 // after its code; its descriptors the stage's. Its status, its $status at the
 // end. Its steps are as limited as its parent's.
-run_child :: proc(h: ^Host, c: ^rc.Command, io: Child_Io) -> string {
+run_child :: proc(h: ^Host, code: string, args: ^rc.Word, io: Child_Io) -> string {
 	putf(&h.log, "child %d ", h.nchildren)
-	esc(&h.log, rc.text(c.argv))
+	esc(&h.log, code)
 	put(&h.log, "\n")
 	if h.nchildren == CHILDREN {
 		return "too deep"
@@ -287,14 +329,14 @@ run_child :: proc(h: ^Host, c: ^rc.Command, io: Child_Io) -> string {
 			_ = rc.run(child, fmt.bprintf(buf[:], "fn %s %s", fn_name, fn_src))
 		}
 	}
-	args: [dynamic; 64]string
-	for w := c.argv.next; w != nil && len(args) < cap(args); w = w.next {
-		append(&args, rc.text(w))
+	star: [dynamic; 64]string
+	for w := args; w != nil && len(star) < cap(star); w = w.next {
+		append(&star, rc.text(w))
 	}
-	rc.set_var(child, "*", ..args[:])
+	rc.set_var(child, "*", ..star[:])
 	h.children[h.nchildren] = io
 	h.nchildren += 1
-	_ = rc.run(child, rc.text(c.argv))
+	_ = rc.run(child, code)
 	h.nchildren -= 1
 	st := rc.get_var(child, "status")
 	status := st != nil ? c_str(rc.text(st)) : ""
@@ -368,7 +410,7 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 		switch name {
 		case "":
 			if c.child {
-				st = run_child(h, &c, {parent = r, fds = c.fds, input = in_copy, pipe = mypipe})
+				st = run_child(h, rc.text(c.argv), c.argv.next, {parent = r, fds = c.fds, input = in_copy, pipe = mypipe})
 			} else {
 				st = "not found"
 			}
@@ -386,7 +428,28 @@ run :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, stages: []rc.Command, async: 
 				emit(h, r, &fds, 1, "\n", mypipe)
 			}
 		case "cat":
-			emit(h, r, &fds, 1, string(in_copy), mypipe)
+			if c.argv.next == nil {
+				emit(h, r, &fds, 1, string(in_copy), mypipe)
+				break
+			}
+			for a := c.argv.next; a != nil; a = a.next { // each /fd/N: what its <{...} wrote
+				if k := pipe_of(&fds, rc.text(a)); k >= 0 {
+					emit(h, r, &fds, 1, string(h.pipes_fd[k].data[:]), mypipe)
+				} else {
+					st = "no such file"
+				}
+			}
+		case "wr": // wr /fd/N words...: the words into descriptor N
+			k := c.argv.next != nil ? pipe_of(&fds, rc.text(c.argv.next)) : -1
+			if k < 0 {
+				st = "no such file"
+				break
+			}
+			to := int(rc.text(c.argv.next)[4] - '0')
+			for a := c.argv.next.next; a != nil; a = a.next {
+				emit(h, r, &fds, to, rc.text(a), mypipe)
+				emit(h, r, &fds, to, a.next != nil ? " " : "\n", mypipe)
+			}
 		case "wc": // words
 			words := 0
 			for k := 0; k < len(in_copy); {
@@ -464,10 +527,47 @@ open_fake :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, path: string, kind: rc.
 	return u32(k), true
 }
 
+// Host.pipefd: <{...}'s child run now, into the pipe; >{...}'s kept, to run
+// on what the command wrote when the pipe closes.
+pipefd_fake :: proc "contextless" (ctx: rawptr, r: ^rc.Rc, child: ^rc.Command, command_reads: bool) -> (handle: u32, ok: bool) {
+	context = runtime.default_context()
+	h := (^Host)(ctx)
+	put(&h.log, "pipefd ")
+	esc(&h.log, rc.text(child.argv))
+	putf(&h.log, " %d\n", int(command_reads))
+	k := 0
+	for k < PIPES && h.pipes_fd[k].used {
+		k += 1
+	}
+	if k == PIPES || child.argv.len >= 256 {
+		return 0, false
+	}
+	pf := &h.pipes_fd[k]
+	clear(&pf.data)
+	clear(&pf.code)
+	pf.used, pf.command_reads, pf.r, pf.fds = true, command_reads, r, child.fds
+	handle = PIPE_HANDLE + u32(k)
+	if command_reads {
+		pf.fds[1] = rc.Fd_Pipe_Out{}
+		_ = run_child(h, rc.text(child.argv), child.argv.next, {parent = r, fds = pf.fds, pipe = &pf.data})
+		return handle, true
+	}
+	append(&pf.code, rc.text(child.argv))
+	return handle, true
+}
+
 close_fake :: proc "contextless" (ctx: rawptr, handle: u32) {
 	context = runtime.default_context()
 	h := (^Host)(ctx)
 	putf(&h.log, "close %d\n", handle)
+	if handle >= PIPE_HANDLE && handle - PIPE_HANDLE < PIPES { // a pipe: a >{...}'s child reads what was written
+		pf := &h.pipes_fd[handle - PIPE_HANDLE]
+		if !pf.command_reads {
+			_ = run_child(h, string(pf.code[:]), nil, {parent = pf.r, fds = pf.fds, input = pf.data[:]})
+		}
+		pf.used = false
+		return
+	}
 	if handle < FILES {
 		h.open_now[handle] = false
 	}

@@ -167,6 +167,12 @@ Msg_Size :: struct { // what channel_read and channel_call report
 //   cwd=PATH                         the current directory, absolute and
 //                                    clean (ADR-0017, upstream's ADR-0039);
 //                                    without it, /
+//   fd=N pipe=read|write end=NAME    descriptor N, 3 to 9 (ADR-0018,
+//                                    upstream's ADR-0040): the message's
+//                                    handle NAME, a pipe end;
+//   fd=N file=PATH flags=F offset=O [token=T]   or an open file, joined by
+//                                    its token; 0 to 2 are the handles
+//                                    stdin, stdout and stderr
 //   env=NAME=VALUE                   an environment variable (the POSIX
 //                                    personality's); repeated
 //   cmdline=VALUE                    the kernel command line (the root task's)

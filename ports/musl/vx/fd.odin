@@ -333,9 +333,10 @@ fd_place :: proc "contextless" (fd: int, o: ^Ofd) {
 // The descriptors the spawn message gives: fd= records from a POSIX parent
 // (from_records), or else 0, 1 and 2 from the pipes it names ("stdin",
 // "stdout", "stderr", as vx:rt's programs take them: a shell's
-// redirections) and the console for what it does not. Without a pipe for
-// it, standard error goes to the console, so a pipeline's errors reach its
-// terminal; without a console either, to stdout.
+// redirections), with 3 to 9 from fd= records beside them (ADR-0018), and
+// the console for what it does not. Without a pipe for it, standard error
+// goes to the console, so a pipeline's errors reach its terminal; without a
+// console either, to stdout.
 fd_init :: proc "contextless" () {
 	console := rt.spawn_take("console")
 	if console != vx.HANDLE_NONE && rt.console_attach(console) != .Ok {
@@ -343,11 +344,12 @@ fd_init :: proc "contextless" () {
 	}
 	fd_port, _ = rt.port_create()
 	rec: ndb.Record
-	if rt.spawn_record("fd", &rec) {
+	records := rt.spawn_record("fd", &rec)
+	in_end, out_end, err_end := rt.spawn_take("stdin"), rt.spawn_take("stdout"), rt.spawn_take("stderr")
+	if records && in_end == vx.HANDLE_NONE && out_end == vx.HANDLE_NONE && err_end == vx.HANDLE_NONE { // a POSIX parent's whole table
 		from_records()
 		return
 	}
-	in_end, out_end, err_end := rt.spawn_take("stdin"), rt.spawn_take("stdout"), rt.spawn_take("stderr")
 	cons := console != vx.HANDLE_NONE ? ofd_new(.Console, linux.O_RDWR) : nil
 	input := in_end != vx.HANDLE_NONE ? pipe_ofd(in_end, true, {}) : cons
 	output := out_end != vx.HANDLE_NONE ? pipe_ofd(out_end, false, {}) : cons
@@ -364,6 +366,9 @@ fd_init :: proc "contextless" () {
 			o.refs += 1
 		}
 		fd_table[fd].o = o
+	}
+	if records {
+		from_records() // 3 to 9 beside the three pipes: a native parent's (rc's; ADR-0018)
 	}
 }
 

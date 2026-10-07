@@ -178,6 +178,7 @@ nsd is not restarted, and its groups would be lost if it were.
 A group's text is at most 16 KiB, a member replays the whole text after any change, and a group's connectors are never let go, so a group takes at most 8 servers over its life.
 nsd takes a member's word for which process it is, so `/proc/`<pid>`/ns` can be read, or claimed, by another process until there are capability tokens.
 
-There is no `/env`, `/fd`, `/dev/cons` or `consctl`, and the console is a handle given at spawn (M6 step 6e brings `/env`).
+There is no `/env`, `/dev/cons` or `consctl`, and the console is a handle given at spawn (M6 step 6e brings `/env`).
+`/fd/0` to `/fd/9` open a copy of the process's descriptor (ADR-0040), but are not in the namespace: `/fd` is not listed, bound or shown by ns(1).
 
 Each process dials its own TCP connection for a `tcp!` mount, and a forked child dials again (M6 step 6d shares one).

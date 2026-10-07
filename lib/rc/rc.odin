@@ -78,6 +78,7 @@ Fd :: union #no_nil {
 	Fd_Pipe_Out,
 	Fd_Pipe_In,
 	Fd_Here,
+	Fd_Pipefd,
 }
 Fd_Inherit :: struct {
 	which: u8, // which of the shell's own
@@ -98,6 +99,11 @@ Fd_Pipe_Out :: struct {} // a pipeline's: into the next stage
 Fd_Pipe_In :: struct {} // from the stage before
 Fd_Here :: struct {
 	text: string, // a here document's, substituted: the host feeds it
+}
+// A pipe <{...} or >{...} made (Host.pipefd, upstream's 6d7b2): its end.
+Fd_Pipefd :: struct {
+	handle: u32, // as pipefd gave it, which close lets go
+	reads:  bool, // the command reads it (<{...}), or writes it (>{...})
 }
 
 // A program to run: its words, and its descriptors after redirections (a
@@ -145,6 +151,12 @@ Host :: struct {
 	read_line: proc "contextless" (ctx: rawptr, buf: []u8) -> int,
 	// The host's builtins' names, for whatis.
 	builtin_names: []string,
+	// <{...} and >{...} (upstream's 6d7b2, as 9front's Xpipefd): a pipe,
+	// child (rc code and $*, as a child stage's) started on one end, not
+	// waited for, as its standard output, or its standard input when the
+	// command writes; the other end's handle, an Fd_Pipefd's, which close
+	// lets go. ok is false if it cannot be (why, in $status).
+	pipefd:    proc "contextless" (ctx: rawptr, r: ^Rc, child: ^Command, command_reads: bool) -> (handle: u32, ok: bool),
 }
 
 // rc's notes, by its signal functions' names (rc's Signame): what trap takes.

@@ -444,6 +444,20 @@ free_stages :: proc "contextless" (r: ^Rc, base: int) {
 	resize(&r.closes, kept)
 }
 
+// How many of the redirections on top are <{...}s (upstream's 6d7b2): the
+// command's, made as its words were, let go once it has run.
+@(private = "file")
+npipefds :: proc "contextless" (r: ^Rc) -> int {
+	n := 0
+	for n < len(r.redirs) {
+		if _, is := r.redirs[len(r.redirs) - 1 - n].to.(Fd_Pipefd); !is {
+			break
+		}
+		n += 1
+	}
+	return n
+}
+
 @(private = "file")
 pop_redirs :: proc "contextless" (r: ^Rc, to: int) {
 	for len(r.redirs) > to {
@@ -452,21 +466,29 @@ pop_redirs :: proc "contextless" (r: ^Rc, to: int) {
 		if d.path == nil {
 			continue
 		}
-		// A file the host opened: closed, or once a stage that may have been
-		// given it has run. Its path waits with it, for that stage's Fd_File,
-		// as a here document's text does for its Fd_Here. A here document has
-		// no file to close. More than rc keeps for one pipeline fail the
-		// command, so its stages never run (upstream ab83fe6).
-		file, is_file := d.to.(Fd_File)
+		// A file the host opened (or a pipe its pipefd made): closed, or once
+		// a stage that may have been given it has run. Its path waits with
+		// it, for that stage's Fd_File, as a here document's text does for its
+		// Fd_Here. A here document has no file to close. More than rc keeps for
+		// one pipeline fail the command, so its stages never run (upstream
+		// ab83fe6).
+		handle: u32
+		is_file := false
+		#partial switch v in d.to {
+		case Fd_File:
+			handle, is_file = v.handle, true
+		case Fd_Pipefd:
+			handle, is_file = v.handle, true
+		}
 		if len(r.stages) > 0 {
 			if len(r.closes) < cap(r.closes) {
-				append(&r.closes, Pending_Close{handle = file.handle, level = u32(len(r.stages)), path = d.path, close = is_file && r.host.close != nil})
+				append(&r.closes, Pending_Close{handle = handle, level = u32(len(r.stages)), path = d.path, close = is_file && r.host.close != nil})
 				continue
 			}
 			fail(r, "", "too many redirections in one pipeline")
 		}
 		if is_file && r.host.close != nil {
-			r.host.close(r.host.ctx, file.handle)
+			r.host.close(r.host.ctx, handle)
 		}
 		forget(r, raw_data(text(d.path)))
 		free_words(r, d.path)
@@ -1123,6 +1145,52 @@ run_child :: proc "contextless" (r: ^Rc, argv: ^Word, async: bool) {
 	free_words(r, argv)
 }
 
+// <{code} or >{code} (upstream's 6d7b2), as 9front's Xpipefd: a pipe, code
+// started on its far end in a child, not waited for; the near end the
+// command's next free descriptor from 3, N, a redirection until it has run,
+// and /fd/N (ADR-0018) its word, onto the list below. It takes code.
+@(private = "file")
+pipefd :: proc "contextless" (r: ^Rc, code: ^Word, command_reads: bool) {
+	fd: u8 = 3
+	for taken := true; taken && fd < FDS; {
+		taken = false
+		for &d in r.redirs {
+			if d.fd == fd {
+				taken = true
+				break
+			}
+		}
+		if taken {
+			fd += 1
+		}
+	}
+	if fd == FDS || len(r.redirs) == REDIRS || r.host.pipefd == nil {
+		free_words(r, code)
+		fail(r, "", "no descriptor for <{...}")
+		return
+	}
+	cmd := Command {
+		argv  = code,
+		argc  = count_words(code),
+		child = true,
+		fds   = command_fds(r),
+	}
+	handle, made := r.host.pipefd(r.host.ctx, r, &cmd, command_reads)
+	free_words(r, code)
+	if !made {
+		fail(r, "", "can't make pipe")
+		return
+	}
+	name := [5]u8{'/', 'f', 'd', '/', '0' + fd}
+	w, path := new_word(r, string(name[:])), new_word(r, string(name[:]))
+	append(&r.redirs, Redir{fd = fd, to = Fd_Pipefd{handle = handle, reads = command_reads}, path = path})
+	if l := top_list(r); l != nil {
+		list_add(l, w)
+	} else {
+		free_words(r, w)
+	}
+}
+
 // Runs a command whose words are argv: a function, a builtin (rc's, then the
 // host's), or a program. Apart from the shell (async, or in @ or `{...}), a
 // function or a builtin runs in a child, as rc's fork runs it; child: argv is
@@ -1485,6 +1553,7 @@ OP_NAMES := [Op]string {
 	.Popredir  = "Xpopredir",
 	.Rdcmds    = "Xrdcmds",
 	.Eflag     = "Xeflag",
+	.Pipefd    = "Xpipefd",
 }
 
 // Runs code from the frame on top until the frames it started with have all
@@ -1625,6 +1694,7 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 			}
 		case .Simple:
 			simple(r, pop_list(r), ins.f0 != 0, ins.f1 != 0, ins.b != 0)
+			pop_redirs(r, len(r.redirs) - npipefds(r)) // its <{...}s, now it has run
 		case .Stage: // a: its own redirections, the top of the stack; b: a child's code and $*
 			argv := ins.b != 0 ? pop_list(r) : glob_list(r, pop_list(r))
 			child := ins.b != 0
@@ -1654,7 +1724,8 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 			}
 			// As rc does in the child: what encloses the pipeline, then the pipe
 			// ends, then the stage's own redirections, which may move them.
-			own := len(r.redirs) >= int(ins.a) ? len(r.redirs) - int(ins.a) : 0
+			pf := npipefds(r) // its <{...}s, above its own
+			own := len(r.redirs) >= int(ins.a) + pf ? len(r.redirs) - int(ins.a) - pf : 0
 			apply_redirs(r, &st.fds, 0, own)
 			if ins.f0 < FDS {
 				st.fds[ins.f0] = Fd_Pipe_Out{}
@@ -1664,6 +1735,9 @@ execute :: proc "contextless" (r: ^Rc, base: u32) {
 			}
 			apply_redirs(r, &st.fds, own, len(r.redirs))
 			append(&r.stages, st)
+			pop_redirs(r, len(r.redirs) - pf) // kept with the gathered stages until they run
+		case .Pipefd:
+			pipefd(r, pop_list(r), Redir_Kind(ins.f0) == .Read)
 		case .Pipeline: // a: how many stages, the last gathered
 			first := len(r.stages) >= int(ins.a) ? len(r.stages) - int(ins.a) : 0
 			stages := r.stages[first:]
