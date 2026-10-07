@@ -91,8 +91,7 @@ There is no usage message.
 
 `-a`, `-o` and parentheses, which POSIX marks obsolescent, are not supported: an expression is four arguments at most.
 
-`-r`, `-w` and `-x` are true of any <file> that exists: VectraOS's C library checks that a file is there and leaves its permissions for the server to refuse when it is opened.
-The first such test in a process also writes `vx-musl: system call` and a number `is not implemented` on the debug console, as the C library tries `faccessat2` first.
+`-r`, `-w` and `-x` ask the file's server by opening the file so, as 9front's APE does, and a directory's `-w` by making and removing a file in it: on tmpfs, which enforces no permissions, they are true of any file that exists.
 
 `-nt` is false when <f2> does not exist and `-ot` when <f1> does not, where POSIX makes them true.
 

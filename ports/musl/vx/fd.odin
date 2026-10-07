@@ -330,6 +330,16 @@ fd_place :: proc "contextless" (fd: int, o: ^Ofd) {
 	fd_table[fd] = {o, false}
 }
 
+// The file-creation mask, umask's: 022, or what a POSIX parent passed on in
+// its umask= record (fd_records), as exec and posix_spawn keep it.
+umask: u32 = 0o022
+
+fd_set_umask :: proc "contextless" (mask: u32) -> int {
+	old := umask
+	umask = mask & 0o777
+	return int(old)
+}
+
 // The descriptors the spawn message gives: fd= records from a POSIX parent
 // (from_records), or else 0, 1 and 2 from the pipes it names ("stdin",
 // "stdout", "stderr", as vx:rt's programs take them: a shell's
@@ -338,6 +348,12 @@ fd_place :: proc "contextless" (fd: int, o: ^Ofd) {
 // goes to the console, so a pipeline's errors reach its terminal; without a
 // console either, to stdout.
 fd_init :: proc "contextless" () {
+	um: ndb.Record
+	if rt.spawn_record("umask", &um) {
+		if mask, ok := ndb.get_u64(&um, "umask"); ok {
+			umask = u32(mask) & 0o777
+		}
+	}
 	console := rt.spawn_take("console")
 	if console != vx.HANDLE_NONE && rt.console_attach(console) != .Ok {
 		rt.print("vx-musl: cannot open the console\n")
@@ -499,8 +515,12 @@ stat_fill :: proc "contextless" (st: ^linux.Stat, s: ^p9.Stat) {
 // A fid's stat: Tgetattr's where the server has the xattr extension (times
 // to the nanosecond, links, inode), Tstat's otherwise.
 stat_fid :: proc "contextless" (c: ^p9.Client, fid: p9.Fid, st: ^linux.Stat) -> vx.Status {
+	// st_dev: the connection, which du and find tell servers apart by (their
+	// qid paths are only each one's own), beside a stat's own dev.
+	conn := ns.conn_id(namespace(), c) << 32
 	if a, e := p9.client_getattr(c, fid); e == .Ok {
 		st^ = {
+			dev     = conn,
 			ino     = a.qid.path,
 			mode    = a.mode,
 			nlink   = auto_cast a.nlink,
@@ -518,6 +538,7 @@ stat_fid :: proc "contextless" (c: ^p9.Client, fid: p9.Fid, st: ^linux.Stat) -> 
 	s: p9.Stat
 	p9.client_stat(c, fid, &s) or_return
 	stat_fill(st, &s)
+	st.dev |= conn
 	return .Ok
 }
 

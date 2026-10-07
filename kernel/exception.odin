@@ -559,6 +559,38 @@ thread_sched_get :: proc "contextless" (h: vx.Handle, id: u64, buf: Uva) -> vx.S
 	return copy_out(buf, &info)
 }
 
+// .Get_Times (ADR-0041): a thread's ticks, or with id 0 its task's, those of
+// threads reaped and of the rest, as nanoseconds. With INSPECT on the task.
+@(private="file", require_results)
+thread_times :: proc "contextless" (h: vx.Handle, id: u64, buf: Uva) -> vx.Status {
+	t := handle_get_as(current_task(), h, Task, {.Inspect}) or_return
+	ticks: [Cpu_Time]u64
+	found := id == 0
+	spin_lock(&t.lock)
+	if id == 0 {
+		ticks = t.gone_ticks
+	}
+	for x := t.threads; x != nil; x = x.task_next {
+		if id != 0 && u64(x.id) != id {
+			continue
+		}
+		found = true
+		for &n, k in ticks {
+			n += intrinsics.atomic_load_explicit(&x.ticks[k], .Relaxed)
+		}
+	}
+	spin_unlock(&t.lock)
+	object_release(&t.obj)
+	if !found {
+		return .Err_Not_Found
+	}
+	out := vx.Cpu_Times {
+		user = vx.Duration(ticks[.User] * u64(TICK)),
+		sys  = vx.Duration(ticks[.Sys] * u64(TICK)),
+	}
+	return copy_out(buf, &out)
+}
+
 // How many bytes each operation reads or writes.
 @(private="file")
 state_size :: proc "contextless" (op: vx.Thread_State_Op) -> u64 {
@@ -583,6 +615,8 @@ state_size :: proc "contextless" (op: vx.Thread_State_Op) -> u64 {
 		return size_of(vx.Note_Stack)
 	case .Get_Sched:
 		return size_of(vx.Sched_Info)
+	case .Get_Times:
+		return size_of(vx.Cpu_Times)
 	}
 	return 0
 }
@@ -613,6 +647,8 @@ sys_thread_state :: proc "contextless" (h: vx.Handle, id, op_arg: u64, buf: Uva,
 		return id != 0 ? .Err_Invalid : thread_note_stack(h, op, buf)
 	case .Get_Sched:
 		return thread_sched_get(h, id, buf)
+	case .Get_Times:
+		return thread_times(h, id, buf)
 	case .Get_Tls, .Set_Tls:
 		if id == 0 {
 			return thread_tls_self(h, op, buf)

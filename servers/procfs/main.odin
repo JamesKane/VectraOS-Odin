@@ -14,7 +14,8 @@
 //   /proc/N/ppid     the parent's pid
 //   /proc/N/ns       its namespace group's text, namespace(6) (ADR-0009), from nsd
 //   /proc/N/wait     a read waits for a child to end, then returns its record:
-//                    pid=9 name=ls noteid=7 status="" real=12 (ms); its length is the count
+//                    pid=9 name=ls noteid=7 status="" user=10 sys=0 real=12 (ms, user and
+//                    sys the kernel's 10 ms samples, ADR-0019); its length is the count
 //
 // As in 9front's pexit, a process that ends leaves a wait record for its
 // parent, at most 128 queued, unless it was registered with .No_Wait, or the
@@ -70,6 +71,8 @@ Proc :: struct {
 	start:       vx.Instant,
 	nwait:       u32, // records queued for it
 	first, last: u32, // its queue, through Wait_Record.next; 0 is none
+	child_user:  vx.Duration, // its children's that have ended, as 9front's TCUser and TCSys
+	child_sys:   vx.Duration,
 }
 
 @(private="file")
@@ -87,6 +90,8 @@ Wait_Record :: struct {
 	sig:     u8, // .Stopped: the signal that stopped it
 	noteid:  u64, // its note group then, for a POSIX wait for a group's children
 	real_ms: u64,
+	user_ms: u64, // .Ended: its CPU time and its children's (ADR-0019)
+	sys_ms:  u64,
 	name:    [24]u8, // NUL-padded, as task_info gives it
 	status:  [dynamic; vx.ERRMAX]u8, // .Ended: its exit string
 }
@@ -254,6 +259,17 @@ registered :: proc "contextless" (ctx: rawptr, msg: []u8, handle: vx.Handle) {
 // room: as 9front's pexit leaves one, at most MAX_WAITS.
 @(private="file")
 queue_record :: proc "contextless" (parent, c: ^Proc, kind: Record_Kind, sig: u8) {
+	// An end's CPU time, the kernel's samples of the task (ADR-0019) and its
+	// own children's, goes to its parent's children's, as 9front's pexit adds
+	// it.
+	t: vx.Cpu_Times
+	if kind == .Ended {
+		_ = rt.thread_state(c.task, 0, .Get_Times, &t)
+		t.user += c.child_user
+		t.sys += c.child_sys
+		parent.child_user += t.user
+		parent.child_sys += t.sys
+	}
 	r := u32(1)
 	for r <= MAX_RECORDS && records[r].pid != 0 {
 		r += 1
@@ -272,6 +288,8 @@ queue_record :: proc "contextless" (parent, c: ^Proc, kind: Record_Kind, sig: u8
 		kind    = kind,
 		sig     = sig,
 		real_ms = u64(rt.clock_read() - c.start) / 1_000_000,
+		user_ms = u64(t.user) / 1_000_000,
+		sys_ms  = u64(t.sys) / 1_000_000,
 		name    = info.name,
 	}
 	if kind == .Ended {
@@ -767,6 +785,8 @@ take_record :: proc "contextless" (p: ^Proc, buf: []u8) -> (n: int, st: vx.Statu
 		ndb.flag(&w, "continued")
 	case .Ended:
 		ndb.put(&w, "status", string(rec.status[:]))
+		ndb.put_u64(&w, "user", rec.user_ms)
+		ndb.put_u64(&w, "sys", rec.sys_ms)
 		ndb.put_u64(&w, "real", rec.real_ms)
 	}
 	_ = ndb.end(&w)

@@ -201,7 +201,9 @@ proc_set_tls :: proc "contextless" (p: u64) -> int {
 // Every clock is the kernel's monotonic one, in nanoseconds since boot; the
 // realtime clocks add the kernel's UTC offset (upstream ADR-0031), which is
 // 0 until a clock driver has set it (no RTC: 1970, as before). The CPU-time
-// clocks are the monotonic clock too.
+// clocks are the kernel's samples of the process's and the thread's
+// (ADR-0019, upstream's ADR-0041), to 10 ms; another thread's or process's (a
+// negative id) is refused.
 
 NS_PER_SEC :: 1_000_000_000
 
@@ -218,14 +220,20 @@ time_get :: proc "contextless" (clock: int, ts: ^linux.Timespec) -> int {
 	if clock < 0 || clock > linux.CLOCK_TAI {
 		return fail(.EINVAL)
 	}
-	now := max(time_is_utc(clock) ? rt.clock_utc() : rt.clock_read(), 0)
+	now := time_is_utc(clock) ? rt.clock_utc() : rt.clock_read()
+	if clock == linux.CLOCK_PROCESS_CPUTIME_ID || clock == linux.CLOCK_THREAD_CPUTIME_ID {
+		t := cpu_times(clock == linux.CLOCK_THREAD_CPUTIME_ID)
+		now = t.user + t.sys
+	}
+	now = max(now, 0)
 	ts^ = {now / NS_PER_SEC, now % NS_PER_SEC}
 	return 0
 }
 
-time_res :: proc "contextless" (ts: ^linux.Timespec) -> int {
+time_res :: proc "contextless" (clock: int, ts: ^linux.Timespec) -> int {
+	cpu := clock == linux.CLOCK_PROCESS_CPUTIME_ID || clock == linux.CLOCK_THREAD_CPUTIME_ID
 	if ts != nil {
-		ts^ = {0, 1}
+		ts^ = {0, cpu ? 10_000_000 : 1} // the kernel's tick
 	}
 	return 0
 }

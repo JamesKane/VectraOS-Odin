@@ -1,5 +1,6 @@
 package kernel
 
+import "base:intrinsics"
 import vx "abi:vx"
 
 // How threads and tasks start, end and are killed.
@@ -131,6 +132,9 @@ thread_exit_current :: proc "contextless" () -> ! {
 thread_reap :: proc "contextless" (th: ^Thread) {
 	t := th.task
 	spin_lock(&t.lock) // off the task's list first: nothing that walks it finds a freed stack
+	for &n, k in t.gone_ticks { // a task keeps its reaped threads' time (ADR-0041)
+		n += intrinsics.atomic_load_explicit(&th.ticks[k], .Relaxed)
+	}
 	unlink(&t.threads, th, "task_next")
 	spin_unlock(&t.lock)
 	kstack_free(th.kstack)

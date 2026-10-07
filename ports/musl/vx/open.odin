@@ -98,7 +98,7 @@ fd_openat :: proc "contextless" (dirfd: int, path: string, flags: linux.Open_Fla
 	// same step as making it, so nothing is opened (or truncated) first.
 	st := excl ? vx.Status.Err_Not_Found : ns.open(space, p, open9, &f)
 	if st == .Err_Not_Found && .Creat in flags {
-		st = ns.create(space, p, mode & 0o755, mode9, &f) // the umask is 022
+		st = ns.create(space, p, mode & ~umask & 0o777, mode9, &f)
 		// Another process made it between the open and the create: open theirs.
 		if st == .Err_Exists && !excl {
 			st = ns.open(space, p, open9, &f)
@@ -289,6 +289,54 @@ fd_lock :: proc "contextless" (o: ^Ofd, cmd: int, l: ^linux.Flock) -> int {
 		}
 		if cmd == linux.F_SETLK {
 			return fail(.EAGAIN)
+		}
+		held := be_wait_begin()
+		w := rt.futex_wait(&never_changes, 0, rt.clock_read() + LOCK_RETRY)
+		be_wait_end(held)
+		if w == .Err_Interrupted {
+			return fail(.EINTR)
+		}
+	}
+}
+
+// flock: a lock on the whole file owned by the open file description, as
+// BSD's and Linux's are: Tlock with an owner no process id can be (the top
+// bit, the description's slot, the process's id), so fcntl's locks and other
+// descriptions' do not count as its own. LOCK_NB answers EWOULDBLOCK; without
+// it, it asks again every 10 ms, as F_SETLKW.
+fd_flock :: proc "contextless" (fd: int, op: int) -> int {
+	o := fd_get(fd)
+	if o == nil {
+		return fail(.EBADF)
+	}
+	type: p9.Lock_Type
+	switch op &~ linux.LOCK_NB {
+	case linux.LOCK_SH:
+		type = .Read
+	case linux.LOCK_EX:
+		type = .Write
+	case linux.LOCK_UN:
+		type = .Unlock
+	case:
+		return fail(.EINVAL)
+	}
+	if o.kind != .File || !file_shared(o) {
+		return fail(.ENOLCK) // no server to keep it
+	}
+	owner := 1 << 31 | u32(ofd_index(o)) << 22 | u32(posix_pid()) & (1 << 22 - 1)
+	for {
+		status, st := p9.client_lock(o.f.c, o.f.fid, type, 0, 0, owner)
+		if st != .Ok {
+			return errno_of(st)
+		}
+		if status == .Success {
+			return 0
+		}
+		if status != .Blocked {
+			return fail(.ENOLCK)
+		}
+		if op & linux.LOCK_NB != 0 {
+			return fail(.EAGAIN) // EWOULDBLOCK
 		}
 		held := be_wait_begin()
 		w := rt.futex_wait(&never_changes, 0, rt.clock_read() + LOCK_RETRY)

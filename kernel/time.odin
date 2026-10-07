@@ -89,8 +89,9 @@ timer_arm :: proc "contextless" (deadline: Instant) {
 	arch_timer_arm(t.armed)
 }
 
-// Called by the architecture's timer interrupt, with the interrupt acknowledged.
-timer_interrupt :: proc "contextless" () {
+// Called by the architecture's timer interrupt, with the interrupt
+// acknowledged; from_user: it came while the CPU was in user mode.
+timer_interrupt :: proc "contextless" (from_user: bool) {
 	t := &cpu_timer[arch_cpu_index()]
 	if t.armed == 0 {
 		return
@@ -108,7 +109,7 @@ timer_interrupt :: proc "contextless" () {
 		}
 	}
 	intrinsics.atomic_add_explicit(&t.fired, 1, .Release)
-	sched_timer()
+	sched_timer(from_user)
 }
 
 // The log prefix: "[    s.mmm] ", seconds since kernel entry.

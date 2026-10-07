@@ -38,5 +38,4 @@ A malformed <mode> is `mkdir: x: invalid mode`, and exits 1.
 
 # BUGS
 
-On VectraOS the file mode creation mask is always `022`: `umask` changes nothing.
-The C library makes a directory with its mode's `0755` bits at most, so `-m` cannot give the group or others write permission, nor the set-id and sticky bits; chmod(1) can afterwards.
+The C library makes a directory with its mode's permission bits less the umask, and never the set-id and sticky bits, which no server keeps.

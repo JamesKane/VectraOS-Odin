@@ -32,8 +32,6 @@ It is 3 if `$PATH` is not set (`which: $PATH is not set`); the usage message exi
 
 # BUGS
 
-On VectraOS the C library's `faccessat` asks only whether a file exists, not whether it may be run, so every regular file of the name is printed, executable or not.
-
 An empty element of `$PATH` is skipped, not taken as the current directory.
 
 `which` is untested on VectraOS.

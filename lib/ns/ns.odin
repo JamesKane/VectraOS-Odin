@@ -915,6 +915,30 @@ write_word :: proc "contextless" (t: ^str.Buf, s: string) {
 	str.write_byte(t, '\'')
 }
 
+// Asks each server mounted in the namespace to put its changes on disk
+// (Tfsync on the mount's fid; fsd commits its volume), as POSIX's sync.
+sync :: proc "contextless" (ns: ^Namespace) {
+	catch_up(ns)
+	for &e in ns.entries {
+		if len(e.path) == 0 {
+			continue
+		}
+		for &m in e.members {
+			if m.mounted {
+				_ = p9.client_fsync(ns.conns[m.conn].client, m.fid)
+			}
+		}
+	}
+}
+
+// c's connection's slot plus 1, which POSIX's st_dev tells servers apart by,
+// or 0 if c is none of this namespace's. An unmounted connection's number may
+// come again for another.
+conn_id :: proc "contextless" (ns: ^Namespace, c: ^p9.Client) -> u64 {
+	slot := conn_of(ns, c)
+	return slot < MAX_CONNS ? u64(slot) + 1 : 0
+}
+
 // Writes the namespace as namespace(6): mount and bind lines, in the order
 // they would rebuild it. Returns its length, or 0 if it does not fit.
 print :: proc "contextless" (ns: ^Namespace, buf: []u8) -> int {

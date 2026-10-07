@@ -67,6 +67,7 @@ Task :: struct {
 	mapped:          u64, // bytes
 	threads:         ^Thread, // started and not yet reaped, through task_next
 	live_threads:    u32,
+	gone_ticks:      [Cpu_Time]u64, // user and system ticks of its threads reaped (ADR-0041)
 	state:           vx.Task_State, // .Exited once torn down
 	ending:          bool, // its last thread has exited, or it was killed: torn down soon
 	killed:          bool,
@@ -128,6 +129,7 @@ Thread :: struct {
 	donor:        ^Thread,
 	donee:        ^Thread,
 	lend_tail:    bool,
+	ticks:        [Cpu_Time]u64, // user and system ticks charged to it (sched_timer, ADR-0041), atomically
 	next:         ^Thread, // in the ready queue (under the scheduler's lock)
 	wait_next:    ^Thread, // in a port's waiters (under the port's lock); never the same link as next
 	sleep_next:   ^Thread, // in its CPU's sleep queue, ordered by wake_at

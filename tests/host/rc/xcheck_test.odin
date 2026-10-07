@@ -11,8 +11,9 @@
 // upstream's heap sizes from 4 MiB down to 64 KiB, where scripts run out of
 // memory as they compile or run.
 //
-// The digests are those of upstream's rc.c at 0a629a3 (its 6d7c: a
-// function's text as 9front's pcmd rebuilds it), unpatched: its ab83fe6 and f24356f fixed what this tree's findings said (a
+// The digests are those of upstream's rc.c at 8385e74 (unchanged since its
+// 6d7c, 0a629a3: a function's text as 9front's pcmd rebuilds it; the
+// mutated ones with rctest.rc at 8385e74), unpatched: its ab83fe6 and f24356f fixed what this tree's findings said (a
 // here document's redirection closes nothing; a stage's paths and here
 // document are kept until it runs), so a stage's paths are logged and its
 // here document read, as the shell does. Its host has exists, read_line (its

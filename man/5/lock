@@ -39,8 +39,7 @@ Every VectraOS server with `posix` keeps locks, read-only ones too.
 ## Lock
 
 The `lock` request takes a lock of <type> over the range for the owner, replacing whatever that owner held of the range; unlock lets go of it.
-A read lock needs <fid> open for reading and a write lock one open for writing, as POSIX has it; otherwise the answer is `permission denied`.
-Unlock needs either.
+<fid> may be open in any mode: fcntl's rule, a read lock on a file open for reading and a write lock on one open for writing, is the client's to keep, as Linux's kernel keeps it, and `flock` has none (M6 step 6d9a).
 
 `Rlock`'s <status> is one of:
 
@@ -83,4 +82,4 @@ The 256 locks are shared by every client of a server, and any one can take them 
 
 A `Tlock` or `Tgetlock` on a fid that is not open is refused with `fid already in use`, the string every request refused for its fid's state gets.
 
-The POSIX library has no `flock` and no open-file-description locks, and a `dup2` or `dup3` that closes a descriptor of a locked file lets none of its locks go.
+The POSIX library's `flock` locks are owned by an open file description, as a <proc_id> with its top bit set, the description's slot and the process's id: a lock taken before a `fork` is the parent's alone, and a clunk of another fid of the file lets it go with the rest. There are no `fcntl` open-file-description locks, and a `dup2` or `dup3` that closes a descriptor of a locked file lets none of its locks go.

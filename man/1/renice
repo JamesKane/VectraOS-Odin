@@ -39,8 +39,8 @@ The exit status is 1 if any <id> failed, otherwise 0.
 # BUGS
 
 `renice` always fails on VectraOS.
-VectraOS's C library does not implement the `getpriority` and `setpriority` system calls, so each <id> is reported as `renice: getpriority` <id>`: Function not implemented`, and the library notes on the console that the system call is not implemented.
-VectraOS has no nice values to change; its own scheduling calls, sched(2), are reserved and not yet implemented.
+VectraOS's C library answers every `getpriority` with 0 and refuses a `setpriority` to any other value, so each <id> is reported as `renice: setpriority` <id>`: Operation not permitted`, and nothing changes.
+VectraOS has no nice values to change: a thread's priority is its intent, set by sched(2).
 
 With `-u` there is no user to find: VectraOS has no `/etc/passwd`, so each name fails in `getpwnam` first.
 

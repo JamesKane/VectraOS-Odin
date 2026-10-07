@@ -30,5 +30,4 @@ An <inc> out of range is `nice: strtonum 40: too large`, and exits 1, as a usage
 
 # BUGS
 
-VectraOS has no nice values: the C library does not implement `getpriority` or `setpriority`, so `nice` always prints two warnings, `nice: getpriority: Function not implemented` and the same for `setpriority`, and runs <cmd> at its usual priority.
-The kernel log gets a line for each, the first time, saying that the call is not implemented.
+VectraOS has no nice values: a thread's priority is its intent (sched(2)). The C library's `getpriority` answers 0 and `setpriority` refuses any other value, so `nice` prints `nice: setpriority: Operation not permitted` and runs <cmd> at its usual priority.

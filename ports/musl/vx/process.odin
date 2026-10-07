@@ -1,5 +1,6 @@
 package backend
 
+import "base:intrinsics"
 import vx "abi:vx"
 import "linux"
 import "vx:drbg"
@@ -209,7 +210,13 @@ Waited :: struct {
 	status:     i32, // as wait4 reports it
 	stopped:    bool,
 	continued:  bool,
+	user, sys:  vx.Duration, // its CPU time and its waited children's (procfs's user= and sys=, ms)
 }
+
+// The CPU time of the children waited for, as 9front's TCUser and TCSys:
+// times' cutime and cstime, getrusage's RUSAGE_CHILDREN.
+@(private="file")
+child_user, child_sys: vx.Duration
 
 @(private="file")
 wait_kept: [dynamic; 128]Waited // as many as procfs keeps for one parent
@@ -234,6 +241,12 @@ wait_parse :: proc "contextless" (text: string) -> (w: Waited, ok: bool) {
 	w = {
 		pid   = i64(pid),
 		group = i64(group),
+	}
+	if ms, uok := ndb.get_u64(&rec, "user"); uok {
+		w.user = vx.Duration(ms) * 1_000_000
+	}
+	if ms, sok := ndb.get_u64(&rec, "sys"); sok {
+		w.sys = vx.Duration(ms) * 1_000_000
 	}
 	if sig, sok := ndb.get_u64(&rec, "stopped"); sok {
 		w.stopped = true
@@ -288,7 +301,12 @@ wait_keep :: proc "contextless" (w: Waited) {
 	_ = append(&wait_kept, w)
 }
 
-// wait4: rusage is not kept, and reads as zero.
+@(private="file")
+timeval_of :: proc "contextless" (d: vx.Duration) -> linux.Timeval {
+	return {d / 1_000_000_000, d % 1_000_000_000 / 1000}
+}
+
+// wait4: rusage has the child's CPU times, nothing else.
 posix_wait4 :: proc "contextless" (pid: i64, status: ^i32, options: linux.Wait_Options, ru: ^linux.Rusage) -> int {
 	if ru != nil {
 		ru^ = {}
@@ -343,7 +361,81 @@ posix_wait4 :: proc "contextless" (pid: i64, status: ^i32, options: linux.Wait_O
 	if status != nil {
 		status^ = w.status
 	}
+	if !w.stopped && !w.continued {
+		child_user += w.user
+		child_sys += w.sys
+	}
+	if ru != nil {
+		ru.utime, ru.stime = timeval_of(w.user), timeval_of(w.sys)
+	}
 	return int(w.pid)
+}
+
+// --- CPU time (ADR-0019, upstream's ADR-0041) ---
+//
+// The kernel samples each thread's user and system time every 10 ms tick of a
+// CPU running it (thread_state's .Get_Times); with thread 0, the task's.
+
+cpu_times :: proc "contextless" (thread: bool) -> (t: vx.Cpu_Times) {
+	id: u32 // the kernel's number for this thread: its slot's
+	if thread {
+		slot := be_me().slot
+		id = slot != 0 ? intrinsics.atomic_load(&be_threads[slot - 1].id) : be_only_thread_id()
+	}
+	_ = rt.thread_state(rt.self, id, .Get_Times, &t)
+	return
+}
+
+// times: in clock ticks, sysconf(_SC_CLK_TCK)'s 100 a second, and the
+// monotonic clock in them, as Linux's.
+posix_times :: proc "contextless" (out: ^linux.Tms) -> int {
+	TICK :: vx.Duration(1_000_000_000 / linux.CLK_TCK)
+	me := cpu_times(false)
+	if out != nil {
+		out^ = {
+			utime  = i64(me.user / TICK),
+			stime  = i64(me.sys / TICK),
+			cutime = i64(child_user / TICK),
+			cstime = i64(child_sys / TICK),
+		}
+	}
+	return int(rt.clock_read() / TICK)
+}
+
+posix_getrusage :: proc "contextless" (who: int, ru: ^linux.Rusage) -> int {
+	t: vx.Cpu_Times
+	switch who {
+	case linux.RUSAGE_SELF, linux.RUSAGE_THREAD:
+		t = cpu_times(who == linux.RUSAGE_THREAD)
+	case linux.RUSAGE_CHILDREN:
+		t = {child_user, child_sys}
+	case:
+		return fail(.EINVAL)
+	}
+	ru^ = {
+		utime = timeval_of(t.user),
+		stime = timeval_of(t.sys),
+	}
+	return 0
+}
+
+// getpriority and setpriority: VectraOS has no nice values (a thread's
+// intent, sched_ctx(2), is its priority), so every process's is 0, as the
+// raw call's 20 says, and any other is refused (6d9b: honestly, not ignored).
+@(private="file")
+priority_which :: proc "contextless" (which: int) -> bool {
+	return which == linux.PRIO_PROCESS || which == linux.PRIO_PGRP || which == linux.PRIO_USER
+}
+
+posix_getpriority :: proc "contextless" (which: int) -> int {
+	return priority_which(which) ? 20 : fail(.EINVAL) // 20 - nice
+}
+
+posix_setpriority :: proc "contextless" (which: int, prio: int) -> int {
+	if !priority_which(which) {
+		return fail(.EINVAL)
+	}
+	return prio == 0 ? 0 : fail(.EPERM)
 }
 
 // --- posix_spawn and execve ---
@@ -729,6 +821,7 @@ fork_child :: proc "contextless" () -> int {
 	fd_after_fork()
 	be_after_fork() // the thread that forked, alone, numbered anew
 	clear(&wait_kept) // the parent's children's records are the parent's
+	child_user, child_sys = 0, 0 // a new process has waited for no one
 	sig_forget_pending(fork_pending) // the parent's, copied with its memory; not those sent to the child since
 	if proc_mounted {
 		_ = proc_write(posix_pid(), "ctl", "childnotes")

@@ -464,7 +464,7 @@ arch_wait :: proc "contextless" () {
 }
 
 @(private="file")
-aarch64_irq :: proc "contextless" () {
+aarch64_irq :: proc "contextless" (from_user: bool) {
 	iar := vx_read_icc_iar1()
 	intid := u32(iar) & 0xffffff
 	if intid >= 1020 && intid <= 1023 {
@@ -472,7 +472,7 @@ aarch64_irq :: proc "contextless" () {
 	}
 	if intid == INTID_VIRTUAL_TIMER || intid == INTID_EL2_VIRTUAL_TIMER {
 		vx_timer_disarm() // disarm before the EOI: the line is level-triggered
-		timer_interrupt()
+		timer_interrupt(from_user)
 	} else if intid == INTID_RESCHED {
 		this_cpu().resched = true
 	} else if intid >= 32 && intid == smmu0.event_intid {
@@ -910,7 +910,7 @@ aarch64_trap :: proc "c" (f: ^Trap_Frame, index: u64) {
 	esr := transmute(Esr)f.esr
 	switch {
 	case index & 3 == 1: // IRQ
-		aarch64_irq()
+		aarch64_irq(from_user)
 	case from_user && index & 3 == 0 && esr.ec == .Svc64:
 		f.x[0] = u64(syscall_dispatch(f.x[8], {f.x[0], f.x[1], f.x[2], f.x[3], f.x[4], f.x[5]}))
 	case !from_user && index & 3 == 0 && esr.ec == .Dabt_Same && f.far < u64(USER_TOP) && uaccess_fixup(f.elr) != 0:
