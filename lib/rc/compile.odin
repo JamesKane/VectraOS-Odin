@@ -126,6 +126,7 @@ NO_FD :: 255
 Compiler_Scratch :: struct {
 	items: [CITEMS]Citem,
 	body:  [SWITCH_MAX]i32, // a switch's body, flattened
+	pstack: Pstack, // a function's text being rebuilt (pcmd.odin)
 }
 
 @(private = "file")
@@ -556,7 +557,10 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 		case .Async, .Pipe: // a pipeline of programs: each stage, leftmost first, then Pipeline
 			async := t.kind == .Async
 			chain := async ? t.a : it.node
-			if async && chain != NONE && c.nodes[chain].kind == .Simple { // program &
+			// A program, &; one with redirections is a child's, below, which
+			// serves its files, here documents and captures while it runs (the
+			// shell, going on, does not; upstream's 6d7c).
+			if async && chain != NONE && c.nodes[chain].kind == .Simple && c.nodes[chain].b == NONE {
 				if it.phase == 0 {
 					again(items, &ni, &it, 1)
 					push(c, items, &ni, chain, 0) or_return
@@ -769,14 +773,9 @@ compile_tree :: proc "contextless" (c: ^Compiler, root: i32) -> bool {
 				} else if t.b == NONE {
 					emit(c, .Delfn)
 				} else {
-					src: u32 // its text, in the strings, plus 1 (0: none kept)
-					if len(t.s) != 0 && len(c.str) - c.nstr >= len(t.s) + 1 {
-						copy(c.str[c.nstr:], t.s)
-						c.str[c.nstr + len(t.s)] = 0
-						src = u32(c.nstr) + 1
-						c.nstr += len(t.s) + 1
-					}
-					it.at = emit(c, .Fn, b = src)
+					// Its text as 9front's pcmd rebuilds it, in the strings, plus 1
+					// (0: none kept; upstream's 6d7c).
+					it.at = emit(c, .Fn, b = fn_text(c, t.b))
 					again(items, &ni, &it, 2)
 					push(c, items, &ni, t.b, 0) or_return
 				}

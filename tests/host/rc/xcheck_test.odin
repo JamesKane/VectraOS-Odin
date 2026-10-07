@@ -11,8 +11,8 @@
 // upstream's heap sizes from 4 MiB down to 64 KiB, where scripts run out of
 // memory as they compile or run.
 //
-// The digests are those of upstream's rc.c at 5c1bbc9 (unchanged since its
-// 6d7b2, e194269), unpatched: its ab83fe6 and f24356f fixed what this tree's findings said (a
+// The digests are those of upstream's rc.c at 0a629a3 (its 6d7c: a
+// function's text as 9front's pcmd rebuilds it), unpatched: its ab83fe6 and f24356f fixed what this tree's findings said (a
 // here document's redirection closes nothing; a stage's paths and here
 // document are kept until it runs), so a stage's paths are logged and its
 // here document read, as the shell does. Its host has exists, read_line (its
@@ -93,10 +93,10 @@ test_seeds :: proc(t: ^testing.T) {
 	defer rt.mutator_destroy(&m)
 	testing.expect_value(t, len(m.seeds), 209)
 	folds := []Fold {
-		{BIG_HEAP, false, 0x179cc66fa1b86365},
-		{MID_HEAP, false, 0x51d7f54ecaaf2fe9},
-		{SMALL_HEAP, false, 0x80e55c92ca13f29b},
-		{SMALL_HEAP, true, 0xcc9727abf20326f7},
+		{BIG_HEAP, false, 0x53ee8ec9aa9f09bb},
+		{MID_HEAP, false, 0x168bfd1468e5987f},
+		{SMALL_HEAP, false, 0x981b53d1fcb02b59},
+		{SMALL_HEAP, true, 0x6c8414f7fbb3a8be},
 	}
 	for f in folds {
 		b := rt.bench_make(f.heap, f.minimal)
@@ -117,11 +117,11 @@ test_mutated :: proc(t: ^testing.T) {
 	m := mutator()
 	defer rt.mutator_destroy(&m)
 	folds := []Fold {
-		{BIG_HEAP, false, 0x3e58edc20ab882c4},
-		{MID_HEAP, false, 0x2ddca4f9ea2b0996},
-		{SMALL_HEAP, false, 0xebb739d8bf2503e2},
-		{FUZZ_HEAP, true, 0x88bc961e293a05ed},
-		{SMALL_HEAP, true, 0xeed913702fd796b8},
+		{BIG_HEAP, false, 0x023ca274f5e2b244},
+		{MID_HEAP, false, 0x87b3d28034b7dea2},
+		{SMALL_HEAP, false, 0xb0a4880824533fbc},
+		{FUZZ_HEAP, true, 0x7ef7aa0e85456351},
+		{SMALL_HEAP, true, 0x4206849ed5522550},
 	}
 	text: [dynamic]u8
 	defer delete(text)

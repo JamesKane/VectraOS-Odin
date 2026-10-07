@@ -38,7 +38,8 @@ The interpreter runs every function, block and builtin in the shell's own task, 
 
 A command line is a sequence of commands, separated by `&` or `;`, and ended by a newline.
 The commands run in order from left to right.
-`rc` does not wait for a command followed by `&` before starting the next, and sets `$apid` to its process id; the command is in a note group of its own, as 9front's `rc` runs `rfork s` for it, so an interrupt at the terminal does not reach it.
+`rc` does not wait for a command followed by `&` before starting the next, and sets `$apid` to its process id; the command is in a note group of its own, as 9front's `rc` runs `rfork s` for it, so an interrupt at the terminal does not reach it, and its standard input, unless redirected, reads nothing.
+One with redirections runs in a child `rc`, which copies its files, here documents and captures while it runs; one that has ended is kept until `wait` takes its status.
 When a command not followed by `&` ends, `$status` is set to the wait message of the program it ran: the program's name, its process id, a colon and a space, then its exit string, such as `ls 12: error`.
 It is empty if the program succeeded.
 
@@ -54,6 +55,7 @@ If the first argument names a function or one of `rc`'s builtins, `rc` runs it i
 Otherwise it names a program.
 A name starting with `/`, `./`, `../` or `#` is the program's path as written; any other is looked for in each directory of `$path`, in order, the first that has it winning.
 A directory of `$path` that is empty or `.` means the name as written.
+A file starting `#!` is a script: the program its first line names runs it, given the rest of that line's words, the script's path, then the arguments.
 
 `rc` reads the program through its namespace and starts it as a task of its own, with a copy of the namespace, the console, and its standard input, output and error.
 Each of the three is `rc`'s own, a pipe, or a channel that `rc` copies to or from a file, a here document or a capture; `rc` serves those channels while it waits for the command.
@@ -251,6 +253,7 @@ They write to the command's own descriptors, redirections followed, and capture 
   `rc` keeps 16 such commands; it lets go of more without being able to wait for them.
 : `whatis` <name> ...
   Prints each <name> as input for `rc` would give it: an assignment for a variable, the definition for a function, `builtin` <name> for a builtin, and the path `$path` finds for a program.
+  A function's definition is rebuilt from its tree, as 9front's prints it, a tab in for each brace; a child is given that text too.
   `$status` is `not found` if any <name> is none of these.
 : `~` <subject> <pattern> ...
   Matches <subject>, its words joined by spaces, against each <pattern>; `$status` is empty if one matches, and `no match` if none does.
@@ -271,7 +274,7 @@ A failure prints `rc:`, the command's name and why on the command's standard err
   Undoes a `bind` or `mount` of <new> on <old>, or everything on <old> if <new> is not given.
 
 : `rfork` [`fnesFNEm`]
-  Changes what the shell shares with the rest of the system, as 9front's (`rfork` alone is `rfork ens`): `n`, a copy of its namespace of its own, leaving its namespace group, so its changes are its own and the group's no longer reach it; `N`, a clean namespace, empty; `m`, no `mount` from here on; `s`, a note group of its own, so a note to the group it was in does not reach it.
+  Changes what the shell shares with the rest of the system, as 9front's (`rfork` alone is `rfork ens`): `n`, a copy of its namespace of its own, leaving its namespace group, so its changes are its own and the group's no longer reach it; `N`, a clean namespace, empty; `m`, no `mount` from here on, the shell's or its children's; `s`, a note group of its own, so a note to the group it was in does not reach it.
   `e`, `E` and `f` change nothing, as the environment and the descriptors are the shell's own already, given to each child as it starts, and never shared; `F` closes the shell's descriptors past 2.
   A failure says `rc: rfork failed` and leaves `$status` `rfork failed`; a flag not one of these prints the usage and leaves `rfork usage`.
 
@@ -492,24 +495,14 @@ Input that ends inside a construct says `unexpected end of file`.
 # BUGS
 
 There is no `fork`: a child `rc` is given the shell's state by its spawn message, so a variable whose name a POSIX program could not read (not letters, digits and `_`), or one or a function past 32 KiB, does not reach it; and its code is the command's text, so a here document whose lines come after the line that text ends on is not in it: `{cat <<EOF} | wc` fails, `here document never ended`, where a block closed after the document's lines works.
-`rfork E` does not empty the environment children are given, as 9front's does, since there is no shared `/env` to empty: they get the shell's variables still; `rfork m` stops the shell's own mounts, not its children's.
-
-A command run with `&` is given no file, here document or capture as a redirection, since `rc` does not serve them while it goes on; its standard input, unless redirected, reads nothing.
-
-A command run with `&` that has ended is let go when `rc` next starts a program, after which `wait` does not find it and leaves `$status` empty.
+`rfork E` does not empty the environment children are given, as 9front's does, since there is no shared `/env` to empty: they get the shell's variables still (M6 step 6e1c, which brings `/env`).
 
 A file given to a child `rc`'s programs as a descriptor past 2 that the child was itself given is opened again by its name, at the offset it was at, not shared with the child's (ADR-0040).
 `/fd` is not a directory: `ls /fd` finds nothing, and only `/fd/0` to `/fd/9` open.
 
-`exec` with a file, here document or capture redirected is refused.
+`exec` with a file, here document or capture redirected is refused, since the shell is not there to copy them (M6 step 6e1, a native program's standard input and output from a file).
 
-A file that is not an ELF executable, a `#!` script among them, is not run, and neither is a program whose loaded part is larger than 4 MiB: both say `file does not exist`.
-
-`whatis` prints a function's body as it was written, where 9front's prints it as its parser rebuilds it.
-
-`-v` writes `rcmain`'s text too, since `-q` does not turn it off in a file as 9front's does; `-V` is the same as `-v`.
-
-`-l` is not implied by a first argument starting `-`, as it is in 9front.
+A program whose loaded part is larger than 4 MiB is not run, and says `file does not exist`.
 
 There should be a way to match patterns against whole lists rather than single strings.
 Using `~` to test `$status` changes `$status`.

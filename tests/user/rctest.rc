@@ -180,6 +180,20 @@ bg=$apid
 wait $bg
 check bg-wait ok `{if(~ $status *': 3') echo ok; if not echo $status}
 
+# 6d7c: a #! script run by its interpreter, given the line's arguments, the
+# script's path and its own; a command with a file redirected, run with &;
+# -v not echoing rcmain, which rc reads with . -q.
+echo '#!/boot/bin/echo hello' > $dir/hi
+check shebang 'hello '$dir'/hi a b' `{$dir/hi a b}
+echo '#!/boot/bin/rc' > $dir/sc.rc
+echo 'echo script $#* $1' >> $dir/sc.rc
+check shebang-rc 'script 2 x' `{$dir/sc.rc x y}
+echo bgfile > $dir/bgf &
+wait
+check bg-redirect bgfile `{cat $dir/bgf}
+rc -v -c 'echo x' >[2] $dir/v > /dev/null
+check v-quiet '0 1' `{grep -c 'flag p' $dir/v; grep -c 'echo x' $dir/v}
+
 # rfork (6d7b3), as 9front's: in children, so this shell keeps its own.
 check rfork-usage 'rfork usage' `{rfork x >[2] /dev/null; echo $status}
 mkdir $dir/nsa $dir/nsb
@@ -192,6 +206,7 @@ check rfork-n-private no `{if(test -e $dir/nsb/echo) echo yes; if not echo no}
 @{rfork N; /boot/bin/true} >[2] /dev/null
 check rfork-N-clean ok `{if(~ $status *'file does not exist') echo ok; if not echo $status}
 check rfork-m refused `{rfork m; mount /srv/nsd $dir/nsb >[2] /dev/null; if(! ~ $status '') echo refused}
+check rfork-m-child refused `{rfork m; rc -c 'mount /srv/nsd '$dir'/nsb >[2] /dev/null; if(! ~ $status '''') echo refused'} # and its children
 check rfork-s '' `{rfork s; echo $status}
 check rfork-ens '' `{rfork; echo $status}
 

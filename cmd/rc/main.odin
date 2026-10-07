@@ -221,8 +221,6 @@ cd_builtin :: proc "contextless" (argv: ^rc.Word, n: int) {
 
 // --- rfork (upstream's 6d7b3), as 9front's execrfork ---
 
-no_mounts: bool // rfork m: mount refused from here on (RFNOMNT)
-
 // A note group of the shell's own (rfork s, RFNOTEG): its own pid written
 // to its noteid (procfs, as 9front's changenoteid allows).
 own_note_group :: proc "contextless" () -> vx.Status {
@@ -277,7 +275,7 @@ rfork_builtin :: proc "contextless" (argv: ^rc.Word, n: int) {
 		ns.reset(&space)
 	}
 	if st == .Ok && has(flags, 'm') {
-		no_mounts = true
+		space.nomount = true // and the children's after (vx:ns, upstream's 6d7c)
 	}
 	if st == .Ok && has(flags, 'F') { // a clean table: none past 2
 		rt.fds_close()
@@ -321,10 +319,6 @@ builtin_run :: proc "contextless" (argv: ^rc.Word, n: int) -> bool {
 		// ns prints it, so its output replays) or srvfs has (srv(1)'s, say);
 		// or a 9P server over TCP, tcp!HOST!PORT or 9p://HOST:PORT, through
 		// a relay, so the children share its session (procns's relay.odin).
-		if no_mounts { // rfork m
-			report("mount", .Err_Access)
-			return true
-		}
 		if !flags_ok || n - first < 2 || n - first > 3 {
 			usage(usage_of.TEXT_mount)
 			return true
@@ -570,17 +564,29 @@ elf_needs :: proc "contextless" (have: int) -> (n: int, needs: Needs) {
 	return int(end), .Bytes
 }
 
+// A #! script load found on the way (upstream's 6d7c, as 9front's kernel
+// runs one): where it is, and its first line, the interpreter and its
+// arguments.
+Script :: struct {
+	path: [dynamic; 256]u8,
+	line: [dynamic; 256]u8,
+}
+
+script: Script
+script_found: bool
+
 // Loads a program through the namespace, found as rc's searchpath finds it:
 // a name that starts / ./ ../ or # as written, any other in each of $path's
 // directories ("" and . meaning as written). Returns its size (what a spawn
-// needs of it), or 0.
+// needs of it), or 0; a #! script found first stops the search (script).
 load :: proc "contextless" (name: string) -> int {
+	script_found = false
 	here := str.has_prefix(name, "/") || str.has_prefix(name, "#") || str.has_prefix(name, "./") || str.has_prefix(name, "../")
 	dirs := here ? nil : rc.get_var(&sh, "path")
 	if dirs == nil {
 		return load_in("", name)
 	}
-	for d := dirs; d != nil; d = d.next {
+	for d := dirs; d != nil && !script_found; d = d.next {
 		if size := load_in(rc.text(d), name); size != 0 {
 			return size
 		}
@@ -588,7 +594,8 @@ load :: proc "contextless" (name: string) -> int {
 	return 0
 }
 
-// Loads dir/name into image: its size, or 0.
+// Loads dir/name into image: its size, or 0 (script_found set if it is a
+// #! script).
 load_in :: proc "contextless" (dir, name: string) -> int {
 	path_buf: [256]u8
 	n := 0
@@ -627,7 +634,36 @@ load_in :: proc "contextless" (dir, name: string) -> int {
 	if want, needs := elf_needs(size); needs == .Bytes && size >= want {
 		return size
 	}
+	if size > 2 && image[0] == '#' && image[1] == '!' { // a script: its interpreter runs it
+		k := 2
+		for k < size && k - 2 < cap(script.line) && image[k] != '\n' {
+			k += 1
+		}
+		clear(&script.line)
+		_ = append(&script.line, ..image[2:k])
+		clear(&script.path)
+		_ = append(&script.path, ..path_buf[:n])
+		script_found = true
+	}
 	return 0
+}
+
+// The words of a #! line: the interpreter, then its arguments, split at
+// blanks (9front's shargs), eight at most.
+script_words :: proc "contextless" (w: ^[dynamic; 8]string) {
+	line := string(script.line[:])
+	for i := 0; i < len(line) && len(w) < cap(w); {
+		for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
+			i += 1
+		}
+		from := i
+		for i < len(line) && line[i] != ' ' && line[i] != '\t' {
+			i += 1
+		}
+		if i > from {
+			_ = append(w, line[from:i])
+		}
+	}
 }
 
 // A variable, exported as rc does: NAME=WORDS, the words of a list separated
@@ -831,11 +867,39 @@ spawn :: proc "contextless" (argv: ^rc.Word, child: bool, io: [rc.FDS]vx.Handle,
 		rt.close_all(..io[:])
 	}
 	size := load(child ? RC_SELF : rc.text(argv))
+	rec := ndb.Writer{buf = records[:]}
+	args, exported := 0, 0
+	base := child ? "rc" : rc.text(argv) // the task's name: the program's, without its directory
+	// #!interpreter [args] (upstream's 6d7c): it, given those, the script's
+	// path, then the arguments.
+	spath: [dynamic; 256]u8
+	interp: [dynamic; 256]u8
+	if size == 0 && script_found {
+		_ = append(&spath, ..script.path[:])
+		w: [dynamic; 8]string
+		script_words(&w)
+		if len(w) > 0 && len(w[0]) < cap(interp) {
+			_ = append(&interp, w[0])
+			size = load(string(interp[:]))
+			if script_found {
+				size = 0 // a script's interpreter is a program, not another script
+			}
+		}
+		for i := 1; size != 0 && i < len(w); i += 1 {
+			ndb.put(&rec, "arg", w[i])
+			_ = ndb.end(&rec)
+			args += 1
+		}
+		if size != 0 {
+			ndb.put(&rec, "arg", string(spath[:]))
+			_ = ndb.end(&rec)
+			args += 1
+			base = string(interp[:])
+		}
+	}
 	if size == 0 {
 		return vx.HANDLE_NONE, .Err_Not_Found
 	}
-	rec := ndb.Writer{buf = records[:]}
-	args, exported := 0, 0
 	if child {
 		flags: [dynamic; 64]u8
 		for f in u8('A') ..= u8('z') {
@@ -902,7 +966,6 @@ spawn :: proc "contextless" (argv: ^rc.Word, child: bool, io: [rc.FDS]vx.Handle,
 			count += 1
 		}
 	}
-	base := child ? "rc" : rc.text(argv) // the task's name: the program's, without its directory
 	base = base[str.last_index_byte(base, '/') + 1:]
 	a := rt.Spawn_Args {
 		name         = base[:utf.cut(base, MAX_TASK_NAME)], // whole runes (ADR-0013)
@@ -1624,6 +1687,9 @@ shell :: proc() -> string {
 			}
 			sh.flag[f] = true
 		}
+	}
+	if str.has_prefix(rt.spawn.argv0, "-") {
+		sh.flag['l'] = true // a login shell's name, as 9front's (upstream's 6d7c)
 	}
 	input, _, _ := rt.stdio_handles()
 	if sh.flag['I'] {

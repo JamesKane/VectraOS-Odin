@@ -115,6 +115,10 @@ Namespace :: struct {
 	// upstream's ADR-0040; vx:procns's). Err_Not_Found for any other, which
 	// resolves as usual. Nil: none (host tests).
 	open_dev: proc "contextless" (ns: ^Namespace, path: string, mode: p9.Open_Mode, f: ^File) -> vx.Status,
+	// No mounts from here on, this process's or its children's (rc's rfork
+	// m, as 9front's RFNOMNT: the spawn message's nomount record passes it
+	// on; upstream's 6d7c).
+	nomount:  bool,
 }
 
 @(private="file")
@@ -758,6 +762,9 @@ mount :: proc "contextless" (
 ) -> (
 	st: vx.Status,
 ) {
+	if ns.nomount && !ns.quiet { // a group's replay is no new mount
+		return .Err_Access
+	}
 	// New to this namespace or not, as it was before the first try: a try
 	// made again finds c among the connections (reset keeps them), and the
 	// group must still be given its connector.

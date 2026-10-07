@@ -730,7 +730,9 @@ rdcmds :: proc "contextless" (r: ^Rc, f: ^Frame) {
 		for c in rd.buf[from:rd.pos] {
 			rd.line += c == '\n' ? 1 : 0
 		}
-		if r.flag['v'] || r.flag['V'] { // -v: input as read
+		// -v: input as read; not a file read with . -q (rcmain's), as 9front's
+		// lex.c has it; -V, everything (upstream's 6d7c).
+		if (r.flag['v'] && !rd.quiet) || r.flag['V'] {
 			errout(r, string(rd.buf[from:rd.pos]))
 		}
 		was := r.src // what it compiles names its file

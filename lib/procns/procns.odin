@@ -635,10 +635,16 @@ from_spawn :: proc "contextless" (space: ^ns.Namespace) -> vx.Status {
 	space.getwd = rt.getwd // relative names from the current directory (ADR-0017)
 	space.open_dev = fd_open // and /fd/N, its descriptors (ADR-0018)
 	group.srv = rt.spawn_take("srv:nsd")
+	st: vx.Status
 	if chan := rt.spawn_take("nsgroup"); chan != vx.HANDLE_NONE {
-		return group_join(space, chan)
+		st = group_join(space, chan)
+	} else {
+		st = replay_records(space, rt.spawn.text, nil)
 	}
-	return replay_records(space, rt.spawn.text, nil)
+	// Its parent's rfork m (RFNOMNT), after what it was given is in place.
+	rec: ndb.Record
+	space.nomount = rt.spawn_record("nomount", &rec)
+	return st
 }
 
 @(private="file")
@@ -741,6 +747,10 @@ spawn_records :: proc "contextless" (
 	wd: [rt.WD_MAX]u8 // the child starts where this process is (ADR-0017)
 	if dir := rt.getwd(wd[:]); dir != "" {
 		ndb.put(w, "cwd", dir)
+		_ = ndb.end(w)
+	}
+	if space.nomount { // RFNOMNT, inherited
+		ndb.flag(w, "nomount")
 		_ = ndb.end(w)
 	}
 	count = first
